@@ -1,0 +1,45 @@
+# Disjorn — systemd unit
+#
+# Install:
+#   sudo cp deploy/disjorn.service /etc/systemd/system/disjorn.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now disjorn
+#
+# Adjust before installing:
+#   * User=/Group=       — the account that owns the Disjorn checkout (default: plink).
+#   * All /home/plink/… paths — if your checkout lives elsewhere, update
+#     WorkingDirectory, EnvironmentFile, ExecStart and ReadWritePaths to match.
+#   * --host / --port    — 127.0.0.1:8399 is right for the recommended
+#     `tailscale serve` HTTPS setup; see README-DEPLOY.md for alternatives
+#     (binding 0.0.0.0 or the Tailscale IP directly).
+
+[Unit]
+Description=Disjorn chat server (FastAPI/uvicorn)
+Documentation=file:///home/plink/Disjorn/Disjorn/deploy/README-DEPLOY.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=plink
+Group=plink
+WorkingDirectory=/home/plink/Disjorn/Disjorn/server
+# All configuration lives in server/.env (see deploy/.env.example).
+EnvironmentFile=/home/plink/Disjorn/Disjorn/server/.env
+ExecStart=/home/plink/Disjorn/Disjorn/server/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8399
+Restart=on-failure
+RestartSec=3
+
+# --- Hardening basics -------------------------------------------------------
+# Keep this modest: faster-whisper downloads models into ~/.cache on first
+# use, so we deliberately do NOT set ProtectHome here.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+# The only path the server writes to (SQLite DB + WAL, uploads, assets).
+# Must match DATA_DIR/DB_PATH in .env (relative paths resolve against
+# WorkingDirectory, i.e. server/data by default).
+ReadWritePaths=/home/plink/Disjorn/Disjorn/server/data
+
+[Install]
+WantedBy=multi-user.target
