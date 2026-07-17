@@ -5,8 +5,10 @@ Endpoints:
     POST   /dms {user_id}                 (user)  — idempotent get-or-create of the 1:1 DM channel
     PUT    /channels/{id}/read {seq}      (user)  — monotonic last_read_seq upsert (no event published)
     GET    /channels/{id}/members         (actor) — member listing, membership-gated
-    POST   /channels/{id}/bots {bot_id}   (user)  — add a bot to a channel (flat access)
+    POST   /channels/{id}/bots {bot_id}   (user)  — add a bot to a channel
+                                                    (DMs: participants only)
     DELETE /channels/{id}/bots/{bot_id}   (user)  — remove a bot from a channel
+                                                    (DMs: participants only)
 
 Exported access-rule helpers (consumed by WP4 messages and WP5 privacy/WS):
     is_member(channel_id, member_type, member_id) -> bool
@@ -357,14 +359,25 @@ async def list_members(channel_id: int, actor: CurrentActor) -> list[MemberOut]:
 
 
 # ---------------------------------------------------------------------------
-# Bot membership management (flat access: any authenticated user)
+# Bot membership management (flat access among members: any user for main_feed,
+# DM participants only for DMs — a bot in a DM streams that DM, so only its
+# members may grant/revoke that access)
 # ---------------------------------------------------------------------------
+
+async def _require_bot_manage_access(channel_id: int, user: User) -> dict[str, Any]:
+    channel = await _get_channel(channel_id)
+    if channel["type"] != "main_feed" and not await is_member(
+        channel_id, "user", user.id
+    ):
+        raise HTTPException(status_code=403, detail="Not a member of this channel")
+    return channel
+
 
 @router.post("/channels/{channel_id}/bots")
 async def add_bot_to_channel(
     channel_id: int, body: BotRef, user: CurrentUser
 ) -> dict[str, bool]:
-    await _get_channel(channel_id)
+    await _require_bot_manage_access(channel_id, user)
     bot = await db.fetch_one("SELECT id FROM bots WHERE id = ?", (body.bot_id,))
     if bot is None:
         raise HTTPException(status_code=404, detail="Bot not found")
@@ -380,7 +393,7 @@ async def add_bot_to_channel(
 async def remove_bot_from_channel(
     channel_id: int, bot_id: int, user: CurrentUser
 ) -> dict[str, bool]:
-    await _get_channel(channel_id)
+    await _require_bot_manage_access(channel_id, user)
     cur = await db.execute(
         """DELETE FROM channel_members
            WHERE channel_id = ? AND member_type = 'bot' AND member_id = ?""",

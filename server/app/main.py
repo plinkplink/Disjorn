@@ -134,6 +134,14 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
+    # Uvicorn's default logging config only wires its own "uvicorn.*" loggers;
+    # the root logger gets no handler, so app-level INFO records (applied
+    # migrations, pruned push subscriptions, …) silently vanish. basicConfig
+    # is a no-op when a root handler already exists (tests, embedders).
+    logging.basicConfig(
+        level=logging.INFO, format="%(levelname)s:     %(name)s - %(message)s"
+    )
+
     app = FastAPI(title="Disjorn", lifespan=lifespan)
 
     app.include_router(auth.router)

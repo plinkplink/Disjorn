@@ -346,6 +346,39 @@ async def test_bot_add_remove_dm(client):
     ).status_code == 401
 
 
+async def test_bot_add_remove_dm_requires_membership(client):
+    """Only a DM's participants may grant/revoke a bot's access to it —
+    otherwise any user could point a bot at someone else's DM stream."""
+    await make_user("alice")
+    uid_b = await make_user("bob")
+    await make_user("carol")
+    bot_id = await make_bot("claw")
+    await login(client, "alice")
+    dm_id = (await client.post("/dms", json={"user_id": uid_b})).json()["id"]
+
+    # Carol is not in the alice<->bob DM: cannot add or remove the bot there.
+    await login(client, "carol")
+    r = await client.post(f"/channels/{dm_id}/bots", json={"bot_id": bot_id})
+    assert r.status_code == 403
+    assert await member_row(dm_id, "bot", bot_id) is None
+
+    await login(client, "alice")
+    assert (
+        await client.post(f"/channels/{dm_id}/bots", json={"bot_id": bot_id})
+    ).status_code == 200
+
+    await login(client, "carol")
+    assert (
+        await client.delete(f"/channels/{dm_id}/bots/{bot_id}")
+    ).status_code == 403
+    assert await member_row(dm_id, "bot", bot_id) is not None
+
+    # main_feed stays flat access: any user may manage bots there.
+    main = await main_feed_id()
+    r = await client.post(f"/channels/{main}/bots", json={"bot_id": bot_id})
+    assert r.status_code == 200
+
+
 # ---------------------------------------------------------------------------
 # Exported helpers: is_member / user_channel_ids / bot_channel_ids
 # ---------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 """WP8 tests: chibi resolve + serving, unfurl parse/cache/TTL, summarize
 endpoint with mocked engines, STT 501 degradation + engine factory selection."""
 
+import importlib.util
 import shutil
 from pathlib import Path
 
@@ -359,9 +360,14 @@ class FakeTranscriber:
         return "hello disjorn"
 
 
-async def test_stt_501_when_engine_unavailable(client):
-    """faster-whisper is an optional extra and not installed in this venv."""
-    assert stt_service._make_faster_whisper() is None  # precondition
+async def test_stt_501_when_engine_unavailable(client, monkeypatch):
+    """The endpoint degrades to 501 when the engine can't be loaded.
+
+    faster-whisper is an optional extra (requirements-ml.txt); force the
+    unavailable path via the registry so this passes whether or not the
+    extra happens to be installed in this venv."""
+    monkeypatch.setitem(stt_service.ENGINES, "faster_whisper", lambda: None)
+    stt_service.reset_transcriber_cache()
     await make_user()
     await login(client)
     r = await client.post(
@@ -428,11 +434,17 @@ def test_get_transcriber_factory_selection(monkeypatch, tmp_db_path):
     stt_service.reset_transcriber_cache()
     assert stt_service.get_transcriber() is None
 
-    # Default engine present in the registry but backend not installed -> None.
+    # Default engine: yields a transcriber iff the optional backend
+    # (requirements-ml.txt) is installed, None otherwise — never raises.
     monkeypatch.setenv("STT_ENGINE", "faster_whisper")
     reset_settings_cache()
     stt_service.reset_transcriber_cache()
-    assert stt_service.get_transcriber() is None
+    if importlib.util.find_spec("faster_whisper") is None:
+        assert stt_service.get_transcriber() is None
+    else:
+        assert isinstance(
+            stt_service.get_transcriber(), stt_service.FasterWhisperTranscriber
+        )
 
     # Registered fake engine -> selected and cached (same instance back).
     stt_service.ENGINES["testfake"] = lambda: FakeTranscriber()
