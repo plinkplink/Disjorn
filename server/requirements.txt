@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+aiosqlite
+pydantic-settings
+argon2-cffi
+py-vapid
+httpx
+python-multipart
+pytest
+pytest-asyncio
