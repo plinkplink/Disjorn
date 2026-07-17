@@ -1,0 +1,4 @@
+# Optional heavy deps — install on the GPU box for STT and RAW photo support.
+# Server degrades gracefully (501 / conversion skip) when these are absent.
+faster-whisper
+rawpy

@@ -30,6 +30,14 @@ class Settings(BaseSettings):
     OLLAMA_URL: str = "http://localhost:11434"
     STT_MODEL: str = "small"
 
+    # Media (WP6)
+    MAX_UPLOAD_BYTES: int = 200 * 1024 * 1024  # generous — trusted users
+    MEDIA_URL_TTL: int = 3600  # seconds a signed media URL stays valid
+    # Pluggable services (WP8)
+    OLLAMA_MODEL: str = "llama3.2"
+    STT_ENGINE: str = "faster_whisper"      # key into services.stt.ENGINES
+    SUMMARIZE_ENGINE: str = "ollama"        # key into services.summarize.ENGINES
+
     @property
     def db_path(self) -> Path:
         return Path(self.DB_PATH)

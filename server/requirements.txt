@@ -8,3 +8,7 @@ httpx
 python-multipart
 pytest
 pytest-asyncio
+pillow
+pillow-heif
+pywebpush
+trafilatura

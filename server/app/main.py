@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from . import db
+from . import db, ws
 from .config import get_settings
 from .routers import (
     auth,
@@ -51,6 +51,8 @@ async def lifespan(app: FastAPI):
     if applied:
         logger.info("applied migrations: %s", ", ".join(applied))
     await seed_main_feed()
+    ws.init()  # WP5: reset hub state + (re-)subscribe fan-out to the event bus
+    notifications.init()  # WP7: subscribe the Web Push notifier to the event bus
     yield
     await db.close()
 
@@ -66,6 +68,7 @@ def create_app() -> FastAPI:
     app.include_router(bots_admin.router)
     app.include_router(stt.router)
     app.include_router(summarize.router)
+    app.include_router(ws.router)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, bool]:
