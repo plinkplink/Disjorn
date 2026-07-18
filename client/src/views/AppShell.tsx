@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import { listMembers } from "../api";
+import { ApiError, createChannel, listMembers } from "../api";
 import { Avatar } from "../components/Avatar";
 import { SearchBar } from "../components/SearchBar";
 import { UserPanel } from "../components/UserPanel";
@@ -33,7 +33,7 @@ function ChannelRow({
   active: boolean;
   onSelect: (id: number) => void;
 }) {
-  const isMain = channel.type === "main_feed";
+  const isHashChannel = channel.type !== "dm_1to1"; // main_feed + text
   const classes = [
     "channel-item",
     active ? "active" : "",
@@ -43,7 +43,7 @@ function ChannelRow({
     .join(" ");
   return (
     <button className={classes} onClick={() => onSelect(channel.id)}>
-      {isMain ? (
+      {isHashChannel ? (
         <span className="hash">#</span>
       ) : (
         channel.dm_user_id !== null && <PresenceDot userId={channel.dm_user_id} />
@@ -272,13 +272,33 @@ export function AppShell() {
 
   const active = channels.find((c) => c.id === activeChannelId);
   const dms = channels.filter((c) => c.type === "dm_1to1");
-  const mains = channels.filter((c) => c.type === "main_feed");
+  const mains = channels.filter((c) => c.type !== "dm_1to1"); // main_feed + text
   const select = (id: number) => {
     if (showSettingsRef.current) closeSettings();
     useChannels.getState().setActive(id);
     // Same channel clicked while in settings: the effect won't re-fire.
     writeChannelHash(id);
     setSidebarOpen(false);
+  };
+
+  // Minimal v1 create flow: browser prompt -> POST /channels -> refetch.
+  // The channel_create WS frame keeps everyone else's sidebar live.
+  const addChannel = async () => {
+    const raw = window.prompt(
+      "New channel name (1-32 chars: lowercase a-z, 0-9, dashes):",
+    );
+    if (raw === null) return;
+    const name = raw.trim().toLowerCase();
+    if (name === "") return;
+    try {
+      const created = await createChannel(name);
+      await useChannels.getState().refresh();
+      select(created.id);
+    } catch (err) {
+      window.alert(
+        err instanceof ApiError ? err.detail : "Failed to create channel",
+      );
+    }
   };
 
   return (
@@ -289,6 +309,17 @@ export function AppShell() {
       <nav className={`sidebar${sidebarOpen ? " open" : ""}`}>
         <div className="sidebar-header">Disjorn</div>
         <div className="channel-list">
+          <div className="channel-section channel-section-row">
+            <span>Channels</span>
+            <button
+              className="icon-btn add-channel-btn"
+              title="Create channel"
+              aria-label="Create channel"
+              onClick={() => void addChannel()}
+            >
+              +
+            </button>
+          </div>
           {mains.map((c) => (
             <ChannelRow
               key={c.id}
@@ -330,7 +361,7 @@ export function AppShell() {
               <span className="title">
                 {active !== undefined ? (
                   <>
-                    {active.type === "main_feed" && <span className="hash">#</span>}
+                    {active.type !== "dm_1to1" && <span className="hash">#</span>}
                     {active.name}
                   </>
                 ) : (

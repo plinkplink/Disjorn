@@ -60,6 +60,7 @@ python examples/echo_bot.py --url http://localhost:8000 --api-key KEY
 | `MessageDelete` | `channel_id`, `id`, `seq` | message soft-deleted (ids only) |
 | `TypingStart` | `channel_id`, `author_type`, `author_id` | ephemeral, no seq |
 | `Presence` | `user_id`, `status` | ephemeral, no seq |
+| `ChannelCreate` | `channel` (`{id, type, name}`, `type` is `"text"`) | a named text channel was created; broadcast to everyone, ephemeral, no seq. Receiving it does **not** make the bot a member — a user must add the bot (`POST /channels/{id}/bots`) before its messages reach you. |
 
 `message` is the server's full materialized payload:
 `{id, channel_id, seq, author_type, author_id, author: {type, id, name, ...},

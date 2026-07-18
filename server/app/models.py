@@ -11,7 +11,7 @@ from typing import Any, Literal, Optional, Union
 from pydantic import BaseModel, Field
 
 MemberType = Literal["user", "bot"]
-ChannelType = Literal["main_feed", "dm_1to1"]
+ChannelType = Literal["main_feed", "dm_1to1", "text"]
 UserStatus = Literal["online", "idle", "dnd", "offline"]
 
 
@@ -131,10 +131,27 @@ class PresenceEvent(BaseModel):
     status: UserStatus
 
 
+class ChannelCreateRef(BaseModel):
+    """Minimal channel payload carried by channel_create frames."""
+
+    id: int
+    type: ChannelType
+    name: str
+
+
+class ChannelCreateEvent(BaseModel):
+    """A named text channel was created (broadcast to all users and bots)."""
+
+    type: Literal["channel_create"] = "channel_create"
+    channel_id: int
+    channel: ChannelCreateRef
+
+
 Event = Union[
     MessageCreateEvent,
     MessageEditEvent,
     MessageDeleteEvent,
     TypingStartEvent,
     PresenceEvent,
+    ChannelCreateEvent,
 ]

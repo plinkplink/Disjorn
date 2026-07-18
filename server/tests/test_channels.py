@@ -1,6 +1,7 @@
-"""WP3 tests: channel listing/unread math, DM idempotency, read state, members, bot membership."""
+"""WP3 tests: channel listing/unread math, DM idempotency, read state, members,
+bot membership, named text channels."""
 
-from app import db
+from app import db, events
 from app.routers import auth, channels
 
 PASSWORD = "correct horse battery staple"
@@ -377,6 +378,153 @@ async def test_bot_add_remove_dm_requires_membership(client):
     main = await main_feed_id()
     r = await client.post(f"/channels/{main}/bots", json={"bot_id": bot_id})
     assert r.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# POST /channels — named text channels
+# ---------------------------------------------------------------------------
+
+async def make_text_channel(client, name: str) -> int:
+    r = await client.post("/channels", json={"name": name})
+    assert r.status_code == 200, r.text
+    return r.json()["id"]
+
+
+async def test_create_text_channel_and_channel_create_event(client):
+    await make_user("alice")
+    await login(client, "alice")
+    captured: list[dict] = []
+    events.subscribe(captured.append)
+
+    r = await client.post("/channels", json={"name": "custodian"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["type"] == "text" and body["name"] == "custodian"
+    assert body["unread"] == 0 and body["last_message"] is None
+    cid = body["id"]
+
+    # Bus event published with the minimal channel payload.
+    assert captured == [
+        {
+            "type": "channel_create",
+            "channel_id": cid,
+            "channel": {"id": cid, "type": "text", "name": "custodian"},
+        }
+    ]
+
+    # Duplicate name -> 409, nothing extra published.
+    assert (await client.post("/channels", json={"name": "custodian"})).status_code == 409
+    assert len(captured) == 1
+    assert len(await db.fetch_all("SELECT * FROM channels WHERE type = 'text'")) == 1
+
+
+async def test_create_text_channel_name_validation_and_auth(client):
+    await make_user("alice")
+    bot_id = await make_bot("claw", api_key="k1")
+    assert bot_id
+
+    # No auth -> 401.
+    assert (await client.post("/channels", json={"name": "ok"})).status_code == 401
+    # Bot auth is NOT user auth -> 401 (channel creation is human-only).
+    r = await client.post("/channels", json={"name": "ok"}, headers={"X-Api-Key": "k1"})
+    assert r.status_code == 401
+
+    await login(client, "alice")
+    for bad in ["", "Has-Upper", "has space", "emoji-💥", "a" * 33, "under_score"]:
+        r = await client.post("/channels", json={"name": bad})
+        assert r.status_code == 400, f"{bad!r} accepted"
+    assert await db.fetch_all("SELECT * FROM channels WHERE type = 'text'") == []
+
+    # Boundary names accepted.
+    for ok in ["a", "a" * 32, "custodian-2"]:
+        assert (await client.post("/channels", json={"name": ok})).status_code == 200
+
+
+async def test_list_orders_main_then_text_alpha_then_dms(client):
+    uid = await make_user("alice")
+    uid_b = await make_user("bob")
+    await login(client, "alice")
+    zeta = await make_text_channel(client, "zeta")
+    alpha = await make_text_channel(client, "alpha")
+    dm_id = (await client.post("/dms", json={"user_id": uid_b})).json()["id"]
+
+    items = (await client.get("/channels")).json()
+    assert [(i["type"], i["name"]) for i in items] == [
+        ("main_feed", "main"),
+        ("text", "alpha"),
+        ("text", "zeta"),
+        ("dm_1to1", "Bob"),
+    ]
+    assert [i["id"] for i in items[1:3]] == [alpha, zeta]
+
+    # Unread math identical to main_feed: implicit membership, floor at 0.
+    for seq in range(1, 4):
+        await insert_message(zeta, seq, f"z{seq}", author_id=uid)
+    zrow = next(i for i in (await client.get("/channels")).json() if i["id"] == zeta)
+    assert zrow["unread"] == 3 and zrow["last_message"]["snippet"] == "z3"
+    await client.put(f"/channels/{zeta}/read", json={"seq": 2})
+    zrow = next(i for i in (await client.get("/channels")).json() if i["id"] == zeta)
+    assert zrow["unread"] == 1
+
+    # Every user sees text channels (implicit membership), even non-creators.
+    await login(client, "bob")
+    items = (await client.get("/channels")).json()
+    assert [(i["type"], i["name"]) for i in items] == [
+        ("main_feed", "main"),
+        ("text", "alpha"),
+        ("text", "zeta"),
+        ("dm_1to1", "Alice"),
+    ]
+    assert dm_id in [i["id"] for i in items]
+
+
+async def test_text_channel_implicit_membership_and_read_state(client):
+    uid = await make_user("alice")
+    uid_b = await make_user("bob")
+    bot_id = await make_bot("claw")
+    await login(client, "alice")
+    cid = await make_text_channel(client, "custodian")
+
+    # Users implicit (no row); bots explicit-only.
+    assert await member_row(cid, "user", uid) is None
+    assert await channels.is_member(cid, "user", uid) is True
+    assert await channels.is_member(cid, "user", uid_b) is True
+    assert await channels.is_member(cid, "bot", bot_id) is False
+    assert cid in await channels.user_channel_ids(uid)
+    assert cid in await channels.user_channel_ids(uid_b)
+    assert await channels.bot_channel_ids(bot_id) == []
+
+    # Lazy read-state row, monotonic, no user_channel_ids duplication.
+    r = await client.put(f"/channels/{cid}/read", json={"seq": 4})
+    assert r.json() == {"channel_id": cid, "last_read_seq": 4}
+    assert (await member_row(cid, "user", uid))["last_read_seq"] == 4
+    r = await client.put(f"/channels/{cid}/read", json={"seq": 2})
+    assert r.json()["last_read_seq"] == 4
+    assert sorted(await channels.user_channel_ids(uid)).count(cid) == 1
+
+    # Members listing: all users implicit + explicit bots only.
+    await client.post(f"/channels/{cid}/bots", json={"bot_id": bot_id})
+    got = {(m["type"], m["id"]) for m in (await client.get(f"/channels/{cid}/members")).json()}
+    assert got == {("user", uid), ("user", uid_b), ("bot", bot_id)}
+    assert await channels.bot_channel_ids(bot_id) == [cid]
+
+
+async def test_text_channel_bot_management_flat_access(client):
+    await make_user("alice")
+    await make_user("bob")
+    bot_id = await make_bot("claw")
+    await login(client, "alice")
+    cid = await make_text_channel(client, "custodian")
+
+    # ANY user may add/remove bots on a text channel (all users are members) —
+    # bob, who did not create it, manages the bot.
+    await login(client, "bob")
+    r = await client.post(f"/channels/{cid}/bots", json={"bot_id": bot_id})
+    assert r.json() == {"ok": True, "added": True}
+    assert await member_row(cid, "bot", bot_id) is not None
+    r = await client.delete(f"/channels/{cid}/bots/{bot_id}")
+    assert r.json() == {"ok": True, "removed": True}
+    assert await member_row(cid, "bot", bot_id) is None
 
 
 # ---------------------------------------------------------------------------

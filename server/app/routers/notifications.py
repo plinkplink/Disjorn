@@ -12,8 +12,9 @@ ws.init(); never at import time): on `message_create`, decide who gets a Web
 Push and fire it off as an asyncio task — message flow is never blocked.
 
 Rules (Architecture §9):
-    Candidates  = the channel's USER members (main_feed = all users), minus
-                  the author (when the author is a user).
+    Candidates  = the channel's USER members (main_feed and text channels =
+                  all users, implicit membership), minus the author (when the
+                  author is a user).
     Suppressed  = recipient is WS-connected AND has that channel focused
                   (ws.manager.is_user_connected + user_focused_channel_ids).
     Eligible    = channel is a DM,
@@ -22,11 +23,16 @@ Rules (Architecture §9):
                   OR (main_feed and the recipient's notify_all_main pref set).
     Notify when: candidate AND NOT suppressed AND eligible.
 
+    NOTE on text channels: the notify_all_main pref covers main_feed ONLY —
+    named text channels are mention-notify only (plus DMs as ever) in v1.
+    A message in #custodian pushes only to users it mentions.
+
 Privacy: `secret`/`off_the_record` flags gate BOTS, not humans — flagged
 messages still push to human members like any other message.
 
 Payload (what the WP11 service worker receives):
-    {"title": author display name ("<author> in #<channel>" for main_feed),
+    {"title": author display name ("<author> in #<channel>" for main_feed
+              and text channels),
      "body": ~120-char snippet, markdown roughly stripped
              ("📎 attachment" for attachment-only messages),
      "channel_id": int, "message_id": int, "url": "/channels/{id}"}
@@ -188,7 +194,7 @@ def _mentions(content: str, *names: Optional[str]) -> bool:
 def _build_payload(channel: dict[str, Any], message: dict[str, Any]) -> dict[str, Any]:
     author = message.get("author") or {}
     author_name = author.get("name") or "Someone"
-    if channel["type"] == "main_feed":
+    if channel["type"] in ("main_feed", "text"):
         title = f"{author_name} in #{channel['name']}"
     else:
         title = author_name
@@ -262,9 +268,11 @@ async def _plan_notifications(
     is_main = channel["type"] == "main_feed"
     is_dm = channel["type"] == "dm_1to1"
 
-    # Candidates: the channel's USER members. main_feed = every user (implicit
-    # membership); DMs from explicit rows. Bots never receive pushes.
-    if is_main:
+    # Candidates: the channel's USER members. main_feed and text channels =
+    # every user (implicit membership); DMs from explicit rows. Bots never
+    # receive pushes. Eligibility below keeps notify_all_main scoped to
+    # main_feed alone: text channels are mention-notify only.
+    if channel["type"] in ("main_feed", "text"):
         candidates = await db.fetch_all(
             "SELECT id, username, display_name, notify_all_main FROM users"
         )

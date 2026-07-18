@@ -26,10 +26,13 @@ Server -> client frames (Architecture §8.2; ephemeral events carry no seq):
     {"type": "message_delete", "channel_id", "id", "seq"}
     {"type": "typing_start", "channel_id", "author_type", "author_id"}
     {"type": "presence", "user_id", "status"}
+    {"type": "channel_create", "channel": {"id", "type", "name"}}
+                                            new text channel — broadcast to ALL
+                                            connected users and bots
 
 Fan-out (bus subscriber, registered idempotently by init() from the app
 lifespan): message events go to connected users who are members of the channel
-(main_feed = every user) and to connected bots that are EXPLICIT members
+(main_feed and text channels = every user) and to connected bots that are EXPLICIT members
 (bot_channel_ids semantics), after privacy.filter_event_for_bot — a
 secret/off_the_record message reaches no bot in any form, not even the
 tombstone of its deletion. When a message_create mentions a receiving bot
@@ -299,7 +302,17 @@ async def _context_block(
 
 
 async def handle_bus_event(event: dict[str, Any]) -> None:
-    """Bus subscriber: fan message events out to connected users and bots."""
+    """Bus subscriber: fan message events out to connected users and bots.
+
+    channel_create (a new text channel) is not privacy-sensitive and goes to
+    every connected socket — users AND bots — so live clients can update their
+    sidebars/state without a refetch.
+    """
+    if event.get("type") == "channel_create":
+        frame = {"type": "channel_create", "channel": event["channel"]}
+        for ws in manager.all_sockets():
+            await _send(ws, frame)
+        return
     if event.get("type") not in _MESSAGE_EVENT_TYPES:
         return
     channel_id = event.get("channel_id")
@@ -313,9 +326,9 @@ async def handle_bus_event(event: dict[str, Any]) -> None:
 
     frame = _frame_for_event(event)
 
-    # Users: channel members only (main_feed = every user).
+    # Users: channel members only (main_feed / text = every user).
     for uid in manager.connected_user_ids():
-        if channel["type"] != "main_feed" and not await is_member(
+        if channel["type"] not in ("main_feed", "text") and not await is_member(
             channel_id, "user", uid
         ):
             continue

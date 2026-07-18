@@ -329,6 +329,65 @@ def test_bot_gets_main_feed_but_not_dm(wsc):
         assert "context" not in frame                     # no mention -> no context
 
 
+def test_text_channel_fanout_and_channel_create_frame(wsc):
+    """Text channels behave like main_feed on the wire: channel_create goes to
+    every connected socket (users AND bots, member or not); message fan-out
+    reaches all users implicitly but only explicit-member bots."""
+    a, b = make_user(wsc, "alice"), make_user(wsc, "bob")
+    ta, tb = login(wsc, "alice"), login(wsc, "bob")
+    member_bot = make_bot(wsc, "claudette", BOT_KEY)
+    outsider_bot = make_bot(wsc, "otto", BOT2_KEY)
+    main = main_feed_id(wsc)
+    add_member(wsc, main, "bot", outsider_bot)  # sentinel channel for otto
+
+    with ExitStack() as stack:
+        wa = open_user(stack, wsc, ta, a)
+        wb = open_user(stack, wsc, tb, b, peers=[wa])
+        wcl = open_bot(stack, wsc, member_bot, BOT_KEY)
+        wot = open_bot(stack, wsc, outsider_bot, BOT2_KEY)
+
+        # Create over REST -> channel_create frame on every socket.
+        r = wsc.post("/channels", json={"name": "custodian"}, headers=cookie(ta))
+        assert r.status_code == 200, r.text
+        cid = r.json()["id"]
+        frame = {
+            "type": "channel_create",
+            "channel": {"id": cid, "type": "text", "name": "custodian"},
+        }
+        for ws in (wa, wb, wcl, wot):
+            assert ws.receive_json() == frame
+
+        # Only claudette becomes a member (any user may add — bob does it).
+        r = wsc.post(
+            f"/channels/{cid}/bots", json={"bot_id": member_bot}, headers=cookie(tb)
+        )
+        assert r.status_code == 200, r.text
+
+        # Message in the text channel: both users (implicit members) + the
+        # member bot receive it; otto does not.
+        post_msg(wsc, ta, cid, "custodial matters")
+        for ws in (wa, wb, wcl):
+            assert_msg_frame(ws.receive_json(), channel_id=cid, content="custodial matters")
+
+        # Sentinel: otto's NEXT frame is main_feed traffic — the text-channel
+        # message never reached it.
+        post_msg(wsc, ta, main, "sentinel")
+        assert_msg_frame(wot.receive_json(), channel_id=main, content="sentinel")
+        for ws in (wa, wb):
+            assert_msg_frame(ws.receive_json(), channel_id=main, content="sentinel")
+
+        # Typing in the text channel follows the same scoping.
+        wa.send_json({"op": "typing", "channel_id": cid})
+        typing = {
+            "type": "typing_start",
+            "channel_id": cid,
+            "author_type": "user",
+            "author_id": a,
+        }
+        assert wb.receive_json() == typing
+        assert wcl.receive_json() == typing
+
+
 # ---------------------------------------------------------------------------
 # Privacy filtering on the stream
 # ---------------------------------------------------------------------------

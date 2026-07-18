@@ -231,7 +231,7 @@ export function SearchBar() {
                 >
                   <span className="search-row-meta">
                     <span className="search-row-channel">
-                      {r.channel.type === "main_feed"
+                      {r.channel.type !== "dm_1to1"
                         ? `#${r.channel.name ?? "main"}`
                         : `@${
                             sidebarChannels.find((c) => c.id === r.channel.id)

@@ -320,6 +320,49 @@ async def test_main_feed_respects_notify_all_main_pref(client, sent):
     assert sent[0]["payload"]["body"] == "afternoon everyone"
 
 
+async def test_text_channel_mention_notifies_but_notify_all_main_does_not_apply(
+    client, sent
+):
+    """Text channels are mention-notify only: the notify_all_main pref covers
+    main_feed exclusively and never fires for a #text channel."""
+    await make_user("alice")
+    bob = await make_user("bob")
+    ta, tb = await login(client, "alice"), await login(client, "bob")
+    await add_sub(bob, "https://p.example/bob")
+    r = await client.post(
+        "/channels", json={"name": "custodian"}, headers=cookie(ta)
+    )
+    assert r.status_code == 200, r.text
+    cid = r.json()["id"]
+
+    # Bob opts into every-main-feed-message pushes...
+    r = await client.put(
+        "/notify-prefs", json={"notify_all_main": True}, headers=cookie(tb)
+    )
+    assert r.status_code == 200
+
+    # ...but a non-mention text-channel message notifies nobody.
+    await post_msg(client, ta, cid, "sweeping the halls")
+    assert sent == []
+
+    # A mention in the text channel notifies, with the "#name" title format.
+    msg = await post_msg(client, ta, cid, "hey @bob the bins are full")
+    assert notified_user_ids(sent) == {bob}
+    assert sent[0]["payload"] == {
+        "title": "Alice in #custodian",
+        "body": "hey @bob the bins are full",
+        "channel_id": cid,
+        "message_id": msg["id"],
+        "url": f"/channels/{cid}",
+    }
+    sent.clear()
+
+    # And the same pref still works on main_feed (regression).
+    main = await main_feed_id()
+    await post_msg(client, ta, main, "no mention here")
+    assert notified_user_ids(sent) == {bob}
+
+
 # ---------------------------------------------------------------------------
 # Payload building units
 # ---------------------------------------------------------------------------

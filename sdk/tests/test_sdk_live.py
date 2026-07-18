@@ -21,6 +21,7 @@ import pytest
 import websockets
 
 from disjorn_sdk import (
+    ChannelCreate,
     DisjornClient,
     Event,
     MessageCreate,
@@ -308,6 +309,42 @@ async def test_dm_traffic_never_reaches_bot(server, alice, main_id, bot_stream):
     with pytest.raises(httpx.HTTPStatusError) as exc_info:
         await bot.get_messages(dm_id, from_seq=1)
     assert exc_info.value.response.status_code == 403
+
+
+async def test_text_channel_create_event_and_membership_gate(server, alice, bot_stream):
+    """A user-created text channel reaches the bot as a typed ChannelCreate,
+    but its messages stay invisible until the bot is explicitly added."""
+    bot, agen = bot_stream
+
+    resp = await alice.post("/channels", json={"name": "sdk-test-channel"})
+    assert resp.status_code == 200, resp.text
+    created = resp.json()
+    assert created["type"] == "text" and created["name"] == "sdk-test-channel"
+    cid = created["id"]
+
+    event = await _next_matching(agen, lambda e: isinstance(e, ChannelCreate))
+    assert event.channel == {"id": cid, "type": "text", "name": "sdk-test-channel"}
+
+    # Not a member yet: REST access denied, live messages skipped entirely.
+    with pytest.raises(httpx.HTTPStatusError) as exc_info:
+        await bot.get_messages(cid, from_seq=1)
+    assert exc_info.value.response.status_code == 403
+    await _post(alice, cid, "pre-membership message")
+
+    # Any user may add the bot (flat access on text channels).
+    resp = await alice.post(f"/channels/{cid}/bots", json={"bot_id": bot.bot_id})
+    assert resp.status_code == 200, resp.text
+
+    posted = await _post(alice, cid, "hello sdk channel")
+    event = await _next_matching(agen, _is_create("hello sdk channel"))
+    assert event.channel_id == cid and event.seq == posted["seq"]
+    assert bot.last_seen_seq[cid] == posted["seq"]
+
+    # Member now: bot can post + the channel shows up in bot search.
+    sent = await bot.send(cid, "bot checking in")
+    assert sent["channel_id"] == cid
+    results = await bot.search("sdk channel")
+    assert any(r["channel"]["id"] == cid and r["channel"]["type"] == "text" for r in results)
 
 
 async def test_typing_op_accepted_and_broadcast(server, alice, main_id, bot_stream):

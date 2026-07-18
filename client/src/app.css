@@ -153,6 +153,20 @@
   color: var(--text-2);
 }
 
+.channel-section-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.add-channel-btn {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  font-size: var(--text-sm);
+  line-height: 1;
+}
+
 .channel-item {
   display: flex;
   align-items: center;

@@ -161,6 +161,9 @@ export class DisjornSocket {
       case "presence":
         usePresence.getState().setStatus(frame.user_id, frame.status);
         return;
+      case "channel_create":
+        useChannels.getState().onChannelCreate(frame.channel);
+        return;
     }
   }
 

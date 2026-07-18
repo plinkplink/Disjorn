@@ -17,6 +17,7 @@ __all__ = [
     "MessageDelete",
     "TypingStart",
     "Presence",
+    "ChannelCreate",
     "Event",
 ]
 
@@ -96,4 +97,21 @@ class Presence:
     status: str  # "online" | "idle" | "dnd" | "offline"
 
 
-Event = Union[Ready, MessageCreate, MessageEdit, MessageDelete, TypingStart, Presence]
+@dataclass(slots=True)
+class ChannelCreate:
+    """A named text channel was created (broadcast to everyone; ephemeral,
+    no seq).
+
+    ``channel`` is ``{id, type, name}`` — for this event ``type`` is always
+    ``"text"``. Receiving this does NOT make the bot a member: bots must be
+    added explicitly (POST /channels/{id}/bots) before any of the channel's
+    messages reach them.
+    """
+
+    channel: dict[str, Any]
+
+
+Event = Union[
+    Ready, MessageCreate, MessageEdit, MessageDelete, TypingStart, Presence,
+    ChannelCreate,
+]

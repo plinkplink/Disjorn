@@ -2,7 +2,7 @@
    These are the client-side contract for WP10-12 — extend, don't fork. */
 
 export type MemberType = "user" | "bot";
-export type ChannelType = "main_feed" | "dm_1to1";
+export type ChannelType = "main_feed" | "dm_1to1" | "text";
 export type UserStatus = "online" | "idle" | "dnd" | "offline";
 /** Statuses a user can pick; "offline" is derived (disconnect), never set. */
 export type SettableStatus = Exclude<UserStatus, "offline">;
@@ -76,7 +76,7 @@ export interface LastMessage {
 export interface ChannelListItem {
   id: number;
   type: ChannelType;
-  /** main_feed: channel name; DMs: the OTHER participant's display name. */
+  /** main_feed/text: channel name; DMs: the OTHER participant's display name. */
   name: string | null;
   /** DMs only: the OTHER participant's user id. */
   dm_user_id: number | null;
@@ -188,13 +188,20 @@ export interface PresenceFrame {
   status: UserStatus;
 }
 
+/** A named text channel was created (broadcast to everyone). */
+export interface ChannelCreateFrame {
+  type: "channel_create";
+  channel: { id: number; type: ChannelType; name: string };
+}
+
 export type ServerFrame =
   | ReadyFrame
   | MessageCreateFrame
   | MessageEditFrame
   | MessageDeleteFrame
   | TypingStartFrame
-  | PresenceFrame;
+  | PresenceFrame
+  | ChannelCreateFrame;
 
 /* ---- Web Push payload (WP7 shape; consumed by src/sw.ts) ---- */
 

@@ -50,7 +50,7 @@ Client (PWA, React/Vite/TS) <--> REST + WebSocket <--> Server (FastAPI, Python 3
 |---|---|
 | `User` | `id`, `username`, `password_hash`, `display_name`, `avatar_path`, `status`, `is_admin` |
 | `Session` | `token`, `user_id`, `created_at`, `expires_at` |
-| `Channel` | `id`, `type` (`main_feed`, `dm_1to1`), `name`, `created_at` |
+| `Channel` | `id`, `type` (`main_feed`, `dm_1to1`, `text`), `name` (`text`: required, unique, lowercase `[a-z0-9-]{1,32}`, shown as `#name`), `created_at` |
 | `ChannelMember` | `channel_id`, `member_type` (`user`\|`bot`), `member_id`, `last_read_seq` |
 | `Message` | `id`, `channel_id`, `seq`, `author_type` (`user`\|`bot`), `author_id`, `content`, `created_at`, `edited_at` (nullable), `deleted_at` (nullable, soft delete), `reply_to_id` (nullable), `privacy_flags` (JSON), `emote_refs` (JSON, bot messages) |
 | `Attachment` | `id`, `message_id`, `file_path`, `original_filename`, `mime_type`, `size_bytes`, `width`, `height` |
@@ -59,7 +59,7 @@ Client (PWA, React/Vite/TS) <--> REST + WebSocket <--> Server (FastAPI, Python 3
 | `messages_fts` | FTS5 virtual table over `Message.content`, trigger-maintained |
 
 - **`seq`:** monotonic integer **per channel**, allocated only for persisted messages. Ephemeral events (typing, presence) carry **no seq** — they cannot be backfilled.
-- **Membership:** `main_feed` implicitly includes all users; DM channels have exactly two user members. Bots are members of `main_feed` by default; **bots are members of a DM only if explicitly added**.
+- **Membership:** `main_feed` and named `text` channels implicitly include all users; DM channels have exactly two user members. Bots are members of `main_feed` by default; **bots are members of a DM or `text` channel only if explicitly added**. Any user may create a `text` channel (`POST /channels {name}`) and manage its bots (flat access — every user is a member). `notify_all_main` covers `main_feed` only; `text` channels are mention-notify only.
 - **Read state:** `last_read_seq` per member per channel drives unread badges and notification suppression.
 
 ### 4.2 Message Metadata

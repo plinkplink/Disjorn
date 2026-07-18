@@ -29,6 +29,7 @@ import websockets
 from websockets.asyncio.client import ClientConnection
 
 from .events import (
+    ChannelCreate,
     Event,
     MessageCreate,
     MessageDelete,
@@ -397,6 +398,8 @@ class DisjornClient:
             )
         if ftype == "presence":
             return Presence(user_id=frame["user_id"], status=frame["status"])
+        if ftype == "channel_create":
+            return ChannelCreate(channel=frame["channel"])
         logger.debug("ignoring unknown frame type %r", ftype)
         return None
 

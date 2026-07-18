@@ -455,6 +455,50 @@ async def test_search_scoped_to_own_channels(client):
     assert (await client.get("/search", params={"q": "x"})).status_code == 401
 
 
+async def test_text_channel_messaging_and_search_scoping(client):
+    """Text channels: users post/read/search implicitly; bots need explicit
+    membership for all three. DM behavior unchanged alongside."""
+    await make_user("alice")
+    uid_b = await make_user("bob")
+    bot_id = await make_bot()
+    await login(client, "alice")
+    r = await client.post("/channels", json={"name": "custodian"})
+    assert r.status_code == 200, r.text
+    cid = r.json()["id"]
+    dm = await make_dm(client, uid_b)
+
+    msg = await post_message(client, cid, "the flamingo mop is in bay 3")
+    assert msg["channel_id"] == cid and msg["seq"] == 1
+    await post_message(client, dm, "flamingo secrets, dm only")
+
+    # Any user (not just the creator) posts and reads implicitly.
+    await login(client, "bob")
+    await post_message(client, cid, "acknowledged, fetching the flamingo mop")
+    r = await client.get(f"/channels/{cid}/messages")
+    assert r.status_code == 200 and len(r.json()) == 2
+
+    # User search spans text channels AND their DMs.
+    r = await client.get("/search", params={"q": "flamingo"})
+    assert {x["channel"]["id"] for x in r.json()} == {cid, dm}
+    hit = next(x for x in r.json() if x["channel"]["id"] == cid)
+    assert hit["channel"] == {"id": cid, "type": "text", "name": "custodian"}
+
+    # Bot: no implicit access — post/read/search all excluded until added.
+    headers = as_bot(client)
+    r = await client.post(f"/channels/{cid}/messages", json={"content": "beep"}, headers=headers)
+    assert r.status_code == 403
+    assert (await client.get(f"/channels/{cid}/messages", headers=headers)).status_code == 403
+    r = await client.get("/search", params={"q": "flamingo"}, headers=headers)
+    assert r.status_code == 200 and r.json() == []
+
+    await add_member(cid, "bot", bot_id)
+    r = await client.post(f"/channels/{cid}/messages", json={"content": "beep"}, headers=headers)
+    assert r.status_code == 200
+    r = await client.get("/search", params={"q": "flamingo"}, headers=headers)
+    # Member of the text channel now — but the DM stays invisible.
+    assert {x["channel"]["id"] for x in r.json()} == {cid}
+
+
 async def _set_created_at(message_id: int, created_at: str) -> None:
     """Pin a message's created_at for deterministic date-range assertions."""
     await db.execute(

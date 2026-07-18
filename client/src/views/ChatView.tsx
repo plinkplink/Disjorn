@@ -87,7 +87,7 @@ export function ChatView() {
 
   const channelName =
     channel !== undefined
-      ? `${channel.type === "main_feed" ? "#" : "@"}${channel.name ?? ""}`
+      ? `${channel.type !== "dm_1to1" ? "#" : "@"}${channel.name ?? ""}`
       : "";
 
   return (

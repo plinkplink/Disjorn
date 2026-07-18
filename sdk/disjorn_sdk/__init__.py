@@ -15,6 +15,7 @@ Quickstart::
 
 from .client import DisjornAuthError, DisjornClient, DisjornError
 from .events import (
+    ChannelCreate,
     Event,
     MessageCreate,
     MessageDelete,
@@ -37,5 +38,6 @@ __all__ = [
     "MessageDelete",
     "TypingStart",
     "Presence",
+    "ChannelCreate",
     "__version__",
 ]

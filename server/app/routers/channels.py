@@ -1,7 +1,9 @@
-"""Channels, membership, read state (WP3).
+"""Channels, membership, read state (WP3; named text channels added post-v1).
 
 Endpoints:
     GET    /channels                      (user)  — sidebar list: unread counts + last-message snippet
+    POST   /channels {name}               (user)  — create a named `text` channel (flat access);
+                                                    409 on duplicate name; publishes channel_create
     POST   /dms {user_id}                 (user)  — idempotent get-or-create of the 1:1 DM channel
     PUT    /channels/{id}/read {seq}      (user)  — monotonic last_read_seq upsert (no event published)
     GET    /channels/{id}/members         (actor) — member listing, membership-gated
@@ -12,23 +14,28 @@ Endpoints:
 
 Exported access-rule helpers (consumed by WP4 messages and WP5 privacy/WS):
     is_member(channel_id, member_type, member_id) -> bool
-    user_channel_ids(user_id) -> list[int]      # main_feed implicit
+    user_channel_ids(user_id) -> list[int]      # main_feed + text implicit
     bot_channel_ids(bot_id)  -> list[int]       # explicit rows only
 
 Membership semantics (Architecture §4.1):
-- main_feed implicitly includes ALL users; a channel_members row is created
-  lazily only to store last_read_seq (first PUT /channels/{id}/read).
+- main_feed AND named `text` channels implicitly include ALL users (this is a
+  <=5-human server); a channel_members row is created lazily only to store
+  last_read_seq (first PUT /channels/{id}/read).
 - DM channels have exactly two user members.
-- Bots are members of main_feed explicitly (cli.py create-bot inserts the row)
-  and NEVER get implicit DM access — they must be added via POST .../bots.
+- Bots are explicit-members-only EVERYWHERE — main_feed (cli.py create-bot
+  inserts the row), text channels and DMs via POST .../bots.
+- Text-channel names: unique, lowercase [a-z0-9-], 1-32 chars (displayed as
+  #name); enforced here plus a partial unique index (005_text_channels.sql).
 """
 
+import re
+import sqlite3
 from typing import Annotated, Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from .. import db
+from .. import db, events
 from ..models import ChannelType, MemberType, User, UserStatus
 from .auth import Actor, get_actor, get_current_user
 
@@ -47,14 +54,14 @@ SNIPPET_LEN = 80
 async def is_member(channel_id: int, member_type: MemberType, member_id: int) -> bool:
     """True if the actor may access the channel.
 
-    Users are implicit members of main_feed (no row required). Everything else
-    — user in a DM, bot anywhere — requires an explicit channel_members row.
-    Unknown channels are never accessible.
+    Users are implicit members of main_feed and text channels (no row
+    required). Everything else — user in a DM, bot anywhere — requires an
+    explicit channel_members row. Unknown channels are never accessible.
     """
     channel = await db.fetch_one("SELECT type FROM channels WHERE id = ?", (channel_id,))
     if channel is None:
         return False
-    if member_type == "user" and channel["type"] == "main_feed":
+    if member_type == "user" and channel["type"] in ("main_feed", "text"):
         return True
     row = await db.fetch_one(
         """SELECT 1 FROM channel_members
@@ -65,9 +72,10 @@ async def is_member(channel_id: int, member_type: MemberType, member_id: int) ->
 
 
 async def user_channel_ids(user_id: int) -> list[int]:
-    """All channel ids the user can access: main_feed (implicit) + explicit rows."""
+    """All channel ids the user can access: main_feed + text (implicit) +
+    explicit rows (DMs; lazy read-state rows dedupe via UNION)."""
     rows = await db.fetch_all(
-        """SELECT id FROM channels WHERE type = 'main_feed'
+        """SELECT id FROM channels WHERE type IN ('main_feed', 'text')
            UNION
            SELECT channel_id FROM channel_members
            WHERE member_type = 'user' AND member_id = ?""",
@@ -105,6 +113,10 @@ class ChannelListItem(BaseModel):
     dm_user_id: Optional[int] = None    # DMs: the OTHER participant's user id
     unread: int = 0
     last_message: Optional[LastMessage] = None
+
+
+class ChannelCreateRequest(BaseModel):
+    name: str
 
 
 class DmCreateRequest(BaseModel):
@@ -154,13 +166,16 @@ async def _get_channel(channel_id: int) -> dict[str, Any]:
 @router.get("/channels")
 async def list_channels(user: CurrentUser) -> list[ChannelListItem]:
     main = await db.fetch_one("SELECT * FROM channels WHERE type = 'main_feed'")
+    texts = await db.fetch_all(
+        "SELECT * FROM channels WHERE type = 'text' ORDER BY name"
+    )
     dms = await db.fetch_all(
         """SELECT c.* FROM channels c
            JOIN channel_members cm ON cm.channel_id = c.id
            WHERE c.type = 'dm_1to1' AND cm.member_type = 'user' AND cm.member_id = ?""",
         (user.id,),
     )
-    chans = ([main] if main is not None else []) + dms
+    chans = ([main] if main is not None else []) + texts + dms
     if not chans:
         return []
 
@@ -236,10 +251,52 @@ async def list_channels(user: CurrentUser) -> list[ChannelListItem]:
         lm = last_msgs.get(c["id"])
         return lm["created_at"] if lm is not None else c["created_at"]
 
-    # main_feed pinned first; DMs by most recent activity (ISO strings sort).
+    # main_feed pinned first; text channels alphabetically; DMs by most
+    # recent activity (ISO strings sort).
     dms_sorted = sorted(dms, key=activity_ts, reverse=True)
-    ordered = ([main] if main is not None else []) + dms_sorted
+    ordered = ([main] if main is not None else []) + texts + dms_sorted
     return [build(c) for c in ordered]
+
+
+# ---------------------------------------------------------------------------
+# POST /channels — create a named text channel
+# ---------------------------------------------------------------------------
+
+CHANNEL_NAME_RE = re.compile(r"^[a-z0-9-]{1,32}$")
+
+
+@router.post("/channels")
+async def create_channel(body: ChannelCreateRequest, user: CurrentUser) -> ChannelListItem:
+    """Create a `text` channel (flat access: any user). 409 on duplicate name.
+
+    Publishes a channel_create event on the bus; the WS hub fans it out to all
+    connected users and bots as {type: "channel_create", channel: {id, type,
+    name}}. Clients otherwise pick new channels up via GET /channels.
+    """
+    name = body.name
+    if not CHANNEL_NAME_RE.fullmatch(name):
+        raise HTTPException(
+            status_code=400,
+            detail="Channel name must be 1-32 characters: lowercase a-z, 0-9, or -",
+        )
+    try:
+        cur = await db.execute(
+            "INSERT INTO channels (type, name) VALUES ('text', ?)", (name,)
+        )
+    except sqlite3.IntegrityError:
+        # Partial unique index on (name) WHERE type='text' — duplicate name.
+        raise HTTPException(
+            status_code=409, detail=f"Channel #{name} already exists"
+        ) from None
+    channel_id = cur.lastrowid
+    await events.publish(
+        {
+            "type": "channel_create",
+            "channel_id": channel_id,
+            "channel": {"id": channel_id, "type": "text", "name": name},
+        }
+    )
+    return ChannelListItem(id=channel_id, type="text", name=name)
 
 
 # ---------------------------------------------------------------------------
@@ -297,13 +354,13 @@ async def create_or_get_dm(body: DmCreateRequest, user: CurrentUser) -> DmRespon
 @router.put("/channels/{channel_id}/read")
 async def mark_read(channel_id: int, body: ReadRequest, user: CurrentUser) -> dict[str, int]:
     channel = await _get_channel(channel_id)
-    if channel["type"] != "main_feed":
-        # Non-main channels require pre-existing membership; the upsert below
-        # must never manufacture DM membership.
+    if channel["type"] == "dm_1to1":
+        # DMs require pre-existing membership; the upsert below must never
+        # manufacture DM membership.
         if not await is_member(channel_id, "user", user.id):
             raise HTTPException(status_code=403, detail="Not a member of this channel")
-    # main_feed: implicit membership — the row is created lazily here, solely
-    # to store last_read_seq. Monotonic: never lowered.
+    # main_feed / text: implicit membership — the row is created lazily here,
+    # solely to store last_read_seq. Monotonic: never lowered.
     await db.execute(
         """INSERT INTO channel_members (channel_id, member_type, member_id, last_read_seq)
            VALUES (?, 'user', ?, ?)
@@ -332,7 +389,7 @@ async def list_members(channel_id: int, actor: CurrentActor) -> list[MemberOut]:
     ):
         raise HTTPException(status_code=403, detail="Not a member of this channel")
 
-    if channel["type"] == "main_feed":
+    if channel["type"] in ("main_feed", "text"):
         # All users are implicit members; bots only via their explicit rows.
         users = await db.fetch_all(
             "SELECT id, display_name, status FROM users ORDER BY id"
@@ -359,9 +416,10 @@ async def list_members(channel_id: int, actor: CurrentActor) -> list[MemberOut]:
 
 
 # ---------------------------------------------------------------------------
-# Bot membership management (flat access among members: any user for main_feed,
-# DM participants only for DMs — a bot in a DM streams that DM, so only its
-# members may grant/revoke that access)
+# Bot membership management (flat access among members: any user for main_feed
+# and text channels — every user is an implicit member there — DM participants
+# only for DMs; a bot in a DM streams that DM, so only its members may
+# grant/revoke that access)
 # ---------------------------------------------------------------------------
 
 async def _require_bot_manage_access(channel_id: int, user: User) -> dict[str, Any]:

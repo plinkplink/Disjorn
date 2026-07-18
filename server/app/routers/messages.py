@@ -470,7 +470,8 @@ async def search_messages(
 ) -> list[dict[str, Any]]:
     """FTS5 search over the caller's channels.
 
-    Users: all accessible channels (main_feed implicit + DMs), deleted excluded.
+    Users: all accessible channels (main_feed + text channels implicit, + DMs),
+    deleted excluded.
     Bots: explicit-membership channels only, and privacy-hidden messages
     (secret / off_the_record) never appear.
     after/before: optional ISO-8601 bounds on created_at — `after` is inclusive

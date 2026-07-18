@@ -95,6 +95,12 @@ export function listChannels(): Promise<ChannelListItem[]> {
   return request<ChannelListItem[]>("GET", "/channels");
 }
 
+/** Create a named text channel (name: lowercase a-z, 0-9, dashes; 1-32 chars).
+    409 -> name taken, 400 -> invalid name (both surface as ApiError.detail). */
+export function createChannel(name: string): Promise<ChannelListItem> {
+  return request<ChannelListItem>("POST", "/channels", { name });
+}
+
 export function openDm(userId: number): Promise<DmResponse> {
   return request<DmResponse>("POST", "/dms", { user_id: userId });
 }

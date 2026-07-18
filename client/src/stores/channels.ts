@@ -4,17 +4,21 @@ import { listChannels, markRead as apiMarkRead, openDm as apiOpenDm } from "../a
 import type { ChannelListItem, Message } from "../types";
 
 function sortChannels(channels: ChannelListItem[]): ChannelListItem[] {
-  // main_feed pinned first; DMs by most recent activity (server order mirrors
-  // this — re-sorting locally keeps live updates consistent).
+  // main_feed pinned first; text channels alphabetically; DMs by most recent
+  // activity (server order mirrors this — re-sorting locally keeps live
+  // updates consistent).
   const main = channels.filter((c) => c.type === "main_feed");
+  const texts = channels
+    .filter((c) => c.type === "text")
+    .sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""));
   const dms = channels
-    .filter((c) => c.type !== "main_feed")
+    .filter((c) => c.type === "dm_1to1")
     .sort((a, b) =>
       (b.last_message?.created_at ?? "").localeCompare(
         a.last_message?.created_at ?? "",
       ),
     );
-  return [...main, ...dms];
+  return [...main, ...texts, ...dms];
 }
 
 interface ChannelsState {
@@ -32,6 +36,12 @@ interface ChannelsState {
   markRead: (channelId: number, seq: number) => Promise<void>;
   /** Live update from a message_create frame: unread badge + last_message + order. */
   onMessageCreate: (message: Message, isRead: boolean) => void;
+  /** Live update from a channel_create frame: add the new text channel row. */
+  onChannelCreate: (channel: {
+    id: number;
+    type: ChannelListItem["type"];
+    name: string;
+  }) => void;
 }
 
 export const useChannels = create<ChannelsState>()((set, get) => ({
@@ -96,5 +106,23 @@ export const useChannels = create<ChannelsState>()((set, get) => ({
       };
     });
     set({ channels: sortChannels(channels) });
+  },
+
+  onChannelCreate: (channel) => {
+    // The creator may already have it via the post-create refresh — dedupe.
+    if (get().channels.some((c) => c.id === channel.id)) return;
+    set({
+      channels: sortChannels([
+        ...get().channels,
+        {
+          id: channel.id,
+          type: channel.type,
+          name: channel.name,
+          dm_user_id: null,
+          unread: 0,
+          last_message: null,
+        },
+      ]),
+    });
   },
 }));
