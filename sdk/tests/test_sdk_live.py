@@ -228,6 +228,23 @@ async def test_secret_message_never_reaches_bot(server, alice, main_id, bot_stre
     assert any(m["id"] == secret["id"] for m in resp.json())
 
 
+async def test_search_finds_posted_message_and_hides_secret(server, alice, main_id, bot):
+    posted = await _post(alice, main_id, "the tarragon harvest starts thursday")
+    await _post(
+        alice, main_id, "tarragon stash location", privacy_flags={"secret": True}
+    )
+
+    results = await bot.search("tarragon")
+    contents = [r["message"]["content"] for r in results]
+    assert "the tarragon harvest starts thursday" in contents
+    assert all("stash" not in c for c in contents)  # secret never reaches the bot
+    hit = next(r for r in results if r["message"]["id"] == posted["id"])
+    assert hit["channel"]["id"] == main_id and hit["channel"]["type"] == "main_feed"
+
+    # Date bounds narrow the window; a future `after` excludes everything
+    assert await bot.search("tarragon", after="2099-01-01") == []
+
+
 async def test_reconnect_backfills_missed_messages_in_order(server, alice, main_id, bot_stream):
     bot, agen = bot_stream
 

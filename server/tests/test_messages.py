@@ -444,10 +444,127 @@ async def test_search_scoped_to_own_channels(client):
     await login(client, "carol")
     assert (await client.get("/search", params={"q": "xylophone"})).json() == []
 
-    # Bots cannot search at all (users only, per spec) — no cookie, only API key
+    # Bot with no channel membership: search works but sees nothing
     await make_bot()
     headers = as_bot(client)
-    assert (await client.get("/search", params={"q": "x"}, headers=headers)).status_code == 401
+    r = await client.get("/search", params={"q": "xylophone"}, headers=headers)
+    assert r.status_code == 200 and r.json() == []
+
+    # No auth at all -> 401
+    client.cookies.clear()
+    assert (await client.get("/search", params={"q": "x"})).status_code == 401
+
+
+async def _set_created_at(message_id: int, created_at: str) -> None:
+    """Pin a message's created_at for deterministic date-range assertions."""
+    await db.execute(
+        "UPDATE messages SET created_at = ? WHERE id = ?", (created_at, message_id)
+    )
+
+
+async def test_bot_search_scoped_to_member_channels(client):
+    await make_user("alice")
+    uid_b = await make_user("bob")
+    bot_id = await make_bot()
+    main = await main_feed_id()
+    await add_member(main, "bot", bot_id)
+
+    await login(client, "alice")
+    dm = await make_dm(client, uid_b)
+    main_msg = await post_message(client, main, "quokka sighting in the main feed")
+    await post_message(client, dm, "quokka plans, just for us two")
+
+    # Bot is a member of main only: DM content invisible
+    headers = as_bot(client)
+    r = await client.get("/search", params={"q": "quokka"}, headers=headers)
+    assert r.status_code == 200
+    [result] = r.json()
+    assert result["message"]["id"] == main_msg["id"]
+    assert result["channel"] == {"id": main, "type": "main_feed", "name": "main"}
+
+    # Explicitly add the bot to the DM: now both hits appear
+    await add_member(dm, "bot", bot_id)
+    r = await client.get("/search", params={"q": "quokka"}, headers=headers)
+    assert {x["channel"]["id"] for x in r.json()} == {main, dm}
+
+
+async def test_bot_search_excludes_privacy_flagged(client):
+    await make_user("alice")
+    bot_id = await make_bot()
+    main = await main_feed_id()
+    await add_member(main, "bot", bot_id)
+
+    await login(client, "alice")
+    plain = await post_message(client, main, "wombat facts, plain and public")
+    await post_message(client, main, "wombat launch codes", privacy_flags={"secret": True})
+    await post_message(
+        client, main, "wombat gossip", privacy_flags={"off_the_record": True}
+    )
+
+    # User search sees all three
+    r = await client.get("/search", params={"q": "wombat"})
+    assert len(r.json()) == 3
+
+    # Bot search sees only the unflagged one — no secret / off_the_record
+    headers = as_bot(client)
+    r = await client.get("/search", params={"q": "wombat"}, headers=headers)
+    [result] = r.json()
+    assert result["message"]["id"] == plain["id"]
+    assert result["message"]["content"] == "wombat facts, plain and public"
+
+
+async def test_search_date_range_filtering_both_actors(client):
+    await make_user("alice")
+    bot_id = await make_bot()
+    main = await main_feed_id()
+    await add_member(main, "bot", bot_id)
+
+    await login(client, "alice")
+    m1 = await post_message(client, main, "ocelot report one")
+    m2 = await post_message(client, main, "ocelot report two")
+    m3 = await post_message(client, main, "ocelot report three")
+    await _set_created_at(m1["id"], "2026-01-01T10:00:00.000Z")
+    await _set_created_at(m2["id"], "2026-01-02T10:00:00.000Z")
+    await _set_created_at(m3["id"], "2026-01-03T10:00:00.000Z")
+
+    async def ids(params, headers=None):
+        r = await client.get("/search", params=params, headers=headers or {})
+        assert r.status_code == 200, r.text
+        return [x["message"]["id"] for x in r.json()]
+
+    # User: after is inclusive on the raw string bound, before is exclusive
+    assert set(await ids({"q": "ocelot", "after": "2026-01-02"})) == {m2["id"], m3["id"]}
+    assert await ids({"q": "ocelot", "before": "2026-01-02"}) == [m1["id"]]
+    assert await ids({"q": "ocelot", "after": "2026-01-02", "before": "2026-01-03"}) == [m2["id"]]
+    # Full timestamps work too
+    assert await ids({"q": "ocelot", "after": "2026-01-03T09:00:00"}) == [m3["id"]]
+
+    # Bot: same semantics through the API-key path
+    headers = as_bot(client)
+    assert set(await ids({"q": "ocelot", "after": "2026-01-02"}, headers)) == {m2["id"], m3["id"]}
+    assert await ids({"q": "ocelot", "before": "2026-01-02"}, headers) == [m1["id"]]
+
+
+async def test_search_garbage_dates_400(client):
+    await make_user("alice")
+    bot_id = await make_bot()
+    main = await main_feed_id()
+    await add_member(main, "bot", bot_id)
+    await login(client, "alice")
+
+    for params in (
+        {"q": "x", "after": "not-a-date"},
+        {"q": "x", "before": "yesterday-ish"},
+        {"q": "x", "after": "2026-13-99"},
+        {"q": "", "after": "garbage"},  # validated even when q is empty
+    ):
+        r = await client.get("/search", params=params)
+        assert r.status_code == 400, f"{params} -> {r.status_code}"
+
+    # Bot path gets the same validation
+    headers = as_bot(client)
+    r = await client.get("/search", params={"q": "x", "after": "junk"}, headers=headers)
+    assert r.status_code == 400
 
 
 async def test_search_survives_weird_fts_input(client):

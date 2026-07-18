@@ -70,6 +70,9 @@ def server() -> LiveServer:
         "DB_PATH": str(scratch / "disjorn.db"),
         "DATA_DIR": str(scratch / "data"),
         "SECRET_KEY": "sdk-test-secret",
+        # server/.env carries production values (COOKIE_SECURE=true breaks the
+        # plain-http scratch server); env vars override the .env file.
+        "COOKIE_SECURE": "false",
     }
 
     for name, password in USERS.items():

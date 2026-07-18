@@ -8,7 +8,10 @@ Endpoints:
                                               or backfill (`from_seq`, ascending,
                                               current-state: edits applied, deleted
                                               messages as tombstones {id, seq, deleted})
-    GET    /search?q=               (user)  — FTS5, membership-scoped, excludes deleted
+    GET    /search?q=               (actor) — FTS5, membership-scoped, excludes deleted;
+                                              optional after=/before= ISO-8601 bounds;
+                                              bot results additionally exclude
+                                              privacy-hidden messages
 
 Exported helper (reused by WP5 WS backfill / WP6 media):
     message_payload(row) -> dict — full materialized payload for a messages-table
@@ -423,7 +426,7 @@ async def list_messages(
 
 
 # ---------------------------------------------------------------------------
-# GET /search — FTS5, users only, membership-scoped
+# GET /search — FTS5, membership-scoped (users and bots), privacy-filtered
 # ---------------------------------------------------------------------------
 
 def _fts_match_query(q: str) -> str:
@@ -438,29 +441,94 @@ def _fts_match_query(q: str) -> str:
     return " ".join('"' + t.replace('"', '""') + '"' for t in terms)
 
 
+def _validate_iso_date(value: str, param: str) -> str:
+    """Loosely validate an ISO-8601 date/datetime query param; 400 on garbage.
+
+    messages.created_at is TEXT like '2026-07-17T12:34:56.789Z', so ISO strings
+    compare lexicographically and any valid prefix ('2026-07-17', full
+    timestamps, ...) works as a raw string bound — no parsing of stored rows
+    needed. datetime.fromisoformat is the loose gate ('Z' accepted on 3.11+).
+    """
+    from datetime import datetime
+
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(
+            status_code=400, detail=f"{param} must be an ISO-8601 date/datetime"
+        ) from None
+    return value
+
+
 @router.get("/search")
-async def search_messages(user: CurrentUser, q: str = Query(default="")) -> list[dict[str, Any]]:
+async def search_messages(
+    actor: CurrentActor,
+    q: str = Query(default=""),
+    after: Optional[str] = Query(default=None),
+    before: Optional[str] = Query(default=None),
+    limit: int = Query(default=SEARCH_LIMIT, ge=1, le=SEARCH_LIMIT),
+) -> list[dict[str, Any]]:
+    """FTS5 search over the caller's channels.
+
+    Users: all accessible channels (main_feed implicit + DMs), deleted excluded.
+    Bots: explicit-membership channels only, and privacy-hidden messages
+    (secret / off_the_record) never appear.
+    after/before: optional ISO-8601 bounds on created_at — `after` is inclusive
+    (created_at >= after), `before` exclusive (created_at < before). A date-only
+    `before=2026-07-17` therefore excludes that whole day.
+    limit: result cap, 1..SEARCH_LIMIT (default SEARCH_LIMIT).
+    """
+    # Validate bounds up front so garbage is a 400 even for empty queries.
+    if after is not None:
+        after = _validate_iso_date(after, "after")
+    if before is not None:
+        before = _validate_iso_date(before, "before")
     match = _fts_match_query(q)
     if not match:
         return []
-    channel_ids = await channels.user_channel_ids(user.id)
+    if actor.type == "user":
+        channel_ids = await channels.user_channel_ids(actor.id)
+    else:
+        # Bots: explicit membership only — no implicit main_feed, no DMs unless
+        # the bot was added (Architecture §11).
+        channel_ids = await channels.bot_channel_ids(actor.id)
     if not channel_ids:
         return []
     placeholders = ",".join("?" * len(channel_ids))
-    rows = await db.fetch_all(
-        f"""SELECT m.*, c.type AS channel_type, c.name AS channel_name
+    sql = f"""SELECT m.*, c.type AS channel_type, c.name AS channel_name
             FROM messages_fts fts
             JOIN messages m ON m.id = fts.rowid
             JOIN channels c ON c.id = m.channel_id
             WHERE messages_fts MATCH ?
               AND m.deleted_at IS NULL
-              AND m.channel_id IN ({placeholders})
-            ORDER BY m.created_at DESC, m.id DESC
-            LIMIT ?""",
-        [match, *channel_ids, SEARCH_LIMIT],
-    )
+              AND m.channel_id IN ({placeholders})"""
+    params: list[Any] = [match, *channel_ids]
+    if after is not None:
+        sql += " AND m.created_at >= ?"
+        params.append(after)
+    if before is not None:
+        sql += " AND m.created_at < ?"
+        params.append(before)
+    if actor.type == "bot":
+        # Privacy wall (Architecture §8.2/§11): app/privacy.py is the source of
+        # truth for bot visibility; this SQL mirrors privacy.hidden_from_bots.
+        # The merge logic (_merge_flags) guarantees only TRUTHY flags are ever
+        # stored in privacy_flags JSON, so "key absent" (json_extract IS NULL)
+        # is exactly "flag not set".
+        sql += """
+              AND json_extract(m.privacy_flags, '$.secret') IS NULL
+              AND json_extract(m.privacy_flags, '$.off_the_record') IS NULL"""
+    sql += " ORDER BY m.created_at DESC, m.id DESC LIMIT ?"
+    params.append(limit)
+    rows = await db.fetch_all(sql, params)
     results: list[dict[str, Any]] = []
     for row in rows:
+        # Belt-and-braces: re-check via the canonical policy even though the
+        # SQL above already excluded hidden rows for bots.
+        if actor.type == "bot" and _hidden_from_bots(
+            json.loads(row["privacy_flags"] or "{}")
+        ):
+            continue
         results.append(
             {
                 "message": await message_payload(row),

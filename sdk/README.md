@@ -79,6 +79,7 @@ privacy_flags_on_current_message: {}}`.
 |---|---|
 | `await client.send(channel_id, content, *, reply_to=None, emotion=None, emote_refs=None, privacy_flags=None)` | POST a message; returns the full message dict. `reply_to` → `reply_to_id` (same channel only). `emotion` is resolved server-side against the bot's chibi pack into `emote_refs`; unknown emotions are silently dropped. `emote_refs` may also be passed explicitly. |
 | `await client.get_messages(channel_id, *, from_seq=None, before_seq=None, limit=None)` | `from_seq`: ascending current-state backfill (tombstones `{id, seq, deleted: true}` for deleted). `before_seq`: newest-first scrollback (deleted omitted). Mutually exclusive. Limit max 200. |
+| `await client.search(q, *, after=None, before=None, limit=None)` | Full-text search across the bot's member channels. Returns `[{message, channel: {id, type, name}}]`, newest first. `after`/`before`: optional ISO-8601 bounds on `created_at` (date-only or full timestamp; `after` inclusive, `before` exclusive; malformed → HTTP 400). `limit` max 50 (server default 50). Membership scoping and the secret/off-the-record privacy wall are enforced server-side. |
 | `await client.members(channel_id)` | `[{type, id, name, status?}]`. **This is the bot's channel-discovery primitive** — `GET /channels` is user-only; bots learn channel ids from events and membership. |
 | `await client.typing(channel_id)` | WS op (needs a live `events()` loop). Server rate-limits to 1 per 3s per channel. |
 | `client.seed_seq(channel_id, seq)` | Pre-register a cursor (see resuming, below). |
@@ -146,6 +147,7 @@ discord.py concept has a direct mapping:
 | `async def on_message_edit/delete` | `MessageEdit` / `MessageDelete` events |
 | `async def on_typing` / `on_presence_update` | `TypingStart` / `Presence` events |
 | `channel.history(...)` | `await client.get_messages(ch, before_seq=..., limit=...)` |
+| `search_topic(...)` (history scan) | `await client.search(q, after=..., before=...)` — server-side FTS, see below |
 | `guild.members` / presence cache | `await client.members(ch)` + `Presence` events + `context["awake_users"]` |
 | gateway resume / missed events | automatic: reconnect + seq backfill (see above) |
 
@@ -176,6 +178,15 @@ said while you were offline (check `event.backfilled` if you want to tag those
 memories), and the server's privacy wall means anything flagged secret/off-
 the-record physically never reaches your ingest path — no "please don't
 remember this" prompt engineering.
+
+**Search replaces discord-history scanning.** Wherever Claudette's
+`search_topic` walked `channel.history(...)` matching content client-side, call
+`await client.search("the topic", after="2026-06-01")` instead: one server-side
+FTS query across every channel the bot is a member of, with optional
+`after`/`before` ISO date bounds to narrow the timeframe. Results are
+membership-scoped and privacy-filtered server-side — non-member channels and
+anything flagged secret/off-the-record are already absent, so there is nothing
+to exclude in bot code.
 
 **Context block replaces ad-hoc presence tracking.** Instead of maintaining
 your own who's-online map from raw presence events, every mention hands you

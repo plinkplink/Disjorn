@@ -207,6 +207,7 @@ Built server-side from already-filtered data. Structure open for future metadata
 ---
 
 ## 13. v2 Backlog
+- **Bot unprompted participation** (TOP OF BACKLOG per plink 2026-07-18): policy layer for bots joining conversation un-summoned — rate limits, spend budget, personality tuning. Design alongside AGENTHOOD.md budgets.
 - HTML rendering in chat (sanitize with `nh3`)
 - Email notifications (exim4 Gmail smarthost)
 - Group DMs, threads, multi-server

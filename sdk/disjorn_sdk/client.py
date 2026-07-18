@@ -162,6 +162,37 @@ class DisjornClient:
         self._raise_for_status(resp)
         return resp.json()
 
+    async def search(
+        self,
+        q: str,
+        *,
+        after: Optional[str] = None,
+        before: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
+        """Full-text search across the bot's member channels.
+
+        Returns ``[{message: <full payload dict>, channel: {id, type, name}}]``,
+        newest first. Scoping and privacy are server-enforced: only channels
+        the bot is an explicit member of are searched, and messages flagged
+        secret/off_the_record never appear — nothing to filter client-side.
+
+        ``after``/``before`` are optional ISO-8601 bounds on ``created_at``
+        (date-only like ``"2026-07-01"`` or full timestamps): ``after`` is
+        inclusive, ``before`` exclusive; the server 400s on malformed dates.
+        ``limit`` caps the result count (server default and max: 50).
+        """
+        params: dict[str, Any] = {"q": q}
+        if after is not None:
+            params["after"] = after
+        if before is not None:
+            params["before"] = before
+        if limit is not None:
+            params["limit"] = limit
+        resp = await self._http.get("/search", params=params)
+        self._raise_for_status(resp)
+        return resp.json()
+
     async def members(self, channel_id: int) -> list[dict[str, Any]]:
         """Member listing: ``[{type: "user"|"bot", id, name, status?}, ...]``.
 

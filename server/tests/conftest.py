@@ -18,6 +18,13 @@ def tmp_db_path(tmp_path, monkeypatch):
     db_path = tmp_path / "disjorn.db"
     monkeypatch.setenv("DB_PATH", str(db_path))
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    # Settings also read server/.env (production deployment values). Env vars
+    # take priority in pydantic-settings, so pin the test-critical ones here:
+    # Secure cookies never flow over the http:// ASGI transport, and the
+    # notification tests assume a keyless VAPID default.
+    monkeypatch.setenv("COOKIE_SECURE", "false")
+    monkeypatch.setenv("VAPID_PUBLIC_KEY", "")
+    monkeypatch.setenv("VAPID_PRIVATE_KEY", "")
     reset_settings_cache()
     yield db_path
     reset_settings_cache()
