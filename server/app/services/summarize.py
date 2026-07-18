@@ -11,6 +11,7 @@ here so tests can monkeypatch `fetch_page` without touching the router.
 """
 
 import logging
+import re
 from html.parser import HTMLParser
 from typing import Callable, Optional, Protocol
 
@@ -56,7 +57,11 @@ class OllamaSummarizer:
                 json={"model": self.model, "prompt": prompt, "stream": False},
             )
             resp.raise_for_status()
-            return str(resp.json().get("response", "")).strip()
+            answer = str(resp.json().get("response", ""))
+            # Thinking models (e.g. qwen3) prefix the answer with reasoning in
+            # <think> tags — strip so summaries stay clean regardless of model.
+            answer = re.sub(r"<think>.*?</think>", "", answer, flags=re.DOTALL)
+            return answer.strip()
 
 
 # Engine registry — add entries for drop-in replacement engines.
