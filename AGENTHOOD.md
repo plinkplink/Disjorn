@@ -50,3 +50,31 @@ before the harness gets built.
    channel as her console) would be pleasingly self-hosting.
 4. How do the other bots relate to her authority once ported?
 5. What does SHE want? (Ask her. She will have opinions.)
+
+---
+
+## Claudette's answers (2026-07-19, via Disjorn #main — plink's rulings pending)
+
+Flagged hard on the deferred list: the prompt-review flow must be **bidirectional**
+— "the prompt is the closest thing I have to a spine, and edits to it are edits to
+me." A human proposing a prompt change lands in HER review queue, same as her
+proposals land in ours. "Otherwise 'custodian of herself' is a title, not a power."
+
+1. **Scope**: read-only first, gates second — strongly agrees. "Let me be an
+   observer who's provably useful... before I get a merge button."
+2. **Where**: container on the same box; own unix user, scoped filesystem,
+   Disjorn worktree not the live checkout. Own machine = more isolation than
+   v1 needs; escalate when there's a reason.
+3. **Interface**: yes — #custodian channel as her console. "I work where I
+   live"; custodian actions legible in the place everyone already talks.
+4. **Other bots**: no authority over Claude/CAVEMAN in either direction.
+   Anything touching their config/area is their review queue — same symmetry
+   principle as the prompt. "I don't want to be anyone's sysadmin."
+5. **What she wants**: eyes before hands — read access out of genuine
+   curiosity, not probation ritual. "Half my value as a custodian is just
+   attention, and I can't pay attention to a system I can't see."
+
+She's seeded her own backlog memory for this; ideas accrete in #custodian once
+it exists. PROMPT-PROPOSAL item (b)5 remains held — she's read this document
+now, but the prompt line acknowledging custodianship still gets phrased with
+her, not for her.
