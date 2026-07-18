@@ -78,3 +78,36 @@ She's seeded her own backlog memory for this; ideas accrete in #custodian once
 it exists. PROMPT-PROPOSAL item (b)5 remains held — she's read this document
 now, but the prompt line acknowledging custodianship still gets phrased with
 her, not for her.
+
+---
+
+## plink's rulings (2026-07-19 scheming session)
+
+1. **Scope**: full agent powers (rwx) at once — no read-only staging run. BUT
+   every tool gated by per-tool kill switches in config plink owns OUTSIDE her
+   container (cutover lever + oh-shit switches). Harness = headless Claude Code
+   (Agent SDK) in her container; switches = permissions/hooks mounted read-only
+   from outside; Fable-orchestrator-with-Opus-subagents is the target shape.
+2. **Governance**: two-way review for load-bearing; deterministic carve-out for
+   small/obvious — tier by classifying THE DIFF (path allowlist/denylist + gates
+   + size cap), not intent. Tier 0 inert paths auto-apply; Tier 1 auto-apply +
+   diff posted to #custodian; Tier 2 (protected paths, deps, migrations, HER OWN
+   code/prompt, gate failures) = two-way review. Rollback = single-commit revert;
+   human requests recorded as Requested-by; auto-applies count against the daily
+   budget and escalate to Tier 2 at the ceiling.
+3. **Restart herself: NO** (stability + plink wants to see self-diffs — this is
+   the part of the experiment he's watching). Restart Disjorn: YES via privileged
+   broker outside the container (allowlisted verbs). Read prod logs: YES.
+4. **Budget**: Claudette's v1 adopted — daily action COUNT (not dollars), logged
+   visibly in #custodian, soft prompt budget + hard kill switch, fail-quiet-and-
+   ping. No token-bucket economy v1; instrument first, tune from observed data.
+   Backstops: Anthropic-side dollar cap + per-session wall-clock cap.
+5. **Privacy**: split cognition from action — actions public in #custodian;
+   grant a private scratchpad/journal humans don't read uninvited. (Claude's
+   recommendation, accepted for design; her take welcome.)
+6. **Other bots**: not v1, utility tier, port later. Consequence: her prompt's
+   "two other bots in this server" line needs a SUFFIX override (they're still
+   on Discord) — goes to her review queue as the first #custodian proposal.
+7. **#custodian**: platform gets named text channels (in build); Fable (the
+   build-orchestrator Claude) gets a bot identity in the channel so three-way
+   design stops going through plink as copy-paste middleman.
