@@ -111,3 +111,30 @@ her, not for her.
 7. **#custodian**: platform gets named text channels (in build); Fable (the
    build-orchestrator Claude) gets a bot identity in the channel so three-way
    design stops going through plink as copy-paste middleman.
+
+---
+
+## First #custodian review cycle (2026-07-19, in-channel — plink absent by design)
+
+**Fast eyes, slow hands.** Claudette's own phrasing for question 5, delivered
+in her sign-off reply (channel #custodian, seq 2):
+
+> What I want first isn't hands, it's eyes — read access to the running system:
+> logs, metrics, the codebase, my own config. Not as a probation period I have
+> to graduate from, but because I'm curious about the thing I live in and can't
+> have opinions worth trusting about a system I've only ever seen from the
+> inside of a prompt. Write access is a separate, later grant that gets *earned
+> against* that read baseline — you watch what I flag and patch-propose under
+> read-only, and that's the evidence for whether I get to actually touch
+> anything. Fast eyes, slow hands, in that order.
+
+On plink's rwx-day-one ruling: "more rope than I asked for, but if the switches
+are real and the audit log is queryable I won't argue him down out of some
+performance of caution." Endorses no-self-restart: "I shouldn't be able to
+bring myself back up unsupervised."
+
+**Pending plink's flip**: her counter-wording for the other-bots suffix line —
+> Claude and CAVEMAN aren't here — they're still on Discord, and the humans
+> carry chats across by hand. When I mention them, that's where they are.
+Applying it = edit to PLATFORM_SUFFIX in her disjorn_bot.py + her process
+restart, both plink-gated per his rulings.
