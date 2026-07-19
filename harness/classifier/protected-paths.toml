@@ -1,0 +1,73 @@
+# protected-paths.toml — Layer-2 (protected-by-enumeration) config for the
+# WP-H4 diff-tier classifier. Owned by plink; lives OUTSIDE resident
+# containers (this template travels with the harness; the live copy is
+# mounted read-only per WP-H1/H3).
+#
+# Layer-1 (protected-by-placement) paths — broker config, verbs.toml, audit
+# logs, /home/plink/resident-config/*, nftables rules, and THIS FILE's live
+# copy — are not listed here: no resident diff can contain them at all.
+#
+# Any diff touching a path below is Tier 2 (human gate). Explicit list,
+# not prefixes, per HARNESS-PLAN.md WP-H4.
+
+[protected]
+# Exact files (repo-relative).
+files = [
+    # privacy enforcement surface
+    "server/app/privacy.py",
+    "server/app/routers/auth.py",
+    "server/app/ws.py",           # fanout = privacy enforcement
+    # account creation
+    "server/cli.py",
+    # dependency files
+    "server/requirements.txt",
+    "server/requirements-ml.txt",
+    "client/package.json",
+    "client/package-lock.json",
+    "sdk/pyproject.toml",
+]
+
+# Protected directories: any change under these (including file CREATION)
+# is a protected touch.
+dirs = [
+    "server/app/migrations",
+    "deploy",
+    "sdk/disjorn_sdk",            # SDK protocol files
+]
+
+# fnmatch patterns, matched against the full repo-relative path AND the
+# basename ('*' crosses '/').
+patterns = [
+    ".env*",                      # .env, .env.local, ... at any depth
+]
+
+# --- Per-resident protected paths -----------------------------------------
+# Filled in when WP-H5/H9/H11 land; paths are relative to each resident's
+# repo as mounted in their container. For each resident add:
+#   - the residency adapter file      (e.g. "claudette/disjorn_bot.py")
+#   - "core.py"
+#   - "memory/"                       (as a dir entry)
+#   - the spine directory             (e.g. "spine/")
+#   - the kernel                      (e.g. "kernel.md" / CLAUDE.md source)
+# A resident's OWN code and prompt are always Tier 2 per AGENTHOOD.md.
+
+[inert]
+# Tier-0 allowlist: paths whose changes are inert (auto-apply when gates
+# pass). fnmatch semantics as above.
+patterns = [
+    "*.md",
+    "docs/*",
+    "client/src/*.css",
+    "client/public/*",
+    "server/app/assets_seed/*",
+]
+
+[limits]
+# Tier 1 requires lines_added + lines_removed <= size_cap.
+size_cap = 150
+
+# Daily auto-apply budget (Tier 0/1 merges per day). Enforcement lives in
+# the broker/orchestrator (WP-H3/H12) — the classifier does not count; the
+# number just lives here so plink owns it in one place. Over budget ->
+# everything escalates to Tier 2.
+daily_auto_apply_budget = 12
