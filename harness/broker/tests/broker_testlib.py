@@ -82,10 +82,25 @@ class BrokerHarness:
         self.proposals = proposals
 
     # -- client side ------------------------------------------------------
-    def call(self, verb, args=None, raw: str | None = None) -> dict:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+    def _connect(self) -> socket.socket:
+        # The socket FILE appears at bind(), before listen() — a fast test can
+        # land in that gap and get ConnectionRefusedError. Retry connects only;
+        # no probe connections (they would pollute audit-completeness asserts).
+        deadline = time.time() + 5
+        while True:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             s.settimeout(10)
-            s.connect(self.broker.socket_path)
+            try:
+                s.connect(self.broker.socket_path)
+                return s
+            except (ConnectionRefusedError, FileNotFoundError):
+                s.close()
+                if time.time() > deadline:
+                    raise
+                time.sleep(0.02)
+
+    def call(self, verb, args=None, raw: str | None = None) -> dict:
+        with self._connect() as s:
             if raw is not None:
                 payload = raw.encode()
             else:
