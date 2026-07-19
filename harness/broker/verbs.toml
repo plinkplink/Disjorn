@@ -1,0 +1,35 @@
+# /etc/disjorn-broker/verbs.toml — THE KILL SWITCHES (HARNESS-PLAN WP-H3).
+# TEMPLATE — copied into place by harness/keyboard/04-broker.sh (never
+# overwriting an existing file). Owned root:plink 0640; edit with sudoedit.
+#
+# One section per resident, one boolean per verb. The broker re-reads this
+# file on EVERY request, so flipping a switch takes effect immediately — no
+# broker restart, no window. Anything missing (file, section, or key) means
+# OFF: the broker fails closed.
+#
+# EVERY verb ships OFF for EVERY resident. plink flips each one on
+# deliberately, one at a time, when he decides that resident gets that power.
+#
+# There is no `restart-self` line because there is no such verb — residents
+# cannot bring themselves back up unsupervised (plink's ruling #3,
+# AGENTHOOD.md; enforced by test in harness/broker/tests/).
+
+[res-claudette]
+"restart-disjorn" = false
+"run-server-tests" = false
+"classify-diff" = false
+"read-prod-logs" = false
+"read-own-log" = false
+"read-metrics" = false
+"file-proposal" = false
+"query-own-audit" = false
+
+[res-gable]
+"restart-disjorn" = false
+"run-server-tests" = false
+"classify-diff" = false
+"read-prod-logs" = false
+"read-own-log" = false
+"read-metrics" = false
+"file-proposal" = false
+"query-own-audit" = false

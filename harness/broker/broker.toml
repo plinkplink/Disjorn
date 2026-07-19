@@ -1,0 +1,69 @@
+# /etc/disjorn-broker/broker.toml — disjorn-broker daemon configuration.
+# TEMPLATE — copied into place by harness/keyboard/04-broker.sh (never
+# overwriting an existing file). Owned root:plink 0640; edit with sudoedit.
+#
+# This file lives OUTSIDE both resident containers on purpose: nothing in it
+# is reachable — for reading or writing — from inside a resident's world.
+# (HARNESS-PLAN WP-H4 "protected by placement".)
+
+[broker]
+# Where the unix socket lives. The systemd unit sets RuntimeDirectory=
+# disjorn-broker, which creates /run/disjorn-broker owned by plink — that is
+# why the socket sits in a subdirectory rather than directly in /run (a
+# non-root daemon cannot create files in /run itself).
+# This path gets bind-mounted into each resident container (WP-H1).
+socket_path = "/run/disjorn-broker/broker.sock"
+
+# Append-only JSON-lines audit trail: one line per call, allowed or denied.
+# /var/log/disjorn-broker is created by the unit's LogsDirectory=.
+audit_log = "/var/log/disjorn-broker/audit.jsonl"
+
+[uids]
+# Kernel uid -> resident identity. THE authentication table: the broker trusts
+# SO_PEERCRED, maps the uid here, and denies anything unlisted.
+# Fill in the real uids after harness/keyboard/01-users.sh has run
+# (`id -u res-claudette`). Keys must be quoted (TOML).
+# "998" = "res-claudette"
+# "997" = "res-gable"
+
+[residents.res-claudette]
+# The ONLY file read-own-log will serve to res-claudette. No other path is
+# ever accepted, whatever the caller sends.
+log_path = "/home/res-claudette/logs/disjorn_bot.log"
+
+[residents.res-gable]
+log_path = "/home/res-gable/logs/gable.log"
+
+[commands]
+# Fixed argv lists — the broker NEVER passes a string to a shell. Validated
+# scalar arguments (line counts, git ranges) are appended by the handlers as
+# separate argv items; callers cannot inject flags or commands.
+#
+# restart-disjorn: `sudo -n` succeeds only because of the single line in
+# /etc/sudoers.d/90-disjorn-broker (exactly `systemctl restart disjorn`).
+restart_disjorn = ["sudo", "-n", "systemctl", "restart", "disjorn"]
+
+# run-server-tests: the full server pytest suite, run from the server dir.
+run_server_tests = ["/home/plink/Disjorn/Disjorn/server/.venv/bin/python", "-m", "pytest", "tests", "-q"]
+run_server_tests_cwd = "/home/plink/Disjorn/Disjorn/server"
+
+# read-prod-logs: handler appends ["-n", "<validated count>"].
+read_prod_logs = ["journalctl", "-u", "disjorn", "--no-pager", "-o", "short-iso"]
+
+# classify-diff: handler appends --repo/--range/--gates-json (all validated).
+classify_diff = ["/home/plink/Disjorn/Disjorn/server/.venv/bin/python", "/home/plink/Disjorn/Disjorn/harness/classifier/classify_diff.py"]
+
+[paths]
+# read-metrics serves exactly this file (producer arrives with WP-H8/H12;
+# until then an empty {} JSON file is fine).
+metrics_json = "/var/lib/disjorn-broker/metrics.json"
+
+[disjorn]
+# file-proposal posts to #custodian AS THE BROKER'S OWN bot identity — the
+# proposal text is data; the authority to post is the broker's. Create a
+# dedicated bot (e.g. "broker") via server/cli.py and put its API key in
+# api_key_path (root:plink 0640).
+url = "http://127.0.0.1:8399"
+api_key_path = "/etc/disjorn-broker/broker-api-key"
+# Channel id of #custodian (look it up in the server DB / channel list).
+custodian_channel_id = 3

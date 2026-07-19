@@ -1,0 +1,12 @@
+# /etc/sudoers.d/90-disjorn-broker — installed by harness/keyboard/04-broker.sh
+# after a `visudo -cf` syntax check.
+#
+# The ONE privileged escape hatch of the disjorn-broker daemon (WP-H3):
+# lets plink (the uid the broker runs as) restart exactly the disjorn service,
+# passwordless, so the broker's restart-disjorn verb can run
+# `sudo -n systemctl restart disjorn`.
+#
+# Exactly this command, no wildcards: not `systemctl *`, not `restart *`.
+# Residents never touch sudo at all — they talk to the broker's socket and the
+# broker holds this single key.
+plink ALL=(root) NOPASSWD: /usr/bin/systemctl restart disjorn

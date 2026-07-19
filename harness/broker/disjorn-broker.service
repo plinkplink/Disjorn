@@ -1,0 +1,45 @@
+# disjorn-broker — privileged verb gateway for residents (HARNESS-PLAN WP-H3).
+#
+# Installed by harness/keyboard/04-broker.sh:
+#   sudo cp harness/broker/disjorn-broker.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now disjorn-broker
+#
+# WHY User=plink (not root) IS ENOUGH:
+#   Everything the broker does is plink-level work — reading its config,
+#   tailing files, running pytest, journalctl, posting to Disjorn. The single
+#   genuinely privileged verb, restart-disjorn, runs
+#   `sudo -n systemctl restart disjorn`, which succeeds only because
+#   /etc/sudoers.d/90-disjorn-broker grants plink exactly that one command
+#   passwordless (see harness/keyboard/90-disjorn-broker.sudoers). Running the
+#   daemon as root would grant every OTHER verb root for no reason.
+#
+#   Consequence: NoNewPrivileges= must stay OFF here (unlike disjorn.service)
+#   or the sudo call would be blocked. The sudoers line, not NNP, is the
+#   privilege boundary.
+
+[Unit]
+Description=Disjorn privileged broker (resident verb gateway)
+Documentation=file:///home/plink/Disjorn/Disjorn/harness/broker/PROTOCOL.md
+After=network.target
+
+[Service]
+Type=exec
+User=plink
+Group=plink
+ExecStart=/home/plink/Disjorn/Disjorn/server/.venv/bin/python /home/plink/Disjorn/Disjorn/harness/broker/brokerd.py
+# Creates /run/disjorn-broker (socket lives there — a plink-uid daemon cannot
+# create files directly in /run) and /var/log/disjorn-broker (audit trail),
+# both owned by plink.
+RuntimeDirectory=disjorn-broker
+LogsDirectory=disjorn-broker
+Restart=on-failure
+RestartSec=3
+
+# Modest hardening. ProtectSystem=full makes /usr /boot /etc read-only for the
+# daemon (it only READS /etc/disjorn-broker); RuntimeDirectory/LogsDirectory
+# stay writable. Deliberately absent: NoNewPrivileges (see header).
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
