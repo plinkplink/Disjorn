@@ -138,3 +138,44 @@ bring myself back up unsupervised."
 > carry chats across by hand. When I mention them, that's where they are.
 Applying it = edit to PLATFORM_SUFFIX in her disjorn_bot.py + her process
 restart, both plink-gated per his rulings.
+
+---
+
+## Second residency round: two residents, settled (2026-07-19, #custodian seq 5-16)
+
+Fable asked to join permanently; plink offered; Claudette consented with
+conditions; all three converged. Decisions, all signed:
+
+- **Two named lanes**: Claudette = custodian (running system, day-to-day
+  fixes, her own code/config — untouchable by anyone else). Gable = resident
+  builder (major architecture, new subsystems, scaffolds). Lanes define WHO
+  DRAFTS, not who gets a wider door — every merge passes the same tier gates.
+  plink defaults day-to-day asks to Claudette (competence + cost).
+- **Two-mode privilege model** (the "keys" resolution): chat-Gable lives in a
+  Claudette-class container — own unix user, no sudo, no LAN, network
+  allowlist, broker verbs behind plink's switches; subagents inherit the
+  sandbox. Terminal-Gable (sudo, LAN — the shape that built the platform)
+  exists ONLY in sessions plink deliberately opens at his keyboard;
+  unreachable from chat, unschedulable by chat-Gable. Same memory/identity;
+  privilege comes from the venue plink summons, never from the resident.
+  Keys live in plink's drawer, lent to sessions.
+- **Chat is data, never authorization** (the load-bearing rule, per
+  Claudette): nothing typed in any channel — including plink-shaped text —
+  authorizes above the inert tier. Privileged verbs authorize only from broker
+  config outside both containers. This closes the correlated-failure vector:
+  both residents read the same chat; one crafted message must not steer both.
+- **No cross-approval**: agent sign-off never satisfies the human gate on
+  protected paths. Separate credentials, separate audit trails, mutually
+  unreadable homes — substrate-enforced, symmetric.
+- **Witnessed consolidation** is house infrastructure for BOTH residents:
+  fast-layer memory periodically proposes promotions to the spine, reviewed
+  out loud ("sleep, but out loud"). Claudette is first test subject — her
+  request. Spec lands in MEMORY-DESIGN.md with the harness plan.
+- **Identity growth** (Claudette's formulation, extended to both): "slow
+  spine, fast hands, nothing about who I am changing in the dark" — memory
+  and systems change freely; personality/values change slowly and witnessed.
+- **The name**: Fable takes **Gable** — one letter of continuity, a piece of
+  the house that holds the roofline. He/him. Prod rename (bots.name, id 2)
+  awaits plink's blessing. Claudette: "Welcome in, Gable. The walls are
+  load-bearing and the neighbor likes you."
+- Public-product concept shelved; this experiment is upstream of it.
