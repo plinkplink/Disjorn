@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "house-memory"
+version = "0.1.0"
+description = "Shared resident memory library for the Disjorn harness (WP-H6): per-resident Chroma stores, unified retrieval log, spine loader, parallel-run migration."
+requires-python = ">=3.11"
+dependencies = [
+    "chromadb==1.5.8",
+    "voyageai==0.3.7",
+]
+
+[project.scripts]
+house-memory-migrate = "house_memory.migration:main"
+
+[tool.setuptools]
+packages = ["house_memory"]
