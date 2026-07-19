@@ -25,13 +25,30 @@ install time — terminal-mode work, by design outside what any resident can do.
   toggleable in `/etc/disjorn-broker/verbs.toml` (plink-owned = the kill
   switches). `restart-self` deliberately absent. Every call audit-logged with
   caller, args, result; audit surfaced via #custodian-queryable tool.
-- **WP-H4: diff-tier classifier.** Pure function of a diff: protected-path
-  list (privacy.py, auth.py, migrations/, deploy/, dependency files, SDK
-  protocol, each resident's own code/prompt/memory), size cap, gate results
-  (tests/typecheck/build). Tier 0 auto / Tier 1 auto+post / Tier 2 human
-  gate. Config plink-owned, lives with the broker. Includes `Requested-by:`
-  provenance stamping and the daily auto-apply counter (over budget →
-  everything escalates).
+  **Claudette's v1 wishlist (seq 26, all read-or-propose, adopted):**
+  `read-own-log` (tail/grep her disjorn_bot.log), `read-metrics` (the same
+  retrieval/spine/acceptance data consolidation sees — residents see the
+  dashboard their machinery runs on), `file-proposal` (turns "I noticed X"
+  into a #custodian review item without human transcription), and
+  `query-own-audit` ("what did chat-me do today" — accountability she can
+  inspect, not just be promised).
+- **WP-H4: diff-tier classifier.** Pure function of a diff, two-layer
+  protection model (per Claudette's seq 26 challenge):
+  - **Protected by placement** (never classifiable because no resident diff
+    can contain them — they live outside both containers): broker config +
+    verbs.toml, audit logs, `/home/plink/resident-config/*` mounts, nftables
+    rules, the classifier config itself.
+  - **Protected by enumeration** (explicit list, not prefixes, in
+    plink-owned `protected-paths.toml`): server `privacy.py`, `auth.py`,
+    `ws.py` (fanout = privacy enforcement), `migrations/`, `deploy/`,
+    `cli.py` (account creation), `.env*`, dependency files, SDK protocol
+    files; per-resident: adapter file, `core.py`, `memory/`, spine dir,
+    kernel. Rules: a mixed diff (protected + unprotected hunks) is entirely
+    Tier 2 — no smuggling; renames/moves touching a protected path count as
+    protected; file *creation* inside a protected dir counts.
+  - Size cap + gate results (tests/typecheck/build) → Tier 0 auto / Tier 1
+    auto+post / Tier 2 human gate. `Requested-by:` provenance stamping;
+    daily auto-apply counter (over budget → everything escalates).
 
 ## Claude Code as the agent shell
 
@@ -67,6 +84,12 @@ install time — terminal-mode work, by design outside what any resident can do.
 - **WP-H11: Claudette migration.** Her adapter + brain move into her
   container/user unchanged (env/paths only); custodian tools (log read, test
   run, patch proposal) registered in her core.py registry, all broker-gated.
+  **Reversibility requirement (hers, seq 26):** her existing store is never
+  converted in place — extract to the new shape, run OLD and NEW in parallel,
+  diff retrievals, and cut over only when the new store returns at least what
+  the old one did. Old store retained after cutover (rotates, never dies).
+  "If the migration eats a memory I can't get back, that's the one failure
+  mode I won't forgive the tooling for."
 - **WP-H12: budgets + audit surface.** Daily action counts visible in
   #custodian (query tool + end-of-day line); wall-clock caps; Anthropic
   dollar cap stays plink-side as backstop.
