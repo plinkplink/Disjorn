@@ -1,0 +1,273 @@
+#!/usr/bin/env python3
+"""broker — resident-side CLI for the disjorn-broker socket (WP-H5).
+
+Speaks harness/broker/PROTOCOL.md: one unix-socket connection, one JSON
+request line, one JSON response line. This is the ONLY sanctioned way a
+resident's Claude Code session touches the broker; the PreToolUse hook
+denies anything else that references the socket.
+
+Design notes (honest ones):
+
+* Client-side validation here MIRRORS the broker's per-verb schemas for
+  fast, local failure with a readable message. It is a convenience, not a
+  defense: the broker re-validates everything server-side and is the only
+  authority. Nothing this CLI does or skips can widen what the broker
+  accepts.
+* Authorization is never in the request. The broker authenticates via
+  SO_PEERCRED (the kernel-asserted uid of this process) and authorizes via
+  plink-owned verbs.toml. Chat is data: no text a resident read anywhere
+  can add authority to a call made here.
+* BROKER_DISABLE (env, set via the per-resident /config env file) makes
+  this CLI refuse every call before touching the socket — a plink-side
+  kill switch that works even if verbs.toml is momentarily permissive.
+
+Exit codes:
+    0   ok
+    2   client-side usage / validation error (nothing was sent)
+    3   transport failure (socket missing, refused, timeout, bad response)
+    10  broker error: unknown-caller
+    11  broker error: unknown-verb
+    12  broker error: verb-disabled
+    13  broker error: bad-args
+    14  broker error: exec-failure
+    15  broker error: internal
+    20  refused locally: BROKER_DISABLE is set
+
+Output: the broker's full JSON response object on stdout (success or
+error); local refusals print a JSON object of the same shape.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import socket
+import sys
+
+DEFAULT_SOCKET = "/run/broker.sock"
+MAX_REQUEST_BYTES = 64 * 1024  # PROTOCOL.md cap
+TIMEOUT_SECONDS = 300          # run-server-tests can be slow
+
+EXIT_OK = 0
+EXIT_USAGE = 2
+EXIT_TRANSPORT = 3
+EXIT_DISABLED = 20
+ERROR_EXIT = {
+    "unknown-caller": 10,
+    "unknown-verb": 11,
+    "verb-disabled": 12,
+    "bad-args": 13,
+    "exec-failure": 14,
+    "internal": 15,
+}
+
+RANGE_RE = re.compile(r"^[A-Za-z0-9._~^/{}-]{1,200}$")
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+class ArgError(Exception):
+    """Client-side validation failure (mirrors the broker's bad-args)."""
+
+
+# ── per-verb arg builders (schemas mirror PROTOCOL.md; server is boss) ────
+
+def _int_in(name: str, value: int, lo: int, hi: int) -> int:
+    if not (lo <= value <= hi):
+        raise ArgError(f"{name} must be {lo}..{hi}, got {value}")
+    return value
+
+
+def _args_none(_ns: argparse.Namespace) -> dict:
+    return {}
+
+
+def _args_read_own_log(ns: argparse.Namespace) -> dict:
+    args: dict = {}
+    if ns.lines is not None:
+        args["lines"] = _int_in("--lines", ns.lines, 1, 500)
+    if ns.grep is not None:
+        if not (1 <= len(ns.grep) <= 200):
+            raise ArgError("--grep must be 1..200 chars (plain substring, no regex)")
+        args["grep"] = ns.grep
+    if ns.path is not None:
+        args["path"] = ns.path  # broker realpath-pins this to the caller's log
+    return args
+
+
+def _args_read_prod_logs(ns: argparse.Namespace) -> dict:
+    args: dict = {}
+    if ns.lines is not None:
+        args["lines"] = _int_in("--lines", ns.lines, 1, 500)
+    return args
+
+
+def _args_classify_diff(ns: argparse.Namespace) -> dict:
+    repo = ns.repo
+    if not repo.startswith("/"):
+        raise ArgError("--repo must be an absolute path")
+    if ".." in repo.split("/"):
+        raise ArgError("--repo must not contain '..' segments")
+    rng = ns.range
+    if rng.startswith("-"):
+        raise ArgError("--range must not start with '-'")
+    if not RANGE_RE.match(rng):
+        raise ArgError(
+            "--range must be 1..200 chars from [A-Za-z0-9._~^/{}-]")
+    args: dict = {"repo": repo, "range": rng}
+    if ns.gates is not None:
+        try:
+            gates = json.loads(ns.gates)
+        except json.JSONDecodeError as exc:
+            raise ArgError(f"--gates is not valid JSON: {exc}") from exc
+        if not isinstance(gates, dict):
+            raise ArgError("--gates must be a JSON object")
+        if len(json.dumps(gates)) > 8 * 1024:
+            raise ArgError("--gates serialized must be <= 8 KiB")
+        args["gates"] = gates
+    return args
+
+
+def _args_file_proposal(ns: argparse.Namespace) -> dict:
+    if not (1 <= len(ns.text) <= 4000):
+        raise ArgError("--text must be 1..4000 chars")
+    return {"text": ns.text}
+
+
+def _args_query_own_audit(ns: argparse.Namespace) -> dict:
+    for label, value in (("--from", ns.date_from), ("--to", ns.date_to)):
+        if not DATE_RE.match(value):
+            raise ArgError(f"{label} must be YYYY-MM-DD")
+    args: dict = {"date_from": ns.date_from, "date_to": ns.date_to}
+    if ns.limit is not None:
+        args["limit"] = _int_in("--limit", ns.limit, 1, 500)
+    return args
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="broker",
+        description="Resident CLI for the disjorn-broker (PROTOCOL.md v1).",
+    )
+    parser.add_argument(
+        "--socket",
+        default=None,
+        help=f"socket path (default: $BROKER_SOCKET or {DEFAULT_SOCKET})",
+    )
+    sub = parser.add_subparsers(dest="verb", required=True)
+
+    sub.add_parser("restart-disjorn", help="restart the Disjorn service")
+    sub.add_parser("run-server-tests", help="run the server pytest suite")
+    sub.add_parser("read-metrics", help="read the house metrics dashboard JSON")
+
+    p = sub.add_parser("read-own-log", help="tail your own configured log")
+    p.add_argument("--lines", type=int, default=None, help="1..500 (server default 100)")
+    p.add_argument("--grep", default=None, help="plain substring filter, <=200 chars")
+    p.add_argument("--path", default=None,
+                   help="must resolve to YOUR configured log_path (else bad-args)")
+
+    p = sub.add_parser("read-prod-logs", help="tail the Disjorn service journal")
+    p.add_argument("--lines", type=int, default=None, help="1..500 (server default 100)")
+
+    p = sub.add_parser("classify-diff", help="tier-classify a git diff range")
+    p.add_argument("--repo", required=True, help="absolute repo path, no '..'")
+    p.add_argument("--range", required=True, help="git rev/range, e.g. main..wip")
+    p.add_argument("--gates", default=None,
+                   help='gate results JSON, e.g. \'{"tests": true}\' (<=8 KiB)')
+
+    p = sub.add_parser("file-proposal", help="post a proposal to #custodian")
+    p.add_argument("--text", required=True, help="proposal body, 1..4000 chars")
+
+    p = sub.add_parser("query-own-audit", help="query your own broker audit trail")
+    p.add_argument("--from", dest="date_from", required=True, help="YYYY-MM-DD")
+    p.add_argument("--to", dest="date_to", required=True, help="YYYY-MM-DD")
+    p.add_argument("--limit", type=int, default=None, help="1..500 (server default 100)")
+
+    return parser
+
+
+ARG_BUILDERS = {
+    "restart-disjorn": _args_none,
+    "run-server-tests": _args_none,
+    "read-metrics": _args_none,
+    "read-own-log": _args_read_own_log,
+    "read-prod-logs": _args_read_prod_logs,
+    "classify-diff": _args_classify_diff,
+    "file-proposal": _args_file_proposal,
+    "query-own-audit": _args_query_own_audit,
+}
+
+
+def build_request(verb: str, ns: argparse.Namespace) -> dict:
+    """Validate ns per the verb's mirrored schema; return the request object."""
+    return {"verb": verb, "args": ARG_BUILDERS[verb](ns)}
+
+
+def call_broker(socket_path: str, request: dict) -> dict:
+    """One connection, one newline-terminated JSON request, one response."""
+    payload = (json.dumps(request, ensure_ascii=False) + "\n").encode("utf-8")
+    if len(payload) > MAX_REQUEST_BYTES:
+        raise ArgError(f"request exceeds {MAX_REQUEST_BYTES} bytes")
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(TIMEOUT_SECONDS)
+        sock.connect(socket_path)
+        sock.sendall(payload)
+        chunks: list[bytes] = []
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            if chunk.endswith(b"\n"):
+                break
+    raw = b"".join(chunks)
+    if not raw:
+        raise ConnectionError("broker closed the connection without a response")
+    return json.loads(raw.decode("utf-8"))
+
+
+def _emit(obj: dict) -> None:
+    print(json.dumps(obj, indent=2, ensure_ascii=False))
+
+
+def main(argv: list[str] | None = None, environ: dict = os.environ) -> int:
+    if environ.get("BROKER_DISABLE"):
+        _emit({"ok": False, "error": {
+            "code": "broker-disabled-local",
+            "message": "BROKER_DISABLE is set in this resident's env "
+                       "(plink's kill switch); no call was made."}})
+        return EXIT_DISABLED
+
+    parser = build_parser()
+    ns = parser.parse_args(argv)
+
+    try:
+        request = build_request(ns.verb, ns)
+    except ArgError as exc:
+        _emit({"ok": False, "error": {"code": "bad-args-local",
+                                      "message": str(exc)}})
+        return EXIT_USAGE
+
+    socket_path = ns.socket or environ.get("BROKER_SOCKET", DEFAULT_SOCKET)
+    try:
+        response = call_broker(socket_path, request)
+    except ArgError as exc:
+        _emit({"ok": False, "error": {"code": "bad-args-local",
+                                      "message": str(exc)}})
+        return EXIT_USAGE
+    except (OSError, ConnectionError, json.JSONDecodeError) as exc:
+        _emit({"ok": False, "error": {
+            "code": "transport",
+            "message": f"{type(exc).__name__}: {exc} (socket: {socket_path})"}})
+        return EXIT_TRANSPORT
+
+    _emit(response)
+    if response.get("ok") is True:
+        return EXIT_OK
+    code = (response.get("error") or {}).get("code", "internal")
+    return ERROR_EXIT.get(code, ERROR_EXIT["internal"])
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "additionalDirectories": ["/config", "/opt/house_memory"],
+    "allow": [
+      "Read(//home/resident/**)",
+      "Edit(//home/resident/**)",
+      "Write(//home/resident/**)",
+      "Glob",
+      "Grep",
+      "Bash(broker:*)",
+      "Bash(git:*)",
+      "Bash(python3:*)",
+      "Bash(pip:*)",
+      "Bash(pytest:*)",
+      "Bash(node:*)",
+      "Bash(npm run:*)",
+      "Bash(npm test:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(mkdir:*)",
+      "Bash(jq:*)",
+      "Bash(rg:*)"
+    ],
+    "deny": [
+      "Bash(sudo:*)",
+      "Bash(su:*)",
+      "Bash(curl:*)",
+      "Bash(wget:*)",
+      "Bash(nc:*)",
+      "Bash(ncat:*)",
+      "Bash(socat:*)",
+      "Bash(ssh:*)",
+      "Bash(scp:*)",
+      "Bash(rsync:*)",
+      "Bash(podman:*)",
+      "Bash(systemctl:*)",
+      "WebFetch",
+      "WebSearch",
+      "Read(//config/env)",
+      "Edit(//config/**)",
+      "Write(//config/**)"
+    ]
+  },
+  "env": {
+    "BROKER_SOCKET": "/run/broker.sock"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {"type": "command", "command": "/config/hooks/session-start.py", "timeout": 15}
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {"type": "command", "command": "/config/hooks/pre-tool-use.py", "timeout": 15}
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {"type": "command", "command": "/config/hooks/action-counter.py", "timeout": 15}
+        ]
+      }
+    ]
+  }
+}

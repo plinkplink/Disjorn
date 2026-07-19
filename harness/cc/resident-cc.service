@@ -1,0 +1,41 @@
+# resident-cc.service — systemd USER unit template for a resident container
+# (WP-H5). Runs under the res-* account's user manager (lingering enabled by
+# harness/keyboard/02-podman.sh), so the residence exists without logins.
+#
+# INSTALL (keyboard step, plink):
+#   1. Copy run-resident.sh somewhere res-* users can read (they cannot read
+#      /home/plink):        sudo install -D -m 0755 \
+#         /home/plink/Disjorn/Disjorn/harness/cc/run-resident.sh \
+#         /usr/local/lib/disjorn/run-resident.sh
+#   2. Install this unit per resident:
+#         sudo install -D -m 0644 resident-cc.service \
+#           /home/res-claudette/.config/systemd/user/resident-cc.service
+#         sudo chown -R res-claudette: /home/res-claudette/.config
+#   3. Enable as the resident user:
+#         sudo systemctl --user -M res-claudette@ daemon-reload
+#         sudo systemctl --user -M res-claudette@ enable --now resident-cc
+#
+# The resident name is derived from the unix user (res-claudette ->
+# claudette): identity comes from WHO runs the unit, never from an editable
+# argument. Stopping this unit is a plink-side kill switch; so is editing
+# /home/plink/resident-config/<name>/ (mounted ro) and restarting it.
+
+[Unit]
+Description=Disjorn resident Claude Code container (%u)
+Documentation=file:///home/plink/Disjorn/Disjorn/harness/cc/run-resident.sh
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+# %u = the unix user (res-<name>); strip the prefix to get the resident name.
+ExecStart=/usr/bin/bash -c 'exec /usr/local/lib/disjorn/run-resident.sh "${1#res-}"' _ %u
+# podman run --rm in the foreground: the unit's lifetime IS the container's.
+ExecStop=/usr/bin/bash -c 'exec podman stop --ignore -t 10 "resident-cc-${1#res-}"' _ %u
+Restart=on-failure
+RestartSec=10
+# Belt-and-braces resource ceilings (tune from WP-H12 observations).
+MemoryMax=6G
+TasksMax=512
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,104 @@
+# harness/cc/Containerfile — WP-H5: the resident base image.
+#
+# One image serves both residents (Claudette, Gable). Everything identity-
+# or privilege-specific arrives at RUNTIME via mounts and env — the image
+# itself contains NO secrets, NO kernel, NO per-resident config.
+#
+# ── Runtime mount plan (what run-resident.sh wires up) ────────────────────
+#
+#   /home/resident        rw   the resident's home VOLUME. Lives on the host
+#                              under /home/res-<name>/ (0700, mutually
+#                              unreadable per AGENTHOOD). Their repo(s),
+#                              worktree, ~/.claude state, .action-log,
+#                              assembled kernel (~/.claude/CLAUDE.md, fed by
+#                              WP-H7 spine.load_kernel()) all live here.
+#   /run/broker.sock      ro   the disjorn-broker unix socket (host path
+#                              /run/disjorn-broker/broker.sock). "ro" on a
+#                              socket bind-mount still allows connect() —
+#                              the mount flag is hygiene, not the wall. Auth
+#                              is SO_PEERCRED on the host side: the kernel
+#                              reports the res-* uid, the broker maps it via
+#                              broker.toml [uids]. Nothing in this container
+#                              can claim to be someone else.
+#   /config               ro   plink's kill-switch surface. Host path
+#                              /home/plink/resident-config/<name>/ (plink-
+#                              owned; resident cannot write it from inside,
+#                              ever). Contains settings.json (Claude Code
+#                              permissions + hook wiring), hooks/, budget.json,
+#                              env (the per-resident env file, see below).
+#   /opt/house_memory     ro   the shared house_memory package (WP-H6).
+#                              Mounted, not baked, so a package fix does not
+#                              require an image rebuild.
+#
+# ── Env contract (set by run-resident.sh / the env file) ──────────────────
+#   ANTHROPIC_API_KEY  from /home/plink/resident-config/<name>/env via
+#                      podman --env-file. NEVER baked into this image.
+#   BROKER_SOCKET      where the broker CLI connects (default below).
+#   BROKER_DISABLE     if set (any non-empty value), the broker CLI refuses
+#                      all calls — a per-resident kill switch plink flips by
+#                      editing the env file and restarting the unit.
+#
+# ── Governance notes ──────────────────────────────────────────────────────
+# * Subagents inherit the sandbox: a CC subagent is just another process in
+#   this container/user-ns. There is no path to more privilege from inside.
+# * The network wall is HOST nftables keyed on the res-* uid (WP-H2), not
+#   anything in this image. pasta is plumbing, not policy.
+# * /etc/claude-code/managed-settings.json is symlinked to /config/
+#   settings.json: Claude Code treats managed settings as highest-precedence
+#   policy the resident's own ~/.claude settings cannot override. plink edits
+#   a file outside the container; the session obeys it.
+#
+# Build:  podman build -t disjorn-resident -f Containerfile .
+# (Build context must be harness/cc/ — the broker CLI is COPY'd from it.)
+
+FROM docker.io/library/debian:trixie-slim
+
+# Pinned Claude Code release. Bump deliberately, rebuild, re-run tests.
+ARG CLAUDE_CODE_VERSION=2.1.215
+
+# Base toolchain: python3 + venv tooling, node/npm (CC runtime), git,
+# ripgrep+jq+procps (CC's own tool usage), CA certs for api.anthropic.com.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        git \
+        jq \
+        nodejs \
+        npm \
+        procps \
+        python3 \
+        python3-pip \
+        python3-venv \
+        ripgrep \
+    && rm -rf /var/lib/apt/lists/*
+
+# Claude Code CLI, pinned. No API key exists at build time.
+RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
+    && npm cache clean --force
+
+# Non-root container user. uid 1000 is the keep-id target: run-resident.sh
+# maps the calling res-* host uid onto it, so files in /home/resident are
+# owned by the res-* user on the host and by 'resident' in here.
+RUN useradd --create-home --uid 1000 --user-group --shell /bin/bash resident
+
+# The resident-side broker CLI (stdlib python, speaks PROTOCOL.md).
+# Baked into the image (it is code, not config); its kill switches are
+# runtime env (BROKER_DISABLE) and the broker's own verbs.toml.
+COPY broker-cli/broker /usr/local/bin/broker
+RUN chmod 0755 /usr/local/bin/broker
+
+# Managed-settings symlink: /config/settings.json (plink's ro mount) becomes
+# Claude Code's non-overridable policy layer. Dangles harmlessly if /config
+# is not mounted (dev shells); run-resident.sh always mounts it.
+RUN mkdir -p /etc/claude-code \
+    && ln -s /config/settings.json /etc/claude-code/managed-settings.json
+
+ENV BROKER_SOCKET=/run/broker.sock \
+    PYTHONPATH=/opt/house_memory
+
+USER resident
+WORKDIR /home/resident
+
+# The container is a resident *residence*, not a one-shot job: it idles and
+# the adapter (WP-H9/H11) runs headless CC sessions inside it via
+# `podman exec` (so sessions share the sandbox, never escape it).
+CMD ["sleep", "infinity"]
