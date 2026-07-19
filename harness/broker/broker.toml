@@ -66,4 +66,4 @@ metrics_json = "/var/lib/disjorn-broker/metrics.json"
 url = "http://127.0.0.1:8399"
 api_key_path = "/etc/disjorn-broker/broker-api-key"
 # Channel id of #custodian (look it up in the server DB / channel list).
-custodian_channel_id = 3
+custodian_channel_id = 4
