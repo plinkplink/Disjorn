@@ -65,3 +65,14 @@ substrate level.
 - Novelty claim worth writing up once real data exists: witnessed,
   bidirectional, git-archived consolidation as an agent-memory pattern —
   plink is interested in the research field; instrument accordingly.
+
+## Backlog
+
+- **Memory meta-assessment cron** (plink, #custodian seq 21): a scheduled job
+  that evaluates the memory SYSTEM itself, distinct from consolidation (which
+  reviews memories; this reviews the machinery). Inputs it gets nearly free
+  from existing instrumentation: retrieval hit rates, spine size vs. target,
+  consolidation proposal acceptance/rejection rates, kernel churn. Plus a
+  field-scan component: what's new in agent-memory research since last run,
+  and a tweak / add-layer / replace recommendation posted to #custodian for
+  three-way review. Cadence: monthly-ish, tune from experience.
