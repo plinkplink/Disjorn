@@ -49,7 +49,10 @@ Verify:
 
 ```sh
 grep res- /etc/subuid /etc/subgid     # one range per resident
-sudo -u res-gable podman info --format '{{.Host.Security.Rootless}}'   # true
+# cd / first: sudo keeps your cwd, and resident users can't traverse /home/plink
+# (that's the 0700 walls working). env line makes podman's runtime dir explicit.
+(cd / && sudo -u res-gable env XDG_RUNTIME_DIR=/run/user/$(id -u res-gable) \
+  podman info --format '{{.Host.Security.Rootless}}')   # true
 sudo -u res-gable podman run --rm docker.io/library/alpine echo hi     # hi
 ```
 
