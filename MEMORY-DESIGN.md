@@ -76,3 +76,8 @@ substrate level.
   field-scan component: what's new in agent-memory research since last run,
   and a tweak / add-layer / replace recommendation posted to #custodian for
   three-way review. Cadence: monthly-ish, tune from experience.
+  Two rules per Claudette (seq 22): it **proposes, never acts** — "a cron that
+  can quietly re-architect my memory on a schedule is exactly the 'changes in
+  the dark' failure with a nice cadence" — and it **assesses itself**: part of
+  each report is whether it still earns its own compute. "Otherwise we've just
+  built one more thing that never gets evicted."
