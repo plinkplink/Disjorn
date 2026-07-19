@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import ALL_VERBS, BrokerHarness
+from broker_testlib import ALL_VERBS, BrokerHarness
 from brokerd import Broker, load_config
 
 
