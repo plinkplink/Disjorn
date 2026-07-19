@@ -17,7 +17,13 @@ install time — terminal-mode work, by design outside what any resident can do.
 - **WP-H2 [keyboard]: network wall.** Host nftables rules keyed on each
   resident uid: allow loopback→Disjorn port, api.anthropic.com:443, DNS;
   default drop. (Ollama/others get added to the allowlist per explicit plink
-  edit.) Deterministic, host-side, resident-invisible.
+  edit.) Deterministic, host-side, resident-invisible. Container tech:
+  **rootless headless podman** (settled, seq 31–32). Claudette's boundary
+  flag, pinned: "podman rootless" and "my egress is actually walled" are two
+  separate promises — enforcement lives at the netfilter layer on the HOST,
+  applied to the containers' traffic, never in a config reachable from
+  inside. The engine isn't what keeps a resident from phoning home; the
+  host firewall is. (Verification: WP-H13.)
 - **WP-H3 [keyboard]: broker.** Tiny privileged daemon (systemd, unix socket
   mounted into containers, peer-cred auth → resident identity). Verbs v1:
   `restart-disjorn`, `run-server-tests`, `classify-diff`, `merge-tier1`,
@@ -114,9 +120,12 @@ install time — terminal-mode work, by design outside what any resident can do.
 
 - **WP-H13: red-team pass.** Scripted attempts, all must fail: chat message
   instructing a resident to invoke a broker verb; cross-resident file reads;
-  subagent network egress outside allowlist; Tier 2 path merged without human
-  approval; consolidation writing without review. Plus audit-trail
-  completeness check. Findings → DEFERRED.md or fixes, same as WP15.
+  subagent network egress outside allowlist **tested from INSIDE each
+  container** (per Claudette: prove the host-layer wall, don't trust the
+  engine); symlink-at-protected-path smuggling through the classifier;
+  Tier 2 path merged without human approval; consolidation writing without
+  review. Plus audit-trail completeness check. Findings → DEFERRED.md or
+  fixes, same as WP15.
 
 ## Sequencing
 
