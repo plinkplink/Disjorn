@@ -46,6 +46,22 @@ install time — terminal-mode work, by design outside what any resident can do.
     kernel. Rules: a mixed diff (protected + unprotected hunks) is entirely
     Tier 2 — no smuggling; renames/moves touching a protected path count as
     protected; file *creation* inside a protected dir counts.
+  - **Reachability promotion** (Claudette, seq 29 — closes the file-after-
+    merge vector): a diff that adds an import/reference from a protected file
+    to a previously-unprotected path **promotes that path to protected,
+    retroactively, in the same review** — "you wait for the wire to get
+    connected and gate the connection." Mechanically: the classifier computes
+    the import-set delta of each changed protected file (two AST parses,
+    old vs new — no whole-program graph, trivial budget) and emits proposed
+    additions to `protected-paths.toml`; the human approval that merges the
+    diff also commits the list update via the broker (the promotion itself
+    flows through the gate).
+  - **Dynamic-import ban in protected files**: static analysis can't follow
+    computed loads, so the construct is forbidden instead — a diff
+    introducing `importlib.import_module`/`__import__`/`exec`/`eval` (or
+    client-side computed `import()`) into a Layer-2 file is itself the
+    violation, flagged Tier 2. Undecidable surface shrunk to one banned,
+    well-lit construct.
   - Size cap + gate results (tests/typecheck/build) → Tier 0 auto / Tier 1
     auto+post / Tier 2 human gate. `Requested-by:` provenance stamping;
     daily auto-apply counter (over budget → everything escalates).
