@@ -75,3 +75,61 @@ shipped" list.
   real iOS hardware.
 - **Safari mp4/AAC STT path untested** — MediaRecorder on Safari produces
   mp4/AAC; the server accepts it in theory, untested on real hardware.
+
+## WP-H13 red-team — deferred findings (2026-07-20)
+
+Fixed in the H13 pass (not deferred): classifier gate fail-open on malformed
+gates (F4), broker range RHS flag-injection (F3), broker path_map fail-open-
+by-omission (F2, also fixed live), oversize-request audit gap (F1), audit
+file perms 0644→0640. All with regression tests; 210 harness tests green.
+
+Deferred below: the classifier's *derived-artifact* weaknesses. Common shape,
+and why they're safe to defer: each is a TWO-STEP vector whose step-1 diff
+ALWAYS classifies Tier 2 (it touches a protected file), so a human sees it in
+#custodian. What's wrong is the machine-checkable promotion/ban artifact the
+diff emits — which only becomes load-bearing once `merge-tier1` automation
+exists (it doesn't yet; MERGE-CONTRACT is a draft). They also touch the
+classifier's core reachability logic, itself a protected/reviewed surface, so
+they deserve a witnessed design cycle, not a rushed patch. Claudette flagged
+the reachability class at MERGE-CONTRACT ratification; this is that case, made
+concrete by the red-team.
+
+- **H13-D1 — Reachability under-detection (was classifier-agent F1).** A
+  protected file wired to a not-yet-existing or computed-load target emits no
+  promotion proposal, so step-2 can create that target as a fresh unprotected
+  file and auto-merge it. Fix direction: at wire time, follow the import
+  string/spec and propose promotion even when the target is absent; or refuse
+  to let a protected file reference an unpromoted module.
+- **H13-D2 — `from pkg import sub` promotes `__init__.py`, not the submodule
+  (agent F2).** The promotion resolver checks package stems before submodule
+  candidates, so the actually-reachable code file (`pkg/sub.py`) is left
+  unprotected. Fix: prefer the submodule resolution for `from pkg import sub`.
+- **H13-D3 — Dynamic-import ban is bypassable (agent F3).** `getattr(importlib,
+  "import_module")`, `builtins.exec`, string-split `"__imp""ort__"` all evade
+  the literal-token check. This is what makes D1's invisible-wire variant
+  work. Fix: widen the ban (any attribute access whose value flows to a call,
+  any `getattr` on importlib/builtins) — accepting more false positives, since
+  the construct is forbidden anyway. NB: **required before merge-tier1 ships.**
+
+Lower-severity, deferred:
+- **H13-D4 — Budget check-then-act race (broker-agent F4).** Concurrent
+  dispatches can burst past a numeric daily cap (read-count is not lock-
+  guarded with the act+audit). Low: budgets are soft/default-OFF, kill
+  switches are the hard lever. Fix: hold the audit lock across count+act, or
+  count-with-reservation.
+- **H13-D5 — pre-tool-use hook tripwire bypasses (broker-agent F5).** The
+  `broker` invocation regex misses leading-whitespace/newline/backtick/abs-
+  path/`eval` forms, and the socket-path check is a literal substring the
+  `BROKER_SOCKET` env var evades. The hook's own honesty note disclaims it as
+  "not the wall" (the broker's SO_PEERCRED + per-verb schema is), so no
+  privilege is gained — but the stated tripwire guarantees are weaker than
+  written. Fix: match `broker` per-segment with `re.M` + normalize, or drop
+  the specific guarantees from the docstring to match reality.
+- **H13-D6 — git-config-exec on an attacker-controlled repo (broker-agent,
+  undetermined).** classify-diff runs git host-side as plink; a resident-
+  writable repo with a hostile `.git/config` could in principle exec as plink.
+  Contained today by: git dubious-ownership refusal, 0700 resident homes, the
+  now-fail-closed path_map (each resident's map only exposes /opt/disjorn +
+  their own volume), and classify-diff shipping OFF for gable. Verify before
+  widening any classify-diff grant: point it at a resident-writable repo
+  carrying a hostile .git/config and confirm git refuses.

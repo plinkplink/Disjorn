@@ -390,22 +390,37 @@ class Broker:
         if rng.startswith("-") or not _RANGE_RE.match(rng):
             raise _bad("range must be a plain git rev/range "
                        "(letters, digits, . _ ~ ^ / { } -, no leading dash)")
+        # WP-H13 F3: the classifier splits A..B (or A...B) and hands each side
+        # to git as a bare positional. A leading '-' on the WHOLE string is
+        # rejected above, but the RIGHT side after the split can still start
+        # with '-' (e.g. "main..--exit-code") and reach git as a flag. Reject
+        # a leading dash on EITHER side of the split — no ref legitimately
+        # starts with one.
+        for _side in rng.replace("...", "..").split(".."):
+            if _side.startswith("-"):
+                raise _bad("neither side of the range may start with '-'")
         # Residents pass THEIR view of the filesystem; the broker runs
         # host-side where those paths don't exist. [residents.<r>.path_map]
-        # translates container prefixes to host paths (longest prefix wins).
-        # When a map is configured it is also an allowlist: unmapped paths
-        # are rejected, so a resident can only ever point the classifier at
-        # repos deliberately exposed to them. No map configured = legacy
-        # pass-through (host-path callers, tests).
+        # translates container prefixes to host paths (longest prefix wins)
+        # AND is the allowlist: a repo outside every mapped root is rejected,
+        # so a resident can only ever point the classifier at repos
+        # deliberately exposed to them.
+        #
+        # WP-H13 F2: absent map now FAILS CLOSED. It used to pass the caller's
+        # repo through verbatim, so a resident configured without a map could
+        # aim git at any host path the broker uid can read. A resident allowed
+        # to classify must have an explicit map; no map = no classify.
         path_map = self.residents.get(resident, {}).get("path_map")
-        if path_map:
-            best = max((p for p in path_map
-                        if repo == p or repo.startswith(p.rstrip("/") + "/")),
-                       key=len, default=None)
-            if best is None:
-                raise _bad(f"repo not under a mapped root for {resident}; "
-                           f"available roots: {sorted(path_map)}")
-            repo = path_map[best].rstrip("/") + repo[len(best.rstrip("/")):]
+        if not path_map:
+            raise _bad(f"no classify-diff path_map configured for {resident}; "
+                       "classify-diff requires an explicit repo allowlist")
+        best = max((p for p in path_map
+                    if repo == p or repo.startswith(p.rstrip("/") + "/")),
+                   key=len, default=None)
+        if best is None:
+            raise _bad(f"repo not under a mapped root for {resident}; "
+                       f"available roots: {sorted(path_map)}")
+        repo = path_map[best].rstrip("/") + repo[len(best.rstrip("/")):]
         gates = args.get("gates", {})
         if not isinstance(gates, dict):
             raise _bad("gates must be an object")
@@ -595,6 +610,14 @@ class Broker:
                     break
                 buf += chunk
                 if len(buf) > MAX_REQUEST_BYTES:
+                    # WP-H13 F1: audit this rejection like every other. The
+                    # invariant (PROTOCOL.md, brokerd docstring) is that every
+                    # request leaves exactly one line; the oversize path used
+                    # to return silently, letting a resident spam hostile
+                    # requests with no trace.
+                    self._audit(f"uid:{uid}" if uid not in self.uid_map
+                                else self.uid_map[uid],
+                                "(oversize)", None, False, "denied: request too large")
                     self._send(conn, self._err("bad-args", "request too large"))
                     return
             line = buf.split(b"\n", 1)[0].strip()

@@ -55,6 +55,15 @@ action_log = "/home/res-gable/.action-log"
 budget_json = "/home/plink/resident-config/gable/budget.json"
 # spine_dir = "/home/res-gable/gable/spine"
 
+[residents.res-gable.path_map]
+# REQUIRED for classify-diff — this is the allowlist, not just translation.
+# WP-H13 F2: when a resident has NO path_map, classify-diff falls open and
+# accepts ANY absolute host path the broker uid can read. Every resident with
+# classify-diff must have a map, even while the verb ships OFF. Gable's
+# container view -> host paths, same two roots as his run-resident mounts.
+"/opt/disjorn" = "/srv/disjorn-ro"
+"/home/resident" = "/home/res-gable/resident-home"
+
 [commands]
 # Fixed argv lists — the broker NEVER passes a string to a shell. Validated
 # scalar arguments (line counts, git ranges) are appended by the handlers as

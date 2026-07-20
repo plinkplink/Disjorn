@@ -459,12 +459,25 @@ def classify(
                 )
 
     # -- gates
-    failed_gates = [k for k, v in gates.items() if not v]
-    gates_pass = bool(gates) and not failed_gates
+    # Gate results must be the exact shape {tests,typecheck,build: bool}, all
+    # true, to pass. Fail-closed on anything else — a missing required gate, a
+    # non-bool value (the string "false" is truthy!), or an unexpected key.
+    # (WP-H13 F4: the old check only fail-closed on empty {}, so a malformed
+    # or partial gates object silently passed and dropped a diff to Tier 1.)
+    REQUIRED_GATES = ("tests", "typecheck", "build")
+    bad_gate_shape = (
+        set(gates) != set(REQUIRED_GATES)
+        or any(v is not True for v in gates.values())
+    )
+    failed_gates = [k for k, v in gates.items() if v is not True]
+    gates_pass = bool(gates) and not bad_gate_shape
     for g in failed_gates:
         reasons.append(f"gate failed: {g}")
     if not gates:
         reasons.append("no gate results provided (fail-closed)")
+    elif bad_gate_shape and not failed_gates:
+        reasons.append(f"gate results not the required shape {list(REQUIRED_GATES)} "
+                       "of booleans (fail-closed)")
 
     # -- tier decision
     if protected_hits or promotions or banned or not gates_pass:

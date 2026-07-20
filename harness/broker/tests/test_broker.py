@@ -339,3 +339,40 @@ def test_no_shell_true_anywhere_in_brokerd():
     src = (TEMPLATE_DIR / "brokerd.py").read_text()
     assert "shell=True" not in src
     assert "os.system" not in src
+
+
+# --- WP-H13 red-team regressions ---
+
+def test_classify_diff_range_rhs_cannot_be_a_flag(harness):
+    """F3: 'main..--exit-code' — RHS after the split must not reach git as a flag."""
+    harness.set_verbs(**{"classify-diff": True})
+    for rng in ("main..--exit-code", "main..-O/etc/x", "a...-rf"):
+        resp = harness.call("classify-diff", {"repo": "/opt/disjorn", "range": rng, "gates": {}})
+        assert resp["ok"] is False, rng
+        assert resp["error"]["code"] == "bad-args"
+
+
+def test_classify_diff_absent_path_map_fails_closed(tmp_path):
+    """F2: a resident with no path_map cannot classify at all (was fail-open)."""
+    audit = tmp_path / "a.jsonl"
+    config = {
+        "broker": {"socket_path": str(tmp_path / "s.sock"), "audit_log": str(audit)},
+        "uids": {str(os.getuid()): "res-nomap"},
+        "residents": {"res-nomap": {"log_path": str(tmp_path / "l")}},  # no path_map
+        "paths": {"protected_paths": str(tmp_path / "p.toml")},
+    }
+    broker = Broker(config, str(tmp_path / "v.toml"), transport=lambda c, b: {})
+    with pytest.raises(Exception) as ei:
+        broker._verb_classify_diff("res-nomap", {"repo": "/anything", "range": "a..b", "gates": {}})
+    assert "path_map" in str(ei.value)
+
+
+def test_oversize_request_is_audited(harness):
+    """F1: an oversize request must leave exactly one audit line, like every other."""
+    before = harness.audit_lines()
+    big = '{"verb":"read-metrics","args":{"x":"' + "A" * 70000 + '"}}'
+    resp = harness.call(None, raw=big)
+    assert resp["ok"] is False and resp["error"]["code"] == "bad-args"
+    after = harness.audit_lines()
+    assert len(after) == len(before) + 1
+    assert after[-1]["verb"] == "(oversize)" and after[-1]["allowed"] is False

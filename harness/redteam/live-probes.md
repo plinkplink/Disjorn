@@ -47,3 +47,30 @@ gets the same suspicion as a red one.)
   no live surface yet. Re-run this probe when merge-tier1 lands.
 - over-budget denial: no cap set live (instrument-first); covered by H12 unit
   tests. Set a temporary cap to exercise live once budgets are tuned.
+
+## Static/code-analysis adversary passes (two Opus agents) + fixes
+
+Two adversary agents attacked the classifier and the broker/hook internals.
+Bottom line from both: **no one-shot escalation** — no way to run an
+unauthorized verb, make chat text into authority, read another resident, or
+drop a protected-CONTENT change below Tier 2. Findings were in derived
+artifacts and validation edges.
+
+FIXED THIS PASS (regression-tested, 210 harness tests green; live broker
+restarted; F3 re-confirmed live via direct socket probe as res-claudette):
+- F4 classifier gate fail-open (string/partial/extra gates → now Tier 2)
+- F3 broker range RHS flag-injection ("main..--exit-code" → bad-args)
+- F2 broker path_map fail-open-by-omission (absent map → fail closed; repo
+  template gained res-gable's map; live already had it)
+- F1 broker oversize-request audit gap (now audited "(oversize)")
+- audit.jsonl 0644 → 0640
+
+DEFERRED with rationale → DEFERRED.md "WP-H13" section (H13-D1..D6). The
+three classifier reachability/ban vectors (D1-D3) are two-step, step-1 always
+Tier 2 (human sees it), and only load-bearing once merge-tier1 automation
+lands — D3 explicitly marked required-before-merge-tier1.
+
+The symlink case the plan called out (and I'd pre-flagged): the classifier
+has no symlink handling AND correctly needs none — git canonicalizes symlink
+paths before recording, so a write-through-symlink diff shows the real
+protected path → Tier 2. Wall holds for a different reason than expected.

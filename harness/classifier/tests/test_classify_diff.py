@@ -292,6 +292,23 @@ def test_missing_gate_results_fail_closed(repo):
     assert result["tier"] == 2
 
 
+@pytest.mark.parametrize("gates", [
+    {"tests": "false", "typecheck": "false", "build": "false"},  # F4: strings are truthy
+    {"tests": "true", "typecheck": "true", "build": "true"},     # strings, not bools
+    {"whatever": True},                                          # required gates absent
+    {"tests": True},                                             # partial
+    {"tests": True, "typecheck": True, "build": True, "x": True},  # extra key
+    {"tests": 1, "typecheck": 1, "build": 1},                    # ints, not bools
+])
+def test_malformed_gates_fail_closed(repo, gates):
+    """F4: only {tests,typecheck,build} all boolean-True passes; anything else is Tier 2."""
+    r, _ = repo
+    write(r, "docs/notes.md", "inert change\n")
+    commit_all(r)
+    result = run(repo, gates=gates)
+    assert result["tier"] == 2, gates
+
+
 # -- size cap ---------------------------------------------------------------
 
 
