@@ -17,6 +17,11 @@ After=network-online.target
 ExecStart=/usr/local/lib/disjorn/residency-venv/bin/python \
     /usr/local/lib/disjorn/residency/run_summon.py \
     --config /srv/disjorn-resident-config/res-gable/summon.toml
+# The daemon logs to stderr; append it to the file the broker's read-own-log
+# serves for res-gable ([residents.res-gable].log_path in broker.toml) —
+# without this the configured log path never receives a byte.
+StandardOutput=append:/home/res-gable/logs/gable.log
+StandardError=append:/home/res-gable/logs/gable.log
 Restart=on-failure
 RestartSec=15
 MemoryMax=1G
