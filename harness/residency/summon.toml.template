@@ -1,0 +1,61 @@
+# summon.toml — Gable summon adapter config (WP-H9).
+#
+# TEMPLATE. plink copies this to the plink-owned config dir mounted read-only
+# into Gable's container (e.g. /home/plink/resident-config/gable/summon.toml ->
+# /config/summon.toml) and edits it. It is the ONLY control surface for the
+# adapter: triggers, budget, and the exact launch argv all live here, outside
+# the container, unreachable from any chat message.
+#
+# Values below are the DOCUMENTED PRODUCTION LAYOUT, but every one is
+# overridable — a scratch/test deployment overrides url, paths, and command so
+# it never touches prod (no port 8399, no live tailnet URL, no real key).
+
+[server]
+# Prod is the tailnet URL; override for a scratch server. NOT defaulted in code
+# so nothing hits prod by omission.
+url = "https://debian.tailca81ba.ts.net"
+# Gable's bot API key, read from a plink-owned file (mounted ro). Never inline
+# the key in this file in prod.
+api_key_path = "/config/gable-key"
+# api_key = "sk-..."   # test-only inline override
+
+[summon]
+bot_name = "gable"
+custodian_channel_id = 4          # #custodian on this deployment
+trigger_on_context = true         # @mention / name-match (server-attested)
+trigger_channels = []             # channel ids where every user msg summons
+extra_patterns = []               # extra wake-word regexes, e.g. ["\\bhey gable\\b"]
+typing_interval_sec = 2.5         # server rate-limits typing to 1/3s
+# Optional pretty names for #custodian summary lines:
+# [summon.channel_names]
+# 4 = "#custodian"
+
+[backfill]
+count = 30                        # recent messages pulled into the session prompt
+
+[container]
+# The container-launch contract. In prod this is the run-resident.sh wrapper
+# (installed world-readable per resident-cc.service), which starts an ephemeral
+# `podman run --rm` container running the headless CC session command below.
+# argv executed = [*command, resident, *session_argv]; the prompt goes on stdin.
+command = ["/usr/local/lib/disjorn/run-resident.sh"]
+resident = "gable"
+# The command run INSIDE the container: a headless Claude Code invocation that
+# reads the prompt on stdin and prints the result as JSON on stdout. Tune to
+# the installed CC; e.g. `claude -p --output-format json` (result/num_turns).
+session_argv = ["claude", "-p", "--output-format", "json"]
+timeout_sec = 1800
+# Optional extra env for the launch subprocess (run-resident.sh reads these):
+# [container.env]
+# RESIDENT_PODMAN_EXTRA = ""
+
+[budget]
+daily_session_cap = 12
+state_path = "/home/resident/.summon-budget.json"   # persisted, survives restart
+
+[cursor]
+state_path = "/home/resident/.summon-cursor.json"   # persisted seq high-water mark
+
+[text]
+refusal_line = "I'm at my summon budget for today — flag a human in #custodian if this can't wait."
+error_line = "Something went wrong running that on my end; a human can check #custodian for the details."
