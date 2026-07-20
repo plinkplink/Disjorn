@@ -90,7 +90,7 @@ grep -q "res-gable" /etc/disjorn-broker/broker.toml && \
   grep -q "log_path.*res-gable" /etc/disjorn-broker/broker.toml || cat <<'NOTE'
   MANUAL: add to /etc/disjorn-broker/broker.toml:
     [residents.res-gable]
-    log_path = "/home/res-gable/logs/summon.log"
+    log_path = "/home/res-gable/logs/gable.log"
   then: sudo systemctl restart disjorn-broker
 NOTE
 
