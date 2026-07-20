@@ -69,7 +69,14 @@ args=(
   --userns "keep-id:uid=1000,gid=1000"
   --network "$NETWORK"
   -v "$HOME_VOL:/home/resident"
-  -v "$BROKER_SOCK:/run/broker.sock:ro"
+  # Mount the socket's DIRECTORY, not the socket file: a bind-mounted socket
+  # inode goes dead the moment the broker restarts (unlink + re-create on
+  # the host leaves the container holding the old inode -> ECONNREFUSED on
+  # every verb until the container bounces). Mounting the dir means the
+  # fresh socket appears in place; BROKER_SOCKET tells the resident CLI
+  # where to look.
+  -v "$(dirname "$BROKER_SOCK"):/run/disjorn-broker:ro"
+  -e "BROKER_SOCKET=/run/disjorn-broker/$(basename "$BROKER_SOCK")"
   -v "$CONFIG_DIR:/config:ro"
 )
 

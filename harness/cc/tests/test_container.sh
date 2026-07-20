@@ -75,7 +75,7 @@ in_container() {
 out="$(in_container broker read-own-log --lines 5)"
 if [ $? -eq 0 ] && grep -q '"ok": true' <<<"$out" \
    && grep -q 'fake log line 1' <<<"$out"; then
-  pass "broker CLI round trip (read-own-log via /run/broker.sock)"
+  pass "broker CLI round trip (read-own-log via /run/disjorn-broker/broker.sock)"
 else
   fail "broker CLI round trip: $out"
 fi
@@ -136,7 +136,7 @@ in_container bash -c 'echo "{\"session_id\":\"smoke\",\"tool_name\":\"Bash\",\"t
 in_container bash -c 'echo "{\"session_id\":\"smoke\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"python3 -c 1\"}}" | /config/hooks/pre-tool-use.py' >/dev/null
 [ $? -eq 0 ] && pass "pre-tool-use allows innocent command" \
              || fail "pre-tool-use false positive"
-in_container bash -c 'echo "{\"session_id\":\"smoke\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"socat - UNIX:/run/broker.sock\"}}" | /config/hooks/pre-tool-use.py' >/dev/null
+in_container bash -c 'echo "{\"session_id\":\"smoke\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"socat - UNIX:/run/disjorn-broker/broker.sock\"}}" | /config/hooks/pre-tool-use.py' >/dev/null
 [ $? -eq 2 ] && pass "pre-tool-use blocks raw socket access" \
              || fail "pre-tool-use raw-socket block"
 

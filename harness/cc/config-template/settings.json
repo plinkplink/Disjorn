@@ -44,7 +44,7 @@
     ]
   },
   "env": {
-    "BROKER_SOCKET": "/run/broker.sock"
+    "BROKER_SOCKET": "/run/disjorn-broker/broker.sock"
   },
   "hooks": {
     "SessionStart": [
