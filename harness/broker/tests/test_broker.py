@@ -126,6 +126,8 @@ def test_classify_diff_contract_roundtrip(harness):
     assert cls["repo"] == "/home/plink/somerepo"
     assert cls["range"] == "main..feature"
     assert cls["gates"] == gates
+    # --config is broker-supplied (protected by placement), never caller data
+    assert cls["config"].endswith("protected-paths.toml")
 
 
 @pytest.mark.parametrize("bad", [

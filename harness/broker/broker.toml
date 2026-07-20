@@ -71,6 +71,10 @@ classify_diff = ["/home/plink/Disjorn/Disjorn/server/.venv/bin/python", "/home/p
 # (harness/metrics/metrics.py `build`) writes it; run it on a timer. Until it
 # has run once, an empty {} JSON file is fine.
 metrics_json = "/var/lib/disjorn-broker/metrics.json"
+# classify-diff hands this to the classifier as --config. Protected by
+# placement: install the repo's harness/classifier/protected-paths.toml to
+# /etc/disjorn-broker/ (root:plink 0640, resident-unreachable) and point here.
+protected_paths = "/etc/disjorn-broker/protected-paths.toml"
 
 [budgets]
 # WP-H12 daily per-resident action budget on broker verbs. DEFAULT OFF:

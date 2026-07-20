@@ -376,8 +376,10 @@ class Broker:
     def _verb_classify_diff(self, resident: str, args: dict) -> tuple[dict, str]:
         """Contract with harness/classifier/classify_diff.py (WP-H4):
         argv: <classify_diff.py> --repo <abs path> --range <git range>
-              --gates-json <json object>; stdout: one JSON object (the
-        classification), exit 0. Anything else is exec-failure."""
+              --config <protected-paths.toml> --gates <json object>;
+        stdout: one JSON object (the classification), exit 0. Anything else
+        is exec-failure. --config comes from broker config, never from the
+        caller — the classifier config is protected by placement."""
         _reject_unknown(args, {"repo", "range", "gates"})
         repo = _check_str(args, "repo", required=True, max_len=300)
         assert repo is not None
@@ -397,8 +399,12 @@ class Broker:
         classifier = self.paths.get(
             "classifier",
             "/home/plink/Disjorn/Disjorn/harness/classifier/classify_diff.py")
+        protected = self.paths.get(
+            "protected_paths",
+            "/home/plink/Disjorn/Disjorn/harness/classifier/protected-paths.toml")
         argv = self._argv("classify_diff", [sys.executable, classifier])
-        argv += ["--repo", repo, "--range", rng, "--gates-json", gates_json]
+        argv += ["--repo", repo, "--range", rng,
+                 "--config", protected, "--gates", gates_json]
         cp = self._run(argv, SUBPROCESS_TIMEOUTS["classify-diff"])
         if cp.returncode != 0:
             raise VerbError("exec-failure",

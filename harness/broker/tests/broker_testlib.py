@@ -50,16 +50,23 @@ TESTS_STUB = textwrap.dedent("""\
 
 CLASSIFY_STUB = textwrap.dedent("""\
     #!/usr/bin/env python3
-    # Emulates the WP-H4 contract: --repo/--range/--gates-json in, one JSON
-    # object out on stdout.
+    # MIRRORS the REAL classify_diff.py argparse (WP-H4) — same flags, same
+    # required-ness — so brokerd's argv is validated against the actual
+    # contract, not an imagined one. (The original stub accepted a
+    # --gates-json flag the real CLI never had, and omitted the required
+    # --config: broker tests passed while every prod call died on argparse.
+    # Keep this in lockstep with classify_diff.py main().)
     import argparse, json
     p = argparse.ArgumentParser()
-    p.add_argument("--repo", required=True)
-    p.add_argument("--range", required=True)
-    p.add_argument("--gates-json", required=True)
+    p.add_argument("--repo", default=".")
+    spec = p.add_mutually_exclusive_group(required=True)
+    spec.add_argument("--range", dest="range_spec")
+    spec.add_argument("--staged", action="store_true")
+    p.add_argument("--config", required=True)
+    p.add_argument("--gates", default="{}")
     ns = p.parse_args()
-    print(json.dumps({"tier": 1, "repo": ns.repo, "range": ns.range,
-                      "gates": json.loads(ns.gates_json)}))
+    print(json.dumps({"tier": 1, "repo": ns.repo, "range": ns.range_spec,
+                      "config": ns.config, "gates": json.loads(ns.gates)}))
 """)
 
 JOURNAL_STUB = textwrap.dedent("""\
@@ -193,6 +200,7 @@ def harness(tmp_path: Path):
 
         [paths]
         metrics_json = "{metrics}"
+        protected_paths = "{tmp_path / 'protected-paths.toml'}"
 
         [disjorn]
         url = "http://127.0.0.1:1"

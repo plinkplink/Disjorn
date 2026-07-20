@@ -81,9 +81,11 @@ All verbs are per-resident toggleable in `verbs.toml` and default OFF.
     ≤ 8 KiB, passed through opaquely.
 - result: `{"classification": <classifier JSON>}`.
 - Contract with `harness/classifier/classify_diff.py` (WP-H4): invoked as
-  `classify_diff.py --repo <repo> --range <range> --gates-json <json>`;
-  must print one JSON object (the classification, including `tier`) on stdout
-  and exit 0. Non-zero exit or non-JSON stdout → `exec-failure`.
+  `classify_diff.py --repo <repo> --range <range> --config <protected-paths.toml>
+  --gates <json>`; must print one JSON object (the classification, including
+  `tier`) on stdout and exit 0. Non-zero exit or non-JSON stdout →
+  `exec-failure`. `--config` comes from broker config (`[paths].protected_paths`),
+  never from the caller — the classifier config is protected by placement.
 
 ### `read-prod-logs`
 - args: `{"lines": int}` — 1..500, default 100.
