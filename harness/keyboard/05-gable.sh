@@ -54,8 +54,13 @@ echo "== 4. Disjorn worktree (write) — his custodian workbench =="
 # Clone from the res-readable mirror; merges to real main flow through the
 # broker gate (MERGE-CONTRACT), never from this clone directly. The mirror
 # is plink-owned, so res-gable's git needs it marked safe (durable — his
-# workbench keeps fetching from it).
-as_gable git config --global --add safe.directory /srv/disjorn-ro
+# workbench keeps fetching from it). BOTH path forms: the local transport's
+# upload-pack resolves the repo to its .git dir and checks THAT string, so
+# the bare parent-path entry alone still trips the wall (run 3's lesson).
+for safe in /srv/disjorn-ro /srv/disjorn-ro/.git; do
+  as_gable git config --global --get-all safe.directory | grep -qx "$safe" || \
+    as_gable git config --global --add safe.directory "$safe"
+done
 if ! as_gable test -d "$VOL/disjorn/.git"; then
   as_gable git clone /srv/disjorn-ro "$VOL/disjorn"
 fi
