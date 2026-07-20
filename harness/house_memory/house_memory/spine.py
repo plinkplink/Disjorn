@@ -20,7 +20,9 @@ CLAUDE.md (WP-H7) consumes `load_kernel()`.
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Union
+from typing import Optional, Union
+
+from .retrieval_log import RetrievalLog
 
 
 @dataclass
@@ -33,8 +35,17 @@ class SpineEntry:
 
 
 class Spine:
-    def __init__(self, spine_dir: Union[str, Path]):
+    def __init__(self, spine_dir: Union[str, Path],
+                 retrieval_log: Optional[RetrievalLog] = None):
+        """retrieval_log: when set, serving a non-kernel entry via
+        load_entry() appends a retrieval record whose returned_ids is the
+        entry's name — spine rent measured in the same unified log episodic
+        recalls use (WP-H8 consolidation's reference_counts() keys spine
+        entries by name). Kernel loads and list_entries() never log: the
+        kernel rides every turn (its rent is capped, not metered) and
+        listing metadata is not serving content into context."""
         self.spine_dir = Path(spine_dir)
+        self.retrieval_log = retrieval_log
         if not self.spine_dir.is_dir():
             raise FileNotFoundError(f"spine dir not found: {self.spine_dir}")
 
@@ -49,6 +60,14 @@ class Spine:
         """Entry by frontmatter name (falling back to filename stem)."""
         for entry in self.list_entries():
             if entry.name == name:
+                if self.retrieval_log is not None and not entry.kernel:
+                    self.retrieval_log.log(
+                        query=f"spine:{name}",
+                        subject_filter=None,
+                        raw_ids=[entry.name],
+                        distances=[None],
+                        returned_ids=[entry.name],
+                    )
                 return entry
         raise KeyError(f"no spine entry named {name!r} in {self.spine_dir}")
 

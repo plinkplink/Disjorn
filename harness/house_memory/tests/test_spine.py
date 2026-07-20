@@ -62,3 +62,34 @@ def test_unclosed_frontmatter_treated_as_body(tmp_path):
     assert entries[0].name == "odd"  # falls back to stem
     assert entries[0].kernel is False
     assert entries[0].body.startswith("---")
+
+
+def test_load_entry_logs_spine_rent(spine_dir, tmp_path):
+    from house_memory import RetrievalLog
+    log = RetrievalLog(tmp_path / "retrieval.jsonl", resident="testres")
+    spine = Spine(spine_dir, retrieval_log=log)
+
+    spine.load_entry("lore")
+    spine.load_entry("lore")
+    records = log.read()
+    assert len(records) == 2
+    assert all(r.returned_ids == ["lore"] for r in records)
+    assert all(r.query == "spine:lore" for r in records)
+    assert all(r.resident == "testres" for r in records)
+    assert log.reference_counts(window_days=7)["lore"] == 2
+
+
+def test_kernel_entries_and_listing_never_log(spine_dir, tmp_path):
+    from house_memory import RetrievalLog
+    log = RetrievalLog(tmp_path / "retrieval.jsonl", resident="testres")
+    spine = Spine(spine_dir, retrieval_log=log)
+
+    spine.load_entry("identity-core")  # kernel entry: rent capped, not metered
+    spine.load_kernel()
+    spine.list_entries()
+    assert log.read() == []
+
+
+def test_no_log_configured_is_noop(spine_dir):
+    entry = Spine(spine_dir).load_entry("lore")  # no retrieval_log: unchanged
+    assert entry.name == "lore"
