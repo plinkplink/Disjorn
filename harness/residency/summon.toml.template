@@ -13,7 +13,10 @@
 [server]
 # Prod is the tailnet URL; override for a scratch server. NOT defaulted in code
 # so nothing hits prod by omission.
-url = "https://debian.tailca81ba.ts.net"
+# LOOPBACK, not the public funnel: the daemon runs as a res-* uid whose
+# egress wall (WP-H2) allows only loopback->Disjorn + Anthropic + DNS.
+# The funnel URL times out from inside the wall — by design.
+url = "http://127.0.0.1:8399"
 # Gable's bot API key, read from a plink-owned file (mounted ro). Never inline
 # the key in this file in prod.
 api_key_path = "/config/gable-key"
