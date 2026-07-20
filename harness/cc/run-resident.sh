@@ -79,6 +79,15 @@ else
   echo "run-resident: WARNING house_memory absent: $HOUSE_MEMORY (skipping mount)" >&2
 fi
 
+# Optional read-only view of the Disjorn repo at /opt/disjorn — for residents
+# whose volume has no writable worktree (e.g. Claudette reading
+# MERGE-CONTRACT.md or a diff under review). Opt-in per resident: set
+# RESIDENT_DISJORN_RO in the plink-owned config env, unset = no mount.
+if [ -n "${RESIDENT_DISJORN_RO:-}" ]; then
+  [ -d "$RESIDENT_DISJORN_RO" ] || { echo "run-resident: RESIDENT_DISJORN_RO not a dir: $RESIDENT_DISJORN_RO" >&2; exit 1; }
+  args+=( -v "$RESIDENT_DISJORN_RO:/opt/disjorn:ro" )
+fi
+
 ENV_FILE="$CONFIG_DIR/env"
 if [ -f "$ENV_FILE" ]; then
   args+=( --env-file "$ENV_FILE" )
