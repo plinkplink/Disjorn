@@ -12,15 +12,19 @@ CUTOVER-CHECKLIST.md "Updating her code after cutover" — bundle fetch into
 her volume clone, then restart her process. Her repo needs 8c31856 (action
 tools) at minimum; pull the latest disjorn-port.
 
-## 2. Claudette's file read (her CC + repo visibility)
+## 2. Claudette's file read (her CC + repo visibility) — DONE 2026-07-20 (Gable)
 
-- Add `RESIDENT_DISJORN_RO=/home/plink/Disjorn/Disjorn` to
-  `/srv/disjorn-resident-config/res-claudette/env` → repo appears read-only
-  at /opt/disjorn in her container (run-resident.sh c8a2563).
-- Re-copy the updated harness to the res-*-readable location:
-  `/usr/local/lib/disjorn/{run-resident.sh,house_memory}` (checklist line —
-  re-copy after harness changes; this wave changed both).
-- MERGE-CONTRACT.md sign-off happens after she reads it herself (pinned,
+All wired; her next restart picks it up:
+- `/srv/disjorn-ro` = git-clean clone of main, res-readable — what mounts at
+  /opt/disjorn. NOT the live working tree (0700-blocked for rootless podman,
+  and it contains runtime data/ incl. the prod DB — privacy wall). Refresh
+  after merges: `git -C /srv/disjorn-ro pull`.
+- `RESIDENT_DISJORN_RO=/srv/disjorn-ro` added to her resident-cc.service
+  Environment= (host-side — the /config env file is container-side and never
+  reaches run-resident.sh); user daemon-reloaded.
+- `/usr/local/lib/disjorn/{run-resident.sh,house_memory}` re-copied (mount
+  support + spine-rent logging).
+- Still open: MERGE-CONTRACT.md sign-off after she reads it herself (pinned,
   seq 63), before her first real diff.
 
 ## 3. Metrics timers + broker config (WP-H12)

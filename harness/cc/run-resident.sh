@@ -82,7 +82,13 @@ fi
 # Optional read-only view of the Disjorn repo at /opt/disjorn — for residents
 # whose volume has no writable worktree (e.g. Claudette reading
 # MERGE-CONTRACT.md or a diff under review). Opt-in per resident: set
-# RESIDENT_DISJORN_RO in the plink-owned config env, unset = no mount.
+# RESIDENT_DISJORN_RO in the unit's Environment= (host-side; the /config env
+# file is container-side and never reaches this script). The source MUST be a
+# git-clean clone readable by res-* (this deployment: /srv/disjorn-ro,
+# refreshed by `git -C /srv/disjorn-ro pull` after merges) — NEVER the live
+# working tree: /home/plink is 0700 so rootless podman can't mount it, and
+# the working tree carries runtime data/ (the prod DB) that the privacy wall
+# exists to keep away from resident eyes. Committed code only.
 if [ -n "${RESIDENT_DISJORN_RO:-}" ]; then
   [ -d "$RESIDENT_DISJORN_RO" ] || { echo "run-resident: RESIDENT_DISJORN_RO not a dir: $RESIDENT_DISJORN_RO" >&2; exit 1; }
   args+=( -v "$RESIDENT_DISJORN_RO:/opt/disjorn:ro" )
