@@ -1,0 +1,35 @@
+# Consolidation config — Gable (WP-H8).
+#
+# SECOND CLIENT, ships INACTIVE. `active = false` means the CLI forces
+# --dry-run for Gable — it can never post to #custodian until plink flips this
+# on. Claudette activates first (her request); Gable follows once her run has
+# proven itself.
+#
+# Mounted read-only from outside his container in production.
+
+resident = "gable"
+active = false
+
+[episodic]
+data_dir = "/home/res-gable/memory/chroma_data"
+collection = "gable_memory"
+
+[retrieval_log]
+path = "/home/res-gable/memory/memory_retrieval.jsonl"
+
+[spine]
+dir = "/home/res-gable/repo/spine"
+
+[consolidation]
+soft_target_spine_size = 60
+window_days = 30
+promote_min_references = 3
+evict_max_references = 0
+min_spine_age_days = 30
+exclude_kernel = true
+max_promotions = 10
+constraint_tags = ["lesson", "why", "promise", "constraint", "boundary", "rule"]
+constraint_keywords = ["never", "always", "because", "must not", "do not", "learned", "the reason"]
+
+[broker]
+cli = "/usr/local/bin/broker"

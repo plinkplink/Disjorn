@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "consolidation"
+version = "0.1.0"
+description = "Witnessed memory consolidation for the Disjorn harness (WP-H8): per-resident, proposes-never-acts, bidirectional promote/evict/compress proposals to #custodian with retrieval-log evidence."
+requires-python = ">=3.11"
+dependencies = [
+    "house-memory",
+]
+
+[project.scripts]
+disjorn-consolidation = "consolidation.__main__:main"
+
+[tool.setuptools]
+packages = ["consolidation"]
