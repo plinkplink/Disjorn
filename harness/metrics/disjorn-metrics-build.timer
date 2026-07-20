@@ -1,0 +1,12 @@
+# TEMPLATE (WP-H12) — refresh the metrics JSON often and cheaply. Every 10
+# min is plenty; the producer is pure file I/O over append-only logs.
+[Unit]
+Description=Refresh Disjorn resident metrics JSON
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

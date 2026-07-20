@@ -48,6 +48,7 @@ Failure:
 | `unknown-caller` | connecting uid is not in the `[uids]` map                      |
 | `unknown-verb`   | no such verb (includes the deliberately absent `restart-self`) |
 | `verb-disabled`  | the per-resident kill switch in `verbs.toml` is off (default)  |
+| `over-budget`    | resident hit the daily action cap in `broker.toml [budgets]`    |
 | `bad-args`       | args failed the verb's schema (also: malformed request JSON)   |
 | `exec-failure`   | verb was authorized but its execution failed (exit/timeout/IO) |
 | `internal`       | broker-side problem (bad config, unexpected exception)         |
@@ -102,7 +103,11 @@ All verbs are per-resident toggleable in `verbs.toml` and default OFF.
 ### `read-metrics`
 - args: none.
 - result: `{"metrics": <JSON>}` — contents of the configured metrics file
-  (the retrieval/spine/acceptance dashboard; producer lands with WP-H8/H12).
+  (`[paths].metrics_json`). The producer is `harness/metrics/metrics.py`
+  (WP-H12): per-resident broker action counts (from the audit log),
+  retrieval/spine stats (read-only from house_memory logs), optional tool-call
+  counts, and each resident's own budget state. The verb reads the file
+  verbatim; it never runs the producer (that is the scheduled `metrics build`).
 
 ### `file-proposal`
 - args: `{"text": str}` — required, 1..4000 chars.
@@ -118,3 +123,35 @@ All verbs are per-resident toggleable in `verbs.toml` and default OFF.
 - result: `{"entries": [audit records], "count": int, "truncated": bool}`.
 - Filtered to the CALLER's own entries by the broker-assigned resident name —
   a resident can never read another's trail.
+
+## Daily action budget (WP-H12)
+
+Additive to the verb table above; changes no existing verb contract. An
+optional per-resident daily cap on broker verb calls lives in `broker.toml`:
+
+```toml
+[budgets]
+# default_daily_action_cap = 2000     # applies to residents without an override
+[budgets.res-claudette]
+# daily_action_cap = 2000
+```
+
+- **Default OFF**: with no cap configured the broker never denies on budget —
+  instrument first, tune from observed data (AGENTHOOD), never from imagined
+  abuse. Every verb call is already audited; plink reads real counts (in
+  `read-metrics` / the daily #custodian line) before setting a number.
+- **Enforcement**: checked in `dispatch()` after the `verbs.toml` kill switch
+  passes and before the verb runs. The broker counts today's (UTC) **allowed**
+  actions for the caller from the audit log; at or over the cap the call is
+  denied with `over-budget` and audited (`allowed: false`) like any denial.
+  Denied calls do not count toward the cap, so a resident cannot exhaust its
+  own budget by being refused. The count is read from the audit log, so it
+  survives a broker restart.
+- **Live-ness**: unlike `verbs.toml` (re-read every request), budgets load at
+  broker start — a cap change takes a broker restart. Kill switches stay the
+  instant lever; budgets are a tunable backstop.
+
+The end-of-day one-liner ("daily action counts visible in #custodian") is
+posted by `metrics.py post-daily` via the broker's OWN posting identity — the
+same transport `file-proposal` uses. It is a scheduled CLI, not a verb: no
+resident can trigger it.

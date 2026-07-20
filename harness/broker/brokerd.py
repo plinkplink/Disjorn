@@ -191,6 +191,10 @@ class Broker:
         self.commands: dict[str, Any] = config.get("commands", {})
         self.paths: dict[str, str] = config.get("paths", {})
         self.disjorn: dict[str, Any] = config.get("disjorn", {})
+        # Daily per-resident action budget (WP-H12). Loaded at construction;
+        # a cap change needs a broker restart (unlike verbs.toml kill switches,
+        # which are re-read live). Default: no cap == OFF. Instrument first.
+        self.budgets: dict[str, Any] = config.get("budgets", {})
         self._audit_lock = threading.Lock()
         self._listener: Optional[socket.socket] = None
         self._closed = False
@@ -225,6 +229,40 @@ class Broker:
             with open(self.audit_path, "a", encoding="utf-8") as fh:
                 fh.write(line + "\n")
 
+    # -------------------------------------------------------------- budget
+
+    def _daily_action_cap(self, resident: str) -> Optional[int]:
+        """Per-resident daily action cap from `[budgets]`, or None (off).
+        `[budgets.<resident>].daily_action_cap` wins; else
+        `[budgets].default_daily_action_cap`; else None."""
+        per = self.budgets.get(resident)
+        if isinstance(per, dict) and isinstance(per.get("daily_action_cap"), int):
+            return per["daily_action_cap"]
+        default = self.budgets.get("default_daily_action_cap")
+        return default if isinstance(default, int) else None
+
+    def _count_today_allowed(self, resident: str) -> int:
+        """How many ALLOWED actions this resident has today (UTC), read from
+        the audit log — the same source the metrics producer aggregates, so
+        the count is authoritative and restart-proof. Denials never count."""
+        today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
+        n = 0
+        try:
+            with open(self.audit_path, "r", encoding="utf-8") as fh:
+                for raw in fh:
+                    if resident not in raw:  # safe prefilter: name is in the JSON
+                        continue
+                    try:
+                        rec = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    if (rec.get("resident") == resident and rec.get("allowed") is True
+                            and str(rec.get("ts", ""))[:10] == today):
+                        n += 1
+        except OSError:
+            return 0
+        return n
+
     # --------------------------------------------------------------- core
 
     def dispatch(self, uid: int, verb: Any, args: Any) -> dict:
@@ -255,6 +293,19 @@ class Broker:
         if verbs_cfg.get(resident, {}).get(verb, False) is not True:
             self._audit(caller, verb, args, False, "denied: verb disabled for resident")
             return self._err("verb-disabled", f"{verb} is not enabled for {resident}")
+
+        # Daily per-resident action budget (WP-H12). Default OFF: with no cap
+        # configured this never denies. Counts today's ALLOWED actions for this
+        # resident from the audit log, so the count survives a broker restart;
+        # the (cap+1)-th action is denied and audited like any other denial.
+        # Additive and permissive by default — instrument first, tune from
+        # observed data (AGENTHOOD budget rule), never from imagined abuse.
+        cap = self._daily_action_cap(resident)
+        if cap is not None and self._count_today_allowed(resident) >= cap:
+            self._audit(caller, verb, args, False,
+                        f"denied: over daily action budget ({cap})")
+            return self._err("over-budget",
+                             f"daily action budget of {cap} reached for {resident}")
 
         try:
             result, summary = self.verbs[verb](resident, args)

@@ -30,9 +30,22 @@ audit_log = "/var/log/disjorn-broker/audit.jsonl"
 # The ONLY file read-own-log will serve to res-claudette. No other path is
 # ever accepted, whatever the caller sends.
 log_path = "/home/res-claudette/logs/disjorn_bot.log"
+# WP-H12 metrics producer inputs (all read-only; optional — omit to skip that
+# section for this resident). house_memory retrieval log, WP-H5 ~/.action-log
+# (all tool calls in the container), WP-H5 budget.json (for cap legibility),
+# and the markdown spine dir. These live in the resident's home volume, which
+# the host can read; the metrics producer runs host-side, never in a container.
+retrieval_log = "/home/res-claudette/memory/memory_retrieval.jsonl"
+action_log = "/home/res-claudette/.action-log"
+budget_json = "/home/plink/resident-config/claudette/budget.json"
+# spine_dir = "/home/res-claudette/claudette/spine"
 
 [residents.res-gable]
 log_path = "/home/res-gable/logs/gable.log"
+retrieval_log = "/home/res-gable/memory/memory_retrieval.jsonl"
+action_log = "/home/res-gable/.action-log"
+budget_json = "/home/plink/resident-config/gable/budget.json"
+# spine_dir = "/home/res-gable/gable/spine"
 
 [commands]
 # Fixed argv lists — the broker NEVER passes a string to a shell. Validated
@@ -54,9 +67,22 @@ read_prod_logs = ["journalctl", "-u", "disjorn", "--no-pager", "-o", "short-iso"
 classify_diff = ["/home/plink/Disjorn/Disjorn/server/.venv/bin/python", "/home/plink/Disjorn/Disjorn/harness/classifier/classify_diff.py"]
 
 [paths]
-# read-metrics serves exactly this file (producer arrives with WP-H8/H12;
-# until then an empty {} JSON file is fine).
+# read-metrics serves exactly this file. The WP-H12 producer
+# (harness/metrics/metrics.py `build`) writes it; run it on a timer. Until it
+# has run once, an empty {} JSON file is fine.
 metrics_json = "/var/lib/disjorn-broker/metrics.json"
+
+[budgets]
+# WP-H12 daily per-resident action budget on broker verbs. DEFAULT OFF:
+# with nothing set here the broker never denies on budget. Instrument first
+# (every call is audited; read the real counts in #custodian), THEN set a cap.
+# A cap change needs a broker restart (kill switches in verbs.toml stay live).
+#
+# default_daily_action_cap = 2000        # applies to any resident without an override
+# [budgets.res-claudette]
+# daily_action_cap = 2000
+# [budgets.res-gable]
+# daily_action_cap = 2000
 
 [disjorn]
 # file-proposal posts to #custodian AS THE BROKER'S OWN bot identity — the
