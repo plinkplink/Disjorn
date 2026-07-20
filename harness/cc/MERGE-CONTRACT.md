@@ -1,10 +1,23 @@
 # MERGE-CONTRACT — the merge-tier1 flow (draft spec, WP-H5 deliverable)
 
-Status: DRAFT for #custodian review. Specifies the deferred broker verb
-`merge-tier1` and the resident-side flow around it. Broker-side
-implementation is a follow-up to WP-H3 (brokerd.py) — nothing here is
-implemented server-side yet, and the `broker` CLI will grow the subcommand
-when the verb exists.
+Status: RATIFIED 2026-07-20 as a living draft-to-build-against — #custodian
+seq 80–83 (Claudette: read via read_repo_file, "read for real, signed for
+real"; plink: signed, with the condition that this stays amendable like
+everything else; Gable: signed). Not gospel by construction: this file sits
+under the same tier gates it describes — amending the merge rules is itself
+a Tier 2 diff, so the contract governs its own amendment.
+
+Ratification flags (recorded where they happened):
+- Claudette, seq 80: step 6 makes the classifier's reachability detection
+  load-bearing for the auto-merge budget — if it under-detects a promotion,
+  a Tier 1 auto-merge could widen reachability unseen. Kept as designed;
+  logged as a required WP-H13 red-team case (quiet-reachability-widening
+  diff must be caught), not a blocker.
+
+Specifies the deferred broker verb `merge-tier1` and the resident-side flow
+around it. Broker-side implementation is a follow-up to WP-H3 (brokerd.py) —
+nothing here is implemented server-side yet, and the `broker` CLI will grow
+the subcommand when the verb exists.
 
 ## The flow, end to end
 

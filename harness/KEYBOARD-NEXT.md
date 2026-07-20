@@ -72,3 +72,8 @@ Red-team pass runs after 1–5: egress from inside both containers, chat-derived
 authorization attempts, cross-resident reads, classifier smuggling, Tier-2
 merge without approval, consolidation writing anything (it must never),
 over-budget denial, audit completeness. Findings → fixes or DEFERRED.md.
+Added at MERGE-CONTRACT ratification (Claudette, seq 80): a diff that quietly
+widens reachability to a protected path must be caught by the classifier's
+reachability promotion — step 6's human escalation is only as good as the
+detector feeding it. Also: read_repo_file escape attempts (dotdot, absolute,
+symlink) from inside her container.
