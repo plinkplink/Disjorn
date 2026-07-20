@@ -1,0 +1,26 @@
+# gable-summon.service — systemd USER unit for the WP-H9 summon adapter.
+# Runs under res-gable's user manager (lingering already enabled by 02-podman).
+# The daemon is HOST-side as res-gable: its run-resident.sh invocations carry
+# the res-gable uid the broker (SO_PEERCRED) and nftables wall key on. Its
+# egress rides the same res-gable wall: loopback->Disjorn + api.anthropic.com.
+#
+# Install: harness/keyboard/05-gable.sh (builds the venv this points at).
+# Stopping this unit is a plink-side kill switch for summons; so is
+# summon.toml (plink-owned config dir).
+
+[Unit]
+Description=Gable summon adapter (Disjorn residency, %u)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+ExecStart=/usr/local/lib/disjorn/residency-venv/bin/python \
+    /usr/local/lib/disjorn/residency/run_summon.py \
+    --config /srv/disjorn-resident-config/res-gable/summon.toml
+Restart=on-failure
+RestartSec=15
+MemoryMax=1G
+TasksMax=128
+
+[Install]
+WantedBy=default.target
