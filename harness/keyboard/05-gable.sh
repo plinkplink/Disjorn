@@ -34,9 +34,12 @@ ln -sfn "$VOL/logs" "$GABLE_HOME/logs"   # broker read-own-log target parity
 
 echo "== 3. Gable's own repo (spine) into his volume =="
 # Bundle across the wall, same recipe as Claudette's (his repo: ~/bots/fable).
-# Bundle created AS PLINK (repo owner — root git would trip safe.directory).
-BUNDLE=$(mktemp /tmp/gable-repo-XXXX.bundle)
-as_plink git -C /home/plink/bots/fable bundle create "$BUNDLE" --all 2>/dev/null
+# Bundle created AS PLINK (repo owner — root git would trip safe.directory),
+# and the temp file must be plink's too: a root-owned file in sticky /tmp
+# can't be replaced by plink's git (lockfile rename EPERM). No stderr
+# suppression — a silent set -e death here cost a debugging round.
+BUNDLE=$(as_plink mktemp /tmp/gable-repo-XXXX.bundle)
+as_plink git -C /home/plink/bots/fable bundle create "$BUNDLE" --all
 chmod 644 "$BUNDLE"
 if as_gable test -d "$VOL/bots/fable/.git"; then
   as_gable git -C "$VOL/bots/fable" fetch "$BUNDLE" 'refs/heads/*:refs/remotes/host/*'
