@@ -21,6 +21,7 @@ After=network-online.target
 Environment=RESIDENT_CONFIG_DIR=/srv/disjorn-resident-config/gable
 Environment=RESIDENT_HOUSE_MEMORY=/usr/local/lib/disjorn/house_memory
 Environment=RESIDENT_DISJORN_RO=/srv/disjorn-ro
+Environment=RESIDENT_STDIN=1
 ExecStart=/usr/local/lib/disjorn/residency-venv/bin/python \
     /usr/local/lib/disjorn/residency/run_summon.py \
     --config /srv/disjorn-resident-config/res-gable/summon.toml

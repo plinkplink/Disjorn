@@ -108,6 +108,14 @@ else
   echo "run-resident: WARNING env file absent: $ENV_FILE (no ANTHROPIC_API_KEY)" >&2
 fi
 
+# Per-summon sessions feed the prompt on stdin; podman drops stdin unless
+# -i is passed. Opt-in (RESIDENT_STDIN=1 in the summon unit) so long-lived
+# residence containers (stdin=/dev/null under systemd) keep their exact
+# proven invocation.
+if [ -n "${RESIDENT_STDIN:-}" ]; then
+  args+=( -i )
+fi
+
 if [ -n "${RESIDENT_PODMAN_EXTRA:-}" ]; then
   # shellcheck disable=SC2206  # deliberate word-splitting of extra flags
   args+=( ${RESIDENT_PODMAN_EXTRA} )
