@@ -47,7 +47,7 @@ resident = "gable"
 # reads the prompt on stdin and prints the result as JSON on stdout. Tune to
 # the installed CC; e.g. `claude -p --output-format json` (result/num_turns).
 session_argv = ["claude", "-p", "--output-format", "json"]
-timeout_sec = 1800
+timeout_sec = 300              # 5 min: past that the endless typing indicator reads as a hang
 # Optional extra env for the launch subprocess (run-resident.sh reads these):
 # [container.env]
 # RESIDENT_PODMAN_EXTRA = ""
