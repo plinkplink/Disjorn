@@ -1,0 +1,17 @@
+# TEMPLATE (WP-H12) — aggregate the resident metrics JSON that read-metrics
+# serves. Runs as plink (NOT root's job — but see INTEGRATION-NEEDS.md about
+# reading resident home volumes). Oneshot, driven by the .timer below.
+# Install (keyboard): copy to /etc/systemd/system/, `systemctl daemon-reload`,
+# `systemctl enable --now disjorn-metrics-build.timer`.
+[Unit]
+Description=Disjorn resident metrics producer (build)
+After=disjorn-broker.service
+
+[Service]
+Type=oneshot
+User=plink
+# StateDirectory creates/owns /var/lib/disjorn-broker (where metrics.json lands).
+StateDirectory=disjorn-broker
+ExecStart=/home/plink/Disjorn/Disjorn/server/.venv/bin/python \
+    /home/plink/Disjorn/Disjorn/harness/metrics/metrics.py \
+    --config /etc/disjorn-broker/broker.toml build

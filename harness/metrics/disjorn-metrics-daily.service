@@ -1,0 +1,15 @@
+# TEMPLATE (WP-H12) — the end-of-day #custodian action-count line. Rebuilds
+# the metrics file, then posts one line per resident to #custodian via the
+# broker's OWN posting identity (same transport file-proposal uses). Needs the
+# broker's disjorn config + api key in broker.toml, exactly like file-proposal.
+[Unit]
+Description=Disjorn end-of-day #custodian action-count line
+After=disjorn-broker.service
+
+[Service]
+Type=oneshot
+User=plink
+StateDirectory=disjorn-broker
+ExecStart=/home/plink/Disjorn/Disjorn/server/.venv/bin/python \
+    /home/plink/Disjorn/Disjorn/harness/metrics/metrics.py \
+    --config /etc/disjorn-broker/broker.toml post-daily

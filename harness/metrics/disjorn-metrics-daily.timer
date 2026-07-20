@@ -1,0 +1,11 @@
+# TEMPLATE (WP-H12) — fire the end-of-day line once daily at 23:55 UTC.
+# `post-daily` defaults to today's UTC date, so 23:55 captures the full day.
+[Unit]
+Description=Post the Disjorn end-of-day #custodian action-count line
+
+[Timer]
+OnCalendar=*-*-* 23:55:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target
