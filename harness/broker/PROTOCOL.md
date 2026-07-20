@@ -86,6 +86,13 @@ All verbs are per-resident toggleable in `verbs.toml` and default OFF.
   `tier`) on stdout and exit 0. Non-zero exit or non-JSON stdout →
   `exec-failure`. `--config` comes from broker config (`[paths].protected_paths`),
   never from the caller — the classifier config is protected by placement.
+- `repo` is the CALLER's view of the filesystem. `[residents.<r>.path_map]`
+  in broker config translates container prefixes to host paths (longest
+  prefix wins) before the classifier runs, e.g. `"/opt/disjorn" =
+  "/srv/disjorn-ro"`. When a map is configured it is also an allowlist —
+  a repo outside every mapped root is `bad-args` — so residents can only
+  classify repos deliberately exposed to them and never need to know host
+  layout. No map configured = pass-through (host-side callers, tests).
 
 ### `read-prod-logs`
 - args: `{"lines": int}` — 1..500, default 100.

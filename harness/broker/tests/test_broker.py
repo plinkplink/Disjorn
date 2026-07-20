@@ -130,6 +130,26 @@ def test_classify_diff_contract_roundtrip(harness):
     assert cls["config"].endswith("protected-paths.toml")
 
 
+def test_classify_diff_translates_resident_paths(harness, tmp_path):
+    """A resident's container path is translated to the mapped host path
+    before the classifier runs — residents never speak host layout."""
+    harness.set_verbs(**{"classify-diff": True})
+    resp = harness.call("classify-diff", {
+        "repo": "/opt/disjorn/sub", "range": "main..x", "gates": {}})
+    assert resp["ok"] is True
+    assert resp["result"]["classification"]["repo"] == str(tmp_path / "mirror" / "sub")
+
+
+def test_classify_diff_rejects_unmapped_repo(harness):
+    """With a path_map configured it doubles as an allowlist."""
+    harness.set_verbs(**{"classify-diff": True})
+    resp = harness.call("classify-diff", {
+        "repo": "/etc/anything", "range": "main..x", "gates": {}})
+    assert resp["ok"] is False
+    assert resp["error"]["code"] == "bad-args"
+    assert "/opt/disjorn" in resp["error"]["message"]
+
+
 @pytest.mark.parametrize("bad", [
     {"repo": "relative/path", "range": "main", "gates": {}},
     {"repo": "/x/../etc", "range": "main", "gates": {}},

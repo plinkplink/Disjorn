@@ -30,6 +30,14 @@ audit_log = "/var/log/disjorn-broker/audit.jsonl"
 # The ONLY file read-own-log will serve to res-claudette. No other path is
 # ever accepted, whatever the caller sends.
 log_path = "/home/res-claudette/logs/disjorn_bot.log"
+
+[residents.res-claudette.path_map]
+# classify-diff path translation AND allowlist: residents pass their
+# in-container paths; the broker (host-side) maps prefixes, longest wins;
+# anything outside every mapped root is bad-args. This deployment: the
+# read-only repo mirror and her home volume.
+"/opt/disjorn" = "/srv/disjorn-ro"
+"/home/resident" = "/home/res-claudette/resident-home"
 # WP-H12 metrics producer inputs (all read-only; optional — omit to skip that
 # section for this resident). house_memory retrieval log, WP-H5 ~/.action-log
 # (all tool calls in the container), WP-H5 budget.json (for cap legibility),

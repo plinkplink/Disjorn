@@ -188,6 +188,10 @@ def harness(tmp_path: Path):
         [residents.res-test]
         log_path = "{own_log}"
 
+        [residents.res-test.path_map]
+        "/opt/disjorn" = "{tmp_path / 'mirror'}"
+        "/home/plink" = "/home/plink"
+
         [residents.res-other]
         log_path = "{tmp_path / 'other.log'}"
 

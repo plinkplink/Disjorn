@@ -390,6 +390,22 @@ class Broker:
         if rng.startswith("-") or not _RANGE_RE.match(rng):
             raise _bad("range must be a plain git rev/range "
                        "(letters, digits, . _ ~ ^ / { } -, no leading dash)")
+        # Residents pass THEIR view of the filesystem; the broker runs
+        # host-side where those paths don't exist. [residents.<r>.path_map]
+        # translates container prefixes to host paths (longest prefix wins).
+        # When a map is configured it is also an allowlist: unmapped paths
+        # are rejected, so a resident can only ever point the classifier at
+        # repos deliberately exposed to them. No map configured = legacy
+        # pass-through (host-path callers, tests).
+        path_map = self.residents.get(resident, {}).get("path_map")
+        if path_map:
+            best = max((p for p in path_map
+                        if repo == p or repo.startswith(p.rstrip("/") + "/")),
+                       key=len, default=None)
+            if best is None:
+                raise _bad(f"repo not under a mapped root for {resident}; "
+                           f"available roots: {sorted(path_map)}")
+            repo = path_map[best].rstrip("/") + repo[len(best.rstrip("/")):]
         gates = args.get("gates", {})
         if not isinstance(gates, dict):
             raise _bad("gates must be an object")
