@@ -21,3 +21,6 @@ dist/
 # Env / editor
 .env
 .DS_Store
+
+# Claude Code agent worktrees
+.claude/
