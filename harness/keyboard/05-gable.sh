@@ -1,9 +1,23 @@
 #!/usr/bin/env bash
 # 05-gable.sh — Gable residency activation (WP-H9/H10 keyboard step).
-# Run as plink with sudo, AFTER: 01-users, 02-podman, 03-network, 04-broker,
-# and the spine witness (#custodian seq 66/67 — done 2026-07-20).
+# Run: sudo ./05-gable.sh  — AFTER: 01-users, 02-podman, 03-network,
+# 04-broker, and the spine witness (#custodian seq 66/67 — done 2026-07-20).
 # Idempotent-ish: safe to re-run; existing files are left alone where noted.
+#
+# CONTEXT RULES (each burned us once):
+#  - runs as root; per-user work is delegated explicitly (podman stores are
+#    per-user: the image lives in PLINK's rootless store, never root's);
+#  - cd / first: sudo -u res-* inherits cwd, and a cwd under /home/plink
+#    (0700) makes every delegated command die on chdir;
+#  - git on another user's repo trips safe.directory — run git AS the owner.
 set -euo pipefail
+cd /
+
+[ "$(id -u)" -eq 0 ] || { echo "run me with sudo (root)"; exit 1; }
+PLINK_UID=$(id -u plink)
+GABLE_UID=$(id -u res-gable)
+as_plink() { sudo -u plink env XDG_RUNTIME_DIR=/run/user/$PLINK_UID "$@"; }
+as_gable() { sudo -u res-gable env XDG_RUNTIME_DIR=/run/user/$GABLE_UID "$@"; }
 
 GABLE_HOME=/home/res-gable
 VOL=$GABLE_HOME/resident-home
@@ -12,32 +26,35 @@ REPO=/home/plink/Disjorn/Disjorn
 CONFIG=/srv/disjorn-resident-config/res-gable
 
 echo "== 1. container image into res-gable's store (wall blocks resident pulls) =="
-podman save localhost/disjorn-resident:latest \
-  | sudo -u res-gable env XDG_RUNTIME_DIR=/run/user/$(id -u res-gable) podman load
+as_plink podman save localhost/disjorn-resident:latest | as_gable podman load
 
 echo "== 2. home volume layout =="
-sudo -u res-gable mkdir -p "$VOL"/{bots,memory,logs}
-sudo ln -sfn "$VOL/logs" "$GABLE_HOME/logs"   # broker read-own-log target parity
+as_gable mkdir -p "$VOL/bots" "$VOL/memory" "$VOL/logs"
+ln -sfn "$VOL/logs" "$GABLE_HOME/logs"   # broker read-own-log target parity
 
 echo "== 3. Gable's own repo (spine) into his volume =="
 # Bundle across the wall, same recipe as Claudette's (his repo: ~/bots/fable).
+# Bundle created AS PLINK (repo owner — root git would trip safe.directory).
 BUNDLE=$(mktemp /tmp/gable-repo-XXXX.bundle)
-git -C /home/plink/bots/fable bundle create "$BUNDLE" --all 2>/dev/null
+as_plink git -C /home/plink/bots/fable bundle create "$BUNDLE" --all 2>/dev/null
 chmod 644 "$BUNDLE"
-if sudo -u res-gable test -d "$VOL/bots/fable/.git"; then
-  sudo -u res-gable git -C "$VOL/bots/fable" fetch "$BUNDLE" 'refs/heads/*:refs/remotes/host/*'
-  sudo -u res-gable git -C "$VOL/bots/fable" merge --ff-only host/main 2>/dev/null || \
-  sudo -u res-gable git -C "$VOL/bots/fable" merge --ff-only host/master
+if as_gable test -d "$VOL/bots/fable/.git"; then
+  as_gable git -C "$VOL/bots/fable" fetch "$BUNDLE" 'refs/heads/*:refs/remotes/host/*'
+  as_gable git -C "$VOL/bots/fable" merge --ff-only host/main 2>/dev/null || \
+  as_gable git -C "$VOL/bots/fable" merge --ff-only host/master
 else
-  sudo -u res-gable git clone "$BUNDLE" "$VOL/bots/fable"
+  as_gable git clone "$BUNDLE" "$VOL/bots/fable"
 fi
 rm -f "$BUNDLE"
 
 echo "== 4. Disjorn worktree (write) — his custodian workbench =="
 # Clone from the res-readable mirror; merges to real main flow through the
-# broker gate (MERGE-CONTRACT), never from this clone directly.
-if ! sudo -u res-gable test -d "$VOL/disjorn/.git"; then
-  sudo -u res-gable git clone /srv/disjorn-ro "$VOL/disjorn"
+# broker gate (MERGE-CONTRACT), never from this clone directly. The mirror
+# is plink-owned, so res-gable's git needs it marked safe (durable — his
+# workbench keeps fetching from it).
+as_gable git config --global --add safe.directory /srv/disjorn-ro
+if ! as_gable test -d "$VOL/disjorn/.git"; then
+  as_gable git clone /srv/disjorn-ro "$VOL/disjorn"
 fi
 
 echo "== 5. residency package + venv (host-side daemon deps) =="
