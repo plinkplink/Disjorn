@@ -157,6 +157,10 @@ class SummonAdapter:
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
 
+        if not result.ok:
+            # The polite channel line hides the cause on purpose; the log
+            # must not — a silent 0.0s failure cost a debugging round.
+            logger.warning("summon session failed: %s", result.error or "(no detail)")
         reply = result.reply.strip() if result.ok else ""
         text = reply if reply else self.config.text.error_line
         await self._safe_send(channel_id, text, reply_to=trigger_id)

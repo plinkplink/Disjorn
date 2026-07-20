@@ -14,6 +14,13 @@ Wants=network-online.target
 After=network-online.target
 
 [Service]
+# run-resident.sh env for the per-summon container (same deviations as
+# Claudette's unit, same reasons): /home/plink is 0700 so the documented
+# defaults are unreachable from a res-* uid — point at the /srv config dir
+# and the root-owned harness copies; mount the clean repo mirror read-only.
+Environment=RESIDENT_CONFIG_DIR=/srv/disjorn-resident-config/gable
+Environment=RESIDENT_HOUSE_MEMORY=/usr/local/lib/disjorn/house_memory
+Environment=RESIDENT_DISJORN_RO=/srv/disjorn-ro
 ExecStart=/usr/local/lib/disjorn/residency-venv/bin/python \
     /usr/local/lib/disjorn/residency/run_summon.py \
     --config /srv/disjorn-resident-config/res-gable/summon.toml
