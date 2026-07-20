@@ -1,0 +1,60 @@
+# Consolidation config — Claudette (WP-H8).
+#
+# FIRST TO ACTIVATE: consolidation was her request ("the spine has to pay
+# rent"), so she is the first live client. `active = true` lets a real
+# (non-dry-run) run post to #custodian; Gable's config ships inactive.
+#
+# In production this file is mounted read-only from OUTSIDE her container
+# (the same lever pattern as broker.toml / verbs.toml) — activation is plink's,
+# not the resident's.
+
+resident = "claudette"
+active = true
+
+[episodic]
+data_dir = "/home/res-claudette/memory/chroma_data"
+collection = "claudette_memory"
+
+[retrieval_log]
+path = "/home/res-claudette/memory/memory_retrieval.jsonl"
+
+[spine]
+dir = "/home/res-claudette/repo/spine"
+
+[consolidation]
+# Soft target on spine size (entry count) — plink's knob. Over target,
+# consolidation proposes >= as much reduction (evict+compress) as addition
+# (promote). A bias on suggestions, never a wall on approval.
+soft_target_spine_size = 60
+
+# Trailing window for the retrieval-log rent assessment.
+window_days = 30
+
+# An episodic memory returned >= this many times in the window is a promotion
+# candidate ("earning its way into the spine").
+promote_min_references = 3
+
+# A spine entry returned <= this many times is a removal candidate.
+evict_max_references = 0
+
+# Entries younger than this are never judged "unreferenced" — they have not
+# spanned the window yet. (Age from frontmatter `since`/`created`, else mtime.)
+min_spine_age_days = 30
+
+# Kernel entries are the hardest rent in the house; consolidation does not
+# propose evicting/compressing them (kernel churn wants a stricter gate — an
+# open question in MEMORY-DESIGN).
+exclude_kernel = true
+
+# Cap promotions per run so a chatty episode can't flood the review queue.
+max_promotions = 10
+
+# Constraint-shaped entries (lessons/whys/promises) default to COMPRESSION,
+# never eviction (anti-Chesterton's-fence). Detected by frontmatter kind/shape,
+# these tags, or these keywords in the body.
+constraint_tags = ["lesson", "why", "promise", "constraint", "boundary", "rule"]
+constraint_keywords = ["never", "always", "because", "must not", "do not", "learned", "the reason"]
+
+[broker]
+# The file-proposal verb CLI (WP-H5). Overridable via CONSOLIDATION_BROKER_CLI.
+cli = "/usr/local/bin/broker"
