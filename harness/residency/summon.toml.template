@@ -46,7 +46,10 @@ resident = "gable"
 # The command run INSIDE the container: a headless Claude Code invocation that
 # reads the prompt on stdin and prints the result as JSON on stdout. Tune to
 # the installed CC; e.g. `claude -p --output-format json` (result/num_turns).
-session_argv = ["claude", "-p", "--output-format", "json"]
+# Bootstrap first (WP-H7 assembly: spine -> ~/.claude/CLAUDE.md + MEMORY.md;
+# idempotent, stdlib-only), then the headless session. Bootstrap output goes
+# to stderr so the JSON contract on stdout stays clean.
+session_argv = ["bash", "-lc", "python3 /opt/house_memory/house_memory/bootstrap.py >&2 && exec claude -p --output-format json"]
 timeout_sec = 300              # 5 min: past that the endless typing indicator reads as a hang
 # Optional extra env for the launch subprocess (run-resident.sh reads these):
 # [container.env]

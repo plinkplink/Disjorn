@@ -22,7 +22,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Union
 
-from .retrieval_log import RetrievalLog
+try:
+    from .retrieval_log import RetrievalLog
+except ImportError:  # direct-file import (bootstrap.py on a bare python)
+    from retrieval_log import RetrievalLog  # type: ignore[no-redef]
 
 
 @dataclass
