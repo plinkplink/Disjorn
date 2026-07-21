@@ -181,7 +181,7 @@ class SummonAdapter:
             recent = await self.client.get_messages(
                 channel_id,
                 before_seq=trigger_seq,
-                limit=self.config.backfill.count,
+                limit=self.config.backfill.count_for(channel_id),
             )
         except Exception:  # noqa: BLE001 — backfill is best-effort context
             logger.warning("backfill fetch failed for channel %s", channel_id,

@@ -34,7 +34,11 @@ typing_interval_sec = 2.5         # server rate-limits typing to 1/3s
 # 4 = "#custodian"
 
 [backfill]
-count = 30                        # recent messages pulled into the session prompt
+count = 30                        # default recent messages pulled into the session prompt
+# Per-channel depth overrides. Design threads in #custodian run long, so 30
+# (a #main number) is too shallow there — give it a deeper window:
+[backfill.per_channel]
+4 = 100                           # #custodian: deep window for long design threads
 
 [container]
 # The container-launch contract. In prod this is the run-resident.sh wrapper
