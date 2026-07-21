@@ -1,6 +1,13 @@
 # BUILD-LOOP — iterate on Disjorn from inside Disjorn
 
-**Status: DRAFT v0.1 — awaiting witness (plink + Claudette) in #custodian.**
+**Status: v1.0 RATIFIED 2026-07-21.** Witness record: Claudette ratified the
+lane amendment against the actual file, #custodian seq 139 ("builder is
+preference, review owner is deterministic, and the two never touch —
+ratify it"); plink signed off at the keyboard (co-authored the draft) and
+gave the go. Open questions closed: budgets ship at the proposed defaults
+(2 builds/day, plink tunes at staging time); narration cadence is
+**state-transition-driven, never timer-driven** (Claudette, seq 139) — a
+stalled build goes quiet then fails loud; no heartbeat noise in #custodian.
 Drafted by Gable from the 2026-07-21 keyboard session with plink. Decision
 records append here as they happen, per house rule 1.
 
