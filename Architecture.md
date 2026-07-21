@@ -208,6 +208,7 @@ Built server-side from already-filtered data. Structure open for future metadata
 
 ## 13. v2 Backlog
 - **Bot unprompted participation** (TOP OF BACKLOG per plink 2026-07-18): policy layer for bots joining conversation un-summoned — rate limits, spend budget, personality tuning. Design alongside AGENTHOOD.md budgets.
+- **`/backlog` slash command** (per plink 2026-07-21, part of the build-from-chat loop): `/backlog` lists the request backlog in-channel; `/backlog <request>` files it verbatim (resident triages later — asks clarifying questions in #custodian only if it's truly unparseable). Listing should be server-rendered, no bot summon; filing is a plain append. Intake half of the loop: requests can arrive anywhere/anytime, planning + build comms live in #custodian.
 - HTML rendering in chat (sanitize with `nh3`)
 - Email notifications (exim4 Gmail smarthost)
 - Group DMs, threads, multi-server
