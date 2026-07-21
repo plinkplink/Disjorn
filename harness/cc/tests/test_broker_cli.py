@@ -77,6 +77,7 @@ def test_valid_args_pass_client_validation(broker_cli):
          "--limit", "500"],
         ["restart-disjorn"],
         ["run-server-tests"],
+        ["refresh-mirror"],
         ["read-metrics"],
     ]
     for argv in good:

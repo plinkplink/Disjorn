@@ -27,8 +27,9 @@ from brokerd import Broker, load_config  # noqa: E402
 
 PY = sys.executable
 ALL_VERBS = [
-    "restart-disjorn", "run-server-tests", "classify-diff", "read-prod-logs",
-    "read-own-log", "read-metrics", "file-proposal", "query-own-audit",
+    "restart-disjorn", "run-server-tests", "refresh-mirror", "classify-diff",
+    "read-prod-logs", "read-own-log", "read-metrics", "file-proposal",
+    "query-own-audit",
 ]
 
 RECORD_STUB = textwrap.dedent("""\
@@ -67,6 +68,16 @@ CLASSIFY_STUB = textwrap.dedent("""\
     ns = p.parse_args()
     print(json.dumps({"tier": 1, "repo": ns.repo, "range": ns.range_spec,
                       "config": ns.config, "gates": json.loads(ns.gates)}))
+""")
+
+MIRROR_STUB = textwrap.dedent("""\
+    #!/usr/bin/env python3
+    # Stub for the refresh-mirror git argvs: record argv, answer like git.
+    import json, sys
+    record = sys.argv[1]
+    with open(record, "a") as fh:
+        fh.write(json.dumps(sys.argv[2:]) + "\\n")
+    print("abc1234" if "rev-parse" in sys.argv else "stub-ok")
 """)
 
 JOURNAL_STUB = textwrap.dedent("""\
@@ -161,6 +172,7 @@ def harness(tmp_path: Path):
     _write_stub(stub_dir / "record.py", RECORD_STUB)
     _write_stub(stub_dir / "tests.py", TESTS_STUB)
     _write_stub(stub_dir / "classify.py", CLASSIFY_STUB)
+    _write_stub(stub_dir / "mirror.py", MIRROR_STUB)
     _write_stub(stub_dir / "journal.py", JOURNAL_STUB)
     record_file = tmp_path / "record.jsonl"
 
@@ -201,6 +213,9 @@ def harness(tmp_path: Path):
         run_server_tests_cwd = "{tmp_path}"
         read_prod_logs = ["{PY}", "{stub_dir / 'journal.py'}"]
         classify_diff = ["{PY}", "{stub_dir / 'classify.py'}"]
+        refresh_mirror_fetch = ["{PY}", "{stub_dir / 'mirror.py'}", "{record_file}", "fetch", "origin"]
+        refresh_mirror_update = ["{PY}", "{stub_dir / 'mirror.py'}", "{record_file}", "merge", "--ff-only", "origin/main"]
+        refresh_mirror_head = ["{PY}", "{stub_dir / 'mirror.py'}", "{record_file}", "rev-parse", "--short", "HEAD"]
 
         [paths]
         metrics_json = "{metrics}"

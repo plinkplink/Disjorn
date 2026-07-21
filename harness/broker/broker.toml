@@ -83,6 +83,15 @@ read_prod_logs = ["journalctl", "-u", "disjorn", "--no-pager", "-o", "short-iso"
 # classify-diff: handler appends --repo/--range/--gates-json (all validated).
 classify_diff = ["/home/plink/Disjorn/Disjorn/server/.venv/bin/python", "/home/plink/Disjorn/Disjorn/harness/classifier/classify_diff.py"]
 
+# refresh-mirror: fast-forward the shared read-only mirror (/srv/disjorn-ro,
+# the residents' only view of the repo) to the canonical repo's main. The verb
+# takes NO caller args — all three argvs are fixed here, so residents can
+# refresh the mirror but never aim git anywhere else. --ff-only fails loudly
+# if the mirror ever diverges (that stays plink's to resolve).
+refresh_mirror_fetch = ["git", "-C", "/srv/disjorn-ro", "fetch", "origin"]
+refresh_mirror_update = ["git", "-C", "/srv/disjorn-ro", "merge", "--ff-only", "origin/main"]
+refresh_mirror_head = ["git", "-C", "/srv/disjorn-ro", "rev-parse", "--short", "HEAD"]
+
 [paths]
 # read-metrics serves exactly this file. The WP-H12 producer
 # (harness/metrics/metrics.py `build`) writes it; run it on a timer. Until it

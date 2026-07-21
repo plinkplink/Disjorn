@@ -72,6 +72,19 @@ All verbs are per-resident toggleable in `verbs.toml` and default OFF.
 - result: `{"exit_code": int, "summary": str}` — `summary` is the last
   non-empty stdout line of the server pytest run (e.g. `148 passed in 25.3s`).
 
+### `refresh-mirror`
+- args: none.
+- result: `{"head": str, "before": str, "updated": bool}` — short HEAD of the
+  mirror after (and before) the refresh.
+- Fast-forwards the shared read-only repo mirror (`/srv/disjorn-ro`, the
+  residents' `/opt/disjorn`) to the canonical repo's `origin/main`. The mirror
+  is the only view of the repo residents have, and nothing else fetches into
+  it — host commits don't cross the wall until this runs. All three git argvs
+  (`rev-parse`, `fetch`, `merge --ff-only`) are fixed broker config; the
+  caller supplies nothing, so the verb can refresh the mirror but never aim
+  git anywhere else. A non-fast-forward mirror is `exec-failure` — a diverged
+  mirror is plink's to resolve, never a resident's.
+
 ### `classify-diff`
 - args: `{"repo": str, "range": str, "gates": object}`
   - `repo` — absolute path, no `..` segments.

@@ -159,6 +159,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("restart-disjorn", help="restart the Disjorn service")
     sub.add_parser("run-server-tests", help="run the server pytest suite")
+    sub.add_parser("refresh-mirror",
+                   help="fast-forward the read-only repo mirror to origin/main")
     sub.add_parser("read-metrics", help="read the house metrics dashboard JSON")
 
     p = sub.add_parser("read-own-log", help="tail your own configured log")
@@ -190,6 +192,7 @@ def build_parser() -> argparse.ArgumentParser:
 ARG_BUILDERS = {
     "restart-disjorn": _args_none,
     "run-server-tests": _args_none,
+    "refresh-mirror": _args_none,
     "read-metrics": _args_none,
     "read-own-log": _args_read_own_log,
     "read-prod-logs": _args_read_prod_logs,

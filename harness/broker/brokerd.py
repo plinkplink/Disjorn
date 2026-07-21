@@ -69,6 +69,7 @@ SUBPROCESS_TIMEOUTS = {  # seconds, per verb
     "run-server-tests": 900,
     "classify-diff": 120,
     "read-prod-logs": 30,
+    "refresh-mirror": 120,
 }
 
 _RANGE_RE = re.compile(r"^[A-Za-z0-9._~^/{}-]{1,200}$")  # git rev / range; no
@@ -204,6 +205,7 @@ class Broker:
         self.verbs: dict[str, Callable[[str, dict], tuple[dict, str]]] = {
             "restart-disjorn": self._verb_restart_disjorn,
             "run-server-tests": self._verb_run_server_tests,
+            "refresh-mirror": self._verb_refresh_mirror,
             "classify-diff": self._verb_classify_diff,
             "read-prod-logs": self._verb_read_prod_logs,
             "read-own-log": self._verb_read_own_log,
@@ -372,6 +374,43 @@ class Broker:
         summary = lines[-1] if lines else "(no output)"
         return ({"exit_code": cp.returncode, "summary": summary},
                 f"exit={cp.returncode}: {summary}"[:300])
+
+    def _verb_refresh_mirror(self, resident: str, args: dict) -> tuple[dict, str]:
+        """Fast-forward the shared read-only repo mirror to the canonical
+        repo's main. The mirror is the ONLY view of the repo residents have
+        (bind-mounted RO into each container), and nothing else ever fetches
+        into it — host commits don't cross the wall until this runs. Zero
+        caller args; every argv is fixed config, so a resident can refresh
+        the mirror but can never aim git anywhere else. `--ff-only` on the
+        update: a diverged mirror fails loudly and stays plink's to resolve."""
+        _reject_unknown(args, set())
+        timeout = SUBPROCESS_TIMEOUTS["refresh-mirror"]
+        head_argv = self._argv("refresh_mirror_head", [
+            "git", "-C", "/srv/disjorn-ro", "rev-parse", "--short", "HEAD"])
+
+        def _head() -> str:
+            cp = self._run(head_argv, timeout)
+            if cp.returncode != 0:
+                raise VerbError("exec-failure",
+                                f"rev-parse exit {cp.returncode}: "
+                                f"{cp.stderr.strip()[:300]}")
+            return cp.stdout.strip()
+
+        before = _head()
+        for key, default in (
+            ("refresh_mirror_fetch",
+             ["git", "-C", "/srv/disjorn-ro", "fetch", "origin"]),
+            ("refresh_mirror_update",
+             ["git", "-C", "/srv/disjorn-ro", "merge", "--ff-only", "origin/main"]),
+        ):
+            cp = self._run(self._argv(key, default), timeout)
+            if cp.returncode != 0:
+                raise VerbError("exec-failure",
+                                f"{key} exit {cp.returncode}: "
+                                f"{(cp.stderr or cp.stdout).strip()[:500]}")
+        head = _head()
+        return ({"head": head, "before": before, "updated": head != before},
+                f"mirror at {head}" + ("" if head == before else f" (was {before})"))
 
     def _verb_classify_diff(self, resident: str, args: dict) -> tuple[dict, str]:
         """Contract with harness/classifier/classify_diff.py (WP-H4):

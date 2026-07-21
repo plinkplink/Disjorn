@@ -66,6 +66,27 @@ All wired; her next restart picks it up:
 - Flip res-gable verbs in /etc/disjorn-broker/verbs.toml deliberately,
   one at a time, same as hers.
 
+## 6a. refresh-mirror verb activation (added 2026-07-21, Gable)
+
+The `refresh-mirror` broker verb (fast-forward /srv/disjorn-ro to origin/main;
+kills the "my mirror is stale" tax from item 2) is built, tested, and OFF.
+To activate:
+- `sudo systemctl restart disjorn-broker` — picks up the new brokerd.py.
+  CAUTION: restarting the broker recreates /run/disjorn-broker (systemd
+  RuntimeDirectory is removed on stop), so any RUNNING resident container
+  keeps a stale directory bind and loses its hands — the exact dead-mount
+  recurrence under investigation. Restart resident containers after, or add
+  `RuntimeDirectoryPreserve=yes` to disjorn-broker.service first (the likely
+  root-cause fix; see #custodian).
+- Sudoedit /etc/disjorn-broker/broker.toml: add the three `refresh_mirror_*`
+  [commands] lines from the repo template (defaults in brokerd.py match, so
+  this is optional but keeps the deployed file honest).
+- Sudoedit /etc/disjorn-broker/verbs.toml: add `"refresh-mirror" = false` to
+  both residents, then flip per resident when ready.
+- Rebuild the resident container image (broker CLI is COPY'd in) so the
+  `broker refresh-mirror` subcommand exists inside; until then residents
+  can't call it even when flipped ON.
+
 ## 6. Then WP-H13 (the gate)
 
 Red-team pass runs after 1–5: egress from inside both containers, chat-derived

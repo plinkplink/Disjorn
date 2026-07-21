@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from broker_testlib import ALL_VERBS, BrokerHarness
+from broker_testlib import ALL_VERBS, PY, BrokerHarness
 from brokerd import Broker, load_config
 
 
@@ -164,6 +164,55 @@ def test_classify_diff_rejects_hostile_args(harness, bad):
     assert resp["ok"] is False
     assert resp["error"]["code"] == "bad-args"
     assert harness.audit_lines()[-1]["allowed"] is False
+
+
+def test_refresh_mirror_runs_fixed_argv_sequence(harness):
+    """head -> fetch -> ff-only merge -> head, all fixed argv, no caller data."""
+    harness.set_verbs(**{"refresh-mirror": True})
+    resp = harness.call("refresh-mirror", {})
+    assert resp["ok"] is True
+    assert resp["result"] == {"head": "abc1234", "before": "abc1234",
+                              "updated": False}
+    assert harness.recorded_argv() == [
+        ["rev-parse", "--short", "HEAD"],
+        ["fetch", "origin"],
+        ["merge", "--ff-only", "origin/main"],
+        ["rev-parse", "--short", "HEAD"],
+    ]
+
+
+def test_refresh_mirror_rejects_any_args(harness):
+    harness.set_verbs(**{"refresh-mirror": True})
+    resp = harness.call("refresh-mirror", {"remote": "https://evil.example"})
+    assert resp["error"]["code"] == "bad-args"
+    assert harness.recorded_argv() == []
+    assert harness.audit_lines()[-1]["allowed"] is False
+
+
+def test_refresh_mirror_off_by_default(harness):
+    resp = harness.call("refresh-mirror", {})
+    assert resp["error"]["code"] == "verb-disabled"
+    assert harness.recorded_argv() == []
+
+
+def test_refresh_mirror_divergence_fails_loud(harness, tmp_path):
+    """A non-fast-forward mirror is exec-failure — plink's to resolve,
+    never auto-recovered by the verb."""
+    harness.set_verbs(**{"refresh-mirror": True})
+    fail = tmp_path / "ff-fail.py"
+    fail.write_text(
+        "#!/usr/bin/env python3\nimport sys\n"
+        "sys.stderr.write('fatal: Not possible to fast-forward, aborting.')\n"
+        "raise SystemExit(128)\n")
+    fail.chmod(0o755)
+    harness.broker.commands["refresh_mirror_update"] = [PY, str(fail)]
+    resp = harness.call("refresh-mirror", {})
+    assert resp["ok"] is False
+    assert resp["error"]["code"] == "exec-failure"
+    assert "fast-forward" in resp["error"]["message"]
+    entry = harness.audit_lines()[-1]
+    assert entry["allowed"] is True  # authorized and ran; the run failed
+    assert "error" in entry["result_summary"]
 
 
 def test_read_prod_logs_line_cap(harness):
@@ -326,7 +375,8 @@ def test_broker_template_parses_and_has_required_sections():
     assert "audit_log" in tmpl["broker"]
     assert set(tmpl["residents"]) == {"res-claudette", "res-gable"}
     for cmd in ["restart_disjorn", "run_server_tests", "read_prod_logs",
-                "classify_diff"]:
+                "classify_diff", "refresh_mirror_fetch",
+                "refresh_mirror_update", "refresh_mirror_head"]:
         assert isinstance(tmpl["commands"][cmd], list)
         assert all(isinstance(a, str) for a in tmpl["commands"][cmd])
     assert tmpl["commands"]["restart_disjorn"] == [

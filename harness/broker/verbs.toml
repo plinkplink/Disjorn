@@ -17,6 +17,7 @@
 [res-claudette]
 "restart-disjorn" = false
 "run-server-tests" = false
+"refresh-mirror" = false
 "classify-diff" = false
 "read-prod-logs" = false
 "read-own-log" = false
@@ -27,6 +28,7 @@
 [res-gable]
 "restart-disjorn" = false
 "run-server-tests" = false
+"refresh-mirror" = false
 "classify-diff" = false
 "read-prod-logs" = false
 "read-own-log" = false
