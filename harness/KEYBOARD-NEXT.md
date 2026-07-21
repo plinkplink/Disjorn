@@ -87,6 +87,49 @@ To activate:
   `broker refresh-mirror` subcommand exists inside; until then residents
   can't call it even when flipped ON.
 
+## 6b. start-build verb activation (added 2026-07-21, WP-L4)
+
+The `start-build` broker verb (launch a DETACHED build of a CONFIRMED spec to a
+`loop/<slug>` branch; the MVP's long pole) is built, tested, and OFF. It merges
+nothing, pushes nothing, and never touches production — the result waits on the
+branch for you. To activate:
+- `sudo systemctl restart disjorn-broker` — picks up the new brokerd.py. Same
+  RuntimeDirectory dead-mount CAUTION as 6a (restart resident containers after,
+  or add `RuntimeDirectoryPreserve=yes` first). NOTE also: a build in flight
+  during a broker restart is orphaned — its done/failed narration is lost (the
+  reaper thread dies with the broker). For detached builds to survive a broker
+  restart, set `KillMode=process` on disjorn-broker.service (leaves the detached
+  session running); it is currently the systemd default (control-group), so a
+  restart kills in-flight builds. Deferred as a deliberate choice — builds are
+  rare and self-terminate at the cap.
+- Install `run-build.sh` world-readable, same as run-resident.sh:
+  `sudo cp harness/cc/run-build.sh /usr/local/lib/disjorn/run-build.sh`
+  (res-* users cannot read /home/plink). `[start_build].command` points here.
+- Sudoedit /etc/disjorn-broker/broker.toml: add the whole `[start_build]`
+  section from the repo template — `command`, `resident`, `session_argv`, the
+  `model` pin (no fallback — the verb refuses a blank pin), `specs_dir`
+  (= `/srv/disjorn-ro/SPECS`, the refreshed RO mirror the confirm gate reads),
+  `timeout_sec`, `daily_build_cap` (ratified default 2). There is NO brokerd
+  default for `specs_dir` or `model`, so these two are REQUIRED — the verb fails
+  loud without them.
+- Sudoedit /etc/disjorn-broker/verbs.toml: add `"start-build" = false` to both
+  residents, then flip per resident when ready.
+- Rebuild the resident container image (broker CLI is COPY'd in) so the
+  `broker start-build --spec ...` subcommand exists inside; until then residents
+  can't call it even when flipped ON. (Same rebuild step as 6a.)
+- Keep the RO mirror fresh (`refresh-mirror`) so `specs_dir` sees confirmed
+  specs: the confirm gate reads the COMMITTED spec, not a working-tree draft.
+- OPEN FORK for the keyboard, flagged by WP-L4: run-build.sh takes the same
+  env-overridable layout as run-resident.sh, but WHO runs it (and thus the
+  container's keep-id identity) depends on how the broker is wired. The broker
+  runs as plink; a build launched straight from it runs podman as plink, whose
+  uid is not a resident (SO_PEERCRED → unknown-caller if the build calls back).
+  If the build session must act AS a resident (res-gable identity, its 0700
+  worktree), the launch needs to drop to that uid — a sudoers/user-unit decision
+  to make here, not in code. Until decided, the build runs under whatever uid
+  execs run-build.sh; validate before granting a resident broker access from
+  inside a build.
+
 ## 6. Then WP-H13 (the gate)
 
 Red-team pass runs after 1–5: egress from inside both containers, chat-derived

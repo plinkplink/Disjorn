@@ -22,6 +22,8 @@ CANNED = {
     "restart-disjorn": {"exit_code": 0, "output": "fake: restarted"},
     "run-server-tests": {"exit_code": 0, "summary": "148 passed in 0.01s"},
     "refresh-mirror": {"head": "abc1234", "before": "abc1234", "updated": False},
+    "start-build": {"started": True, "branch": "loop/fake", "slug": "fake",
+                    "pid": 4242, "confirmed_by": "plink", "seq": 139},
     "classify-diff": {"classification": {"tier": 1, "fake": True}},
     "read-prod-logs": {"lines": ["2026-07-19T00:00:00 fake journal line"]},
     "read-own-log": {"lines": ["fake log line 1", "fake log line 2"],

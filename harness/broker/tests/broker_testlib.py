@@ -27,9 +27,9 @@ from brokerd import Broker, load_config  # noqa: E402
 
 PY = sys.executable
 ALL_VERBS = [
-    "restart-disjorn", "run-server-tests", "refresh-mirror", "classify-diff",
-    "read-prod-logs", "read-own-log", "read-metrics", "file-proposal",
-    "query-own-audit",
+    "restart-disjorn", "run-server-tests", "refresh-mirror", "start-build",
+    "classify-diff", "read-prod-logs", "read-own-log", "read-metrics",
+    "file-proposal", "query-own-audit",
 ]
 
 RECORD_STUB = textwrap.dedent("""\
@@ -90,14 +90,100 @@ JOURNAL_STUB = textwrap.dedent("""\
         print(f"2026-07-19T00:00:{i:02d} disjorn line {i}")
 """)
 
+BUILD_STUB = textwrap.dedent("""\
+    #!/usr/bin/env python3
+    # Stub build session (stands in for run-build.sh + the headless CC build):
+    # record the argv (after the record-file arg) AND the spec read from stdin,
+    # then print a JSON report like a real build session would, exit 0.
+    import json, sys
+    record = sys.argv[1]
+    payload = sys.stdin.read()
+    with open(record, "a") as fh:
+        fh.write(json.dumps({"argv": sys.argv[2:], "stdin": payload}) + "\\n")
+    print(json.dumps({"files": ["server/app/x.py"], "tests": "12 passed",
+                      "diff": "+40 -2", "branch": "loop/stub"}))
+""")
+
+# A minimal spec matching TEMPLATE.md's parseable structure. Callers override
+# status / confirmed_by / seq to exercise the confirm gate (pass a `<...>`
+# placeholder or a draft status to simulate an unconfirmed spec).
+SPEC_BODY = textwrap.dedent("""\
+    # Spec: test build
+
+    ## Request
+    - **Verbatim**: do the thing
+    - **Requester**: usrda
+    - **Origin**: #custodian / seq 100
+
+    ## Agreed UX
+    A thing happens.
+
+    ## Confirm record
+    - **Confirmed by**: {confirmed_by}
+    - **#custodian seq**: {seq}
+    - **Confirmed at**: 2026-07-21T12:00:00Z
+
+    ## Status
+    `{status}`
+""")
+
+
+class FakeBuildProc:
+    """A stand-in for the detached Popen (mock the exec). communicate() records
+    the spec fed on stdin and returns canned (out, err); returncode is settable
+    to exercise the failed path. `block` gates communicate() on an event so a
+    test can prove the verb returns BEFORE the build finishes (detachment)."""
+
+    def __init__(self, out=b"", err=b"", rc=0, block=False, raise_timeout=False):
+        self.pid = 4242
+        self.returncode = rc
+        self._out = out
+        self._err = err
+        self._raise_timeout = raise_timeout
+        self.stdin_written = None
+        self.killed = False
+        self.release = threading.Event()
+        if not block:
+            self.release.set()
+
+    def communicate(self, input=None, timeout=None):
+        import subprocess as _sp
+        self.release.wait(timeout=10)
+        self.stdin_written = input
+        if self._raise_timeout:
+            raise _sp.TimeoutExpired(cmd="build", timeout=timeout)
+        return self._out, self._err
+
+    def kill(self):
+        self.killed = True
+        self.release.set()
+
+
+class FakeBuildSpawn:
+    """Injectable _build_spawn: records each argv and hands back a proc."""
+
+    def __init__(self, proc_factory):
+        self._factory = proc_factory
+        self.calls: list[list[str]] = []
+        self.procs: list = []
+
+    def __call__(self, argv):
+        self.calls.append(list(argv))
+        proc = self._factory()
+        self.procs.append(proc)
+        return proc
+
 
 class BrokerHarness:
     def __init__(self, broker: Broker, verbs_path: Path, record_file: Path,
-                 proposals: list) -> None:
+                 proposals: list, specs_dir: Path | None = None,
+                 build_record: Path | None = None) -> None:
         self.broker = broker
         self.verbs_path = verbs_path
         self.record_file = record_file
         self.proposals = proposals
+        self.specs_dir = specs_dir
+        self.build_record = build_record
 
     # -- client side ------------------------------------------------------
     def _connect(self) -> socket.socket:
@@ -158,6 +244,35 @@ class BrokerHarness:
             return []
         return [json.loads(ln) for ln in self.record_file.read_text().splitlines()]
 
+    # -- start-build helpers ---------------------------------------------
+    def write_spec(self, filename: str, *, status: str = "confirmed",
+                   confirmed_by: str = "plink", seq="139") -> str:
+        """Write a spec into the configured SPECS/ dir; return its filename.
+        Pass a draft status or a `<...>` placeholder confirmed_by/seq to
+        exercise the confirm gate."""
+        assert self.specs_dir is not None
+        (self.specs_dir / filename).write_text(
+            SPEC_BODY.format(status=status, confirmed_by=confirmed_by, seq=seq))
+        return filename
+
+    def build_records(self) -> list[dict]:
+        """The {argv, stdin} records the real build stub wrote."""
+        if self.build_record is None or not self.build_record.exists():
+            return []
+        return [json.loads(ln) for ln in self.build_record.read_text().splitlines()]
+
+    def use_fake_build(self, proc_factory=None) -> FakeBuildSpawn:
+        """Swap in an injectable _build_spawn (mock the exec) and return it for
+        inspection. Default factory yields a clean, immediately-returning proc
+        with a valid JSON report."""
+        if proc_factory is None:
+            def proc_factory():
+                return FakeBuildProc(
+                    out=b'{"files": ["a.py"], "tests": "ok", "diff": "+1 -0"}')
+        spawn = FakeBuildSpawn(proc_factory)
+        self.broker._build_spawn = spawn
+        return spawn
+
 
 def _write_stub(path: Path, content: str) -> None:
     path.write_text(content)
@@ -174,7 +289,11 @@ def harness(tmp_path: Path):
     _write_stub(stub_dir / "classify.py", CLASSIFY_STUB)
     _write_stub(stub_dir / "mirror.py", MIRROR_STUB)
     _write_stub(stub_dir / "journal.py", JOURNAL_STUB)
+    _write_stub(stub_dir / "build.py", BUILD_STUB)
     record_file = tmp_path / "record.jsonl"
+    build_record = tmp_path / "build.jsonl"
+    specs_dir = tmp_path / "SPECS"
+    specs_dir.mkdir()
 
     own_log = tmp_path / "res-test.log"
     own_log.write_text("".join(
@@ -217,6 +336,15 @@ def harness(tmp_path: Path):
         refresh_mirror_update = ["{PY}", "{stub_dir / 'mirror.py'}", "{record_file}", "merge", "--ff-only", "origin/main"]
         refresh_mirror_head = ["{PY}", "{stub_dir / 'mirror.py'}", "{record_file}", "rev-parse", "--short", "HEAD"]
 
+        [start_build]
+        command = ["{PY}", "{stub_dir / 'build.py'}", "{build_record}"]
+        resident = "gable"
+        session_argv = ["--output-format", "json"]
+        model = "claude-opus-4-8"
+        specs_dir = "{specs_dir}"
+        timeout_sec = 30
+        daily_build_cap = 2
+
         [paths]
         metrics_json = "{metrics}"
         protected_paths = "{tmp_path / 'protected-paths.toml'}"
@@ -235,7 +363,8 @@ def harness(tmp_path: Path):
 
     config = load_config(str(broker_toml))
     broker = Broker(config, str(verbs_path), transport=stub_transport)
-    h = BrokerHarness(broker, verbs_path, record_file, proposals)
+    h = BrokerHarness(broker, verbs_path, record_file, proposals,
+                      specs_dir=specs_dir, build_record=build_record)
     h.set_verbs()  # everything explicitly OFF to start
 
     t = threading.Thread(target=broker.serve_forever, daemon=True)

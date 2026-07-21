@@ -72,9 +72,24 @@ SUBPROCESS_TIMEOUTS = {  # seconds, per verb
     "refresh-mirror": 120,
 }
 
+# start-build (WP-L4): the detached build is NOT a synchronous _run() call, so
+# its wall-clock cap lives in config ([start_build].timeout_sec), not the dict
+# above; this is only the fallback when config omits it. Longer than the 300s
+# summon on purpose — a build is a whole feature, not a chat turn.
+START_BUILD_DEFAULT_TIMEOUT = 3600
+# Ratified default (BUILD-LOOP.md): builds are CAPPED by default (2/day), unlike
+# the WP-H12 action budget which ships OFF. plink tunes at staging time.
+DEFAULT_DAILY_BUILD_CAP = 2
+MAX_SPEC_BYTES = 64 * 1024  # a spec is a short markdown doc; bigger is hostile
+
 _RANGE_RE = re.compile(r"^[A-Za-z0-9._~^/{}-]{1,200}$")  # git rev / range; no
 # whitespace, no leading dash (checked separately) — can never be read as a flag
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# A spec slug also names the build branch (loop/<slug>) and rides argv as a
+# positional, so it is held to a strict branch/argv-safe kebab charset — it can
+# never be read as a flag or a path segment.
+_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+_SPEC_DATE_PREFIX_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-")  # SPECS/YYYY-MM-DD-<slug>.md
 
 
 class VerbError(Exception):
@@ -164,6 +179,185 @@ def _sdk_transport(disjorn_cfg: dict, body: str) -> dict:
 
 
 # --------------------------------------------------------------------------
+# start-build (WP-L4): spec parsing, slug/branch derivation, the build-session
+# prompt, and #custodian narration. Pure functions — no I/O, no broker state —
+# so the confirm gate, the slug rules, and every narration shape are unit-
+# testable in isolation, exactly like the argv validators above.
+# --------------------------------------------------------------------------
+
+def _clean_field(value: str) -> Optional[str]:
+    """A spec field value, or None if it is blank or still the TEMPLATE.md
+    placeholder (angle-bracketed `<...>`). This is how "the confirm record is
+    unfilled" is detected mechanically — a spec left with `<username>` in the
+    box has no confirm record, whatever it looks like at a glance."""
+    v = value.strip()
+    if not v or v in {"-", "_"}:
+        return None
+    if v.startswith("<") and v.endswith(">"):
+        return None
+    return v
+
+
+def parse_spec_status(text: str) -> Optional[str]:
+    """The status token under `## Status` (e.g. 'confirmed'), lowercased, or
+    None if the section is absent. Backticks and HTML comments are ignored —
+    TEMPLATE.md writes the token as `` `confirmed` `` trailed by a comment."""
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if line.strip().lower() == "## status":
+            for follow in lines[i + 1:]:
+                s = follow.strip()
+                if not s or s.startswith("<!--"):
+                    continue
+                if s.startswith("#"):  # next heading, no value in the section
+                    return None
+                return s.strip("`").strip().lower()
+            return None
+    return None
+
+
+def parse_confirm_record(text: str) -> dict:
+    """`{confirmed_by, seq}` from the `## Confirm record` section. A field that
+    is blank or still the `<...>` placeholder comes back None — mechanically,
+    that IS "no confirm record". `seq` is the witnessing #custodian sequence as
+    an int (or None). Chat is data: the broker verifies this record, it never
+    trusts a caller's word that a build was confirmed."""
+    lines = text.splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if line.strip().lower() == "## confirm record":
+            start = i + 1
+            break
+    out: dict = {"confirmed_by": None, "seq": None}
+    if start is None:
+        return out
+    for line in lines[start:]:
+        if line.strip().startswith("## "):
+            break  # next section
+        m = re.match(r"\s*-\s*\*\*Confirmed by\*\*:\s*(.*)$", line)
+        if m:
+            out["confirmed_by"] = _clean_field(m.group(1))
+        m = re.match(r"\s*-\s*\*\*#custodian seq\*\*:\s*(.*)$", line)
+        if m:
+            raw = _clean_field(m.group(1))
+            if raw is not None:
+                digits = re.search(r"\d+", raw)
+                out["seq"] = int(digits.group()) if digits else None
+    return out
+
+
+def slug_from_spec_filename(filename: str) -> str:
+    """`SPECS/YYYY-MM-DD-<slug>.md` -> `<slug>` (branch = loop/<slug>). The
+    date prefix is stripped and the remainder must be a strict kebab slug —
+    anything else is bad-args, because this string ends up as a git branch and
+    an argv positional."""
+    base = os.path.basename(filename)
+    if base.endswith(".md"):
+        base = base[:-3]
+    slug = _SPEC_DATE_PREFIX_RE.sub("", base)
+    if not _SLUG_RE.match(slug):
+        raise _bad(f"spec filename does not yield a valid slug: {base!r} "
+                   "(expected SPECS/YYYY-MM-DD-<kebab-slug>.md)")
+    return slug
+
+
+def build_session_prompt(spec_text: str, *, slug: str, branch: str) -> str:
+    """The instruction preamble + the committed spec, fed to the build session
+    on STDIN. ALL of it is data on stdin — argv stays config-only (launcher
+    doctrine): only the mechanically-validated slug/branch and fixed broker
+    text vary here, and the branch/no-merge/no-push rules are stated where the
+    session actually reads them."""
+    return (
+        f"You are a Disjorn build session. Build exactly what the spec below "
+        f"describes, on a NEW git branch named `{branch}` in your worktree.\n"
+        f"Hard rules (non-negotiable):\n"
+        f"- Do NOT merge. Do NOT push. Do NOT touch the production service.\n"
+        f"- Everything you do lands on `{branch}` and waits there for a human.\n"
+        f"- Narrate STATE TRANSITIONS ONLY to #custodian (channel 4): each\n"
+        f"  checkpoint you choose to mark. No heartbeats, no timers — go quiet\n"
+        f"  between transitions, and fail loud if you get stuck.\n"
+        f"- When done, print a final JSON object on stdout with keys "
+        f'"files" (paths touched), "tests" (what you ran + result), '
+        f'"diff" (one-line summary), "branch".\n\n'
+        f"--- SPEC ({slug}) ---\n{spec_text}"
+    )
+
+
+def _parse_build_report(stdout: str) -> dict:
+    """Best-effort structured report from the build session's stdout for the
+    'done' line. The session is asked to end with a JSON object
+    {files, tests, diff, branch}; we surface those and degrade to 'n/a' (or a
+    text tail) if it didn't. Tier is intentionally NOT computed here — see
+    format_build_done: classify-diff is a separate verb, not coupled in."""
+    text = stdout.strip()
+    files = tests = diff = "n/a"
+    data: Any = None
+    if text:
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            data = None
+    if isinstance(data, dict):
+        inner = data
+        for key in ("build_report", "report", "result", "reply"):
+            v = data.get(key)
+            if isinstance(v, dict):
+                inner = v
+                break
+            if isinstance(v, str):
+                try:
+                    parsed = json.loads(v)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(parsed, dict):
+                    inner = parsed
+                    break
+
+        def _fmt(val: Any) -> str:
+            if isinstance(val, list):
+                return ", ".join(str(x) for x in val) or "none"
+            return str(val) if val is not None else "n/a"
+
+        files = _fmt(inner.get("files"))
+        tests = _fmt(inner.get("tests"))
+        diff = _fmt(inner.get("diff"))
+    elif text:
+        diff = text.replace("\n", " ")[:300]
+    return {"files": files, "tests": tests, "diff": diff}
+
+
+def format_build_started(*, slug: str, branch: str, confirmed_by: str,
+                         seq: int, eta_sec: int) -> str:
+    """The 'started' state-transition line. Names the spec, the branch, who
+    confirmed it + the witnessing seq, and an ETA GUESS (the wall-clock cap, a
+    ceiling not a promise). Plain text, greppable, no emoji — same house idiom
+    as the summon summaries."""
+    eta_min = max(1, eta_sec // 60)
+    return (f"build started | {slug} -> {branch} | "
+            f"confirmed by {confirmed_by} (#custodian seq {seq}) | "
+            f"ETA <= {eta_min}m (guess) | no merge, no push — lands on the branch")
+
+
+def format_build_done(*, slug: str, branch: str, files: str, tests: str,
+                      diff: str, tier: str = "pending") -> str:
+    """The 'done' state-transition line: files touched, tests run/result, a
+    one-line diff summary, the branch, and the advisory tier. Tier is 'pending'
+    by default — the reaper does not invoke classify-diff (a separate verb,
+    ships OFF); a human runs it on the branch. Nothing merged, ever."""
+    return (f"build done | {slug} -> {branch} | tier {tier} | "
+            f"files: {files} | tests: {tests} | diff: {diff} | "
+            f"on the branch for review — nothing merged")
+
+
+def format_build_failed(*, slug: str, branch: str, reason: str) -> str:
+    """The 'failed' state-transition line — LOUD. A stalled build goes quiet
+    then lands here (never a heartbeat); the branch keeps whatever exists and a
+    human is told to look."""
+    return (f"BUILD FAILED | {slug} -> {branch} | {reason} | "
+            f"the branch holds what there is — a human should look")
+
+
+# --------------------------------------------------------------------------
 # The broker.
 # --------------------------------------------------------------------------
 
@@ -177,10 +371,14 @@ class Broker:
         verbs_path: str,
         *,
         transport: Optional[Callable[[dict, str], dict]] = None,
+        build_spawn: Optional[Callable[[list[str]], Any]] = None,
     ) -> None:
         self.config = config
         self.verbs_path = verbs_path
         self.transport = transport or _sdk_transport
+        # How a detached build session is launched. Injected in tests (mock the
+        # exec); prod uses _default_build_spawn (a detached, un-waited Popen).
+        self._build_spawn = build_spawn or self._default_build_spawn
         broker_cfg = config.get("broker", {})
         self.socket_path: str = broker_cfg.get("socket_path", DEFAULT_SOCKET_PATH)
         self.audit_path: str = broker_cfg["audit_log"]
@@ -196,7 +394,22 @@ class Broker:
         # a cap change needs a broker restart (unlike verbs.toml kill switches,
         # which are re-read live). Default: no cap == OFF. Instrument first.
         self.budgets: dict[str, Any] = config.get("budgets", {})
+        # start-build (WP-L4) config: the detached build-session launch contract
+        # (command + session_argv + model pin), the SPECS/ dir the confirm gate
+        # reads, the wall-clock cap, and the per-day build budget.
+        self.start_build: dict[str, Any] = config.get("start_build", {})
         self._audit_lock = threading.Lock()
+        # Build-budget lock (H13-D4): count-with-reservation is held under this,
+        # so two concurrent start-builds can NEVER both slip past the cap — the
+        # check-then-act race the red-team flagged is closed here.
+        self._build_lock = threading.Lock()
+        # Per-resident build reservations for the day: resident -> (utc_date,
+        # count). Seeded lazily from the audit log per day, then authoritative
+        # in memory (never re-read, so in-flight builds are never double-counted).
+        self._builds: dict[str, tuple[Optional[str], int]] = {}
+        # Detached build reaper threads, kept ONLY so tests can join them;
+        # production never waits on a build — detachment is the whole point.
+        self._build_threads: list[threading.Thread] = []
         self._listener: Optional[socket.socket] = None
         self._closed = False
 
@@ -206,6 +419,7 @@ class Broker:
             "restart-disjorn": self._verb_restart_disjorn,
             "run-server-tests": self._verb_run_server_tests,
             "refresh-mirror": self._verb_refresh_mirror,
+            "start-build": self._verb_start_build,
             "classify-diff": self._verb_classify_diff,
             "read-prod-logs": self._verb_read_prod_logs,
             "read-own-log": self._verb_read_own_log,
@@ -265,6 +479,81 @@ class Broker:
             return 0
         return n
 
+    # -------------------------------------------------------- build budget
+
+    def _daily_build_cap(self, resident: str) -> Optional[int]:
+        """Per-day build cap for a resident.
+        `[start_build.per_resident.<r>].daily_build_cap` wins; else
+        `[start_build].daily_build_cap`; else the ratified default of 2. Builds
+        are capped by DEFAULT (BUILD-LOOP.md), unlike the WP-H12 action budget:
+        the blast radius of an autonomous build is a whole branch of tokens."""
+        per = self.start_build.get("per_resident")
+        if isinstance(per, dict):
+            r = per.get(resident)
+            if isinstance(r, dict) and isinstance(r.get("daily_build_cap"), int):
+                return r["daily_build_cap"]
+        cap = self.start_build.get("daily_build_cap", DEFAULT_DAILY_BUILD_CAP)
+        return cap if isinstance(cap, int) else DEFAULT_DAILY_BUILD_CAP
+
+    def _count_builds_today(self, resident: str, today: str) -> int:
+        """Allowed start-build audit lines for this resident today (UTC). Used
+        ONLY to seed the in-memory reservation counter once per day; after
+        seeding the counter is authoritative, so a build launched this process
+        (already reserved in memory, not yet reflected here until dispatch
+        writes its line) is never counted twice."""
+        n = 0
+        try:
+            with open(self.audit_path, "r", encoding="utf-8") as fh:
+                for raw in fh:
+                    if "start-build" not in raw or resident not in raw:
+                        continue
+                    try:
+                        rec = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    if (rec.get("resident") == resident
+                            and rec.get("verb") == "start-build"
+                            and rec.get("allowed") is True
+                            and str(rec.get("ts", ""))[:10] == today):
+                        n += 1
+        except OSError:
+            return 0
+        return n
+
+    def _reserve_build(self, resident: str) -> tuple[int, Optional[int]]:
+        """Race-safe build-budget check + reservation (H13-D4: count-with-
+        reservation under a lock, NEVER check-then-act on the audit file).
+        Under one lock: seed the day's count from the audit log if unseen,
+        refuse at/over the cap, else reserve a slot and return (used_after,
+        cap). Because the lock spans count AND reserve, concurrent start-builds
+        can never both pass a cap of N."""
+        cap = self._daily_build_cap(resident)
+        with self._build_lock:
+            today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
+            date, count = self._builds.get(resident, (None, 0))
+            if date != today:  # first build this UTC day (or after restart)
+                count = self._count_builds_today(resident, today)
+            if cap is not None and count >= cap:
+                self._builds[resident] = (today, count)
+                raise VerbError("over-budget",
+                                f"daily build budget of {cap} reached for {resident}")
+            self._builds[resident] = (today, count + 1)
+            return count + 1, cap
+
+    def _release_build(self, resident: str) -> None:
+        """Refund a reservation when the launch itself never started (a build
+        that ran and then failed keeps its slot — it burned the attempt)."""
+        with self._build_lock:
+            date, count = self._builds.get(resident, (None, 0))
+            if count > 0:
+                self._builds[resident] = (date, count - 1)
+
+    def join_builds(self, timeout: float = 5.0) -> None:
+        """Join detached build reaper threads — TEST convenience only.
+        Production never waits on a build (detachment is the whole point)."""
+        for t in list(self._build_threads):
+            t.join(timeout)
+
     # --------------------------------------------------------------- core
 
     def dispatch(self, uid: int, verb: Any, args: Any) -> dict:
@@ -312,7 +601,11 @@ class Broker:
         try:
             result, summary = self.verbs[verb](resident, args)
         except VerbError as exc:
-            allowed = exc.code != "bad-args"  # bad args = a denial, not a run
+            # A denial (the verb never ran) audits allowed=False; an authorized
+            # run that failed audits allowed=True. bad-args is a denial; so is a
+            # handler-raised over-budget (e.g. the WP-L4 build budget, refused
+            # before any launch) — neither reached execution.
+            allowed = exc.code not in ("bad-args", "over-budget")
             self._audit(caller, verb, args, allowed,
                         f"{'error' if allowed else 'denied'}: {exc.message}")
             return self._err(exc.code, exc.message)
@@ -411,6 +704,218 @@ class Broker:
         head = _head()
         return ({"head": head, "before": before, "updated": head != before},
                 f"mirror at {head}" + ("" if head == before else f" (was {before})"))
+
+    # ------------------------------------------------------------ start-build
+
+    def _specs_dir(self) -> str:
+        d = self.start_build.get("specs_dir")
+        if not d or not isinstance(d, str):
+            raise VerbError("internal", "start_build.specs_dir is not configured")
+        return d
+
+    def _resolve_spec_path(self, spec: str) -> str:
+        """Map caller input to a real spec file, CONFINED to the configured
+        SPECS/ dir. realpath() resolves BOTH `..` traversal and symlink escape,
+        then we require the resolved file to sit DIRECTLY in SPECS/ (the flat
+        one-file-per-spec layout) and end in .md. A caller can never point the
+        builder outside SPECS/ — not with `..`, not through a planted symlink,
+        not with an absolute path. The path is caller input; the confinement is
+        the broker's, verified mechanically."""
+        if spec.startswith("-") or "\x00" in spec:
+            raise _bad("spec must not start with '-' or contain NUL")
+        specs_dir = self._specs_dir()
+        candidate = spec if os.path.isabs(spec) else os.path.join(specs_dir, spec)
+        real = os.path.realpath(candidate)
+        real_specs = os.path.realpath(specs_dir)
+        if os.path.dirname(real) != real_specs or not real.endswith(".md"):
+            raise _bad("spec must be a .md file directly inside the SPECS/ directory")
+        if not os.path.isfile(real):
+            raise _bad("spec file does not exist")
+        return real
+
+    def _read_confirmed_spec(self, path: str) -> dict:
+        """Read + validate the spec at `path`: status must be 'confirmed' and
+        the confirm record must be filled (Confirmed by + #custodian seq).
+        No confirm record -> refuse, fail-loud. Returns the fields the launch
+        and narration need. The verbs.toml toggle authorizes the CLASS (this
+        resident may build); THIS record selects the instance and the broker
+        verifies it — chat is data, never authorization."""
+        try:
+            if os.path.getsize(path) > MAX_SPEC_BYTES:
+                raise _bad(f"spec exceeds {MAX_SPEC_BYTES} bytes")
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+        except OSError as exc:
+            raise VerbError("exec-failure", f"spec not readable: {exc}") from None
+
+        status = parse_spec_status(text)
+        if status != "confirmed":
+            raise _bad(f"spec status is {status!r}, not 'confirmed' — no build "
+                       "starts without a confirmed spec")
+        confirm = parse_confirm_record(text)
+        if not confirm.get("confirmed_by") or confirm.get("seq") is None:
+            raise _bad("spec has no confirm record (need 'Confirmed by' + "
+                       "'#custodian seq') — the confirm record is the instance "
+                       "selector the broker verifies mechanically")
+        slug = slug_from_spec_filename(path)
+        return {"text": text, "slug": slug, "branch": f"loop/{slug}",
+                "confirmed_by": confirm["confirmed_by"], "seq": confirm["seq"]}
+
+    def _build_argv(self, slug: str) -> list[str]:
+        """The detached build command — a PURE function of config + the
+        validated slug. Mirrors the summon launcher's contract
+        (launcher.build_argv):
+            [*command, resident, slug, *session_argv, "--model", model]
+        Only fixed config and the mechanically-validated kebab slug (branch/
+        argv-safe) reach argv; the spec — the chat-derived design — rides on
+        STDIN. The model pin is WP-L5's idiom: appended as `--model <id>`,
+        forwarded by run-build.sh through the bash wrapper's "$@", with NO
+        fallback (a blank pin is config drift and fails loud here, never
+        silently rides the account default)."""
+        command = self.start_build.get("command", [])
+        if (not isinstance(command, list) or not command
+                or not all(isinstance(a, str) for a in command)):
+            raise VerbError("internal",
+                            "start_build.command must be a non-empty list of strings")
+        resident_arg = str(self.start_build.get("resident", "gable"))
+        session_argv = self.start_build.get("session_argv", [])
+        if (not isinstance(session_argv, list)
+                or not all(isinstance(a, str) for a in session_argv)):
+            raise VerbError("internal",
+                            "start_build.session_argv must be a list of strings")
+        model = self.start_build.get("model")
+        if not isinstance(model, str) or not model.strip():
+            raise VerbError("internal",
+                            "start_build.model must be a non-empty string "
+                            "(WP-L5 pin; no fallback)")
+        return [*command, resident_arg, slug, *session_argv, "--model", model.strip()]
+
+    def _default_build_spawn(self, argv: list[str]) -> subprocess.Popen:
+        """Launch the build DETACHED so it outlives this request.
+        `start_new_session=True` puts it in its OWN session/process group — a
+        broker signal to its own foreground group never reaches it — and the
+        broker does NOT wait: a daemon reaper feeds the spec on stdin, holds the
+        wall-clock cap, and narrates the terminal transition. Fixed argv, shell
+        NEVER involved (same discipline as _run)."""
+        return subprocess.Popen(  # noqa: S603 — argv list, no shell
+            argv,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+
+    def _narrate(self, body: str) -> None:
+        """Post a build state-transition line to #custodian via the broker's
+        OWN bot identity — the same transport file-proposal uses. Best-effort:
+        a posting failure never crashes a build (the audit line still lands).
+        STATE TRANSITIONS ONLY — this is never called on a timer."""
+        try:
+            self.transport(self.disjorn, body)
+        except Exception:  # noqa: BLE001 — narration is legibility, not control
+            pass
+
+    def _reap_build(self, proc: Any, spec_bytes: bytes, meta: dict,
+                    timeout: int) -> None:
+        """Detached-build lifecycle END (runs in a daemon thread; the request
+        returned long ago). Feed the spec on stdin, wait up to the wall-clock
+        cap, then narrate the terminal state transition — done or failed. No
+        intermediate posts: a build that stalls goes quiet and fails loud at the
+        cap (BUILD-LOOP: never timer-driven)."""
+        slug, branch = meta["slug"], meta["branch"]
+        try:
+            out, err = proc.communicate(spec_bytes, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+                proc.communicate()
+            except Exception:  # noqa: BLE001 — already reaping
+                pass
+            self._narrate(format_build_failed(
+                slug=slug, branch=branch,
+                reason=f"timed out after {timeout}s — killed"))
+            return
+        except Exception as exc:  # noqa: BLE001 — broken pipe etc. = a failure
+            self._narrate(format_build_failed(
+                slug=slug, branch=branch, reason=f"build error: {exc!r}"))
+            return
+
+        out_s = out.decode("utf-8", "replace") if isinstance(out, (bytes, bytearray)) else str(out or "")
+        err_s = err.decode("utf-8", "replace") if isinstance(err, (bytes, bytearray)) else str(err or "")
+        rc = getattr(proc, "returncode", None)
+        if rc is not None and rc != 0:
+            self._narrate(format_build_failed(
+                slug=slug, branch=branch,
+                reason=f"exit {rc}: {(err_s or out_s).strip()[:400]}"))
+            return
+        report = _parse_build_report(out_s)
+        self._narrate(format_build_done(
+            slug=slug, branch=branch, files=report["files"],
+            tests=report["tests"], diff=report["diff"], tier="pending"))
+
+    def _verb_start_build(self, resident: str, args: dict) -> tuple[dict, str]:
+        """Launch a DETACHED build of a CONFIRMED spec to `loop/<slug>` (WP-L4).
+
+        The gate, in order and all mechanical (chat is data, never
+        authorization — the verbs.toml toggle authorizes the CLASS, this
+        resident may run builds; the confirm record in the file selects the
+        INSTANCE and the broker verifies it, never trusts it):
+          1. the spec path resolves inside SPECS/ (no `..`, no symlink escape);
+          2. the spec's status is 'confirmed' with a real confirm record
+             (Confirmed by + #custodian seq) — else refuse, fail-loud;
+          3. the per-day build budget has a free slot (race-safe reservation).
+        On accept it posts a 'started' line to #custodian, spawns the build
+        detached (own session; outlives this request), and returns immediately.
+        A daemon reaper feeds the spec on stdin, holds the wall-clock cap, and
+        narrates done/failed. The build lands on the branch; NOTHING merges,
+        pushes, or touches production."""
+        _reject_unknown(args, {"spec"})
+        spec_arg = _check_str(args, "spec", required=True, max_len=300)
+        assert spec_arg is not None
+        spec_path = self._resolve_spec_path(spec_arg)
+        meta = self._read_confirmed_spec(spec_path)
+
+        # Build the argv (pure config + validated slug) BEFORE reserving, so a
+        # misconfiguration refuses without burning a budget slot.
+        argv = self._build_argv(meta["slug"])
+        timeout = int(self.start_build.get("timeout_sec", START_BUILD_DEFAULT_TIMEOUT))
+        prompt = build_session_prompt(
+            meta["text"], slug=meta["slug"], branch=meta["branch"])
+
+        # Reserve the budget slot under the lock (H13-D4). A refusal here is
+        # audited over-budget like any other denial.
+        used, cap = self._reserve_build(resident)
+
+        # 'started' — a state transition; best-effort (a failed post must never
+        # sink a launched build, and is never a heartbeat).
+        self._narrate(format_build_started(
+            slug=meta["slug"], branch=meta["branch"],
+            confirmed_by=meta["confirmed_by"], seq=meta["seq"], eta_sec=timeout))
+
+        try:
+            proc = self._build_spawn(argv)
+        except OSError as exc:
+            self._release_build(resident)  # never spawned; refund the slot
+            self._narrate(format_build_failed(
+                slug=meta["slug"], branch=meta["branch"],
+                reason=f"launch failed: {exc}"))
+            raise VerbError("exec-failure",
+                            f"build failed to launch: {exc}") from None
+
+        t = threading.Thread(
+            target=self._reap_build,
+            args=(proc, prompt.encode("utf-8"), meta, timeout),
+            daemon=True)
+        self._build_threads.append(t)
+        t.start()
+
+        result = {"started": True, "branch": meta["branch"], "slug": meta["slug"],
+                  "pid": getattr(proc, "pid", None),
+                  "confirmed_by": meta["confirmed_by"], "seq": meta["seq"]}
+        budget_str = f"{used}/{cap}" if cap is not None else str(used)
+        return (result,
+                f"build {meta['slug']} -> {meta['branch']} launched "
+                f"(budget {budget_str})")
 
     def _verb_classify_diff(self, resident: str, args: dict) -> tuple[dict, str]:
         """Contract with harness/classifier/classify_diff.py (WP-H4):

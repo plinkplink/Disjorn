@@ -85,6 +85,48 @@ All verbs are per-resident toggleable in `verbs.toml` and default OFF.
   git anywhere else. A non-fast-forward mirror is `exec-failure` — a diverged
   mirror is plink's to resolve, never a resident's.
 
+### `start-build`
+- args: `{"spec": str}` — a spec filename (or path) resolving DIRECTLY inside
+  the configured `SPECS/` dir. Absolute paths, `..` traversal, and symlink
+  escape are all rejected (`bad-args`); a leading `-` or NUL is rejected.
+- result: `{"started": true, "branch": str, "slug": str, "pid": int?,
+  "confirmed_by": str, "seq": int}` — the build was accepted and launched
+  DETACHED; the branch is `loop/<slug>`.
+- Launches a headless Claude Code **build session** that builds the confirmed
+  spec to a NEW branch `loop/<slug>` (slug = the spec filename minus its
+  `YYYY-MM-DD-` date prefix and `.md`). The session runs in the resident's
+  worktree (rw) with a longer wall-clock cap than the 300s summon
+  (`[start_build].timeout_sec`, suggest 3600s) and the model pinned via the
+  WP-L5 idiom (`--model <id>`, no fallback). It **does NOT merge, does NOT
+  push, does NOT touch production** — the result waits on the branch for a
+  human. `argv` is entirely config-derived (`[*command, resident, slug,
+  *session_argv, "--model", model]`); the spec (the chat-derived design) is
+  fed on **STDIN**, never spliced into argv (launcher.py doctrine).
+- **Confirm gate** (chat is data, never authorization): the `verbs.toml` toggle
+  authorizes the *class* (this resident may run builds); the spec's **confirm
+  record** selects the *instance* and the broker verifies it mechanically. The
+  spec's `## Status` must be `confirmed` AND the `## Confirm record` must be
+  filled — a real `Confirmed by` (not the `<...>` placeholder) and an integer
+  `#custodian seq`. No confirm record → refuse, fail-loud (`bad-args`).
+- **Budget**: a per-day build cap (`[start_build].daily_build_cap`, ratified
+  default **2**; CAPPED by default, unlike the action budget). Enforced
+  race-safely — count-with-reservation under a lock (H13-D4) — so concurrent
+  calls can never both pass a cap of N. At/over the cap the call is denied
+  `over-budget` and audited like any denial.
+- **Detachment**: the broker execs the launch wrapper via `subprocess.Popen`
+  with `start_new_session=True` (its own session/process group) and does NOT
+  wait, so the build outlives this request. A daemon reaper thread feeds the
+  spec on stdin, holds the wall-clock cap (kill on timeout), and posts the
+  terminal state transition to #custodian.
+- **Narration** (STATE TRANSITIONS ONLY — never timer-driven; a stalled build
+  goes quiet then fails loud): posts to #custodian (channel 4) via the broker's
+  OWN bot identity (same transport as `file-proposal`) at **started** (spec,
+  branch, confirmer + seq, an ETA guess), **done** (files touched, tests
+  run/result, one-line diff summary, branch; advisory **tier pending** — a
+  human runs `classify-diff` on the branch), or **failed** (why, loud).
+  Intermediate checkpoints are the build session's own choice to mark, from
+  inside the session — the broker owns only the started/done/failed transitions.
+
 ### `classify-diff`
 - args: `{"repo": str, "range": str, "gates": object}`
   - `repo` — absolute path, no `..` segments.

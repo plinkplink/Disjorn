@@ -135,6 +135,15 @@ def _args_file_proposal(ns: argparse.Namespace) -> dict:
     return {"text": ns.text}
 
 
+def _args_start_build(ns: argparse.Namespace) -> dict:
+    spec = ns.spec
+    if not (1 <= len(spec) <= 300):
+        raise ArgError("--spec must be 1..300 chars")
+    if spec.startswith("-") or "\x00" in spec:
+        raise ArgError("--spec must not start with '-' or contain NUL")
+    return {"spec": spec}
+
+
 def _args_query_own_audit(ns: argparse.Namespace) -> dict:
     for label, value in (("--from", ns.date_from), ("--to", ns.date_to)):
         if not DATE_RE.match(value):
@@ -162,6 +171,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("refresh-mirror",
                    help="fast-forward the read-only repo mirror to origin/main")
     sub.add_parser("read-metrics", help="read the house metrics dashboard JSON")
+
+    p = sub.add_parser("start-build",
+                       help="launch a detached build of a confirmed spec")
+    p.add_argument("--spec", required=True,
+                   help="spec filename inside SPECS/ (e.g. 2026-07-21-gif-picker.md)")
 
     p = sub.add_parser("read-own-log", help="tail your own configured log")
     p.add_argument("--lines", type=int, default=None, help="1..500 (server default 100)")
@@ -194,6 +208,7 @@ ARG_BUILDERS = {
     "run-server-tests": _args_none,
     "refresh-mirror": _args_none,
     "read-metrics": _args_none,
+    "start-build": _args_start_build,
     "read-own-log": _args_read_own_log,
     "read-prod-logs": _args_read_prod_logs,
     "classify-diff": _args_classify_diff,

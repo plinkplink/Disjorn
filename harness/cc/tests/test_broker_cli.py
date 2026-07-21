@@ -43,6 +43,8 @@ def run_cli(broker_cli, capsys, argv, env=None):
     ["query-own-audit", "--from", "2026-07-19", "--to", "19-07-2026"],
     ["query-own-audit", "--from", "2026-07-01", "--to", "2026-07-19",
      "--limit", "501"],
+    ["start-build", "--spec", ""],
+    ["start-build", "--spec=-oops.md"],
 ])
 def test_client_side_rejection(broker_cli, capsys, argv):
     # No socket exists at this path: reaching the transport would exit 3,
@@ -78,6 +80,7 @@ def test_valid_args_pass_client_validation(broker_cli):
         ["restart-disjorn"],
         ["run-server-tests"],
         ["refresh-mirror"],
+        ["start-build", "--spec", "2026-07-21-gif-picker.md"],
         ["read-metrics"],
     ]
     for argv in good:

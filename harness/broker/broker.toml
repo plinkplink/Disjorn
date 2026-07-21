@@ -114,6 +114,44 @@ protected_paths = "/etc/disjorn-broker/protected-paths.toml"
 # [budgets.res-gable]
 # daily_action_cap = 2000
 
+[start_build]
+# WP-L4 start-build: launch a DETACHED build of a CONFIRMED spec to a
+# `loop/<slug>` branch. Like the WP-H9 summon launcher, argv is ENTIRELY
+# config-derived — [*command, resident, slug, *session_argv, "--model", model]
+# — and the spec (the chat-derived design) is fed on STDIN, never spliced into
+# argv. The verb ships OFF in verbs.toml; this section is inert until flipped.
+#
+# The container-launch wrapper (sibling of run-resident.sh; worktree rw, longer
+# cap). Installed world-readable, same as run-resident.sh (res-* users cannot
+# read /home/plink).
+command = ["/usr/local/lib/disjorn/run-build.sh"]
+resident = "gable"
+# The command run INSIDE the container: a headless Claude Code build session.
+# The trailing "$@" + the "build-session" argv0 are load-bearing (WP-L5): the
+# broker appends `--model <id>` after this list, and `bash -lc "<script>"
+# build-session --model <id>` makes those the script's positional args, which
+# "$@" forwards to claude. Drop either and the pin stops reaching claude.
+session_argv = ["bash", "-lc", "exec claude -p --output-format json \"$@\"", "build-session"]
+# WP-L5 MODEL PIN — no fallback. A blank/absent pin is config drift and the
+# verb refuses (never rides the account default). ONE-PIN UPGRADE PATH: flip
+# this one value when Fable API access returns on plink's credits.
+model = "claude-opus-4-8"
+# The authoritative committed specs the confirm gate reads: the read-only repo
+# mirror's SPECS/ (refreshed by refresh-mirror). A spec must resolve DIRECTLY
+# inside this dir — no `..`, no symlink escape — and be status `confirmed` with
+# a filled confirm record, or the build is refused.
+specs_dir = "/srv/disjorn-ro/SPECS"
+# Wall-clock cap for the detached build (seconds). Longer than the 300s summon
+# — a build is a whole feature, not a chat turn. The reaper kills at the cap
+# and narrates a loud failure.
+timeout_sec = 3600
+# Per-day build budget (BUILD-LOOP.md ratified default: 2). CAPPED by default,
+# unlike the action budget above. Race-safe (count-with-reservation, H13-D4).
+daily_build_cap = 2
+# Optional per-resident override:
+# [start_build.per_resident.res-gable]
+# daily_build_cap = 2
+
 [disjorn]
 # file-proposal posts to #custodian AS THE BROKER'S OWN bot identity — the
 # proposal text is data; the authority to post is the broker's. Create a

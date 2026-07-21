@@ -18,6 +18,7 @@
 "restart-disjorn" = false
 "run-server-tests" = false
 "refresh-mirror" = false
+"start-build" = false
 "classify-diff" = false
 "read-prod-logs" = false
 "read-own-log" = false
@@ -29,6 +30,7 @@
 "restart-disjorn" = false
 "run-server-tests" = false
 "refresh-mirror" = false
+"start-build" = false
 "classify-diff" = false
 "read-prod-logs" = false
 "read-own-log" = false
