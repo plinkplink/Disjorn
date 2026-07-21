@@ -122,6 +122,13 @@ if [ -n "${RESIDENT_PODMAN_EXTRA:-}" ]; then
 fi
 
 args+=( "$IMAGE" )
+# Everything after the resident name is forwarded verbatim as the container
+# command. This carries the summon session_argv AND the WP-L5 model pin: the
+# adapter appends `--model <id>` to the argv, so it arrives here in "$@" and
+# rides into the container command unchanged. run-resident.sh does NOT and
+# cannot cheaply re-derive the resolved model (that lives in Claude Code's
+# JSON result on stdout, which the adapter parses and asserts) — its job is
+# only to forward the pin faithfully; the assert happens one layer up.
 [ "$#" -gt 0 ] && args+=( "$@" )
 
 exec podman "${args[@]}"

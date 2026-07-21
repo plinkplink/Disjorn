@@ -76,11 +76,17 @@ class BackfillConfig:
 class ContainerConfig:
     # The container-launch contract. In prod this is the run-resident.sh
     # wrapper; in tests it is a stub script. argv is entirely config-derived:
-    #   [*command, resident, *session_argv]
+    #   [*command, resident, *session_argv, ("--model", model) if pinned]
     # and the assembled prompt is fed on STDIN — never spliced into argv.
     command: list[str] = field(default_factory=list)
     resident: str = "gable"
     session_argv: list[str] = field(default_factory=list)
+    # WP-L5 model pin: the model the summoned session MUST run. When set the
+    # launcher appends `--model <model>` to the argv (config, never chat), so
+    # the session never silently rides the API key's account default. No
+    # fallback — a session that can't run the pin fails loud. None = unpinned
+    # (documented legacy behaviour; prod always pins).
+    model: Optional[str] = None
     timeout_sec: float = 1800.0
     # Extra env for the launch subprocess (e.g. RESIDENT_IMAGE). Config only.
     env: dict[str, str] = field(default_factory=dict)
@@ -110,6 +116,23 @@ class TextConfig:
         "Something went wrong running that on my end; a human can check "
         "#custodian for the details."
     )
+
+
+def _parse_model(raw) -> Optional[str]:
+    """The [container].model pin, validated fail-loud (WP-L5).
+
+    Absent → None (unpinned). Present → must be a non-empty string; a blank or
+    non-string value is config drift and raises at load time, never a silent
+    empty pin that would fall through to the account default.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError(
+            "container.model must be a non-empty string when set "
+            f"(got {raw!r})"
+        )
+    return raw.strip()
 
 
 @dataclass
@@ -169,6 +192,7 @@ class AdapterConfig:
                 command=[str(a) for a in cn.get("command", [])],
                 resident=str(cn.get("resident", ContainerConfig.resident)),
                 session_argv=[str(a) for a in cn.get("session_argv", [])],
+                model=_parse_model(cn.get("model")),
                 timeout_sec=float(cn.get("timeout_sec", ContainerConfig.timeout_sec)),
                 env={str(k): str(v) for k, v in (cn.get("env", {}) or {}).items()},
             ),

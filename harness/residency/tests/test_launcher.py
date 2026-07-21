@@ -69,7 +69,12 @@ def test_extra_env_reaches_subprocess(tmp_path, monkeypatch):
 
 
 def test_parse_output_variants():
-    assert parse_output('{"result": "hi", "num_turns": 2}') == ("hi", 2)
-    assert parse_output('{"reply": "yo", "action_count": 5}') == ("yo", 5)
-    assert parse_output("plain text") == ("plain text", None)
-    assert parse_output("") == ("", None)
+    # (reply, action_count, model) — model absent in these envelopes.
+    assert parse_output('{"result": "hi", "num_turns": 2}') == ("hi", 2, None)
+    assert parse_output('{"reply": "yo", "action_count": 5}') == ("yo", 5, None)
+    assert parse_output("plain text") == ("plain text", None, None)
+    assert parse_output("") == ("", None, None)
+    # model rides along when the envelope carries it.
+    assert parse_output(
+        '{"result": "hi", "num_turns": 1, "model": "claude-opus-4-8"}'
+    ) == ("hi", 1, "claude-opus-4-8")

@@ -43,7 +43,12 @@ from cursor import CursorStore
 from detector import SummonDetector
 from launcher import ContainerLauncher
 from prompt import assemble_prompt
-from summary import format_refusal_summary, format_summary
+from summary import (
+    format_drift_alert,
+    format_refusal_summary,
+    format_reply_suffix,
+    format_summary,
+)
 
 logger = logging.getLogger("disjorn.residency")
 
@@ -141,8 +146,9 @@ class SummonAdapter:
 
         count = self.budget.spend()
         logger.info(
-            "summon %d/%d: %s in %s",
+            "summon %d/%d: %s in %s (model pin %s)",
             count, self.config.budget.daily_session_cap, summoner, where,
+            self.config.container.model or "unpinned",
         )
 
         prompt = await self._assemble(event, summoner, where)
@@ -161,9 +167,36 @@ class SummonAdapter:
             # The polite channel line hides the cause on purpose; the log
             # must not — a silent 0.0s failure cost a debugging round.
             logger.warning("summon session failed: %s", result.error or "(no detail)")
+
+        # WP-L5 model integrity: assert the actually-used model against the
+        # pin where knowable. pin = config (never chat); actual = what the
+        # session reported (best-effort, may be None). display = what's really
+        # running, for the visible suffix + audit line.
+        pin = self.config.container.model
+        actual = result.model if result.ok else None
+        display_model = actual or pin
+        drift = bool(pin and actual and actual != pin)
+        if drift:
+            logger.error(
+                "model drift: pinned %s but session ran %s (summon by %s in %s)",
+                pin, actual, summoner, where,
+            )
+
         reply = result.reply.strip() if result.ok else ""
         text = reply if reply else self.config.text.error_line
+        if display_model:
+            text = f"{text}\n\n{format_reply_suffix(self.config.summon.bot_name, display_model)}"
         await self._safe_send(channel_id, text, reply_to=trigger_id)
+
+        # Fail-loud, never fail-over: on drift the reply still went out above;
+        # here the house gets a loud alert naming expected vs actual.
+        if drift:
+            await self._safe_send(
+                self.config.summon.custodian_channel_id,
+                format_drift_alert(
+                    expected=pin, actual=actual, summoner=summoner, where=where,
+                ),
+            )
 
         await self._safe_send(
             self.config.summon.custodian_channel_id,
@@ -171,6 +204,7 @@ class SummonAdapter:
                 summoner=summoner, where=where,
                 action_count=result.action_count,
                 duration_sec=result.duration_sec, ok=result.ok,
+                model=display_model,
             ),
         )
 
