@@ -106,6 +106,17 @@ happen (silent account-default changes, key swaps, CC upgrades):
    the assert + suffix verify the change end-to-end. Documented in
    KEYBOARD-NEXT.md when WP-L5 lands.
 
+Amendment 2026-07-21 (during the build): Gable's flat "no auto-demotion
+mechanism exists" was wrong for interactive surfaces — Fable 5's
+safeguards DO switch flagged consumer/CC-TUI sessions to Opus 4.8, sticky
+per conversation (support article 15363606; user lever: Settings >
+Capabilities toggle). On the raw API — which is what the summon path uses
+— switching is NOT automatic; flagged requests error rather than silently
+substitute. The summon-path finding stands: never pinned, always Opus,
+entitlement-bound. The pin stays claude-opus-4-8 until a live probe shows
+Fable runs on plink's API credits; drift-assert (item 2) is the standing
+countermeasure should any server-side substitution ever appear.
+
 ## Work packages (MVP)
 
 Sized one-shot each, exclusive file ownership, Opus subagents, orchestrator
