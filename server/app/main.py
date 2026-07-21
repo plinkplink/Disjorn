@@ -25,6 +25,7 @@ from .routers import (
     media,
     messages,
     notifications,
+    slash,
     stt,
     summarize,
 )
@@ -47,6 +48,7 @@ API_PREFIXES = frozenset(
         "dms",
         "messages",
         "search",
+        "backlog",
         "media",
         "avatars",
         "picker",
@@ -150,6 +152,7 @@ def create_app() -> FastAPI:
     app.include_router(media.router)
     app.include_router(notifications.router)
     app.include_router(bots_admin.router)
+    app.include_router(slash.router)
     app.include_router(stt.router)
     app.include_router(summarize.router)
     app.include_router(ws.router)

@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 MemberType = Literal["user", "bot"]
 ChannelType = Literal["main_feed", "dm_1to1", "text"]
 UserStatus = Literal["online", "idle", "dnd", "offline"]
+BacklogStatus = Literal["open", "spec'd", "built", "rejected"]
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +71,22 @@ class Message(BaseModel):
     privacy_flags: dict[str, Any] = Field(default_factory=dict)
     emote_refs: list[Any] = Field(default_factory=list)
     attachments: list[Attachment] = Field(default_factory=list)
+
+
+class BacklogItem(BaseModel):
+    """A feature request filed via `/backlog <text>` (WP-L2).
+
+    `text` is stored verbatim; `author` is the poster's label (username or bot
+    name). Residents triage `open` items into specs later, setting `status` and
+    `spec_ref` — triage is not part of WP-L2.
+    """
+
+    id: int
+    text: str
+    author: str
+    created_at: str
+    status: BacklogStatus = "open"
+    spec_ref: Optional[str] = None
 
 
 class Bot(BaseModel):

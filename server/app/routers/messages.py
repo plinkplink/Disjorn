@@ -216,6 +216,60 @@ async def _require_message(message_id: int) -> dict[str, Any]:
     return row
 
 
+async def deliver_message(
+    channel_id: int,
+    author_type: str,
+    author_id: int,
+    content: str,
+    *,
+    flags: Optional[dict[str, Any]] = None,
+    emote_refs: Optional[list[Any]] = None,
+    reply_to_id: Optional[int] = None,
+) -> dict[str, Any]:
+    """Allocate a per-channel seq, insert the message, publish message_create.
+
+    The shared insert path used by the HTTP create endpoint AND by server-side
+    features that author messages directly (WP-L2's slash framework posts its
+    server-rendered replies through here, as the seeded 'system' bot). It does
+    NO membership/authorization checks — callers own that. Returns the full
+    materialized payload. Does NOT run slash dispatch, so it never recurses.
+    """
+    async with db.transaction():
+        seq_row = await db.fetch_one(
+            "SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq FROM messages WHERE channel_id = ?",
+            (channel_id,),
+        )
+        assert seq_row is not None
+        cur = await db.execute(
+            """INSERT INTO messages
+                   (channel_id, seq, author_type, author_id, content, created_at,
+                    reply_to_id, privacy_flags, emote_refs)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                channel_id,
+                seq_row["next_seq"],
+                author_type,
+                author_id,
+                content,
+                db.utc_now(),
+                reply_to_id,
+                json.dumps(flags or {}),
+                json.dumps(emote_refs or []),
+            ),
+            commit=False,
+        )
+        message_id = cur.lastrowid
+
+    row = await _require_message(message_id)
+    payload = await message_payload(row)
+    # Published AFTER commit so subscribers (WS hub, push) only ever see
+    # durable messages.
+    await events.publish(
+        {"type": "message_create", "channel_id": channel_id, "message": payload}
+    )
+    return payload
+
+
 def _require_author(row: dict[str, Any], actor: Actor) -> None:
     if row["author_type"] != actor.type or row["author_id"] != actor.id:
         raise HTTPException(status_code=403, detail="Not the author of this message")
@@ -277,42 +331,28 @@ async def create_message(
             if ref is not None:
                 emote_refs.append(ref)
 
-    # Per-channel seq allocation. BEGIN IMMEDIATE on the single shared
-    # connection serializes writers, so MAX(seq)+1 is race-free (WP1 note);
-    # UNIQUE(channel_id, seq) backstops.
-    async with db.transaction():
-        seq_row = await db.fetch_one(
-            "SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq FROM messages WHERE channel_id = ?",
-            (channel_id,),
-        )
-        assert seq_row is not None
-        cur = await db.execute(
-            """INSERT INTO messages
-                   (channel_id, seq, author_type, author_id, content, created_at,
-                    reply_to_id, privacy_flags, emote_refs)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                channel_id,
-                seq_row["next_seq"],
-                actor.type,
-                actor.id,
-                body.content,
-                db.utc_now(),
-                body.reply_to_id,
-                json.dumps(flags),
-                json.dumps(emote_refs),
-            ),
-            commit=False,
-        )
-        message_id = cur.lastrowid
-
-    row = await _require_message(message_id)
-    payload = await message_payload(row)
-    # Published AFTER commit so subscribers (WS hub, push) only ever see
-    # durable messages.
-    await events.publish(
-        {"type": "message_create", "channel_id": channel_id, "message": payload}
+    # Per-channel seq allocation, insert, and post-commit publish are shared
+    # with server-authored messages — see deliver_message. BEGIN IMMEDIATE on
+    # the single shared connection serializes writers, so MAX(seq)+1 is race-free
+    # (WP1 note); UNIQUE(channel_id, seq) backstops.
+    payload = await deliver_message(
+        channel_id,
+        actor.type,
+        actor.id,
+        body.content,
+        flags=flags,
+        emote_refs=emote_refs,
+        reply_to_id=body.reply_to_id,
     )
+
+    # Slash-command dispatch (WP-L2): the user's message is persisted as normal
+    # chat above; if its content is a registered /command, the server handles it
+    # and posts its own reply. Unknown /commands (e.g. /shrug) pass through
+    # untouched. Local import avoids a messages<->slash import cycle.
+    from . import slash
+
+    await slash.dispatch(channel_id, body.content, actor)
+
     return payload
 
 

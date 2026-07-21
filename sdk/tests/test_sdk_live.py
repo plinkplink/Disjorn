@@ -131,6 +131,21 @@ async def test_connect_ready(bot_stream):
     assert isinstance(bot.bot_id, int) and bot.bot_id > 0
 
 
+async def test_backlog_read(server, alice, main_id, bot):
+    """A user files a request via /backlog in chat; the bot reads the table
+    through the SDK (WP-L2 resident triage read surface)."""
+    text = "SDK-filed backlog item xyzzy"
+    await _post(alice, main_id, f"/backlog {text}")
+
+    items = await bot.backlog()
+    match = next((it for it in items if it["text"] == text), None)
+    assert match is not None, f"filed item not found in {items!r}"
+    assert match["author"] == "alice"
+    assert match["status"] == "open"
+    assert match["spec_ref"] is None
+    assert set(match) >= {"id", "text", "author", "created_at", "status", "spec_ref"}
+
+
 async def test_user_post_bot_receives_live_events(server, alice, main_id, bot_stream):
     bot, agen = bot_stream
 

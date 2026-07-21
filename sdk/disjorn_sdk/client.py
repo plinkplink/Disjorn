@@ -194,6 +194,20 @@ class DisjornClient:
         self._raise_for_status(resp)
         return resp.json()
 
+    async def backlog(self) -> list[dict[str, Any]]:
+        """Read the feature-request backlog (WP-L2), oldest first.
+
+        Returns ``[{id, text, author, created_at, status, spec_ref}, ...]`` —
+        the same items users file with ``/backlog <text>`` in chat. This is the
+        resident's triage read surface: get the table straight from the server
+        instead of scraping the server-rendered ``/backlog`` chat listing.
+        ``status`` is one of ``open``/``spec'd``/``built``/``rejected``;
+        ``spec_ref`` is null until an item is triaged into a spec.
+        """
+        resp = await self._http.get("/backlog")
+        self._raise_for_status(resp)
+        return resp.json()
+
     async def members(self, channel_id: int) -> list[dict[str, Any]]:
         """Member listing: ``[{type: "user"|"bot", id, name, status?}, ...]``.
 
