@@ -49,14 +49,17 @@ count = 30                        # default recent messages pulled into the sess
 command = ["/usr/local/lib/disjorn/run-resident.sh"]
 resident = "gable"
 # WP-L5 MODEL PIN — the one line that decides what actually runs.
-# The launcher appends `--model claude-opus-4-8` to the argv; nothing else
-# pins a model, so without this the session silently rides the API key's
-# account default (config drift waiting to happen). No fallback: if the pin
-# can't run, the session fails loud and #custodian gets a drift alert.
-# ONE-PIN UPGRADE PATH: when Fable API access returns on plink's credits,
-# flip this single value (e.g. to a Fable model id); the run-time assert +
-# the reply suffix verify the change end-to-end. Until then, Opus.
-model = "claude-opus-4-8"
+# The launcher appends `--model <this>` to the argv; nothing else pins a
+# model, so without this the session silently rides the API key's account
+# default (config drift waiting to happen). No fallback: if the pin can't
+# run, the session fails loud and #custodian gets a drift alert — on the API
+# a disallowed/flagged request ERRORS, it does not silently downgrade.
+# 2026-07-21: Fable confirmed available on plink's API credits (probe: HTTP
+# 200, model echoed), so the one-pin upgrade path is taken — Gable-chat runs
+# Fable. Per-resident: Claudette's pin is an Opus id (she IS Opus-4.8);
+# subagent build hands stay Opus by plink's design. The run-time assert + the
+# reply suffix verify any flip end-to-end.
+model = "claude-fable-5"
 # The command run INSIDE the container: a headless Claude Code invocation that
 # reads the prompt on stdin and prints the result as JSON on stdout. Tune to
 # the installed CC; e.g. `claude -p --output-format json` (result/num_turns).
