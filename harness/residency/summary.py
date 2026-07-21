@@ -53,13 +53,20 @@ def format_refusal_summary(*, summoner: str, where: str, cap: int) -> str:
     )
 
 
-def format_reply_suffix(bot_name: str, model: str) -> str:
+def format_reply_suffix(bot_name: str, model: str, *, verified: bool = True) -> str:
     """Identity suffix appended to a summon reply (WP-L5 VISIBLE).
 
     Every reply shows what's actually running — the platform-suffix idiom, so
     a silent model swap is visible in-channel, not just in the audit log.
+
+    ``verified`` is False when the session did not report its model id (so
+    ``model`` is the *pin*, not a confirmed fact). We must not stamp an
+    unconfirmed pin as if it ran — that would invert the whole point of the
+    suffix. Mark it explicitly instead.
     """
-    return f"— {bot_name} · {model}"
+    if verified:
+        return f"— {bot_name} · {model}"
+    return f"— {bot_name} · {model} (pinned; actual unverified)"
 
 
 def format_drift_alert(*, expected: str, actual: str, summoner: str, where: str) -> str:

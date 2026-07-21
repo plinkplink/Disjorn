@@ -119,6 +119,19 @@ branch for you. To activate:
   can't call it even when flipped ON. (Same rebuild step as 6a.)
 - Keep the RO mirror fresh (`refresh-mirror`) so `specs_dir` sees confirmed
   specs: the confirm gate reads the COMMITTED spec, not a working-tree draft.
+- **HARD BLOCKERS before flipping `start-build` ON (BUILD-LOOP red-team,
+  DEFERRED.md):**
+  - **BL-D1 (HIGH):** the confirm gate's real authorization is that
+    `specs_dir` is the resident-UNWRITABLE RO mirror. Nothing in code enforces
+    it yet. Do NOT point `specs_dir` at a resident worktree, and land the hard
+    startup assertion (`realpath(specs_dir)` not inside any resident volume;
+    optional seq cross-check) before ON. Witnessed design — protected
+    authorization surface, same class as D3.
+  - **BL-D2 (MEDIUM):** the reaper buffers the build's whole stdout in the
+    privileged broker (OOM: 180MB → 540MB RSS). Land the temp-file-streaming /
+    bounded-read fix before ON.
+  Both are OFF-gated today (the verb can't be invoked until the flip + image
+  rebuild), so they block activation, not landing.
 - OPEN FORK for the keyboard, flagged by WP-L4: run-build.sh takes the same
   env-overridable layout as run-resident.sh, but WHO runs it (and thus the
   container's keep-id identity) depends on how the broker is wired. The broker

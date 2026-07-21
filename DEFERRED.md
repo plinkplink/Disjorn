@@ -133,3 +133,95 @@ Lower-severity, deferred:
   their own volume), and classify-diff shipping OFF for gable. Verify before
   widening any classify-diff grant: point it at a resident-writable repo
   carrying a hostile .git/config and confirm git refuses.
+
+## BUILD-LOOP red-team — findings (2026-07-21)
+
+Two adversarial verifiers (independent, cross-validating) attacked the five
+build-loop WPs. Server 162 tests green, harness 61 residency + 69 broker green.
+
+**Fixed in this pass (not deferred), with regression tests:**
+- **Privacy-wall bypass via `/backlog` (HIGH, same class as the WP15 DM-bot
+  leak).** `create_message` flags-and-hides a `/backlog` message from bots,
+  then the old code copied the identical text into the bot-readable `backlog`
+  table + `GET /backlog` + the server-rendered listing — leaking secret /
+  off-the-record content the server itself had just hidden. Fix: thread the
+  message's effective privacy flags into `slash.dispatch`; the filing handler
+  refuses at intake (`privacy.hidden_from_bots`) so no flagged row is ever
+  written. Refusal text never echoes the content. Read side needs no filter —
+  the table is public by construction now. Tests: test_backlog_refuses_*.
+- **Model-suffix fail-open (L5).** When a session reported no model id
+  (`actual=None`), the reply suffix stamped the *pin* as if confirmed —
+  inverting "shows what's actually running." Fix: `format_reply_suffix(...,
+  verified=False)` marks it `(pinned; actual unverified)` and the adapter logs
+  an unverified warning. Tests: test_suffix_shows_pin_when_actual_unknown
+  (updated), test_suffix_verified_flag_shapes.
+
+**Deferred — ACTIVATION BLOCKERS (must be closed before the verb/flag is
+flipped ON; the code ships OFF so nothing bites until then):**
+
+- **BL-D1 — Confirm gate is integrity-by-config; enforce `specs_dir` is
+  resident-unwritable (HIGH-at-activation).** Both verifiers' headline. The
+  confirm record (`Confirmed by` + `#custodian seq`) is a presence-check on
+  caller-controlled text — by design advisory (BUILD-LOOP: verbs.toml toggle
+  authorizes the class, the record selects the instance). The REAL instance
+  gate is that `specs_dir = /srv/disjorn-ro/SPECS`, the plink-gated RO mirror
+  residents can't write. That invariant lives only in a comment. Repointing
+  `specs_dir` at a resident worktree silently converts self-attestation into a
+  self-authorization bypass (any resident forges a confirm record, builds
+  within the 2/day budget). Fix (witnessed design — protected authorization
+  surface, treat like D3): at start-build config load, hard-assert
+  `realpath(specs_dir)` is not inside any resident-writable volume (fail loud);
+  and/or cross-check the `#custodian seq` against real chat history before
+  launch. NB: **required before start-build ships.**
+- **BL-D2 — Reaper unbounded-stdout OOM on the privileged broker (MEDIUM,
+  insecure-as-written when ON).** `_reap_build` calls
+  `proc.communicate(spec_bytes, timeout=...)` with no size bound on a
+  resident-influenced build session (up to `timeout_sec`, 3600s default); a
+  build flooding stdout balloons the broker's RSS (measured 180MB stdout →
+  540MB broker RSS) and can OOM the verb gateway for all residents. Fix
+  (touches the just-built + tested detachment I/O contract — witnessed):
+  redirect the build's stdout/stderr to a temp file at spawn (bounded on disk),
+  read a bounded tail for the done-report; or bounded-read with kill-on-
+  overflow. **Required before start-build ships.**
+
+**Deferred — lower severity (file, fix opportunistically):**
+- **BL-D3 — Build-budget reseed overcounts a never-started build across a
+  broker restart (LOW).** A spawn `OSError` refunds the in-memory slot
+  (`_release_build`) but still audits `allowed=True` (exec-failure is not a
+  denial), and `_count_builds_today` recounts `allowed=True` lines on restart
+  reseed — so a build that never ran consumes a slot post-restart. In-memory
+  and on-disk disagree. Budgets are soft (kill switches are the hard lever),
+  cap default 2. Fix: distinguish never-started from ran-and-failed in the
+  audit (e.g. a `started` marker the reseed counts), or audit spawn-failure as
+  non-consuming.
+- **BL-D4 — Slug collision → branch/container-name clash (LOW footgun).** Two
+  specs with the same base slug but different dates both derive `loop/<slug>`
+  and `disjorn-build-<slug>`; concurrent → podman `--name` clash, sequential →
+  second clobbers the first's branch. No privilege issue. Fix: uniqueness check
+  or date-in-slug.
+- **BL-D5 — Backlog has no visibility scoping; DM-filed items exfil to public
+  chat (LOW/MED).** `/backlog <text>` files from any channel incl. DMs into one
+  global table; `/backlog` (no args) in a public channel dumps every item +
+  author verbatim, and `GET /backlog` returns all to any authenticated actor.
+  A non-flagged sensitive request filed in a DM leaks to public via one listing
+  (the privacy-flag fix above only blocks secret/off-the-record content, not
+  merely-sensitive text). Backlog is "public feature requests by design"
+  (Architecture §13), so this is a footgun not a wall breach. Fix: warn/refuse
+  on filing from a DM, or scope reads. Pairs with:
+- **BL-D6 — No rate limit or content-length cap (LOW/MED, pre-existing gap
+  backlog widens).** `create_message`/`dispatch` have no throttle;
+  `MessageCreate.content` has no `max_length` (a 2MB `/backlog` stored
+  verbatim). `GET /backlog` is unpaginated. Fix: cap message/backlog text
+  length, paginate GET /backlog, consider a per-actor command rate limit.
+
+**Governance decision owed to plink (not a code fix — a ratified-spec
+reconciliation):**
+- **BL-G1 — Model integrity: "refuse to act" vs alert-only.** BUILD-LOOP item 2
+  (ratified) says mismatch → "refuse to act + alert." The shipped adapter is
+  alert-only: the actual model is only knowable from the FINISHED session's
+  output envelope, so the check is post-hoc and the reply goes out before the
+  drift alert ("fail-loud, never fail-over"). This silently softens a ratified
+  line. plink to either (a) re-ratify alert-only as the contract, or (b)
+  greenlight a real pre-act gate via `--output-format stream-json` whose
+  `system/init` event reports the model BEFORE the turn completes, enabling an
+  early abort (a fast-follow WP). Recorded as an open decision in BUILD-LOOP.md.

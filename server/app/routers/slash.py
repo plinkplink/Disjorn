@@ -30,7 +30,7 @@ from typing import Annotated, Any, Awaitable, Callable, Optional
 
 from fastapi import APIRouter, Depends
 
-from .. import db
+from .. import db, privacy
 from ..models import BacklogItem
 from .auth import Actor, get_actor
 from .messages import deliver_message
@@ -57,10 +57,21 @@ class Ctx:
     with no argument.
     """
 
-    def __init__(self, channel_id: int, args: str, actor: Actor) -> None:
+    def __init__(
+        self,
+        channel_id: int,
+        args: str,
+        actor: Actor,
+        flags: Optional[dict[str, Any]] = None,
+    ) -> None:
         self.channel_id = channel_id
         self.args = args
         self.actor = actor
+        # Effective privacy flags of the message that carried this command
+        # (caller-supplied + server NL detection, already merged by the create
+        # path). Handlers that persist command text to bot-readable surfaces
+        # must honor these — see /backlog.
+        self.flags = flags or {}
 
     @property
     def poster(self) -> str:
@@ -105,11 +116,18 @@ def _parse(content: str) -> Optional[tuple[str, str]]:
     return name, args
 
 
-async def dispatch(channel_id: int, content: str, actor: Actor) -> None:
+async def dispatch(
+    channel_id: int,
+    content: str,
+    actor: Actor,
+    flags: Optional[dict[str, Any]] = None,
+) -> None:
     """Handle a posted message if its content is a registered slash command.
 
     No-op for plain text and for unknown /commands. Called from the messages
-    create path AFTER the user's message is persisted.
+    create path AFTER the user's message is persisted. ``flags`` are the
+    persisted message's effective privacy flags, passed through so handlers can
+    refuse to copy bot-hidden content onto public surfaces.
     """
     parsed = _parse(content)
     if parsed is None:
@@ -118,7 +136,7 @@ async def dispatch(channel_id: int, content: str, actor: Actor) -> None:
     handler = _COMMANDS.get(name)
     if handler is None:
         return  # unknown command: leave the user's message as plain text
-    reply = await handler(Ctx(channel_id, args, actor))
+    reply = await handler(Ctx(channel_id, args, actor, flags))
     if reply:
         await _post_system_reply(channel_id, reply)
 
@@ -168,6 +186,18 @@ def _render_list(items: list[dict[str, Any]]) -> str:
 async def _backlog(ctx: Ctx) -> str:
     if not ctx.args.strip():
         return _render_list(await _all_items())
+    # The backlog table and GET /backlog are bot-readable. If the carrying
+    # message was flagged bot-hidden (secret / off_the_record — by NL detection
+    # or explicit privacy_flags), refuse at intake rather than copy the text
+    # onto a public surface. The wall is "never in any form": filtering the
+    # read side is not enough while the row persists as bot-readable data, so
+    # the row must never be written. The refusal text does not echo the args.
+    if privacy.hidden_from_bots(ctx.flags):
+        return (
+            "Can't file that: the message is marked private (secret / "
+            "off-the-record) and the backlog is readable by bots. Rephrase "
+            "the request without the private content and file it again."
+        )
     # File verbatim. Use the raw args (leading separator already stripped by the
     # parser); do not otherwise normalize the text.
     cur = await db.execute(
@@ -186,6 +216,8 @@ async def list_backlog(actor: CurrentActor) -> list[BacklogItem]:
     """Backlog table as JSON, oldest first. Any authenticated actor may read it.
 
     Lets residents triage via the SDK without scraping the server-rendered chat
-    listing. Not privacy-filtered: backlog items are public feature requests.
+    listing. Backlog items are public feature requests by construction: the
+    /backlog filing path refuses bot-hidden content at intake, so no row here
+    can carry secret / off-the-record text. No read-side filtering is needed.
     """
     return [BacklogItem(**it) for it in await _all_items()]

@@ -174,6 +174,7 @@ class SummonAdapter:
         # running, for the visible suffix + audit line.
         pin = self.config.container.model
         actual = result.model if result.ok else None
+        verified = actual is not None
         display_model = actual or pin
         drift = bool(pin and actual and actual != pin)
         if drift:
@@ -181,11 +182,19 @@ class SummonAdapter:
                 "model drift: pinned %s but session ran %s (summon by %s in %s)",
                 pin, actual, summoner, where,
             )
+        elif pin and not verified:
+            # Fail-OPEN guard: with no reported model we cannot prove the pin
+            # ran. Do NOT let this pass as a clean match — log it, and the
+            # suffix below marks it unverified rather than advertising the pin.
+            logger.warning(
+                "model unverified: pinned %s but session reported no model id "
+                "(summon by %s in %s)", pin, summoner, where,
+            )
 
         reply = result.reply.strip() if result.ok else ""
         text = reply if reply else self.config.text.error_line
         if display_model:
-            text = f"{text}\n\n{format_reply_suffix(self.config.summon.bot_name, display_model)}"
+            text = f"{text}\n\n{format_reply_suffix(self.config.summon.bot_name, display_model, verified=verified)}"
         await self._safe_send(channel_id, text, reply_to=trigger_id)
 
         # Fail-loud, never fail-over: on drift the reply still went out above;

@@ -161,6 +161,54 @@ async def test_backlog_files_text_verbatim(client):
     assert row["text"] == "Fix   the thing (URGENT!!) — see @bob"
 
 
+async def test_backlog_refuses_nl_flagged_content(client):
+    # Regression (adversarial verify, Finding 1): a /backlog whose text trips
+    # NL privacy detection is bot-hidden as a message, so it must NOT be copied
+    # into the bot-readable backlog. Refuse at intake; nothing is filed.
+    await make_user("alice")
+    await login(client, "alice")
+    ch = await main_feed_id()
+
+    await post(client, ch, "/backlog off the record: the merger price is 50m")
+
+    rows = await db.fetch_all("SELECT * FROM backlog")
+    assert rows == []  # refused, not filed
+    msgs = await channel_messages(client, ch)
+    ack = msgs[-1]
+    assert "Can't file" in ack["content"]
+    assert "merger" not in ack["content"]  # refusal must not echo the secret
+
+
+async def test_backlog_refuses_explicitly_flagged_message(client):
+    # The other vector: text that doesn't trip NL detection but the message
+    # carries explicit privacy_flags. Still bot-hidden, still refused.
+    await make_user("alice")
+    await login(client, "alice")
+    ch = await main_feed_id()
+
+    r = await client.post(
+        f"/channels/{ch}/messages",
+        json={"content": "/backlog buy the thing", "privacy_flags": {"secret": True}},
+    )
+    assert r.status_code == 200, r.text
+
+    rows = await db.fetch_all("SELECT * FROM backlog")
+    assert rows == []
+    assert "Can't file" in (await channel_messages(client, ch))[-1]["content"]
+
+
+async def test_backlog_files_when_not_flagged(client):
+    # The fix must not over-refuse: an ordinary request still files.
+    await make_user("alice")
+    await login(client, "alice")
+    ch = await main_feed_id()
+
+    await post(client, ch, "/backlog add a gif picker to the composer")
+    rows = await db.fetch_all("SELECT * FROM backlog")
+    assert len(rows) == 1
+    assert rows[0]["text"] == "add a gif picker to the composer"
+
+
 async def test_backlog_bare_slash_no_arg_lists_not_files(client):
     await make_user("alice")
     await login(client, "alice")

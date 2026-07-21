@@ -175,8 +175,9 @@ def test_unpinned_deployment_keeps_bare_reply_and_summary(tmp_path):
 
 
 def test_suffix_shows_pin_when_actual_unknown(tmp_path):
-    """Output carried no model id: assert at the strongest available level (the
-    pin) and show the pin — never fabricate an 'actual'."""
+    """Output carried no model id: we cannot PROVE the pin ran (fail-open guard,
+    adversarial-verify Finding). Show the pin but mark it UNVERIFIED — never
+    stamp it as if confirmed, and never fabricate an 'actual'."""
     config = make_config(tmp_path, container={"model": PIN})
     client = FakeClient(events=[
         make_event(channel_id=7, seq=50, author_name="alice",
@@ -186,10 +187,20 @@ def test_suffix_shows_pin_when_actual_unknown(tmp_path):
         ok=True, reply="Hi.", action_count=1, duration_sec=1.0, model=None,
     ))
     _run(SummonAdapter(client, config, launcher=launcher))
-    assert f"— gable · {PIN}" in client.replies_to(7)[0].content
+    reply = client.replies_to(7)[0].content
+    assert f"— gable · {PIN} (pinned; actual unverified)" in reply
     custodian = [s.content for s in client.replies_to(4)]
     assert any(c.endswith(f"| {PIN}") for c in custodian)
     assert not any("MODEL DRIFT" in c for c in custodian)  # unknown != drift
+
+
+def test_suffix_verified_flag_shapes():
+    """A confirmed model reads clean; an unverified one is explicitly marked."""
+    assert format_reply_suffix("gable", PIN) == f"— gable · {PIN}"
+    assert format_reply_suffix("gable", PIN, verified=True) == f"— gable · {PIN}"
+    assert format_reply_suffix("gable", PIN, verified=False) == (
+        f"— gable · {PIN} (pinned; actual unverified)"
+    )
 
 
 # ----------------------------------------------------------- 5. DRIFT ALERT

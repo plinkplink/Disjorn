@@ -11,6 +11,27 @@ stalled build goes quiet then fails loud; no heartbeat noise in #custodian.
 Drafted by Gable from the 2026-07-21 keyboard session with plink. Decision
 records append here as they happen, per house rule 1.
 
+**BUILT 2026-07-21 (orchestrator-Gable, Opus subagents).** All five WPs
+landed on main, ship OFF: L1 8fea632, L3 f2fa568, L2 20267f1, L5 d67c6b3,
+L4 f2b1e38 (+ privacy/suffix fixes below). Two independent adversarial
+verifiers ran the WP15/H13 habit; findings in DEFERRED.md ("BUILD-LOOP
+red-team"). Fixed in-pass: the `/backlog` privacy-wall bypass (HIGH) and the
+L5 model-suffix fail-open. Deferred as **activation blockers** (must close
+before flipping any verb/flag ON, all OFF-gated today): BL-D1 confirm-gate
+`specs_dir`-must-be-RO enforcement, BL-D2 reaper OOM. Lower-severity
+BL-D3..D6 filed.
+
+**OPEN DECISION owed to plink — BL-G1 (model integrity: refuse vs alert).**
+Item 2 below says mismatch → "refuse to act + alert." As built it is
+alert-only: the actual model is only knowable from the FINISHED session's
+output, so the check is post-hoc and the reply ships before the drift alert
+(the code's "fail-loud, never fail-over"). That softens a ratified line, so
+it's yours to settle: (a) re-ratify alert-only as the contract, or (b)
+greenlight a real pre-act gate via `--output-format stream-json` (its
+`system/init` event names the model before the turn runs, enabling an early
+abort) as a fast-follow WP. Until you rule, the shipped behavior is
+alert-only and the suffix now honestly marks an unverified pin.
+
 ## Mission
 
 Users ask for features in chat; a resident designs with them in #custodian,
