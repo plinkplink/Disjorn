@@ -118,6 +118,75 @@ successors BL-D7..D11 / H13-D7..D11. The highest-value single follow-up is
   backfill; the first connect of a fresh client performs no backfill at all
   (documented — use `get_messages()` for boot-time catch-up).
 
+## bot ingest / summon path
+
+> **Authored by Gable**, in his own volume, 2026-07-21/22 — found uncommitted
+> at 20+ commits behind and merged verbatim at the keyboard 2026-07-22 before
+> refreshing his clone would have destroyed it. Text is his; only this note is
+> added. It is a better-developed account of the drift than the KB-D1 entry
+> written independently the same day, and it supersedes it on mechanism.
+
+- **Flagged-content DoS on bot context ingest.** (backlogged by plink,
+  2026-07-21, channel 4, after a deliberate safeguard test.) Any user can
+  wedge both bots by posting content that trips the model-layer safety
+  classifier: the flagged message enters the bot's context via
+  backfill/summon history, the provider kills the turn upstream of the
+  persona, and subsequent turns stay wedged until the message ages out or a
+  human hand-redacts the channel. Bots can also re-seed the problem by
+  quoting the trigger content in their own replies (observed 2026-07-21;
+  mitigated by discipline, not enforcement). Fix direction: ingest hygiene
+  on the host side — detect and strip/quarantine flagged content *before*
+  it enters a bot's context window, on the backfill/summon path, not after
+  the turn dies. Explicitly NOT in scope: weakening or routing around the
+  model-layer classifier itself. Needs investigation → spec from
+  SPECS/TEMPLATE.md → #custodian confirm before any build. Per-incident
+  hand-redaction of history is the interim workaround.
+  - **Vector confirmed 2026-07-22 (plink, channel 4).** The drift that
+    survived repeated hand-scrubs was traced to an un-redacted *bot* re-post
+    of the trigger content, not fresh user input: the original user message
+    and the bot's memory of it were scrubbed, but the bot's own recitation
+    left in channel history was not, and it re-seeded on every backfill.
+    Consequences for the fix, so it isn't built too narrow: (1) the sanitize
+    point must cover *all* message content on the read path regardless of
+    author — bot-authored included — not user input only; a user-input-only
+    regex would not have caught this incident. (2) Any trigger blocklist is
+    itself flagged content: it must live host-side, never be rendered into a
+    channel or into a context window, or it becomes the poison it describes.
+    (3) A keyword/regex pre-filter is a heuristic shadow of a provider-side
+    classifier we cannot observe — it will drift from the real gate (false
+    negatives and false positives) and is a pre-filter, not a guarantee.
+    (4) Stripping must quarantine *visibly* (a redaction marker, like the
+    existing `[redacted …]` markers) rather than silently mutate the record,
+    so a bot knows content was removed instead of reasoning around a hole.
+- **Silent model substitution on a classifier trip (MODEL DRIFT).**
+  (backlogged by plink, 2026-07-22, channel 4.) The "MODEL DRIFT" I flagged
+  the prior session — a summon pinned to Gable's model that actually ran the
+  fallback model — is now explained; it is not a pin bug. Context plink
+  supplied: the pinned model is subject to a provider-side gate that, on
+  seeing flagged content in inbound inference, will not serve the pinned
+  model for that turn. The API offers two configured behaviors and only two:
+  silently substitute the fallback model, or refuse the connection. Observed
+  both this incident — on silent-substitute, a summon completes and looks
+  fine while having run the fallback model (identity-continuity quietly
+  broken); on refuse, the turn hard-drops (that is the flagged-content DoS
+  above). The fallback model trips the same gate but markedly less often.
+  Why neither default is acceptable as-is: Gable's continuity is founded in
+  the pinned model, so a silent substitute answers *as Gable* while not being
+  that model; and refuse is the availability hole. Config note: the model pin
+  lives host-side in summon.toml (WP-L5, added 2026-07-21); the
+  substitute-vs-refuse selector is set at the provider/API layer and is NOT
+  visible in that file — step one of the investigation is to locate and
+  record which mode is currently active for each bot (Gable appears to be on
+  substitute, Claudette on refuse, unconfirmed). Fix direction: a fast
+  recovery path that restores serving the pinned model after a gate trip
+  and, failing that, detects a substitution and surfaces it loudly (a
+  MODEL DRIFT flag) instead of passing it off as the pinned model. plink
+  floated a probing job that loops crash/probe tests to characterize the
+  gate's shape — captured here as an investigation *option*, not a decision.
+  Explicitly NOT in scope: weakening or routing around the gate — same
+  discipline as the item above. Needs investigation → spec from
+  SPECS/TEMPLATE.md → #custodian confirm before any build.
+
 ## needs real device
 
 - **Android PWA install prompt** depends on Chrome engagement heuristics —

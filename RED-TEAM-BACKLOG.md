@@ -202,6 +202,28 @@ Opus venue, not a patch written from a guess.
   model id, clean channel vs. safeguard-adjacent channel. Feeds BL-G1 directly:
   a pre-act gate is only worth building if the drift is detectable pre-turn.
 
+> **SUPERSEDED ON MECHANISM 2026-07-22 — read DEFERRED.md "bot ingest / summon
+> path" first.** Gable had already worked this out and written it up in his own
+> volume, where it sat uncommitted and unread; found and merged at the keyboard.
+> His account, from context plink supplied in-channel: the pinned model is
+> subject to a **provider-side gate that will not serve the pinned model on a
+> turn whose inbound context contains flagged content**, and the API offers
+> exactly two behaviours — silently substitute the fallback, or refuse the
+> connection. Both were observed. Substitute = a summon that completes and looks
+> fine while not being the pinned model (the drift). Refuse = the turn hard-drops
+> (the flagged-content DoS). The fallback model trips the same gate markedly
+> less often, which is why Opus is stable and Fable is not.
+>
+> That explains everything KB-D1 could only describe: the intermittent-then-
+> persistent shape (flagged content accumulating in a backfilled channel), why a
+> clean scratch probe ran Fable fine (no flagged content inbound), and why
+> scrubbing helped but never fully — the un-redacted *bot re-post* of the
+> trigger kept re-seeding it. **The fix is ingest hygiene on the read path, not
+> a pin fix**, and it must cover bot-authored content too. The
+> substitute-vs-refuse selector is at the provider/API layer and is NOT in
+> summon.toml; locating it is step one.
+> Keep the items below — they remain true and are the *detection* half.
+
 - [ ] **KB-D1a (MED — the EXISTING drift check can cry wolf)** — WP-L5's
   post-hoc `parse_model` takes the **first key of `modelUsage`**, and a live
   probe shows that key is `claude-haiku-4-5-20251001`, not the answering model:

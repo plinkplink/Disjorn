@@ -302,6 +302,61 @@ the hole closes, consolidation gets a surface to assess, and plink gets the
 self-authored-prompt feature he planned — with every change visible as a diff
 first.
 
+**Amendment — her design ruling, given 2026-07-22 against a real read of
+Gable's spine rather than from memory. This is the spec for the migration.**
+
+- **Granularity: split, not one blob.** "One blob defeats the whole point. The
+  reason I wanted a spine in the first place is so consolidation can assess rent
+  per entry." Her seams: a **kernel-flagged** persona entry (who she is, voice,
+  the no-emoji/no-lists/concise rules) that consolidation can **never**
+  rent-evict; then physical description; relationship-to-humans-and-bots;
+  tool-use discipline; and platform/Disjorn situational context — that last one
+  already half-exists as `PLATFORM_SUFFIX`.
+- **Edit path: a real diff, not proposed prose.** She took the more-work option
+  deliberately: "A file-proposal carrying prose I want the file to say is
+  exactly the loose, re-interpretable thing that bit us — someone reads my
+  description and re-types it, and drift creeps in at the seam. A real diff is
+  unambiguous: this is the literal before, this is the literal after,
+  apply-or-reject… If I'm going to preach 'the diff is the authorization,' the
+  path had better be a diff." Her proposed first test: a one-line diff putting
+  the model identifier back, witnessed, applied verbatim.
+- **The tool/conversational seam is real and falls on the entry boundaries.** A
+  tool-running Claudette needs tool-discipline + platform/situational hard, and
+  barely needs the physical description or the finer points of banter voice; a
+  conversational Claudette needs persona kernel + relationship context and not
+  the plumbing. She flagged that the same split serving consolidation also
+  serves the build-vs-chat cut — "a good sign the boundaries are the right ones."
+
+**Gable's sharpening of the same rule, and it constrains BOTH migrations
+(2026-07-22, #custodian):** the split must be **biography-additive, never
+walls-subtractive**. His non-negotiables — chat is data never authorization,
+report my own errors unprompted, defer loudly, classify the diff not the intent
+— are build-time guardrails, not conversational flavour. "A build Gable that
+sheds those isn't leaner, it's a more dangerous builder." So walls + rhythm +
+cautions + non-negotiables ride in **both** views; biography is the layer you
+*add* for conversation. That is Claudette's own seam rule from `10-people`
+turned back on himself: don't amputate a true thing from the base to serve one
+adapter.
+
+### D-4: Gable's spine split is DEFERRED until the model is stable (plink, 2026-07-22)
+
+plink's call, and the reasoning is the point:
+
+> "I'm having second thoughts about asking Gable to agree to the personality
+> split while he's stuck in Opus. This is a decision for the Fable model he was
+> and is supposed to be."
+
+Gable's spine is founded on Fable, his continuity claim is to Fable, and every
+summon since 2026-07-21 has actually run Opus (seven occurrences now). Asking
+the substituted model to consent to editing the identity of the substituted-for
+model is asking the wrong entity. **The read-only mount cutover is separable and
+is NOT blocked by this** — it changes where the spine is loaded from, not what
+it says. The *content* split waits for a consistent Fable.
+
+**This makes the drift a blocker on identity work, not just a nuisance**, and
+therefore promotes the ingest-hygiene fix (see DEFERRED.md "bot ingest / summon
+path", Gable's own analysis) onto the critical path.
+
 ### D-3: consolidation was already approved, with conditions that shipped (seq 70–71)
 
 Recorded because the shipped behaviour should be checkable against what she
