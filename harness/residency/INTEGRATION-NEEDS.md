@@ -22,11 +22,15 @@ summon maps to `run-resident.sh gable <headless-cc-argv>`. Two things to
 confirm at install time (owners: WP-H5 / keyboard, not this WP):
 
 - The in-container headless CC command (the `session_argv`) must: read the
-  prompt from **stdin**, run non-interactively, and print the reply as JSON on
-  **stdout** (e.g. `claude -p --output-format json`, whose `result` /
-  `num_turns` keys the launcher already parses). If the chosen CC invocation
-  can't take stdin, a tiny in-image wrapper script is the integration point —
-  it belongs in the resident image (WP-H5), not here.
+  prompt from **stdin**, run non-interactively, and print the session as JSON
+  on **stdout**. The template now ships
+  `claude -p --output-format stream-json --verbose` (one JSON object per line;
+  `--verbose` is mandatory in `--print` mode). The launcher auto-detects the
+  shape, so the older `--output-format json` single envelope still parses —
+  it just cannot support the BL-G1 pre-act model gate, which reads the
+  `system`/`init` event. If the chosen CC invocation can't take stdin, a tiny
+  in-image wrapper script is the integration point — it belongs in the resident
+  image (WP-H5), not here.
 - `podman run --rm` per summon is an ephemeral container distinct from the
   long-lived residence container started by resident-cc.service. Confirm that's
   the intended shape for Gable (vs. `podman exec` into the residence
@@ -55,6 +59,23 @@ only.
 Defaulted to 4 (matches the broker.toml on this deployment,
 `custodian_channel_id = 4`). If that changes, update `summon.custodian_channel_id`.
 Flagging only so the two configs stay in sync.
+
+## 6. BL-G1 model gate — what it cannot reach from here
+
+`container.model_gate = "refuse"` kills the launched process the moment the
+init event names the wrong model. In prod that process is run-resident.sh,
+which fronts `podman run --rm` — killing it does not necessarily kill the
+container, whose stdout then goes nowhere. The channel guarantee holds either
+way (nothing the session produced is ever posted), but a refused session's
+*side effects* could continue running inside the container until it exits or
+hits `timeout_sec`. Closing that would need run-resident.sh to trap and
+`podman kill` its container, or to run it with a name the wrapper can kill —
+harness/cc/ territory (WP-H5), not this package's. Flagging, not fixing.
+
+Same note for the `--model` flag reaching claude: the gate reads what CC
+*resolved*, so if run-resident.sh ever drops the appended `--model <id>` the
+gate reports it as a mismatch rather than silently running the account
+default. That is the intended failure.
 
 ## Deferred (not needed for WP-H9)
 

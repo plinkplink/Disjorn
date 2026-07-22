@@ -32,6 +32,32 @@ greenlight a real pre-act gate via `--output-format stream-json` (its
 abort) as a fast-follow WP. Until you rule, the shipped behavior is
 alert-only and the suffix now honestly marks an unverified pin.
 
+> **UPDATE 2026-07-22 — option (b) is BUILT and ships OFF; the decision is now
+> one config line, not a WP.** `stream-json` was verified against the real CLI:
+> the `system/init` event carries the resolved model id and is the FIRST line
+> of stdout, before any content. Implemented in `harness/residency/launcher.py`
+> as `[container].model_gate` with three states — `"off"` (**default;
+> byte-for-byte today's alert-only behaviour**), `"alert"` (detected at init so
+> the log lands before the reply), `"refuse"` (session killed at init, the
+> channel sees only the operator line, #custodian sees `MODEL GATE REFUSED`).
+> Proven end-to-end against the real `claude` binary: a refused mismatched
+> session returned at 1.1s with an empty reply, versus 2.8s for the full run.
+>
+> **Do not flip `refuse` without first changing `session_argv` to
+> `--output-format stream-json --verbose`.** The live config still says
+> `--output-format json`; flipping the gate alone refuses every summon —
+> loudly, with the fix named, but the resident goes silent. Sequence:
+> change `session_argv`, run at `"alert"` until real summons confirm init
+> matches the pin, then flip to `"refuse"`.
+>
+> Two caveats bearing on how much (b) actually buys, both filed in
+> RED-TEAM-BACKLOG.md: the gate kills the wrapper but **not the container**
+> (KB-D1c), so a mid-session refusal's side effects can continue inside it; and
+> the legacy post-hoc check it replaces reads `modelUsage`'s first key, which is
+> *haiku*, so it can fire false drift alerts (KB-D1a) — re-read any past alert
+> before treating it as evidence. The five 2026-07-21/22 drifts are unaffected
+> and remain real.
+
 ## Mission
 
 Users ask for features in chat; a resident designs with them in #custodian,
@@ -137,6 +163,53 @@ substitute. The summon-path finding stands: never pinned, always Opus,
 entitlement-bound. The pin stays claude-opus-4-8 until a live probe shows
 Fable runs on plink's API credits; drift-assert (item 2) is the standing
 countermeasure should any server-side substitution ever appear.
+
+## Amendment 2026-07-22 — the summon path is Claude Code, not the raw API
+
+**Appended per house rule 1 (decision records append here as they happen).
+This corrects a premise in the ratified text above; it is NOT a re-ratification
+— the correction is factual, the governance call it feeds is plink's.**
+
+The 2026-07-21 amendment says of the summon path: *"On the raw API — which is
+what the summon path uses — switching is NOT automatic; flagged requests error
+rather than silently substitute."* **The first clause is wrong.** The summon
+session argv is `claude -p --output-format json` (see the live
+`[container].session_argv`), which is **Claude Code**, not the raw Messages
+API. So the summon path plausibly inherits CC's documented sticky safeguard
+auto-switch — exactly the behaviour the amendment was excluding.
+
+**Observed, not theorised.** `harness/residency`'s WP-L5 drift assert has fired
+five times in production: 2026-07-21 18:41, 20:41, 20:50 and 2026-07-22 06:14,
+06:24, every one `pinned claude-fable-5 but session ran claude-opus-4-8`, all in
+channel 4. Four Fable-pinned summons before 18:40 on 07-21 ran clean, so the
+shape is intermittent-then-persistent rather than a flat entitlement failure —
+and Fable IS entitled on this account (`additionalModelOptionsCache` offers it;
+probed HTTP 200 on 07-21).
+
+Consequences for anything downstream of the old premise:
+1. **BL-G1 is no longer hypothetical.** "Refuse to act vs alert-only" is now a
+   choice about a thing that demonstrably happens, several times a week, on the
+   surface residents actually speak from.
+2. A **detached build** inherits this. A summon that silently runs the wrong
+   model costs one chat turn; a build runs unattended for up to an hour and
+   commits code. The stakes are not symmetric, and a gate that is optional for
+   summons is much harder to argue against for `start-build`.
+3. The **WP-L5 pin is not self-enforcing**. It is an input to model selection,
+   not a guarantee of it — the drift assert is what makes the pin honest, and
+   the reply suffix marking `(pinned; actual unverified)` was the right call.
+4. Anything else in this document resting on "the summon path cannot silently
+   substitute" should be re-read with this correction in hand.
+
+A pre-act gate is buildable: `--output-format stream-json` emits a `system`/
+`init` event naming the resolved model **before** the turn's content, which
+permits an early abort instead of a post-hoc alert. Built this session behind a
+config knob that **defaults to today's alert-only behaviour**; flipping it to
+enforcing is plink's, and is the BL-G1 decision.
+
+Filed as KB-D1 in RED-TEAM-BACKLOG.md, together with the related finding that
+summon containers are not actually ephemeral — CC's `.claude.json` and
+`.sessions/` persist in the mounted home volume across `--rm`, carrying model
+state, which is a candidate mechanism for the sticky shape above.
 
 ## Work packages (MVP)
 

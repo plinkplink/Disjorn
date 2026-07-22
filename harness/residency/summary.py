@@ -14,6 +14,7 @@ __all__ = [
     "format_refusal_summary",
     "format_reply_suffix",
     "format_drift_alert",
+    "format_gate_refusal_alert",
 ]
 
 
@@ -80,3 +81,31 @@ def format_drift_alert(*, expected: str, actual: str, summoner: str, where: str)
         f"pinned {expected} but session ran {actual} | "
         f"no fallback — a human should check #custodian and the pin"
     )
+
+
+def format_gate_refusal_alert(
+    *,
+    expected: Optional[str],
+    actual: Optional[str],
+    stage: str,
+    summoner: str,
+    where: str,
+    detail: str = "",
+) -> str:
+    """Loud #custodian alert when the PRE-ACT model gate killed a session (BL-G1).
+
+    Distinct from format_drift_alert on purpose: drift means "the wrong model
+    already answered and the answer shipped"; this means "the wrong model was
+    caught before it answered and NOTHING it produced was posted." Reading the
+    two the same way would lose exactly the distinction the gate exists to make.
+    """
+    saw = actual or "no model id"
+    line = (
+        f"MODEL GATE REFUSED | summon by {summoner} in {where} | "
+        f"pinned {expected} but session came up on {saw} (at {stage}) | "
+        f"session killed, nothing it produced was posted | "
+        f"no fallback — a human should check the pin and the account"
+    )
+    if detail:
+        line += f" | {detail}"
+    return line

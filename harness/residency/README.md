@@ -38,12 +38,40 @@ DisjornClient.events()  ──▶  SummonDetector.is_summon?
 | `detector.py` | Summon detection (mention context / trigger channel / wake regex). |
 | `budget.py` | Persisted daily session counter (survives restart). |
 | `cursor.py` | Persisted per-channel seq cursor; reconnect-from-seq across restarts. |
-| `launcher.py` | The container-launch contract. argv is config; prompt is stdin. |
+| `launcher.py` | The container-launch contract (argv is config, prompt is stdin) + the BL-G1 pre-act model gate. |
 | `prompt.py` | Session-prompt assembly; wraps chat in `[[CHAT]]` markers. |
 | `summary.py` | One-line #custodian summaries. |
 | `adapter.py` | `SummonAdapter` — the daemon wiring it all together. |
 | `run_summon.py` | CLI entry point. |
 | `summon.toml.template` | Config template (documented prod layout, all overridable). |
+
+## Model integrity: the pin, the suffix, and the gate
+
+`[container].model` pins the model a summon must run (`--model <id>` in the
+argv, config never chat). WP-L5 then *asserted* the pin after the fact, from
+the finished session's envelope — which meant a mismatch was alerted only
+after the reply had already been posted. BL-G1 closes that gap.
+
+`claude -p --output-format stream-json --verbose` emits a `system`/`init`
+event naming the **resolved model before the turn runs** (verified against CC
+2.1.201). `launcher.StreamGate` consumes that stream line by line, so
+`[container].model_gate` can act on the init event:
+
+| state | on a pin/actual mismatch |
+|-------|--------------------------|
+| `"off"` **(default, ships)** | nothing is stopped; the reply goes out and #custodian gets the post-hoc `MODEL DRIFT` alert — WP-L5 behaviour exactly |
+| `"alert"` | detected at init (log lands before the reply), session runs on, reply still ships |
+| `"refuse"` | session killed at init; the channel sees only `[text].model_gate_line`, #custodian sees `MODEL GATE REFUSED` |
+
+A missing or unparseable `model_gate` means `"off"`, logged at WARNING — an
+unreadable lever can only ever leave the summon path behaving as it does
+today. `"refuse"` requires a stream-json `session_argv`; pointed at
+`--output-format json` it refuses everything (and says so). The launcher
+auto-detects the output shape, so the legacy single-envelope path still works
+unchanged with the gate off.
+
+Fail loud, never fail over, at every state: no retry on another model, no
+substitution, no downgrading a refusal to a warning.
 
 ## Chat is data, never authorization
 

@@ -32,7 +32,84 @@ __all__ = [
     "make_config",
     "STUB_LAUNCH",
     "stub_config",
+    "make_stream_events",
 ]
+
+
+# ------------------------------------------------------------------- stream-json
+
+
+def make_stream_events(
+    *,
+    init_model: Optional[str] = "claude-fable-5",
+    turn_models: Optional[list[str]] = None,
+    reply: str = "Hello from Gable.",
+    num_turns: int = 4,
+    include_init: bool = True,
+    model_usage: Optional[dict] = None,
+    subagent_model: Optional[str] = None,
+) -> list[dict]:
+    """A stream-json event list shaped like real `claude -p --output-format
+    stream-json --verbose` output (probed locally on CC 2.1.201).
+
+    ``init_model=None`` builds a malformed init event that arrives without a
+    model id; ``include_init=False`` omits it entirely (the shape a deployment
+    still running `--output-format json` produces). ``subagent_model`` adds an
+    assistant event carrying ``parent_tool_use_id``, which the gate must ignore
+    because a subagent may legitimately run another model.
+    """
+    events: list[dict] = []
+    if include_init:
+        init = {
+            "type": "system",
+            "subtype": "init",
+            "cwd": "/home/resident",
+            "session_id": "7e897653-2a00-4c70-b6d6-41f7f72036af",
+            "tools": [],
+            "mcp_servers": [],
+            "permissionMode": "default",
+            "apiKeySource": "none",
+            "claude_code_version": "2.1.201",
+            "output_style": "default",
+            "uuid": "b56814aa-a084-47c7-a5a3-09b3ea174b29",
+        }
+        if init_model is not None:
+            init["model"] = init_model
+        events.append(init)
+    events.append(
+        {"type": "rate_limit_event", "rate_limit_info": {}, "session_id": "s", "uuid": "u"}
+    )
+    for i, m in enumerate(turn_models if turn_models is not None else [init_model]):
+        if m is None:
+            continue
+        if subagent_model and i == 0:
+            events.append({
+                "type": "assistant",
+                "parent_tool_use_id": "toolu_sub",
+                "message": {"model": subagent_model, "content": []},
+                "session_id": "s", "uuid": f"sub{i}",
+            })
+        events.append({
+            "type": "assistant",
+            "parent_tool_use_id": None,
+            "message": {"model": m, "content": [{"type": "text", "text": reply}]},
+            "session_id": "s", "uuid": f"a{i}",
+        })
+    events.append({
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "result": reply,
+        "num_turns": num_turns,
+        "modelUsage": model_usage if model_usage is not None else {
+            # Real sessions carry an auxiliary model here, ahead of the pinned
+            # one — see launcher.parse_model's KNOWN WEAKNESS note.
+            "claude-haiku-4-5-20251001": {"costUSD": 0.0001},
+            (init_model or "claude-unknown"): {"costUSD": 0.02},
+        },
+        "session_id": "s", "uuid": "r",
+    })
+    return events
 
 
 # --------------------------------------------------------------------------- client

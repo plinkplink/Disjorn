@@ -171,6 +171,40 @@ Opus venue, not a patch written from a guess.
   model id, clean channel vs. safeguard-adjacent channel. Feeds BL-G1 directly:
   a pre-act gate is only worth building if the drift is detectable pre-turn.
 
+- [ ] **KB-D1a (MED — the EXISTING drift check can cry wolf)** — WP-L5's
+  post-hoc `parse_model` takes the **first key of `modelUsage`**, and a live
+  probe shows that key is `claude-haiku-4-5-20251001`, not the answering model:
+  Claude Code uses a small model for background work, so a normal session's
+  `modelUsage` is `[haiku, <pinned>]`. On that envelope shape the shipped check
+  would report *haiku* and fire a **false** MODEL DRIFT. It is also structurally
+  incapable of naming which model wrote the reply when a session uses two.
+  (This does NOT explain the five real gable.log drifts — those named
+  `claude-opus-4-8` and haiku is absent from their envelopes — so KB-D1 stands
+  on its own.) The new stream path takes the model from init/assistant events
+  instead; `parse_model` survives only as the legacy fallback. Decide whether
+  to keep the legacy path at all, and re-read any past drift alert with this
+  in mind before treating it as evidence.
+- [ ] **KB-D1b (evidence for the KB-D1 probe, not a defect)** — a live probe on
+  2026-07-22 from this machine ran `claude -p --model claude-fable-5` and got
+  `"model":"claude-fable-5"` in the init event **and** Fable on every assistant
+  turn. So Fable is entitled and works via Claude Code here, today. Combined
+  with the intermittent-then-persistent shape of the five production drifts,
+  that points away from entitlement and toward a content- or state-triggered
+  switch — which is exactly what the KB-D1 probe should discriminate, and what
+  makes KB-D2 (non-ephemeral session state) the leading candidate mechanism.
+- [ ] **KB-D1c (MED — refusal does not stop the container)** — the pre-act gate
+  kills the process it spawned (`run-resident.sh`), but the CONTAINER is not in
+  that process group, so `podman run --rm` keeps going until it finishes or hits
+  `timeout_sec`. The channel guarantee is absolute (nothing a refused session
+  produces is read or posted), but its **side effects inside the container
+  continue** — near-zero at an `init` refusal since no turn has run, but a
+  mid-session refusal may already have made tool calls and can make more.
+  Handed to the harness/cc owner to add a `podman kill` trap; verify it.
+- [ ] **KB-D1d (LOW — deployment footgun)** — `--output-format stream-json`
+  **requires `--verbose`**; without it CC exits 1 with empty stdout. A config
+  that adopts stream-json but forgets `--verbose` gets zero output, not degraded
+  output. Also: the gate compares exact strings, so an alias pin (`opus` rather
+  than `claude-opus-4-8`) reads as a mismatch and would refuse every summon.
 - [ ] **KB-D2 (MED — isolation gap, resident-writable surface)** — the
   "ephemeral `podman run --rm`" summon container is **not stateless**. CC writes
   its client state into the mounted home volume, so `/home/res-gable/

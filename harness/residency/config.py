@@ -13,9 +13,12 @@ overridable, so a scratch/test deployment never touches prod.
 
 from __future__ import annotations
 
+import logging
 import tomllib
 from dataclasses import dataclass, field
 from typing import Optional
+
+logger = logging.getLogger("disjorn.residency.config")
 
 __all__ = [
     "ServerConfig",
@@ -27,7 +30,20 @@ __all__ = [
     "TextConfig",
     "AdapterConfig",
     "load_config",
+    "MODEL_GATE_OFF",
+    "MODEL_GATE_ALERT",
+    "MODEL_GATE_REFUSE",
+    "MODEL_GATE_STATES",
 ]
+
+# ---------------------------------------------------------------- model gate
+# BL-G1: the three explicit states of [container].model_gate. See
+# _parse_model_gate + summon.toml.template for the contract; launcher.StreamGate
+# enforces them.
+MODEL_GATE_OFF = "off"
+MODEL_GATE_ALERT = "alert"
+MODEL_GATE_REFUSE = "refuse"
+MODEL_GATE_STATES = (MODEL_GATE_OFF, MODEL_GATE_ALERT, MODEL_GATE_REFUSE)
 
 
 @dataclass
@@ -87,6 +103,10 @@ class ContainerConfig:
     # fallback — a session that can't run the pin fails loud. None = unpinned
     # (documented legacy behaviour; prod always pins).
     model: Optional[str] = None
+    # BL-G1 pre-act model gate. One of MODEL_GATE_STATES; see _parse_model_gate
+    # for the exact semantics of each state and of a missing/unparseable value.
+    # Ships "off" — today's post-hoc alert-only behaviour, unchanged.
+    model_gate: str = MODEL_GATE_OFF
     timeout_sec: float = 1800.0
     # Extra env for the launch subprocess (e.g. RESIDENT_IMAGE). Config only.
     env: dict[str, str] = field(default_factory=dict)
@@ -116,6 +136,14 @@ class TextConfig:
         "Something went wrong running that on my end; a human can check "
         "#custodian for the details."
     )
+    # BL-G1: the ONLY thing that reaches the summoning channel when the model
+    # gate refuses a session. Operator-facing on purpose — it says a human is
+    # needed and nothing else. The session's own words never ship: the gate
+    # exists precisely because we cannot vouch for who wrote them.
+    model_gate_line: str = (
+        "I stopped before answering — the session didn't come up on my pinned "
+        "model. A human should check #custodian."
+    )
 
 
 def _parse_model(raw) -> Optional[str]:
@@ -133,6 +161,58 @@ def _parse_model(raw) -> Optional[str]:
             f"(got {raw!r})"
         )
     return raw.strip()
+
+
+def _parse_model_gate(raw) -> str:
+    """The [container].model_gate state, defaulted safest-compatible (BL-G1).
+
+    Three explicit states, enforced in launcher.StreamGate:
+
+    * ``"off"`` — **the default.** No pre-act gate. The stream is parsed for
+      reply/actions/model exactly as before, nothing is ever aborted, and a
+      pin/actual mismatch is handled the way it is today: the reply ships and
+      #custodian gets a post-hoc MODEL DRIFT alert (alert-only).
+    * ``"alert"`` — pre-act *detection*, post-hoc *consequence*. A mismatch is
+      recognised the moment the session's ``system``/``init`` event names the
+      model — i.e. before the turn runs, so the log line lands before the reply
+      — but the session is NOT killed and the reply still ships, plus the same
+      #custodian drift alert. The shakedown state: prove the gate sees the
+      truth before letting it stop anything.
+    * ``"refuse"`` — enforcing. A mismatch at init kills the session
+      immediately; nothing the session produced reaches the channel, only
+      ``[text].model_gate_line``, and #custodian gets a loud refusal alert
+      naming expected vs actual. Requires a stream-json session_argv (see
+      below).
+
+    Missing key, wrong type, or an unrecognised string → ``"off"``, logged at
+    WARNING. That is the safest-compatible default in the precise sense that
+    matters here: an unreadable knob can only ever leave the summon path
+    behaving exactly as it does today. It can never brick summons (which a
+    stray "refuse" would, on a deployment whose session_argv still emits
+    ``--output-format json``), and it can never silently *look* enforcing while
+    being off — the WARNING says which key was ignored and what was assumed.
+    Deliberately NOT fail-loud-at-load like ``container.model``: the pin is a
+    value the adapter must have, the gate is a lever it must not invent.
+    """
+    if raw is None:
+        return MODEL_GATE_OFF
+    if isinstance(raw, bool):
+        # A boolean is a plausible typo for the tri-state. Don't guess an
+        # enforcing meaning from `true` — say so and stay off.
+        logger.warning(
+            "container.model_gate must be one of %s (got the boolean %r); "
+            "assuming %r — the model gate is OFF",
+            list(MODEL_GATE_STATES), raw, MODEL_GATE_OFF,
+        )
+        return MODEL_GATE_OFF
+    if isinstance(raw, str) and raw.strip().lower() in MODEL_GATE_STATES:
+        return raw.strip().lower()
+    logger.warning(
+        "container.model_gate must be one of %s (got %r); assuming %r — "
+        "the model gate is OFF",
+        list(MODEL_GATE_STATES), raw, MODEL_GATE_OFF,
+    )
+    return MODEL_GATE_OFF
 
 
 @dataclass
@@ -193,6 +273,7 @@ class AdapterConfig:
                 resident=str(cn.get("resident", ContainerConfig.resident)),
                 session_argv=[str(a) for a in cn.get("session_argv", [])],
                 model=_parse_model(cn.get("model")),
+                model_gate=_parse_model_gate(cn.get("model_gate")),
                 timeout_sec=float(cn.get("timeout_sec", ContainerConfig.timeout_sec)),
                 env={str(k): str(v) for k, v in (cn.get("env", {}) or {}).items()},
             ),
@@ -208,6 +289,9 @@ class AdapterConfig:
             text=TextConfig(
                 refusal_line=str(tx.get("refusal_line", TextConfig.refusal_line)),
                 error_line=str(tx.get("error_line", TextConfig.error_line)),
+                model_gate_line=str(
+                    tx.get("model_gate_line", TextConfig.model_gate_line)
+                ),
             ),
         )
 

@@ -45,6 +45,7 @@ from launcher import ContainerLauncher
 from prompt import assemble_prompt
 from summary import (
     format_drift_alert,
+    format_gate_refusal_alert,
     format_refusal_summary,
     format_reply_suffix,
     format_summary,
@@ -167,6 +168,40 @@ class SummonAdapter:
             # The polite channel line hides the cause on purpose; the log
             # must not — a silent 0.0s failure cost a debugging round.
             logger.warning("summon session failed: %s", result.error or "(no detail)")
+
+        # BL-G1 pre-act model gate: the session was killed before (or, for a
+        # mid-session switch, without) its output being trusted. NOTHING it
+        # produced reaches the channel — only the configured operator-facing
+        # line — and #custodian is told loudly what was expected vs seen. This
+        # path only exists when plink has set container.model_gate = "refuse";
+        # the shipped default never reaches it.
+        if getattr(result, "gate_abort", False):
+            logger.error(
+                "MODEL GATE REFUSED summon by %s in %s: pinned %s, saw %s (at %s)",
+                summoner, where, result.gate_expected,
+                result.gate_actual or "no model id", result.gate_stage,
+            )
+            await self._safe_send(
+                channel_id, self.config.text.model_gate_line, reply_to=trigger_id
+            )
+            await self._safe_send(
+                self.config.summon.custodian_channel_id,
+                format_gate_refusal_alert(
+                    expected=result.gate_expected, actual=result.gate_actual,
+                    stage=result.gate_stage or "unknown",
+                    summoner=summoner, where=where,
+                ),
+            )
+            await self._safe_send(
+                self.config.summon.custodian_channel_id,
+                format_summary(
+                    summoner=summoner, where=where,
+                    action_count=result.action_count,
+                    duration_sec=result.duration_sec, ok=False,
+                    model=result.gate_actual,
+                ),
+            )
+            return
 
         # WP-L5 model integrity: assert the actually-used model against the
         # pin where knowable. pin = config (never chat); actual = what the

@@ -50,19 +50,80 @@ command = ["/usr/local/lib/disjorn/run-resident.sh"]
 resident = "gable"
 # WP-L5 MODEL PIN — the one line that decides what actually runs.
 # The launcher appends `--model <this>` to the argv; nothing else pins a
-# model, so without this the session silently rides the API key's account
-# default (config drift waiting to happen). No fallback: if the pin can't
-# run, the session fails loud and #custodian gets a drift alert — on the API
-# a disallowed/flagged request ERRORS, it does not silently downgrade.
-# 2026-07-21: Fable confirmed available on plink's API credits (probe: HTTP
-# 200, model echoed), so the one-pin upgrade path is taken — Gable-chat runs
-# Fable. Per-resident: Claudette's pin is an Opus id (she IS Opus-4.8);
-# subagent build hands stay Opus by plink's design. The run-time assert + the
-# reply suffix verify any flip end-to-end.
+# model, so without this the session silently rides the account default (config
+# drift waiting to happen). No fallback: the adapter never retries on another
+# model and never substitutes one.
+# 2026-07-21: Fable confirmed available on plink's credits (probe: HTTP 200,
+# model echoed), so the one-pin upgrade path is taken — Gable-chat runs Fable.
+# Per-resident: Claudette's pin is an Opus id (she IS Opus-4.8); subagent build
+# hands stay Opus by plink's design.
+# CORRECTION (BL-G1, 2026-07-22) to an earlier note here: the summon path is
+# NOT the raw API. session_argv below runs `claude -p`, i.e. Claude Code, so
+# whatever model-selection behaviour Claude Code has — including a safeguard
+# switch that resolves a session onto a different model — applies to summons.
+# "The pin can only fail by erroring" was never a property of this path, and
+# /home/res-gable/logs/gable.log has five 2026-07-21/22 entries where a
+# claude-fable-5-pinned summon reported running claude-opus-4-8. Which is why
+# the pin now has an enforcement lever below rather than only a suffix and an
+# after-the-fact alert.
 model = "claude-fable-5"
+#
+# BL-G1 MODEL GATE — the one line that decides whether the pin is enforced or
+# merely reported. Three explicit states:
+#
+#   "off"     DEFAULT, and what ships. No pre-act gate at all. A mismatch is
+#             caught only after the session finishes, so the reply has ALREADY
+#             been posted when #custodian gets the MODEL DRIFT alert. This is
+#             the WP-L5 behaviour exactly, warts included.
+#   "alert"   Detect early, act late. The mismatch is recognised the moment the
+#             session's system/init event names the resolved model — before the
+#             turn runs, so the log line lands ahead of the reply — but the
+#             session is NOT killed and the reply still ships. Use this first:
+#             it proves the gate sees the truth on this deployment before you
+#             let it stop anything.
+#   "refuse"  Enforcing, and the actual answer to BL-G1. A mismatch at init
+#             kills the session immediately; the only thing that reaches the
+#             summoning channel is [text].model_gate_line, and #custodian gets
+#             MODEL GATE REFUSED naming expected vs seen. A model change part
+#             way through a session is caught the same way (nothing had been
+#             posted yet). Never a fallback, never a retry on another model.
+#
+# The trade: "refuse" converts a wrong-model reply into NO reply. If the pinned
+# model is intermittently unavailable — which is exactly what the five
+# 2026-07-21/22 drift events in gable.log look like — enforcing means the
+# resident goes quiet instead of answering as the wrong model. That is the
+# right failure for a house that cares who is speaking, and it is the wrong
+# failure if you would rather have an answer from anyone. plink's call, hence
+# this key.
+#
+# REQUIREMENT for "refuse": session_argv MUST use `--output-format stream-json
+# --verbose` (below). The gate reads the model off the stream's init event; a
+# session that never emits one cannot be verified before it acts, and "refuse"
+# treats that as a refusal, not a pass — so pointing "refuse" at an
+# `--output-format json` session_argv silences the resident entirely. The
+# refusal message says so in as many words.
+#
+# Also: pin the FULL resolved model id. `--model <id>` is echoed verbatim into
+# the init event (probed locally on CC 2.1.201: `--model claude-opus-4-8` ->
+# init `"model": "claude-opus-4-8"`), but a short alias would resolve to a
+# different string and read as a mismatch.
+#
+# An unreadable value here (missing, wrong type, unknown string) means "off",
+# logged at WARNING — an unparseable lever can only ever leave the summon path
+# behaving as it does today, never brick summons and never pretend to enforce.
+model_gate = "off"
+#
 # The command run INSIDE the container: a headless Claude Code invocation that
-# reads the prompt on stdin and prints the result as JSON on stdout. Tune to
-# the installed CC; e.g. `claude -p --output-format json` (result/num_turns).
+# reads the prompt on stdin and prints the session as JSON on stdout.
+# `--output-format stream-json --verbose` emits one JSON object per line in
+# real time — a system/init event naming the resolved model BEFORE the turn
+# runs, assistant events per turn, then the same result envelope
+# (result/num_turns) the launcher has always parsed. `--verbose` is not
+# optional: CC errors out with "When using --print,
+# --output-format=stream-json requires --verbose".
+# The launcher auto-detects the shape, so a deployment that reverts this to
+# `--output-format json` still works — it just loses the pre-act gate (and must
+# then keep model_gate = "off"; see above).
 # Bootstrap first (WP-H7 assembly: spine -> ~/.claude/CLAUDE.md + MEMORY.md;
 # idempotent, stdlib-only), then the headless session. Bootstrap output goes
 # to stderr so the JSON contract on stdout stays clean.
@@ -71,7 +132,7 @@ model = "claude-fable-5"
 # `bash -lc "<script>" cc-session --model <id>` makes those the script's
 # positional args ($0=cc-session, "$@"=--model <id>), which "$@" forwards to
 # claude. Drop either and the pin silently stops reaching claude.
-session_argv = ["bash", "-lc", "python3 /opt/house_memory/house_memory/bootstrap.py >&2 && exec claude -p --output-format json \"$@\"", "cc-session"]
+session_argv = ["bash", "-lc", "python3 /opt/house_memory/house_memory/bootstrap.py >&2 && exec claude -p --output-format stream-json --verbose \"$@\"", "cc-session"]
 timeout_sec = 300              # 5 min: past that the endless typing indicator reads as a hang
 # Optional extra env for the launch subprocess (run-resident.sh reads these):
 # [container.env]
@@ -87,3 +148,7 @@ state_path = "/home/resident/.summon-cursor.json"   # persisted seq high-water m
 [text]
 refusal_line = "I'm at my summon budget for today — flag a human in #custodian if this can't wait."
 error_line = "Something went wrong running that on my end; a human can check #custodian for the details."
+# BL-G1: the ONLY thing posted to the summoning channel when model_gate =
+# "refuse" stops a session. Nothing the session produced ships — the whole
+# point is that we can't vouch for who wrote it.
+model_gate_line = "I stopped before answering — the session didn't come up on my pinned model. A human should check #custodian."
