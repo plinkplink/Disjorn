@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { ApiError, createChannel, listMembers } from "../api";
 import { Avatar } from "../components/Avatar";
+import { CheatSheet } from "../components/CheatSheet";
 import { SearchBar } from "../components/SearchBar";
 import { UserPanel } from "../components/UserPanel";
 import {
@@ -140,6 +141,8 @@ export function AppShell() {
   const [membersOpen, setMembersOpen] = useState(
     () => window.innerWidth >= 1024,
   );
+  const [cheatOpen, setCheatOpen] = useState(false);
+  const me = useSession((s) => s.user);
   const showSettingsRef = useRef(showSettings);
   showSettingsRef.current = showSettings;
 
@@ -369,6 +372,16 @@ export function AppShell() {
                 )}
               </span>
               <SearchBar />
+              {me?.is_admin && (
+                <button
+                  className="icon-btn cheat-toggle"
+                  title="Command cheat sheet"
+                  aria-label="Command cheat sheet"
+                  onClick={() => setCheatOpen(true)}
+                >
+                  ⌘
+                </button>
+              )}
               {activeChannelId !== null && (
                 <button
                   className={`icon-btn members-toggle${membersOpen ? " active" : ""}`}
@@ -400,6 +413,9 @@ export function AppShell() {
           </>
         )}
       </main>
+      {cheatOpen && me?.is_admin && (
+        <CheatSheet onClose={() => setCheatOpen(false)} />
+      )}
     </div>
   );
 }
