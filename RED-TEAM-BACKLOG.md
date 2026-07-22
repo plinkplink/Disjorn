@@ -397,3 +397,39 @@ Opus venue, not a patch written from a guess.
   redacted messages (170/182/190/192) are already placeholders. Re-check this
   relationship during the red-team, and note the interaction with KB-D1 —
   if drift is content-triggered, a deeper window raises the drift rate.
+
+---
+
+## KB-D14 — live test running now: is the drift caused by MY backfill change?
+
+- [ ] **Test in flight, started 2026-07-22 ~15:30, one config line to undo.**
+  WP-L1's deeper #custodian window (100) was wired into the live summon.toml
+  that morning. Arithmetic found later the same day, at the channel's current
+  length:
+
+  | backfill | reaches back to | includes incident region (seqs 170–192)? |
+  |---|---|---|
+  | 30 (default) | seq 223 | **no** |
+  | 100 (as wired) | seq 153 | **yes — all of it** |
+
+  Per Gable's mechanism (DEFERRED.md "bot ingest / summon path"), flagged
+  content in inbound context is precisely what makes the provider-side gate
+  decline to serve the pinned model. So the deeper window plausibly **re-exposed
+  a poisoned region that had just aged out of the 30-window** as the channel
+  grew past it. That fits the timeline: the pre-change drifts (07-21 18:41,
+  20:41, 20:50; 07-22 06:14, 06:24) all happened when the incident region was
+  still recent enough to sit inside a 30-window; it had since scrolled out;
+  the 100-window pulled it back in, and drift continued (seq 240, and the
+  15:07 summon).
+
+  **Reverted to 30 and restarted the adapter as a live test.** If Fable now
+  holds across several #custodian summons, the mechanism is confirmed and plink
+  has a consistent Fable immediately, without waiting for the full fix.
+  If it still drifts at 30, the vector is elsewhere — most likely the
+  persisted session state of KB-D2, which the revert does not touch.
+
+  **Either result is informative, and the negative result is the more valuable
+  one**, because it eliminates the cheap explanation. Record the outcome here.
+
+  Restore 100 once ingest hygiene lands — the deeper window is genuinely wanted
+  for design threads. This is a stopgap, not a verdict on WP-L1.
