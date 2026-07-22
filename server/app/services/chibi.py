@@ -84,6 +84,15 @@ def _pack_dir(pack: str) -> Optional[Path]:
     return path if path.is_dir() else None
 
 
+def pack_exists(pack: str) -> bool:
+    """True if `pack` (bare name or filesystem path) resolves to a pack directory.
+
+    Public wrapper over _pack_dir for admin surfaces that want to validate a
+    `bots.chibi_pack` value before storing it (routers/bots_admin.py, cli.py).
+    """
+    return _pack_dir(pack) is not None
+
+
 def _mtime_signature(pack_dir: Path) -> tuple:
     sig: list = [pack_dir.stat().st_mtime_ns]
     for sub in sorted(p for p in pack_dir.iterdir() if p.is_dir()):

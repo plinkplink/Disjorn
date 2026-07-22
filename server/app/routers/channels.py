@@ -136,10 +136,23 @@ class ReadRequest(BaseModel):
 
 
 class MemberOut(BaseModel):
+    """One row of the member panel.
+
+    `avatar_path` is the DB-relative storage path (non-null == this member has
+    an avatar) and `avatar_url` the versioned serving URL, both mirroring the
+    message-author payload. Without them a member panel had to fire one
+    request per member and let most of them 404 — bots almost never have an
+    avatar. `avatar_url` also carries the `?v={mtime}` cache key, so a
+    repainted avatar shows up on the next members fetch instead of waiting out
+    the response cache.
+    """
+
     type: MemberType
     id: int
     name: str
     status: Optional[UserStatus] = None  # users only
+    avatar_path: Optional[str] = None
+    avatar_url: Optional[str] = None
 
 
 class BotRef(BaseModel):
@@ -392,27 +405,47 @@ async def list_members(channel_id: int, actor: CurrentActor) -> list[MemberOut]:
     if channel["type"] in ("main_feed", "text"):
         # All users are implicit members; bots only via their explicit rows.
         users = await db.fetch_all(
-            "SELECT id, display_name, status FROM users ORDER BY id"
+            "SELECT id, display_name, status, avatar_path FROM users ORDER BY id"
         )
     else:
         users = await db.fetch_all(
-            """SELECT u.id, u.display_name, u.status
+            """SELECT u.id, u.display_name, u.status, u.avatar_path
                FROM channel_members cm JOIN users u ON u.id = cm.member_id
                WHERE cm.channel_id = ? AND cm.member_type = 'user'
                ORDER BY u.id""",
             (channel_id,),
         )
     bots = await db.fetch_all(
-        """SELECT b.id, b.name
+        """SELECT b.id, b.name, b.avatar_path
            FROM channel_members cm JOIN bots b ON b.id = cm.member_id
            WHERE cm.channel_id = ? AND cm.member_type = 'bot'
            ORDER BY b.id""",
         (channel_id,),
     )
+    # Local import: media imports messages imports channels (see messages.py's
+    # _attachment_url for the same dodge).
+    from .media import bot_avatar_url, user_avatar_url
+
     return [
-        MemberOut(type="user", id=u["id"], name=u["display_name"], status=u["status"])
+        MemberOut(
+            type="user",
+            id=u["id"],
+            name=u["display_name"],
+            status=u["status"],
+            avatar_path=u["avatar_path"],
+            avatar_url=user_avatar_url(u["id"], u["avatar_path"]),
+        )
         for u in users
-    ] + [MemberOut(type="bot", id=b["id"], name=b["name"]) for b in bots]
+    ] + [
+        MemberOut(
+            type="bot",
+            id=b["id"],
+            name=b["name"],
+            avatar_path=b["avatar_path"],
+            avatar_url=bot_avatar_url(b["id"], b["avatar_path"]),
+        )
+        for b in bots
+    ]
 
 
 # ---------------------------------------------------------------------------

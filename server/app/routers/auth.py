@@ -5,8 +5,10 @@ Exported dependencies for other WPs:
                        Sliding 30-day expiry: expires_at refreshed on every use.
     get_current_bot  — `X-Api-Key` header -> SHA-256 hashed lookup in bots -> Bot.
     get_actor        — either of the above -> Actor (type: "user"|"bot", id, user|bot).
+    get_admin_user   — get_current_user + the `is_admin` bit (403 without it).
 
-All three raise HTTP 401 on failure.
+The first three raise HTTP 401 on failure; get_admin_user raises 401 (not
+logged in) or 403 (logged in, not an admin).
 
 Hashing: passwords use argon2id (argon2-cffi); bot API keys use plain SHA-256
 (they are high-entropy random secrets, so a slow KDF is unnecessary).
@@ -101,11 +103,17 @@ def _clear_session_cookie(response: Response) -> None:
 
 
 def _user_from_row(row: dict) -> User:
+    # Local import: media imports this module (store_avatar's callers need the
+    # auth dependencies), so the versioned-URL helper can only be pulled in at
+    # call time. See media.avatar_version for why the `?v=` exists.
+    from .media import user_avatar_url
+
     return User(
         id=row["id"],
         username=row["username"],
         display_name=row["display_name"],
         avatar_path=row["avatar_path"],
+        avatar_url=user_avatar_url(row["id"], row["avatar_path"]),
         status=row["status"],
         is_admin=bool(row["is_admin"]),
         created_at=row["created_at"],
@@ -175,6 +183,20 @@ async def get_current_bot(x_api_key: ApiKeyHeader = None) -> Bot:
     if bot is None:
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
     return bot
+
+
+async def get_admin_user(disjorn_session: SessionCookie = None) -> User:
+    """Session cookie -> User, gated on the `is_admin` bit.
+
+    The single admin gate for the whole app (Architecture §3: flat access, one
+    `is_admin` bit used only for account/bot management). Bots can never pass
+    it — admin surfaces are cookie-only by construction, so a leaked bot API
+    key cannot reconfigure other bots.
+    """
+    user = await get_current_user(disjorn_session)
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin only")
+    return user
 
 
 class Actor(BaseModel):

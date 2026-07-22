@@ -35,7 +35,7 @@ import json
 from typing import Annotated, Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from .. import db, events, privacy
 from ..models import User
@@ -48,6 +48,30 @@ CurrentUser = Annotated[User, Depends(get_current_user)]
 CurrentActor = Annotated[Actor, Depends(get_actor)]
 
 SEARCH_LIMIT = 50
+
+# Hard cap on message content, in characters (BL-D6).
+#
+# Why 16000: Discord ships 2000 (4000 for Nitro), but this house is explicitly
+# friendlier to long bot output — a resident posts whole build reports, and the
+# largest cap anywhere else in the stack is the harness's 4000-char file-proposal
+# contract (harness/consolidation/poster.py PROPOSAL_TEXT_CAP = 3900). 16000
+# leaves ~4x headroom over that so no legitimate bot post is broken, while still
+# turning "a 2MB /backlog stored verbatim" into a 422 instead of a row. It is
+# also comfortably under SQLite's default 1e9-byte string limit and small enough
+# that a full 200-message history page stays a few MB.
+#
+# Server-authored messages (slash replies via deliver_message) do not pass
+# through this pydantic model, so their own rendering must stay bounded — see
+# slash._render_list.
+MAX_MESSAGE_CHARS = 16000
+
+# Same idea for the free-form JSON fields on a message create. Without this,
+# `content` is capped but `emote_refs` / `privacy_flags` are an uncapped side
+# channel into the same row (both are json.dumps'd straight into the DB).
+# 4000 chars is generous: a realistic emote_refs is one or two
+# "chibi:pack/Category/File.png" strings, and privacy_flags is a handful of
+# booleans.
+MAX_METADATA_CHARS = 4000
 
 
 # ---------------------------------------------------------------------------
@@ -92,13 +116,13 @@ def _resolve_emotion(bot_chibi_pack: Optional[str], emotion: str) -> Any:
         return None
 
 
-async def _attachment_url(attachment_id: int) -> Optional[str]:
-    """Signed media URL via WP6's media module; None until it lands."""
+async def _attachment_url(attachment_id: int, variant: str = "display") -> Optional[str]:
+    """Signed media URL for one variant via WP6's media module; None until it lands."""
     try:
         from .media import sign_media_url  # WP6
     except ImportError:
         return None
-    result = sign_media_url(attachment_id)
+    result = sign_media_url(attachment_id, variant)
     if inspect.isawaitable(result):
         result = await result
     return result
@@ -107,6 +131,23 @@ async def _attachment_url(attachment_id: int) -> Optional[str]:
 # ---------------------------------------------------------------------------
 # Payload building (exported — WS backfill and other WPs reuse this)
 # ---------------------------------------------------------------------------
+
+def _avatar_url(author_type: str, author_id: int, avatar_path: Optional[str]) -> Optional[str]:
+    """Versioned avatar URL for an author, or None when they have none.
+
+    Local import for the same reason as _attachment_url: media imports this
+    module. See media.avatar_version for why the `?v=` matters.
+    """
+    try:
+        from .media import bot_avatar_url, user_avatar_url  # WP6
+    except ImportError:
+        return None
+    return (
+        user_avatar_url(author_id, avatar_path)
+        if author_type == "user"
+        else bot_avatar_url(author_id, avatar_path)
+    )
+
 
 async def _author_info(author_type: str, author_id: int) -> dict[str, Any]:
     if author_type == "user":
@@ -121,6 +162,7 @@ async def _author_info(author_type: str, author_id: int) -> dict[str, Any]:
                 "name": row["display_name"],
                 "username": row["username"],
                 "avatar_path": row["avatar_path"],
+                "avatar_url": _avatar_url("user", row["id"], row["avatar_path"]),
             }
     else:
         row = await db.fetch_one(
@@ -132,8 +174,15 @@ async def _author_info(author_type: str, author_id: int) -> dict[str, Any]:
                 "id": row["id"],
                 "name": row["name"],
                 "avatar_path": row["avatar_path"],
+                "avatar_url": _avatar_url("bot", row["id"], row["avatar_path"]),
             }
-    return {"type": author_type, "id": author_id, "name": "unknown", "avatar_path": None}
+    return {
+        "type": author_type,
+        "id": author_id,
+        "name": "unknown",
+        "avatar_path": None,
+        "avatar_url": None,
+    }
 
 
 async def message_payload(row: dict[str, Any]) -> dict[str, Any]:
@@ -141,12 +190,20 @@ async def message_payload(row: dict[str, Any]) -> dict[str, Any]:
 
     Shape:
         {id, channel_id, seq, author_type, author_id,
-         author: {type, id, name, username?, avatar_path},
+         author: {type, id, name, username?, avatar_path, avatar_url},
          content, created_at, edited_at, deleted_at, reply_to_id,
          privacy_flags: {}, emote_refs: [], attachments: [
-             {id, original_filename, mime_type, size_bytes, width, height, url}]}
+             {id, original_filename, mime_type, size_bytes, width, height,
+              url, thumb_url, orig_url}]}
 
-    `url` is a signed media URL once WP6's media.sign_media_url exists, else None.
+    `url`/`thumb_url`/`orig_url` are signed media URLs (display / thumb /
+    preserved original) once WP6's media.sign_media_url exists, else None. The
+    three-variant shape matches POST /upload's `_attachment_out`, so a client
+    that got an attachment from an upload response and one that got it from
+    history see the same keys — that's what lets the image modal offer "view
+    original" (the display variant is a re-encoded WebP; the original keeps the
+    source format and metadata).
+
     Attachment rows may be pre-linked by the upload flow; the join always runs
     (empty list when none exist).
     """
@@ -162,7 +219,9 @@ async def message_payload(row: dict[str, Any]) -> dict[str, Any]:
                 "size_bytes": att["size_bytes"],
                 "width": att["width"],
                 "height": att["height"],
-                "url": await _attachment_url(att["id"]),
+                "url": await _attachment_url(att["id"], "display"),
+                "thumb_url": await _attachment_url(att["id"], "thumb"),
+                "orig_url": await _attachment_url(att["id"], "orig"),
             }
         )
     return {
@@ -280,15 +339,39 @@ def _require_author(row: dict[str, Any], actor: Actor) -> None:
 # ---------------------------------------------------------------------------
 
 class MessageCreate(BaseModel):
-    content: str
+    # max_length is the intake wall for oversized content (BL-D6): pydantic
+    # rejects with a 422 before anything is persisted, indexed by FTS5, or
+    # fanned out on the bus.
+    content: str = Field(max_length=MAX_MESSAGE_CHARS)
     reply_to_id: Optional[int] = None
     privacy_flags: dict[str, Any] = Field(default_factory=dict)
-    emotion: Optional[str] = None       # bot authors only; resolved via chibi (WP8)
+    # bot authors only; resolved via chibi (WP8)
+    emotion: Optional[str] = Field(default=None, max_length=200)
     emote_refs: Optional[list[Any]] = None  # bot authors only; stored as-is
+
+    @model_validator(mode="after")
+    def _bound_metadata(self) -> "MessageCreate":
+        """Keep the free-form JSON fields from becoming an uncapped side channel."""
+        for name, value in (
+            ("privacy_flags", self.privacy_flags),
+            ("emote_refs", self.emote_refs),
+        ):
+            if value is None:
+                continue
+            try:
+                encoded = json.dumps(value)
+            except (TypeError, ValueError):
+                raise ValueError(f"{name} must be JSON-serializable") from None
+            if len(encoded) > MAX_METADATA_CHARS:
+                raise ValueError(
+                    f"{name} exceeds {MAX_METADATA_CHARS} serialized characters"
+                )
+        return self
 
 
 class MessageEdit(BaseModel):
-    content: str
+    # Same cap as create — an edit must not be a way around it.
+    content: str = Field(max_length=MAX_MESSAGE_CHARS)
 
 
 # ---------------------------------------------------------------------------

@@ -405,9 +405,21 @@ async def test_avatar_upload_and_fetch(client):
         "/me/avatar", files=[("file", ("me.png", png_bytes((800, 600)), "image/png"))]
     )
     assert r.status_code == 200, r.text
-    assert r.json()["url"] == f"/avatars/{uid}"
+    first_url = r.json()["url"]
+    assert first_url.startswith(f"/avatars/{uid}?v=")
     row = await db.fetch_one("SELECT avatar_path FROM users WHERE id = ?", (uid,))
     assert row["avatar_path"] == f"avatars/user_{uid}.webp"
+
+    # The versioned URL is surfaced wherever the user shape is, and it moves
+    # when the avatar does — the path alone can't be a cache key (it never
+    # changes), which is why a re-upload used to stay invisible for max-age.
+    assert (await client.get("/me")).json()["avatar_url"] == first_url
+    r = await client.post(
+        "/me/avatar", files=[("file", ("me2.png", png_bytes((64, 64)), "image/png"))]
+    )
+    assert r.status_code == 200
+    assert r.json()["url"] != first_url
+    assert (await client.get("/me")).json()["avatar_url"] == r.json()["url"]
 
     r = await client.get(f"/avatars/{uid}")
     assert r.status_code == 200 and r.headers["content-type"] == "image/webp"
@@ -464,3 +476,59 @@ async def test_picker_path_traversal_blocked(client):
     assert r.status_code == 404
     r = await client.get("/picker/file/image/does-not-exist.png")
     assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# DEFERRED: orig_url / thumb_url in message payloads
+# ---------------------------------------------------------------------------
+
+async def test_message_payload_carries_all_three_variants(client):
+    # Regression: message_payload() signed only the display variant, so the
+    # client image modal could only ever link the re-encoded WebP — the
+    # preserved original was unreachable from history even though /upload
+    # already returned an orig_url.
+    await make_user("alice")
+    await login(client, "alice")
+    ch = await main_feed_id()
+
+    msg = await post_message(client, ch, "look at this")
+    body = await upload(client, "geo.jpg", jpeg_with_gps(), "image/jpeg", message_id=msg["id"])
+    att_id = body["attachments"][0]["id"]
+
+    for payload in (
+        body["message"],                                   # publish path
+        (await client.get(f"/channels/{ch}/messages", params={"from_seq": 0})).json()[0],
+    ):
+        (att,) = payload["attachments"]
+        assert att["id"] == att_id
+        assert att["url"].startswith(f"/media/{att_id}?v=display")
+        assert att["thumb_url"].startswith(f"/media/{att_id}?v=thumb")
+        assert att["orig_url"].startswith(f"/media/{att_id}?v=orig")
+
+    # Each URL is independently signed and actually serves its own variant:
+    # display is the stripped WebP, orig is the untouched source.
+    (att,) = body["message"]["attachments"]
+    r = await client.get(att["url"])
+    assert r.status_code == 200 and r.headers["content-type"] == "image/webp"
+    r = await client.get(att["thumb_url"])
+    assert r.status_code == 200 and r.headers["content-type"] == "image/webp"
+    r = await client.get(att["orig_url"])
+    assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg"
+    with Image.open(io.BytesIO(r.content)) as im:
+        assert im.getexif().get_ifd(ExifTags.IFD.GPSInfo)  # the preserved original
+
+
+async def test_payload_variant_urls_are_bus_visible(client):
+    """WS/bot consumers see the same three variants (one payload builder)."""
+    await make_user("alice")
+    await login(client, "alice")
+    ch = await main_feed_id()
+    captured = capture_events()
+
+    msg = await post_message(client, ch, "with a file")
+    await upload(client, "s.png", png_bytes((64, 48)), "image/png", message_id=msg["id"])
+
+    edits = [e for e in captured if e["type"] == "message_edit"]
+    (att,) = edits[-1]["message"]["attachments"]
+    assert {"url", "thumb_url", "orig_url"} <= set(att)
+    assert all(att[k] for k in ("url", "thumb_url", "orig_url"))

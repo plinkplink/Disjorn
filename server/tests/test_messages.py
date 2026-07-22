@@ -3,6 +3,7 @@ reply validation, pagination/backfill semantics, bot privacy exclusion, search."
 
 from app import db, events
 from app.routers import auth
+from app.routers.messages import MAX_MESSAGE_CHARS, MAX_METADATA_CHARS
 
 PASSWORD = "correct horse battery staple"
 BOT_KEY = "bot-key-1"
@@ -122,7 +123,8 @@ async def test_create_membership_and_unknown_channel(client):
     r = await client.post(f"/channels/{main}/messages", json={"content": "beep"}, headers=headers)
     assert r.status_code == 200
     assert r.json()["author"] == {
-        "type": "bot", "id": bot_id, "name": "claw", "avatar_path": None,
+        "type": "bot", "id": bot_id, "name": "claw",
+        "avatar_path": None, "avatar_url": None,
     }
 
     # No auth at all
@@ -638,3 +640,104 @@ async def test_search_survives_weird_fts_input(client):
     # Empty / whitespace-only queries return nothing, no error
     assert (await client.get("/search", params={"q": ""})).json() == []
     assert (await client.get("/search", params={"q": "   "})).json() == []
+
+
+# ---------------------------------------------------------------------------
+# BL-D6 — message content length cap
+# ---------------------------------------------------------------------------
+
+async def test_message_content_length_cap(client):
+    # Regression (BL-D6): MessageCreate.content had no max_length, so a 2MB
+    # body was stored verbatim (and FTS-indexed, and fanned out on the bus).
+    await make_user("alice")
+    await login(client, "alice")
+    ch = await main_feed_id()
+
+    over = await client.post(
+        f"/channels/{ch}/messages", json={"content": "x" * (MAX_MESSAGE_CHARS + 1)}
+    )
+    assert over.status_code == 422
+    assert await db.fetch_all("SELECT * FROM messages") == []  # nothing persisted
+
+    # Two megabytes — the shape the finding called out.
+    huge = await client.post(f"/channels/{ch}/messages", json={"content": "x" * 2_000_000})
+    assert huge.status_code == 422
+    assert await db.fetch_all("SELECT * FROM messages") == []
+
+
+async def test_message_content_at_cap_is_accepted(client):
+    await make_user("alice")
+    await login(client, "alice")
+    ch = await main_feed_id()
+
+    r = await client.post(
+        f"/channels/{ch}/messages", json={"content": "x" * MAX_MESSAGE_CHARS}
+    )
+    assert r.status_code == 200
+    assert len(r.json()["content"]) == MAX_MESSAGE_CHARS
+
+
+async def test_cap_does_not_break_long_bot_posts(client):
+    """A resident's build report is legitimately long — 4x the harness's
+    file-proposal cap (3900 chars) must still go through."""
+    bot_id = await make_bot()
+    ch = await main_feed_id()
+    await add_member(ch, "bot", bot_id)
+
+    report = "## build report\n" + ("a long paragraph of narration. " * 400)
+    assert 12_000 < len(report) < MAX_MESSAGE_CHARS
+    r = await client.post(
+        f"/channels/{ch}/messages", json={"content": report}, headers=as_bot(client)
+    )
+    assert r.status_code == 200
+    assert r.json()["content"] == report
+
+
+async def test_message_edit_content_length_cap(client):
+    """An edit must not be a way around the create cap."""
+    await make_user("alice")
+    await login(client, "alice")
+    ch = await main_feed_id()
+    msg = (await client.post(f"/channels/{ch}/messages", json={"content": "hi"})).json()
+
+    r = await client.patch(
+        f"/messages/{msg['id']}", json={"content": "x" * (MAX_MESSAGE_CHARS + 1)}
+    )
+    assert r.status_code == 422
+    row = await db.fetch_one("SELECT content, edited_at FROM messages WHERE id = ?", (msg["id"],))
+    assert row["content"] == "hi" and row["edited_at"] is None
+
+
+async def test_message_metadata_json_is_bounded(client):
+    """The content cap must not leave emote_refs/privacy_flags as a side channel."""
+    bot_id = await make_bot()
+    ch = await main_feed_id()
+    await add_member(ch, "bot", bot_id)
+    hdrs = as_bot(client)
+
+    over = await client.post(
+        f"/channels/{ch}/messages",
+        json={"content": "hi", "emote_refs": ["x" * (MAX_METADATA_CHARS + 10)]},
+        headers=hdrs,
+    )
+    assert over.status_code == 422
+    over = await client.post(
+        f"/channels/{ch}/messages",
+        json={"content": "hi", "privacy_flags": {"secret": "y" * (MAX_METADATA_CHARS + 10)}},
+        headers=hdrs,
+    )
+    assert over.status_code == 422
+    assert await db.fetch_all("SELECT * FROM messages") == []
+
+    # Realistic metadata still goes through untouched.
+    ok = await client.post(
+        f"/channels/{ch}/messages",
+        json={
+            "content": "hi",
+            "emote_refs": ["chibi:claudette/Happy_and_Confident/Smug.png"],
+            "privacy_flags": {"secret": True},
+        },
+        headers=hdrs,
+    )
+    assert ok.status_code == 200
+    assert ok.json()["emote_refs"] == ["chibi:claudette/Happy_and_Confident/Smug.png"]

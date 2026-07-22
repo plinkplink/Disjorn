@@ -21,12 +21,17 @@ BacklogStatus = Literal["open", "spec'd", "built", "rejected"]
 # ---------------------------------------------------------------------------
 
 class User(BaseModel):
-    """Public user shape — never includes password_hash."""
+    """Public user shape — never includes password_hash.
+
+    `avatar_url` mirrors Bot.avatar_url: the versioned serving URL
+    (`/avatars/{id}?v={mtime}`) or None when there is no avatar.
+    """
 
     id: int
     username: str
     display_name: str
     avatar_path: Optional[str] = None
+    avatar_url: Optional[str] = None
     status: UserStatus = "offline"
     is_admin: bool = False
     created_at: str
@@ -90,11 +95,18 @@ class BacklogItem(BaseModel):
 
 
 class Bot(BaseModel):
-    """Public bot shape — never includes api_key_hash."""
+    """Public bot shape — never includes api_key_hash.
+
+    `avatar_url` is the versioned serving URL (`/bots/{id}/avatar?v={mtime}`,
+    routers/media.py) or None when the bot has no avatar — consumers use the
+    None to skip a request that would 404, and the `?v=` to avoid a stale
+    cached face after a re-upload.
+    """
 
     id: int
     name: str
     avatar_path: Optional[str] = None
+    avatar_url: Optional[str] = None
     chibi_pack: Optional[str] = None
     created_at: str
 

@@ -3,14 +3,19 @@
 
 Usage:
     .venv/bin/python cli.py create-user <username> [--display-name NAME] [--admin] [--password-stdin]
-    .venv/bin/python cli.py create-bot <name>
+    .venv/bin/python cli.py create-bot <name> [--chibi-pack PACK]
     .venv/bin/python cli.py gen-vapid
 
 Works against the configured DB (config.py / .env); runs migrations first if
 needed. `create-user` prompts for a password via getpass unless
 `--password-stdin` is given (reads one line from stdin — for scripts).
 `create-bot` prints the raw API key exactly once; only its SHA-256 hash is
-stored. `gen-vapid` prints VAPID env lines to paste into .env.
+stored; `--chibi-pack` sets `bots.chibi_pack` at creation (a bare pack name
+under DATA_DIR/assets/chibi_packs/ or an absolute path to a pack directory —
+unresolvable values are refused, since a dead pack silently disables every
+`emotion` tag the bot sends). Bot cosmetics can also be changed later over HTTP
+via the admin surface in app/routers/bots_admin.py. `gen-vapid` prints VAPID env
+lines to paste into .env.
 """
 
 import argparse
@@ -66,14 +71,24 @@ async def cmd_create_user(args: argparse.Namespace) -> None:
 
 
 async def cmd_create_bot(args: argparse.Namespace) -> None:
+    from app.services import chibi
+
     await db.connect()
     await db.run_migrations()
     main_feed_id = await seed_main_feed()
+    chibi_pack = getattr(args, "chibi_pack", None)
+    if chibi_pack is not None and not chibi.pack_exists(chibi_pack):
+        # Refuse rather than store a dead pointer: an unresolvable pack makes
+        # every `emotion` the bot sends resolve to nothing, silently.
+        _fail(
+            f"chibi pack '{chibi_pack}' not found — expected a directory under "
+            f"{chibi.packs_root()} or an absolute path to a pack directory"
+        )
     api_key = secrets.token_urlsafe(32)
     try:
         cur = await db.execute(
-            "INSERT INTO bots (name, api_key_hash) VALUES (?, ?)",
-            (args.name, hash_api_key(api_key)),
+            "INSERT INTO bots (name, api_key_hash, chibi_pack) VALUES (?, ?, ?)",
+            (args.name, hash_api_key(api_key), chibi_pack),
         )
     except sqlite3.IntegrityError:
         _fail(f"bot '{args.name}' already exists")
@@ -84,6 +99,8 @@ async def cmd_create_bot(args: argparse.Namespace) -> None:
         (main_feed_id, bot_id),
     )
     print(f"Created bot '{args.name}' (id={bot_id}), member of main_feed (channel {main_feed_id})")
+    if chibi_pack is not None:
+        print(f"Chibi pack: {chibi_pack}")
     print("API key (shown ONCE — store it now):")
     print(f"  {api_key}")
 
@@ -135,6 +152,15 @@ def main(argv: list[str] | None = None) -> None:
 
     p_bot = sub.add_parser("create-bot", help="create a bot (prints API key once)")
     p_bot.add_argument("name")
+    p_bot.add_argument(
+        "--chibi-pack",
+        default=None,
+        metavar="PACK",
+        help=(
+            "chibi pack for this bot's `emotion` tags: a pack name under "
+            "DATA_DIR/assets/chibi_packs/ or an absolute path to a pack directory"
+        ),
+    )
 
     sub.add_parser("gen-vapid", help="generate a VAPID keypair for Web Push")
 

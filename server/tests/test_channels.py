@@ -2,6 +2,7 @@
 bot membership, named text channels."""
 
 from app import db, events
+from app.config import get_settings
 from app.routers import auth, channels
 
 PASSWORD = "correct horse battery staple"
@@ -262,6 +263,42 @@ async def test_members_main_feed_lists_all_users_and_explicit_bots(client):
     client.cookies.clear()
     r = await client.get(f"/channels/{main}/members", headers={"X-Api-Key": "k1"})
     assert r.status_code == 200
+
+
+async def test_members_carry_avatar_path_and_versioned_url(client):
+    """Regression: MemberOut used to be {type, id, name, status?} only, so a
+    member panel could not tell whether a member had an avatar and fired one
+    request per member — 404 for every bot without one."""
+    uid = await make_user("alice")
+    bare_bot = await make_bot("bare", api_key="k1")
+    painted_bot = await make_bot("painted", api_key="k2")
+    main = await main_feed_id()
+    for bot_id in (bare_bot, painted_bot):
+        await db.execute(
+            "INSERT INTO channel_members (channel_id, member_type, member_id) "
+            "VALUES (?, 'bot', ?)",
+            (main, bot_id),
+        )
+
+    avatars = get_settings().data_dir / "avatars"
+    avatars.mkdir(parents=True, exist_ok=True)
+    (avatars / f"bot_{painted_bot}.webp").write_bytes(b"fake-webp")
+    await db.execute(
+        "UPDATE bots SET avatar_path = ? WHERE id = ?",
+        (f"avatars/bot_{painted_bot}.webp", painted_bot),
+    )
+
+    await login(client, "alice")
+    by_id = {(m["type"], m["id"]): m for m in (await client.get(f"/channels/{main}/members")).json()}
+
+    # No avatar -> no URL: the panel skips the doomed request.
+    assert by_id[("bot", bare_bot)]["avatar_path"] is None
+    assert by_id[("bot", bare_bot)]["avatar_url"] is None
+    assert by_id[("user", uid)]["avatar_url"] is None
+
+    painted = by_id[("bot", painted_bot)]
+    assert painted["avatar_path"] == f"avatars/bot_{painted_bot}.webp"
+    assert painted["avatar_url"].startswith(f"/bots/{painted_bot}/avatar?v=")
 
 
 async def test_members_dm_access_control(client):

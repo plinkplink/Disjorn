@@ -97,11 +97,23 @@ successors BL-D7..D11 / H13-D7..D11. The highest-value single follow-up is
 
 ## sdk
 
-- **No `upload()` helper.** Bots can post text/emotions/replies but attaching
-  media means hand-rolling the `/upload` + `/attachments/claim` calls.
-- **No WS-send posting.** All posting goes through REST (`send()`); the
-  protocol's WS posting path is unused by the SDK.
-- **Backfill only covers channels with a known cursor.** A channel the bot has
+- ~~**No `upload()` helper.**~~ **CLOSED 2026-07-22.** `upload()` and `attach()`
+  cover the real two-step `/upload` + `/attachments/claim` flow, taking a path
+  on disk or `(filename, bytes[, content_type])`, with both flows and the
+  200 MB cap documented. Live-tested including the fail-closed case (a bot
+  claiming onto another author's message → 403).
+- ~~**No WS-send posting.**~~ **WITHDRAWN 2026-07-22 — the bullet was wrong.**
+  There is no WS posting path in the protocol to be "unused": `server/app/ws.py`
+  accepts exactly `auth`, `typing`, `status`, `focus`. Closing this would mean
+  designing a NEW server op with ordering/ack/idempotency semantics to duplicate
+  a REST path that already works. Not a gap; a non-feature. Left here only so
+  the correction is recorded rather than the line silently vanishing.
+- **Backfill only covers channels with a known cursor.** *(2026-07-22: confirmed
+  this is blocked SERVER-side, not in the SDK — a bot cannot enumerate its own
+  channels, since `GET /channels` is user-only and `members()` is per-channel,
+  so there is nothing to seed cursors from on first connect. Closing it needs a
+  new bot-visible channel-list endpoint, which is a privacy-relevant API surface
+  and deserves its own design pass. Staying deferred deliberately.)* A channel the bot has
   never seen an event for (and never `seed_seq()`-ed) is skipped on reconnect
   backfill; the first connect of a fresh client performs no backfill at all
   (documented — use `get_messages()` for boot-time catch-up).

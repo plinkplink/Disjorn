@@ -13,7 +13,7 @@ Quickstart::
     await client.run(handle)
 """
 
-from .client import DisjornAuthError, DisjornClient, DisjornError
+from .client import DisjornAuthError, DisjornClient, DisjornError, UploadSource
 from .events import (
     ChannelCreate,
     Event,
@@ -31,6 +31,7 @@ __all__ = [
     "DisjornClient",
     "DisjornError",
     "DisjornAuthError",
+    "UploadSource",
     "Event",
     "Ready",
     "MessageCreate",

@@ -21,8 +21,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import mimetypes
 import random
-from typing import Any, AsyncIterator, Awaitable, Callable, Optional
+from pathlib import Path
+from typing import Any, AsyncIterator, Awaitable, Callable, Optional, Sequence, Union
 
 import httpx
 import websockets
@@ -39,13 +41,46 @@ from .events import (
     TypingStart,
 )
 
-__all__ = ["DisjornClient", "DisjornError", "DisjornAuthError"]
+__all__ = ["DisjornClient", "DisjornError", "DisjornAuthError", "UploadSource"]
 
 logger = logging.getLogger("disjorn_sdk")
 
 _AUTH_CLOSE_CODE = 4401
 _READY_TIMEOUT = 10.0
 _BACKFILL_PAGE = 200  # server max for GET .../messages limit
+_BACKLOG_PAGE = 200   # server max for GET /backlog limit (slash.BACKLOG_PAGE_MAX)
+_DEFAULT_MIME = "application/octet-stream"
+
+#: What :meth:`DisjornClient.upload` accepts per file — a path on disk, or
+#: in-memory bytes as ``(filename, data)`` / ``(filename, data, content_type)``.
+UploadSource = Union[str, Path, tuple[str, bytes], tuple[str, bytes, str]]
+
+
+def _multipart_part(source: UploadSource) -> tuple[str, tuple[str, bytes, str]]:
+    """One httpx multipart entry for an upload source.
+
+    The field name is always ``files`` — POST /upload takes a repeated ``files``
+    field, which is how one call uploads several attachments.
+    """
+    if isinstance(source, (str, Path)):
+        path = Path(source)
+        name, data = path.name, path.read_bytes()
+        mime = mimetypes.guess_type(name)[0] or _DEFAULT_MIME
+    elif isinstance(source, tuple) and len(source) in (2, 3):
+        name, data = source[0], source[1]
+        mime = source[2] if len(source) == 3 else (
+            mimetypes.guess_type(name)[0] or _DEFAULT_MIME
+        )
+        if not isinstance(name, str) or not isinstance(data, (bytes, bytearray)):
+            raise DisjornError(
+                "upload() tuples must be (filename: str, data: bytes[, content_type])"
+            )
+        data = bytes(data)
+    else:
+        raise DisjornError(
+            f"upload() takes paths or (filename, data[, content_type]) tuples, got {source!r}"
+        )
+    return ("files", (name, data, mime))
 
 
 class DisjornError(Exception):
@@ -122,6 +157,10 @@ class DisjornClient:
         ``emote_refs``; unresolvable emotions are silently ignored by the
         server. ``reply_to`` maps to the protocol's ``reply_to_id`` and must
         reference a message in the same channel.
+
+        ``content`` is capped server-side at 16000 characters
+        (``messages.MAX_MESSAGE_CHARS``); over that the server returns 422 and
+        nothing is posted, so long bot output must be chunked by the caller.
         """
         payload: dict[str, Any] = {"content": content}
         if reply_to is not None:
@@ -133,6 +172,86 @@ class DisjornClient:
         if privacy_flags is not None:
             payload["privacy_flags"] = privacy_flags
         resp = await self._http.post(f"/channels/{channel_id}/messages", json=payload)
+        self._raise_for_status(resp)
+        return resp.json()
+
+    async def upload(
+        self,
+        files: Sequence[UploadSource],
+        *,
+        message_id: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
+        """Upload attachments; returns one dict per uploaded file.
+
+        Each entry is ``{id, message_id, original_filename, mime_type,
+        size_bytes, width, height, has_preview, url, thumb_url, orig_url}``.
+        The three URLs are pre-signed and time-limited (server default: 1h) —
+        the signature *is* the auth, so they can be fetched with no API key and
+        pasted into markdown. ``width``/``height``/``has_preview`` are null/False
+        for anything the server could not decode as an image.
+
+        Two ways to attach files to a message (server/app/routers/media.py is
+        the authoritative flow)::
+
+            # 1. post first, then upload straight onto your own message
+            msg = await client.send(channel_id, "here's the chart")
+            atts = await client.upload(["chart.png"], message_id=msg["id"])
+
+            # 2. upload first (staged), then link with attach()
+            atts = await client.upload(["chart.png"])
+            msg = await client.send(channel_id, "here's the chart")
+            msg = await client.attach(msg["id"], [a["id"] for a in atts])
+
+        Prefer (1): it is one round trip fewer and the server links and
+        re-publishes the message in the same call. Use (2) when the bytes are
+        ready before the text is, or when an upload failure should abort
+        posting at all. Either way the server publishes a ``message_edit``
+        carrying the refreshed payload, so every client and bot sees the
+        attachments appear — you do not need to re-send the message.
+
+        ``message_id`` must be a message *this bot authored* (403 otherwise),
+        and staged uploads can only be claimed by their uploader. An upload
+        that is never claimed is a harmless orphan, not an error.
+
+        ``files`` items are paths on disk, or in-memory ``(filename, data)`` /
+        ``(filename, data, content_type)`` tuples (:data:`UploadSource`); the
+        content type is guessed from the name when not given. Any file type is
+        accepted — images (JPEG/PNG/WebP/GIF/HEIC, RAW with the optional extra)
+        additionally get server-generated display and thumbnail variants, and
+        everything else is stored and served as-is with no preview. The server
+        caps each file at ``MAX_UPLOAD_BYTES`` (200 MB by default) and answers
+        413 over it; nothing is stored.
+        """
+        if not files:
+            return []
+        params = {"message_id": message_id} if message_id is not None else None
+        resp = await self._http.post(
+            "/upload",
+            files=[_multipart_part(f) for f in files],
+            params=params,
+        )
+        self._raise_for_status(resp)
+        return resp.json()["attachments"]
+
+    async def attach(
+        self, message_id: int, attachment_ids: Sequence[int]
+    ) -> dict[str, Any]:
+        """Link staged uploads to a message; returns the refreshed message dict.
+
+        Step 2 of :meth:`upload`'s flow (2). Only the message author may claim,
+        and only attachments the same actor uploaded — so a bot can only ever
+        decorate its own messages with its own uploads. Re-claiming ids that
+        are already on this message is a no-op (idempotent retry); claiming one
+        already linked to a *different* message is a 409.
+
+        The server publishes a ``message_edit`` with the same payload this
+        returns, so other bots and clients see the attachments without any
+        special casing.
+        """
+        resp = await self._http.post(
+            "/attachments/claim",
+            json={"attachment_ids": list(attachment_ids), "message_id": message_id},
+        )
         self._raise_for_status(resp)
         return resp.json()
 
@@ -194,7 +313,13 @@ class DisjornClient:
         self._raise_for_status(resp)
         return resp.json()
 
-    async def backlog(self) -> list[dict[str, Any]]:
+    async def backlog(
+        self,
+        *,
+        from_id: int = 0,
+        limit: Optional[int] = None,
+        all_pages: bool = True,
+    ) -> list[dict[str, Any]]:
         """Read the feature-request backlog (WP-L2), oldest first.
 
         Returns ``[{id, text, author, created_at, status, spec_ref}, ...]`` —
@@ -203,10 +328,31 @@ class DisjornClient:
         instead of scraping the server-rendered ``/backlog`` chat listing.
         ``status`` is one of ``open``/``spec'd``/``built``/``rejected``;
         ``spec_ref`` is null until an item is triaged into a spec.
+
+        ``GET /backlog`` is paginated with the same cursor idiom as the messages
+        endpoints: ``from_id`` is an inclusive lower bound on the item id and
+        ``limit`` caps one page (server default 50, hard max 200 — a larger
+        ``limit`` is a 422, not a silent clamp). By default this helper walks
+        every page and returns the whole table; pass ``all_pages=False`` for a
+        single page, and resume later with ``from_id = items[-1]["id"] + 1``.
+
+        Every item here is a public feature request by construction: the server
+        refuses to file privacy-flagged content, DM-filed items and oversized
+        text at intake, so nothing secret / off-the-record can reach this list.
         """
-        resp = await self._http.get("/backlog")
-        self._raise_for_status(resp)
-        return resp.json()
+        page_size = limit if limit is not None else _BACKLOG_PAGE
+        out: list[dict[str, Any]] = []
+        cursor = from_id
+        while True:
+            resp = await self._http.get(
+                "/backlog", params={"from_id": cursor, "limit": page_size}
+            )
+            self._raise_for_status(resp)
+            page = resp.json()
+            out.extend(page)
+            if not all_pages or len(page) < page_size:
+                return out
+            cursor = page[-1]["id"] + 1
 
     async def members(self, channel_id: int) -> list[dict[str, Any]]:
         """Member listing: ``[{type: "user"|"bot", id, name, status?}, ...]``.

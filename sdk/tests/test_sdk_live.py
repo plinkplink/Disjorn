@@ -13,6 +13,7 @@ airtight).
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from typing import Any, AsyncIterator, Callable
 
@@ -33,6 +34,11 @@ from disjorn_sdk import (
 pytestmark = pytest.mark.integration
 
 EVENT_TIMEOUT = 10.0
+
+# Smallest valid PNG (1x1, opaque) — keeps the upload test free of Pillow.
+PNG_1PX = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +150,87 @@ async def test_backlog_read(server, alice, main_id, bot):
     assert match["status"] == "open"
     assert match["spec_ref"] is None
     assert set(match) >= {"id", "text", "author", "created_at", "status", "spec_ref"}
+
+
+async def test_backlog_pagination(server, alice, main_id, bot):
+    """BL-D6: GET /backlog is paginated; backlog() walks the pages by default.
+
+    The /backlog chat command is rate limited, so seed through the API surface
+    the SDK actually reads rather than through 60 chat messages."""
+    baseline = await bot.backlog()
+    for i in range(5):
+        await _post(alice, main_id, f"/backlog paging probe {i}")
+
+    all_items = await bot.backlog()
+    assert len(all_items) == len(baseline) + 5
+    assert [it["id"] for it in all_items] == sorted(it["id"] for it in all_items)
+
+    # Single page + cursor resume reconstructs the same list.
+    page = await bot.backlog(limit=2, all_pages=False)
+    assert len(page) == 2
+    rest = await bot.backlog(from_id=page[-1]["id"] + 1)
+    assert [it["id"] for it in page + rest] == [it["id"] for it in all_items]
+
+    # The server's hard max is enforced, not silently clamped.
+    with pytest.raises(httpx.HTTPStatusError) as exc:
+        await bot.backlog(limit=5000, all_pages=False)
+    assert exc.value.response.status_code == 422
+
+
+async def test_upload_attaches_media_to_a_bot_message(server, alice, main_id, bot, tmp_path):
+    """The DEFERRED sdk gap: attaching media used to mean hand-rolling
+    /upload + /attachments/claim. Both documented flows must work end to end,
+    and the result must be visible to a *user* fetching history."""
+    # Flow 1 — post, then upload straight onto the bot's own message.
+    msg = await bot.send(main_id, "chart incoming")
+    atts = await bot.upload([("chart.png", PNG_1PX, "image/png")], message_id=msg["id"])
+    assert len(atts) == 1
+    att = atts[0]
+    assert att["message_id"] == msg["id"]
+    assert att["original_filename"] == "chart.png"
+    assert att["mime_type"] == "image/png"
+    assert att["size_bytes"] == len(PNG_1PX)
+    assert att["has_preview"] is True
+    assert {"url", "thumb_url", "orig_url"} <= set(att)
+
+    fetched = next(
+        m for m in await bot.get_messages(main_id, before_seq=msg["seq"] + 1) if m["id"] == msg["id"]
+    )
+    assert [a["id"] for a in fetched["attachments"]] == [att["id"]]
+
+    # The signed URL needs no credentials — that is what makes it pasteable.
+    async with httpx.AsyncClient(base_url=server.base_url, timeout=10) as anon:
+        media = await anon.get(att["url"])
+        assert media.status_code == 200, media.text
+
+    # Flow 2 — stage from a path on disk first, then attach() to a new message.
+    path = tmp_path / "diagram.png"
+    path.write_bytes(PNG_1PX)
+    staged = await bot.upload([path])
+    assert staged[0]["message_id"] is None  # staged, not linked yet
+    msg2 = await bot.send(main_id, "diagram attached")
+    linked = await bot.attach(msg2["id"], [staged[0]["id"]])
+    assert [a["id"] for a in linked["attachments"]] == [staged[0]["id"]]
+    assert linked["attachments"][0]["original_filename"] == "diagram.png"
+
+    # Re-claiming the same ids is idempotent, not an error.
+    again = await bot.attach(msg2["id"], [staged[0]["id"]])
+    assert [a["id"] for a in again["attachments"]] == [staged[0]["id"]]
+
+    # And a user sees both messages carrying their files.
+    resp = await alice.get(f"/channels/{main_id}/messages", params={"limit": 20})
+    resp.raise_for_status()
+    by_id = {m["id"]: m for m in resp.json()}
+    assert len(by_id[msg["id"]]["attachments"]) == 1
+    assert len(by_id[msg2["id"]]["attachments"]) == 1
+
+    # Fails closed: a bot may not decorate someone else's message.
+    others = await _post(alice, main_id, "alice's own message")
+    orphan = await bot.upload([("x.png", PNG_1PX)])
+    with pytest.raises(httpx.HTTPStatusError) as exc:
+        await bot.attach(others["id"], [orphan[0]["id"]])
+    assert exc.value.response.status_code == 403
+    assert await bot.upload([]) == []
 
 
 async def test_user_post_bot_receives_live_events(server, alice, main_id, bot_stream):

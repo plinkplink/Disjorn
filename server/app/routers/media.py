@@ -30,6 +30,13 @@ ENDPOINTS
   GET  /media/{attachment_id}       (signed) ?v=orig|display|thumb&exp=&sig=
   POST /me/avatar                   (user)   -> 256px WebP, users.avatar_path
   GET  /avatars/{user_id}           (open)   unsigned — avatars are not sensitive
+
+  Exported for routers/bots_admin.py (bot cosmetics reuse this path, never a
+  second one): store_avatar(file, stem) -> relative path, avatar_response(rel).
+  Exported for payload builders: user_avatar_url / bot_avatar_url, which append
+  `?v={mtime}` so a re-uploaded avatar is never served from cache (the storage
+  path itself is stable across re-uploads, so it cannot be the cache key).
+
   GET  /picker?tab=gif|image        (user)   list picker assets
   GET  /picker/file/{tab}/{name}    (open)   static picker asset (traversal-safe)
 
@@ -355,22 +362,99 @@ async def get_media(
 # Avatars
 # ---------------------------------------------------------------------------
 
-@router.post("/me/avatar")
-async def upload_avatar(user: CurrentUser, file: UploadFile = File(...)) -> dict[str, Any]:
+async def store_avatar(file: UploadFile, stem: str) -> str:
+    """Save an uploaded image as avatars/{stem}.webp; return the DB-relative path.
+
+    THE avatar conversion path (256px WebP via media_convert.make_avatar) —
+    exported so bot avatars (routers/bots_admin.py) reuse it instead of growing
+    a second one. Raises HTTP 400 on anything Pillow can't decode; the caller
+    owns authorization and the DB column update.
+    """
     avatars = _data_dir() / "avatars"
     avatars.mkdir(parents=True, exist_ok=True)
     tmp = avatars / f"tmp_{uuid.uuid4().hex}"
     await _save_upload(file, tmp, get_settings().MAX_UPLOAD_BYTES)
-    dest = avatars / f"user_{user.id}.webp"
+    dest = avatars / f"{stem}.webp"
     try:
         media_convert.make_avatar(tmp, dest, max_dim=256)
     except Exception:
         raise HTTPException(status_code=400, detail="Not a supported image")
     finally:
         tmp.unlink(missing_ok=True)
-    rel = _rel(dest)
+    return _rel(dest)
+
+
+def avatar_version(rel_path: Optional[str]) -> Optional[int]:
+    """Cache-busting version for a stored avatar: its mtime in nanoseconds.
+
+    The storage path is stable across re-uploads (avatars/user_3.webp is
+    always user 3's avatar), which is why avatar_response can only offer a
+    short max-age — nothing in the URL changes when the bytes do. The mtime is
+    the one thing that does, so it is the server's mutable cache key.
+
+    Nanoseconds, not seconds: two re-uploads inside the same wall-clock second
+    must still produce different URLs, or the second one is invisible until
+    the cache expires — exactly the bug this closes.
+
+    None when there is no avatar, or when the column points at a file that is
+    gone (callers then emit an unversioned URL and the GET 404s as before).
+    """
+    if not rel_path:
+        return None
+    try:
+        return (_data_dir() / rel_path).stat().st_mtime_ns
+    except OSError:
+        return None
+
+
+def _versioned(base: str, rel_path: Optional[str]) -> Optional[str]:
+    if not rel_path:
+        return None
+    version = avatar_version(rel_path)
+    return f"{base}?v={version}" if version is not None else base
+
+
+def user_avatar_url(user_id: int, rel_path: Optional[str]) -> Optional[str]:
+    """`/avatars/{id}?v={mtime}`, or None when the user has no avatar.
+
+    Payload builders surface this next to `avatar_path` so a consumer can both
+    (a) skip the request entirely when it is None and (b) get a URL that
+    changes the moment the avatar is replaced — see avatar_version.
+    """
+    return _versioned(f"/avatars/{user_id}", rel_path)
+
+
+def bot_avatar_url(bot_id: int, rel_path: Optional[str]) -> Optional[str]:
+    """`/bots/{id}/avatar?v={mtime}`, or None when the bot has no avatar."""
+    return _versioned(f"/bots/{bot_id}/avatar", rel_path)
+
+
+def avatar_response(rel_path: str) -> FileResponse:
+    """Serve a stored avatar (shared by user and bot avatar endpoints).
+
+    max-age stays short because the *unversioned* URL is a legitimate way to
+    ask for an avatar (the client's <img src="/avatars/3"> fallback). Callers
+    that go through user_avatar_url/bot_avatar_url get a `?v=` key that busts
+    the cache immediately on re-upload, so the 300s window is the worst case
+    for a consumer that ignores the versioned URL, not the normal one.
+    """
+    path = _data_dir() / rel_path
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="No avatar")
+    return FileResponse(
+        path,
+        media_type="image/webp",
+        headers={"Cache-Control": "public, max-age=300"},
+    )
+
+
+@router.post("/me/avatar")
+async def upload_avatar(user: CurrentUser, file: UploadFile = File(...)) -> dict[str, Any]:
+    rel = await store_avatar(file, f"user_{user.id}")
     await db.execute("UPDATE users SET avatar_path = ? WHERE id = ?", (rel, user.id))
-    return {"avatar_path": rel, "url": f"/avatars/{user.id}"}
+    # `url` carries the fresh version so the uploader's own <img> updates
+    # without waiting out the cache.
+    return {"avatar_path": rel, "url": user_avatar_url(user.id, rel)}
 
 
 @router.get("/avatars/{user_id}")
@@ -380,16 +464,7 @@ async def get_avatar(user_id: int) -> FileResponse:
     row = await db.fetch_one("SELECT avatar_path FROM users WHERE id = ?", (user_id,))
     if row is None or not row["avatar_path"]:
         raise HTTPException(status_code=404, detail="No avatar")
-    path = _data_dir() / row["avatar_path"]
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail="No avatar")
-    return FileResponse(
-        path,
-        media_type="image/webp",
-        # Short max-age: the path is stable across re-uploads, so long caching
-        # would show stale avatars.
-        headers={"Cache-Control": "public, max-age=300"},
-    )
+    return avatar_response(row["avatar_path"])
 
 
 # ---------------------------------------------------------------------------

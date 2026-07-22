@@ -3,13 +3,29 @@
 Covers: pass-through of plain text and unknown /commands, /backlog filing
 (verbatim) + server-rendered ack, /backlog listing, the reply being a real
 persisted message authored by the seeded 'system' bot, and the GET /backlog
-SDK read surface (users and bots)."""
+SDK read surface (users and bots).
+
+Plus the BUILD-LOOP red-team regressions:
+  BL-D5 — filing from a DM is refused (a DM-filed item would be reprinted
+          verbatim, with its author, by the next public `/backlog` listing).
+  BL-D6 — backlog text cap, bounded in-channel listing, paginated GET /backlog,
+          per-actor slash dispatch rate limit."""
+
+import pytest
 
 from app import db, events
-from app.routers import auth
+from app.routers import auth, slash
 
 PASSWORD = "correct horse battery staple"
 BOT_KEY = "bot-key-1"
+
+
+@pytest.fixture(autouse=True)
+def reset_rate_limit():
+    """The dispatch limiter is in-process module state; isolate every test."""
+    slash.init()
+    yield
+    slash.init()
 
 
 # ---------------------------------------------------------------------------
@@ -276,3 +292,292 @@ async def test_bot_can_file_backlog(client):
     row = await db.fetch_one("SELECT * FROM backlog WHERE id = 1")
     assert row["text"] == "from a bot"
     assert row["author"] == "claw"
+
+
+# ---------------------------------------------------------------------------
+# BL-D5 — visibility scoping: no filing from DMs
+# ---------------------------------------------------------------------------
+
+async def make_dm(client, other_user_id: int) -> int:
+    r = await client.post("/dms", json={"user_id": other_user_id})
+    assert r.status_code == 200, r.text
+    return r.json()["id"]
+
+
+async def text_channel(client, name: str) -> int:
+    r = await client.post("/channels", json={"name": name})
+    assert r.status_code == 200, r.text
+    return r.json()["id"]
+
+
+SENSITIVE = "rebuild the payroll importer before bob's review on friday"
+
+
+async def test_backlog_refuses_filing_from_dm(client):
+    # Regression (BL-D5): merely-sensitive text — nothing that trips the
+    # privacy NL detector, so the HIGH fix does not catch it — filed from a DM
+    # would land in the global, public, bot-readable backlog table.
+    await make_user("alice")
+    bob = await make_user("bob")
+    await login(client, "alice")
+    dm = await make_dm(client, bob)
+
+    await post(client, dm, f"/backlog {SENSITIVE}")
+
+    assert await db.fetch_all("SELECT * FROM backlog") == []  # refused, not filed
+    refusal = (await channel_messages(client, dm))[-1]["content"]
+    assert "Can't file from a DM" in refusal
+    # The refusal must never echo the content it just refused to publish.
+    for word in ("payroll", "importer", "bob's review", SENSITIVE):
+        assert word not in refusal
+
+
+async def test_dm_filed_item_never_reaches_public_listing_or_api(client):
+    # The full exfil path the finding describes: file in a DM, then list in
+    # public. Nothing filed => nothing to leak, through chat OR GET /backlog.
+    await make_user("alice")
+    bob = await make_user("bob")
+    await login(client, "alice")
+    dm = await make_dm(client, bob)
+    main = await main_feed_id()
+
+    await post(client, dm, f"/backlog {SENSITIVE}")
+    await post(client, main, "/backlog")  # public listing in #main
+
+    listing = (await channel_messages(client, main))[-1]["content"]
+    assert "payroll" not in listing
+    assert "empty" in listing.lower()
+    assert (await client.get("/backlog")).json() == []
+
+    # And the DM message itself stays where it was said — bob's DM, not #main.
+    main_contents = [m["content"] for m in await channel_messages(client, main)]
+    assert not any(SENSITIVE in c for c in main_contents)
+
+
+async def test_backlog_listing_still_works_in_a_dm(client):
+    # Not over-refusing: reading the (public by construction) backlog inside a
+    # DM leaks nothing — only FILING from a DM is refused.
+    await make_user("alice")
+    bob = await make_user("bob")
+    await login(client, "alice")
+    main = await main_feed_id()
+    await post(client, main, "/backlog add a gif picker")
+
+    dm = await make_dm(client, bob)
+    await post(client, dm, "/backlog")
+    listing = (await channel_messages(client, dm))[-1]["content"]
+    assert "#1 [open] add a gif picker — alice" in listing
+
+
+async def test_backlog_files_from_a_named_text_channel(client):
+    # Not over-refusing: named text channels are house-public (every user is an
+    # implicit member), so filing there is the intended path.
+    await make_user("alice")
+    await login(client, "alice")
+    ch = await text_channel(client, "custodian")
+
+    await post(client, ch, "/backlog dark mode toggle")
+    rows = await db.fetch_all("SELECT * FROM backlog")
+    assert [r["text"] for r in rows] == ["dark mode toggle"]
+
+
+async def test_backlog_dm_refusal_is_not_a_privacy_refusal(client):
+    """The two refusals stay distinguishable (and both stay non-echoing)."""
+    await make_user("alice")
+    bob = await make_user("bob")
+    await login(client, "alice")
+    dm = await make_dm(client, bob)
+
+    await post(client, dm, "/backlog off the record: rebuild the importer")
+    refusal = (await channel_messages(client, dm))[-1]["content"]
+    # Privacy flag wins — it is the wall, checked first.
+    assert "marked private" in refusal
+    assert "importer" not in refusal
+    assert await db.fetch_all("SELECT * FROM backlog") == []
+
+
+async def test_editing_a_dm_message_into_a_command_does_not_file(client):
+    """Adversarial: the edit path must not be a second door into dispatch.
+
+    Post something innocuous in a DM, then PATCH it into `/backlog <secret>`.
+    edit_message does not run slash dispatch, so nothing is filed — this test
+    exists so that stays true if someone later wires dispatch into edits."""
+    await make_user("alice")
+    bob = await make_user("bob")
+    await login(client, "alice")
+    dm = await make_dm(client, bob)
+
+    msg = await post(client, dm, "hi bob")
+    r = await client.patch(f"/messages/{msg['id']}", json={"content": f"/backlog {SENSITIVE}"})
+    assert r.status_code == 200
+
+    assert await db.fetch_all("SELECT * FROM backlog") == []
+    assert (await client.get("/backlog")).json() == []
+
+
+async def test_bot_in_a_dm_cannot_file_from_it(client):
+    """Bots can be explicit DM members; the DM refusal is not human-only."""
+    bot_id = await make_bot()
+    await make_user("alice")
+    bob = await make_user("bob")
+    await login(client, "alice")
+    dm = await make_dm(client, bob)
+    await db.execute(
+        "INSERT INTO channel_members (channel_id, member_type, member_id) VALUES (?, 'bot', ?)",
+        (dm, bot_id),
+    )
+
+    client.cookies.clear()
+    r = await client.post(
+        f"/channels/{dm}/messages",
+        json={"content": f"/backlog {SENSITIVE}"},
+        headers={"X-Api-Key": BOT_KEY},
+    )
+    assert r.status_code == 200
+    assert await db.fetch_all("SELECT * FROM backlog") == []
+
+
+async def test_unknown_channel_type_fails_closed():
+    """A channel type nobody has taught the handler about counts as private."""
+    from app.routers.auth import Actor
+
+    actor = Actor(type="user", id=1)
+    for channel_type in (None, "dm_1to1", "group_dm_from_the_future"):
+        ctx = slash.Ctx(1, "x", actor, {}, channel_type)
+        assert ctx.is_private_channel is True
+    for channel_type in ("main_feed", "text"):
+        ctx = slash.Ctx(1, "x", actor, {}, channel_type)
+        assert ctx.is_private_channel is False
+
+
+# ---------------------------------------------------------------------------
+# BL-D6 — length caps, bounded listing, pagination, rate limit
+# ---------------------------------------------------------------------------
+
+async def test_backlog_refuses_oversize_text(client):
+    # Regression (BL-D6): /backlog stores its argument verbatim, so without a
+    # cap a single command writes an unbounded row (and an unbounded listing).
+    await make_user("alice")
+    await login(client, "alice")
+    ch = await main_feed_id()
+
+    huge = "z" * (slash.MAX_BACKLOG_CHARS + 1)
+    await post(client, ch, f"/backlog {huge}")
+
+    assert await db.fetch_all("SELECT * FROM backlog") == []
+    refusal = (await channel_messages(client, ch))[-1]["content"]
+    assert "Can't file that" in refusal and "capped at" in refusal
+    assert "zzzz" not in refusal  # refusals never echo the argument
+
+
+async def test_backlog_accepts_text_at_the_cap(client):
+    await make_user("alice")
+    await login(client, "alice")
+    ch = await main_feed_id()
+
+    at_cap = "y" * slash.MAX_BACKLOG_CHARS
+    await post(client, ch, f"/backlog {at_cap}")
+    rows = await db.fetch_all("SELECT text FROM backlog")
+    assert len(rows) == 1 and rows[0]["text"] == at_cap
+
+
+async def seed_backlog(n: int) -> None:
+    for i in range(1, n + 1):
+        await db.execute(
+            "INSERT INTO backlog (text, author, created_at) VALUES (?, ?, ?)",
+            (f"item {i}", "alice", db.utc_now()),
+        )
+
+
+async def test_backlog_listing_is_bounded(client):
+    # An unbounded listing is the one way to manufacture a giant message:
+    # server-authored replies bypass MessageCreate's max_length.
+    await make_user("alice")
+    await login(client, "alice")
+    ch = await main_feed_id()
+    await seed_backlog(slash._LIST_MAX_ITEMS + 12)
+
+    await post(client, ch, "/backlog")
+    listing = (await channel_messages(client, ch))[-1]["content"]
+
+    assert listing.startswith(f"Backlog ({slash._LIST_MAX_ITEMS + 12} items,")
+    assert f"showing the {slash._LIST_MAX_ITEMS} most recent" in listing
+    assert "item 1 —" not in listing          # oldest dropped
+    assert f"item {slash._LIST_MAX_ITEMS + 12} " in listing  # newest kept
+    assert len(listing) < 4000
+
+
+async def test_get_backlog_pagination(client):
+    await make_user("alice")
+    await login(client, "alice")
+    await seed_backlog(120)
+
+    # Default page size.
+    first = (await client.get("/backlog")).json()
+    assert len(first) == slash.BACKLOG_PAGE_DEFAULT
+    assert first[0]["id"] == 1
+
+    # Cursor: from_id is an inclusive lower bound (mirrors from_seq).
+    second = (await client.get("/backlog", params={"from_id": first[-1]["id"] + 1})).json()
+    assert second[0]["id"] == slash.BACKLOG_PAGE_DEFAULT + 1
+
+    # Explicit limit, and the hard max is enforced by validation (not clamped).
+    assert len((await client.get("/backlog", params={"limit": 5})).json()) == 5
+    over = await client.get("/backlog", params={"limit": slash.BACKLOG_PAGE_MAX + 1})
+    assert over.status_code == 422
+    assert (await client.get("/backlog", params={"limit": 0})).status_code == 422
+    assert (await client.get("/backlog", params={"from_id": -1})).status_code == 422
+
+
+async def test_slash_dispatch_is_rate_limited(client):
+    # Regression (BL-D6): dispatch had no throttle, so a loop could fill the
+    # backlog table and the channel without bound.
+    await make_user("alice")
+    await login(client, "alice")
+    ch = await main_feed_id()
+
+    for i in range(slash.SLASH_RATE_MAX):
+        await post(client, ch, f"/backlog request {i}")
+    assert len(await db.fetch_all("SELECT * FROM backlog")) == slash.SLASH_RATE_MAX
+
+    # Over the limit: the message still persists as ordinary chat, but the
+    # command does not run — nothing filed.
+    await post(client, ch, "/backlog one too many")
+    await post(client, ch, "/backlog and another")
+    rows = await db.fetch_all("SELECT text FROM backlog")
+    assert len(rows) == slash.SLASH_RATE_MAX
+    assert not any("too many" in r["text"] for r in rows)
+
+    # Exactly one "slow down" notice, then silence (a refusal is itself a
+    # persisted message — it must not be a free amplifier).
+    contents = [m["content"] for m in await channel_messages(client, ch)]
+    assert sum(1 for c in contents if c.startswith("Slow down")) == 1
+
+
+async def test_slash_rate_limit_is_per_actor(client):
+    await make_user("alice")
+    await make_user("bob")
+    ch = await main_feed_id()
+
+    await login(client, "alice")
+    for i in range(slash.SLASH_RATE_MAX + 2):
+        await post(client, ch, f"/backlog alice {i}")
+    assert len(await db.fetch_all("SELECT * FROM backlog")) == slash.SLASH_RATE_MAX
+
+    client.cookies.clear()
+    await login(client, "bob")
+    await post(client, ch, "/backlog bob is not throttled")
+    rows = await db.fetch_all("SELECT text FROM backlog")
+    assert rows[-1]["text"] == "bob is not throttled"
+
+
+async def test_rate_limit_does_not_block_plain_chat(client):
+    """Only dispatch is limited — ordinary messages are untouched."""
+    await make_user("alice")
+    await login(client, "alice")
+    ch = await main_feed_id()
+
+    for i in range(slash.SLASH_RATE_MAX + 5):
+        await post(client, ch, f"/backlog spam {i}")
+    r = await client.post(f"/channels/{ch}/messages", json={"content": "hi everyone"})
+    assert r.status_code == 200
