@@ -100,8 +100,13 @@ All wired; her next restart picks it up:
   reaches run-resident.sh); user daemon-reloaded.
 - `/usr/local/lib/disjorn/{run-resident.sh,house_memory}` re-copied (mount
   support + spine-rent logging).
-- Still open: MERGE-CONTRACT.md sign-off after she reads it herself (pinned,
-  seq 63), before her first real diff.
+- ~~Still open: MERGE-CONTRACT.md sign-off~~ **CLOSED — it was already signed.**
+  RATIFIED 2026-07-20, #custodian seq 80–83: Claudette read it via
+  `read_repo_file` ("read for real, signed for real"), plink signed with the
+  condition that it stays amendable, Gable signed. Her step-6 flag (a Tier 1
+  auto-merge could widen reachability unseen) was logged as a WP-H13 red-team
+  case rather than a blocker — and that case is now closed by the H13-D1/D2/D3
+  classifier work. This line sat stale for two days; corrected 2026-07-22.
 
 ## 3. Metrics timers + broker config (WP-H12) — DONE 2026-07-22 (Opus keyboard)
 

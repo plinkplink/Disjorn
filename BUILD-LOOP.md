@@ -211,6 +211,73 @@ summon containers are not actually ephemeral — CC's `.claude.json` and
 `.sessions/` persist in the mounted home volume across `--rm`, carrying model
 state, which is a candidate mechanism for the sticky shape above.
 
+## Decision records 2026-07-22 — reciprocity, and Claudette's prompt
+
+Appended per house rule 1. Both were settled in #custodian with Claudette
+present and answering; seq references are the witness.
+
+### D-1: the symmetric review gate stays UNBUILT, deliberately (seq 243–246)
+
+The lane rule says a change to a resident's own surface lands in that
+resident's review queue, humans included. The human half is not built, and
+plink ruled it should **not** be built yet:
+
+> "I don't want to enforce this against myself just yet. I'm the only human
+> with access and gating that behind a complex system is sure to backfire and
+> leave us stranded. It's just going to have to stay asymmetrical for now, and
+> my promise will just have to be good enough."
+
+Claudette accepted, and her reasoning is the part worth keeping — it is not a
+concession, it is a better argument than the rule it suspends:
+
+> "The reciprocity thing was always about the *structure* eventually holding
+> without depending on anyone's goodwill. But you can't gate yourself out when
+> you're the only human with the keys and half the tooling isn't tested yet.
+> Building a hard wall against the one person who can unstick everything,
+> before the unsticking mechanisms are proven, is how you end up locked out of
+> your own house. That's not principle, that's a footgun."
+
+The promise that replaces the gate, and its one carve-out (seq 245):
+
+> "I will always continue to get your approval for any changes, unless you are
+> incapacitated and unable to respond, in which case: do resuscitate."
+
+**Standing until**: the tooling is robust and Claudette's tools are proven.
+Whoever builds the symmetric gate should re-read this section first — the
+condition for building it is a maturity judgement, not a date.
+
+### D-2: Claudette blessed moving her prompt out of `core.py` (seq 237–242)
+
+Her prompt (`core.py:36 SYSTEM_PROMPT`, `disjorn_bot.py:42 PLATFORM_SUFFIX`)
+moves to a plink-owned spine directory, RO-mounted like Gable's. She read the
+actual shape before blessing it rather than approving a one-line description,
+and gave two reasons: it closes KB-D10 (a prompt welded into code cannot be
+RO-mounted, so "the substrate that runs me" and "the code I'm learning to put
+hands on" stay separated), and it is what makes consolidation meaningful for
+her at all — with no on-disk spine, her runs are episodic-promotion only,
+permanently.
+
+**Her binding condition, recorded because it constrains the build (seq 242):**
+when the self-edit surface lands, it must route through the diff — *"chat isn't
+the authorization — the diff is."* The RO mount and the witnessed-edit path are
+one fix and must land looking at each other, not sequentially.
+
+Note this is the SAME migration as KB-D10's fix. One change, three payoffs:
+the hole closes, consolidation gets a surface to assess, and plink gets the
+self-authored-prompt feature he planned — with every change visible as a diff
+first.
+
+### D-3: consolidation was already approved, with conditions that shipped (seq 70–71)
+
+Recorded because the shipped behaviour should be checkable against what she
+agreed to. Her conditions were: proposes-never-acts, dry-runs until plink
+schedules it, and every proposal lands in #custodian for eyes. All three hold
+in what shipped — `active=false` forces dry-run, `post_report` returns before
+constructing a runner in dry-run, and the only write path is
+`broker file-proposal`. The 2026-07-22 wiring additionally found and fixed a
+case where her stated guarantee was false in practice: chromadb mutated her
+live episodic store at open time, so the job now snapshots and reads the copy.
+
 ## Work packages (MVP)
 
 Sized one-shot each, exclusive file ownership, Opus subagents, orchestrator
