@@ -377,7 +377,14 @@ Opus venue, not a patch written from a guess.
   memory. Fixed by snapshotting the chroma dir to a temp copy and opening the
   snapshot. **The class is the item**: any other "read-only" consumer of
   `MemoryStore` currently writes too. Audit them.
-- [ ] **KB-D9 (LOW/MED — config dishonesty on the kill-switch surface)** —
+- [x] **KB-D9 — CLOSED 2026-07-22.** `refresh-mirror` is now genuinely wired
+  and verified end to end: the resident image was refreshed (built as plink,
+  `podman save`/`load` into each resident store — residents CANNOT build their
+  own, the egress wall blocks the registry pull, which is the wall working),
+  the CLI inside now carries `refresh-mirror` and `start-build`, the verb was
+  flipped back ON, and Gable called it from inside his container: the broker
+  fast-forwarded the mirror `a198540 -> 4a46093`, `updated: true`. First
+  resident-invoked action verb proven through the whole stack. Original finding:
   `refresh-mirror` was `true` for BOTH residents while the broker CLI baked into
   the live resident image has no such subcommand, so the verb has never been
   invokable. An ON switch wired to nothing misreports the blast radius in the one

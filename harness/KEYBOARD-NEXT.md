@@ -50,13 +50,43 @@ pre-cutover copy; the repo version adds the `/config/env` credential mask, the
 container reaper, and the optional spine mount. This IS a live change to the
 summon path — expect it, and watch one summon after.
 
-### 2. Rebuild the resident images, then honour `refresh-mirror`
-The broker CLI is COPY'd into the image, and the live image predates
-`refresh-mirror` and `start-build` — I turned `refresh-mirror` **OFF** for both
-residents this session because it was `true` while wired to nothing (KB-D9).
-Rebuild in **each resident's own rootless podman store** (they are per-user;
-plink's store is separate and rebuilding there does nothing for them), then flip
-`refresh-mirror` back on in `/etc/disjorn-broker/verbs.toml`.
+### 2. Refresh the resident images, then honour `refresh-mirror`
+
+The broker CLI is COPY'd into the image, and the live resident image predates
+`refresh-mirror` and `start-build` — `refresh-mirror` was turned **OFF** for
+both residents this session because it was `true` while wired to nothing
+(KB-D9). Podman stores are **per-user**, so plink's store is separate and
+building there does nothing for them.
+
+**A resident CANNOT build its own image, and this is the wall working, not a
+bug.** Attempting `podman build` as `res-gable` fails at
+`pinging container registry registry-1.docker.io: i/o timeout` — the WP-H2
+nftables egress wall permits only api.anthropic.com and loopback→Disjorn, so
+the base layer can never be pulled. Discovered by trying it, 2026-07-22.
+
+So the supported pattern is **build as plink, load into each resident**:
+
+    # plink has registry egress; residents deliberately do not
+    podman build -t localhost/disjorn-resident:latest \
+      -f harness/cc/Containerfile harness/cc
+    podman save -o /var/tmp/disjorn-resident.tar localhost/disjorn-resident:latest
+    chmod 0644 /var/tmp/disjorn-resident.tar
+    for u in res-gable res-claudette; do
+      sudo -u $u XDG_RUNTIME_DIR=/run/user/$(id -u $u) \
+        podman load -i /var/tmp/disjorn-resident.tar
+    done
+    rm -f /var/tmp/disjorn-resident.tar
+
+Use `/var/tmp`, not `/tmp` — `/tmp` is tmpfs on this host and the archive is
+~1 GB, so staging it there spends RAM for no reason.
+
+Verify before flipping anything: `podman run --rm localhost/disjorn-resident:latest
+broker --help` must list `refresh-mirror` and `start-build`. Only then flip
+`refresh-mirror` back on in `/etc/disjorn-broker/verbs.toml` — an ON verb wired
+to a subcommand the image lacks is exactly the config dishonesty of KB-D9.
+
+Note this also means **image updates are a plink action, permanently**. A
+resident can never self-update its own runtime, which is the correct shape.
 
 ### 3. Max / OAuth cutover  *(optional; gated on KB-D6)*
 Steps are in `harness/cc/config-template/README.md`. **Conditions before you
