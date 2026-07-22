@@ -120,11 +120,7 @@ export function AddBotModal({
                   setChosen(b);
                 }}
               >
-                <BotAvatar
-                  botId={b.id}
-                  name={b.name}
-                  hasAvatar={b.avatar_path !== null}
-                />
+                <BotAvatar src={b.avatar_url} name={b.name} />
                 <span className="bot-pick-name">{b.name}</span>
                 <span className="bot-tag">BOT</span>
               </button>
@@ -133,12 +129,7 @@ export function AddBotModal({
         ) : (
           <div className="bot-modal-body">
             <div className="bot-confirm-who">
-              <BotAvatar
-                botId={chosen.id}
-                name={chosen.name}
-                size={38}
-                hasAvatar={chosen.avatar_path !== null}
-              />
+              <BotAvatar src={chosen.avatar_url} name={chosen.name} size={38} />
               <span className="bot-pick-name">{chosen.name}</span>
             </div>
             <p className="bot-consequence">

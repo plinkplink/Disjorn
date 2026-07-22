@@ -446,11 +446,47 @@ class ContainerLauncher:
         env.update(self.config.env)  # config-supplied extras only
         return env
 
+    # Grace period before escalating SIGTERM -> SIGKILL. Deliberately short:
+    # this path runs when we have ALREADY decided to refuse or time out a
+    # session, so every extra second is a session we do not trust still calling
+    # tools. Long enough for podman to forward the signal and for the container
+    # to exit; not long enough to matter to a human.
+    TERM_GRACE_SEC = 2.0
+
     @staticmethod
     async def _kill(proc) -> None:
+        """Stop a session process, SIGTERM first, then SIGKILL.
+
+        KB-D11. The process we spawn in production is ``run-resident.sh``,
+        which ``exec``s ``podman run``. podman's ``--sig-proxy`` (on by default
+        for foreground runs) forwards SIGTERM INTO the container, so a TERM
+        gives the session a chance to actually stop; SIGKILL does not — it
+        kills the podman client and leaves the container running, which is
+        exactly the gap the run-resident.sh watchdog had to be built to cover.
+        Sending TERM first means the common case stops promptly and the
+        watchdog is only the backstop it was meant to be.
+
+        Best-effort throughout: this is the path that runs when something has
+        already gone wrong, so it must never raise into the caller.
+        """
+        try:
+            proc.terminate()
+        except ProcessLookupError:  # already gone
+            return
+        except Exception:  # noqa: BLE001 — fall through to kill
+            pass
+        else:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=ContainerLauncher.TERM_GRACE_SEC)
+                return  # stopped politely; nothing left to do
+            except (asyncio.TimeoutError, TimeoutError):
+                pass  # did not stop in time — escalate
+            except Exception:  # noqa: BLE001
+                return
+
         try:
             proc.kill()
-        except ProcessLookupError:  # already gone
+        except ProcessLookupError:  # exited during the grace period
             return
         except Exception:  # noqa: BLE001 — best effort reaping
             return

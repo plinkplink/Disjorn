@@ -22,7 +22,14 @@ import type {
 
 export class ApiError extends Error {
   readonly status: number;
-  /** Server-provided `detail`, or a generic fallback. */
+  /**
+   * Server-provided `detail`, or a generic fallback. Every error body the
+   * server emits — including 422 validation failures, which the server now
+   * flattens to one "Invalid request: …" sentence rather than a list — puts a
+   * plain string here, so callers can show it verbatim instead of
+   * second-guessing the status. It is server-authored text: render it as
+   * text, never as markup.
+   */
   readonly detail: string;
 
   constructor(status: number, detail: string) {
@@ -348,36 +355,17 @@ export function putNotifyPrefs(prefs: NotifyPrefs): Promise<NotifyPrefs> {
 
 /* ---- avatars ---- */
 
-/* Cache-buster bumped after an avatar upload so every <img> rendered from
-   then on bypasses the browser's cached copy of /avatars/{id}. Bot avatars
-   ride the same counter: their path is equally stable across re-uploads
-   (avatars/bot_{id}.webp) and the server serves both with the same short
-   max-age, so one knob is enough. Note the client has no bot-avatar upload
-   surface (that is admin-side), so within a session the counter only advances
-   when the viewer changes their OWN avatar; a bot repainted out of band shows
-   through when the server's max-age expires. */
-let avatarVersion = 0;
+/* There is deliberately no avatarUrl()/botAvatarUrl() builder here. Every
+   payload that renders a face now carries `avatar_url` — the server's own
+   versioned URL, keyed on the avatar file's mtime (server media.py
+   avatar_version) — so the client neither guesses the endpoint nor owns a
+   cache-buster. The session counter this replaced only advanced when the
+   VIEWER changed their own avatar, which left a bot repainted through the
+   admin surface showing its old face until the 300s max-age expired. A null
+   `avatar_url` is the "no avatar, don't ask" signal; see components/Avatar. */
 
-export function bumpAvatarVersion(): void {
-  avatarVersion += 1;
-}
-
-/** Unsigned avatar URL; the server 404s when the user has none set. */
-export function avatarUrl(userId: number): string {
-  return avatarVersion > 0
-    ? `/avatars/${userId}?v=${avatarVersion}`
-    : `/avatars/${userId}`;
-}
-
-/** Unsigned bot avatar URL (mirrors /avatars/{user_id}); 404s when unset, so
-    callers render it behind an onError fallback rather than pre-checking. */
-export function botAvatarUrl(botId: number): string {
-  return avatarVersion > 0
-    ? `/bots/${botId}/avatar?v=${avatarVersion}`
-    : `/bots/${botId}/avatar`;
-}
-
-/** POST /me/avatar (multipart). Server converts to 256px WebP. */
+/** POST /me/avatar (multipart). Server converts to 256px WebP. The response's
+    `url` is the newly versioned avatar_url — put it on the session user. */
 export async function uploadAvatar(file: File): Promise<AvatarUploadResponse> {
   const form = new FormData();
   form.append("file", file);

@@ -54,10 +54,12 @@ function MemberRow({
   const body = (
     <>
       <span className="member-avatar">
+        {/* The roster carries each member's `avatar_url` (null = none), so the
+            panel no longer fires a request per avatar-less member. */}
         {isBot ? (
-          <BotAvatar botId={member.id} name={member.name} />
+          <BotAvatar src={member.avatar_url} name={member.name} />
         ) : (
-          <Avatar userId={member.id} name={member.name} />
+          <Avatar src={member.avatar_url} name={member.name} />
         )}
         {status !== null && (
           <span className={`presence-dot ring ${status}`} aria-label={STATUS_LABEL[status]} />

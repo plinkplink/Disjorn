@@ -1,72 +1,58 @@
 import { useState } from "react";
 
-import { avatarUrl, botAvatarUrl } from "../api";
-
 interface AvatarProps {
-  userId: number;
+  /**
+   * The payload's `avatar_url` (see types.ts): a versioned serving URL, or
+   * null/undefined when this actor has no avatar. Null is the server telling
+   * us not to ask — the letter tile stands alone and no doomed request goes
+   * out. Every message author, roster row, bot and user payload now carries
+   * it, so no caller has to guess a URL from an id.
+   */
+  src: string | null | undefined;
   name: string;
   size?: number;
 }
 
-/** User avatar with initial-letter fallback (the server 404s when none set). */
-export function Avatar({ userId, name, size = 32 }: AvatarProps) {
-  const [failed, setFailed] = useState(false);
+/**
+ * Letter tile with the avatar image layered over it. The tile is ALWAYS
+ * rendered — no avatar is the normal case for most bots and for humans who
+ * never set a picture, not an error state — and the <img> simply covers it
+ * once it loads.
+ *
+ * `failedSrc` rather than a boolean so a src change re-arms the image: when an
+ * avatar is re-uploaded the payload's `?v={mtime}` changes, and this component
+ * must try the new URL even though the previous one failed.
+ */
+function AvatarTile({
+  src,
+  name,
+  size,
+  className,
+}: AvatarProps & { size: number; className: string }) {
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
   return (
-    <div className="avatar" style={{ width: size, height: size }} aria-hidden>
+    <div className={className} style={{ width: size, height: size }} aria-hidden>
       {name.slice(0, 1).toUpperCase()}
-      {!failed && (
-        <img
-          src={avatarUrl(userId)}
-          alt=""
-          loading="lazy"
-          onError={() => setFailed(true)}
-        />
+      {src != null && src !== failedSrc && (
+        <img src={src} alt="" loading="lazy" onError={() => setFailedSrc(src)} />
       )}
     </div>
   );
 }
 
-interface BotAvatarProps {
-  botId: number;
-  name: string;
-  size?: number;
-  /**
-   * False when we positively know the bot has no avatar (message payloads
-   * carry `author.avatar_path`), so no doomed request is made. Rosters don't
-   * carry it — leave it true and let the 404 fall back.
-   */
-  hasAvatar?: boolean;
+/** User avatar with initial-letter fallback. */
+export function Avatar({ src, name, size = 32 }: AvatarProps) {
+  return <AvatarTile src={src} name={name} size={size} className="avatar" />;
 }
 
 /**
- * Bot avatar with the same letter-tile fallback as humans. Bots keep their own
- * id space (a bot id can collide with a user id), hence a separate endpoint —
- * `/bots/{id}/avatar`, which 404s when none is set. Most bots have none, so the
- * letter tile is the normal case, not the error case: it is always rendered and
- * the image simply layers over it when it loads.
+ * Bot avatar — same tile, own accent. Bots keep their own id space (a bot id
+ * can collide with a user id) and so are served from a separate endpoint;
+ * `avatar_url` already names the right one, which is why this no longer builds
+ * a URL itself.
  */
-export function BotAvatar({
-  botId,
-  name,
-  size = 32,
-  hasAvatar = true,
-}: BotAvatarProps) {
-  const [failed, setFailed] = useState(false);
+export function BotAvatar({ src, name, size = 32 }: AvatarProps) {
   return (
-    <div
-      className="avatar avatar-bot"
-      style={{ width: size, height: size }}
-      aria-hidden
-    >
-      {name.slice(0, 1).toUpperCase()}
-      {hasAvatar && !failed && (
-        <img
-          src={botAvatarUrl(botId)}
-          alt=""
-          loading="lazy"
-          onError={() => setFailed(true)}
-        />
-      )}
-    </div>
+    <AvatarTile src={src} name={name} size={size} className="avatar avatar-bot" />
   );
 }

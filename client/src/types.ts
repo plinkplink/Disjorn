@@ -7,11 +7,20 @@ export type UserStatus = "online" | "idle" | "dnd" | "offline";
 /** Statuses a user can pick; "offline" is derived (disconnect), never set. */
 export type SettableStatus = Exclude<UserStatus, "offline">;
 
+/* `avatar_url` is the server's versioned serving URL — `/avatars/{id}?v={mtime}`
+   for users, `/bots/{id}/avatar?v={mtime}` for bots (server media.py
+   avatar_version). null means "no avatar, don't ask": the request would only
+   404. The `?v=` is the file's mtime, so a repainted avatar arrives with a new
+   URL instead of hiding behind the response cache. Optional (not just
+   nullable) so a payload from before the server grew the field is still a
+   valid object — such a payload just renders the letter tile. */
+
 export interface User {
   id: number;
   username: string;
   display_name: string;
   avatar_path: string | null;
+  avatar_url?: string | null;
   status: UserStatus;
   is_admin: boolean;
   created_at: string;
@@ -23,6 +32,7 @@ export interface MessageAuthor {
   name: string;
   username?: string; // users only
   avatar_path: string | null;
+  avatar_url?: string | null;
 }
 
 export interface Attachment {
@@ -103,6 +113,7 @@ export interface Bot {
   id: number;
   name: string;
   avatar_path: string | null;
+  avatar_url?: string | null;
   chibi_pack: string | null;
   created_at: string;
 }
@@ -112,6 +123,8 @@ export interface ChannelMemberOut {
   id: number;
   name: string;
   status?: UserStatus | null; // users only
+  avatar_path?: string | null;
+  avatar_url?: string | null;
 }
 
 export interface SearchResult {
@@ -157,6 +170,9 @@ export interface NotifyPrefs {
   notify_all_main: boolean;
 }
 
+/** POST /me/avatar. `url` is the freshly versioned `avatar_url` for the file
+    just written — assign it straight onto the session user so every <img>
+    rendered from then on points at the new bytes. */
 export interface AvatarUploadResponse {
   avatar_path: string;
   url: string;

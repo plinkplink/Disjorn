@@ -105,7 +105,7 @@ function UserFooter({ onOpenSettings }: { onOpenSettings: () => void }) {
 
   return (
     <div className="user-footer">
-      <Avatar userId={user.id} name={user.display_name} />
+      <Avatar src={user.avatar_url} name={user.display_name} />
       <div className="who">
         <span className="display-name">{user.display_name}</span>
         <button

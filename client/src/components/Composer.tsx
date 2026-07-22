@@ -37,10 +37,12 @@ const MAX_TEXTAREA_PX = 8 * 22 + 20; // ~8 lines + padding
 const TYPING_THROTTLE_MS = 2500;
 
 /* Mirrors messages.MAX_MESSAGE_CHARS server-side, where it is a pydantic
-   max_length: over the cap the API answers 422 with a *structured* validation
-   body, which our ApiError flattens to "Unprocessable Entity". A long paste
-   failing under that label is exactly the opaque failure to avoid, so the
-   limit is shown before the send and named in the error after one. */
+   max_length. Kept client-side purely as UX: the counter warns before the
+   paste is sent and the pre-send guard names the limit without a round-trip.
+   It is NOT the error path — a 422 that does come back carries the server's
+   own flat `detail` ("Invalid request: body.content must be at most 16000
+   characters"), and that string is what gets shown, because a 422 here can
+   also mean something other than length. */
 const MAX_MESSAGE_CHARS = 16000;
 /** Show the counter only once it's about to matter. */
 const COUNTER_FROM = MAX_MESSAGE_CHARS - 500;
@@ -301,6 +303,10 @@ export function Composer({
 
   /* ---- send ---- */
 
+  /* Pre-send only: catching an over-long paste before the round-trip lets us
+     say something more useful than the server can (it does not know the draft
+     is still in the box). Anything the server rejects is reported in the
+     server's words. */
   const tooLongError = (n: number) =>
     `Message is ${n.toLocaleString()} characters — the limit is ${MAX_MESSAGE_CHARS.toLocaleString()}. Split it into a few messages (nothing is truncated for you).`;
 
@@ -323,13 +329,7 @@ export function Composer({
         setValue(draftBeforeEditRef.current);
         draftBeforeEditRef.current = "";
       } catch (err) {
-        setError(
-          err instanceof ApiError && err.status === 422
-            ? tooLongError(content.length)
-            : err instanceof ApiError
-              ? err.detail
-              : "Edit failed",
-        );
+        setError(err instanceof ApiError ? err.detail : "Edit failed");
       } finally {
         setSending(false);
       }
@@ -369,13 +369,7 @@ export function Composer({
         return [];
       });
     } catch (err) {
-      setError(
-        err instanceof ApiError && err.status === 422
-          ? tooLongError(content.length)
-          : err instanceof ApiError
-            ? err.detail
-            : "Failed to send",
-      );
+      setError(err instanceof ApiError ? err.detail : "Failed to send");
     } finally {
       setSending(false);
     }

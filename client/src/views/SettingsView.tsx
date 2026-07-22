@@ -8,8 +8,6 @@ import { useEffect, useRef, useState } from "react";
 
 import {
   ApiError,
-  avatarUrl,
-  bumpAvatarVersion,
   getNotifyPrefs,
   putNotifyPrefs,
   updateMe,
@@ -76,8 +74,9 @@ function ProfileSection() {
     setAvatarNote(null);
     try {
       const res = await uploadAvatar(pendingFile);
-      bumpAvatarVersion(); // future <img> renders bypass the stale cache entry
-      setUser({ ...user, avatar_path: res.avatar_path });
+      // res.url carries the new file's `?v={mtime}`, so every <img> rendered
+      // from the refreshed session user misses the stale cache entry.
+      setUser({ ...user, avatar_path: res.avatar_path, avatar_url: res.url });
       pickFile(null);
       setAvatarNote("Avatar updated");
     } catch (err) {
@@ -97,7 +96,7 @@ function ProfileSection() {
           {previewUrl !== null ? (
             <img src={previewUrl} alt="" />
           ) : (
-            user.avatar_path !== null && <img src={avatarUrl(user.id)} alt="" />
+            user.avatar_url != null && <img src={user.avatar_url} alt="" />
           )}
         </div>
         <div className="settings-avatar-actions">

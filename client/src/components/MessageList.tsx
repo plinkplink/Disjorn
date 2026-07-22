@@ -132,20 +132,14 @@ function buildFeed(list: Message[], gaps: number[]): FeedItem[] {
 /* ---------------------------------------------------------------- pieces */
 
 function AuthorAvatar({ message }: { message: Message }) {
+  // The payload carries the author's versioned `avatar_url` — already pointed
+  // at the right endpoint (bots have their own, since bot ids can collide with
+  // user ids), and null when they have none, which skips the request entirely.
+  const { author } = message;
   if (message.author_type === "user") {
-    return <Avatar userId={message.author_id} name={message.author.name} size={38} />;
+    return <Avatar src={author.avatar_url} name={author.name} size={38} />;
   }
-  // Bots have their own avatar endpoint (bot ids can collide with user ids, so
-  // /avatars/{id} would show the wrong face). The payload tells us whether one
-  // exists; without it we go straight to the letter tile and skip the request.
-  return (
-    <BotAvatar
-      botId={message.author_id}
-      name={message.author.name}
-      size={38}
-      hasAvatar={message.author.avatar_path !== null}
-    />
-  );
+  return <BotAvatar src={author.avatar_url} name={author.name} size={38} />;
 }
 
 function ReplyRef({
