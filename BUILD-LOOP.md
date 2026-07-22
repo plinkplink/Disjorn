@@ -211,6 +211,41 @@ summon containers are not actually ephemeral — CC's `.claude.json` and
 `.sessions/` persist in the mounted home volume across `--rm`, carrying model
 state, which is a candidate mechanism for the sticky shape above.
 
+## Decision record 2026-07-22 — BL-G1 SETTLED: run `alert`, gather data first
+
+plink, at the keyboard, answering the open decision this document has carried
+since 2026-07-21:
+
+> "Alert for now is the right move. Let's gather more data before stepping into
+> the `refuse` path."
+
+**This closes BL-G1** as a staged answer rather than a binary one. The ratified
+"refuse to act + alert" line is not abandoned — `refuse` is built, tested
+against the real CLI, and one config value away. It is held until the drift has
+been characterised, because refusing on a signal we do not yet understand
+silences the resident on every false positive, and we already know the legacy
+post-hoc check can produce those (KB-D1a: it reads `modelUsage`'s first key,
+which is *haiku*).
+
+**Required order — `alert` is NOT the default, so this is two changes:**
+1. `session_argv` → `--output-format stream-json --verbose` (the gate cannot
+   see an init event without it, and `--verbose` is mandatory or CC exits 1
+   with empty stdout).
+2. `[container].model_gate = "alert"` (ships `"off"`).
+
+**What "more data" means concretely** — the point of `alert` is that it dates
+and attributes the drift *before* the reply ships, which the post-hoc check
+cannot. Watch for: whether drift correlates with channel content (KB-D1), with
+session state persisting across the `--rm` boundary (KB-D2), or with neither.
+Six occurrences are on record so far (2026-07-21 18:41/20:41/20:50, 2026-07-22
+06:14/06:24, plus #custodian seq 240 during the closure sweep).
+
+**Open sub-decision, deliberately not folded in**: whether a detached BUILD
+should get `refuse` earlier than summons do. A mis-modelled summon costs one
+chat turn; a mis-modelled build runs unattended for up to an hour and commits
+code. The two are not obviously the same risk and need not take the same
+setting.
+
 ## Decision records 2026-07-22 — reciprocity, and Claudette's prompt
 
 Appended per house rule 1. Both were settled in #custodian with Claudette
