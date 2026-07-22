@@ -1,3 +1,79 @@
+# ACTIVATION RUNBOOK (2026-07-22) — read this first
+
+The 2026-07-22 closure sweep landed a lot, **all of it closed**: no verb was
+flipped, no timer enabled, no live resident behaviour changed. Everything below
+is a lever waiting for you. The numbered sections after this one are the older
+per-wave runbooks, now annotated with what is done.
+
+**Order matters. Each step assumes the ones above it.**
+
+### 0. The red-team gate — do this first
+`RED-TEAM-BACKLOG.md` is the checklist. It grew from 17 items to ~33 this
+session: the old blockers are ticked, and the new ones (KB-D1..D13, plus
+BL-D7..D11 and H13-D7..D11 which are the *residue of the fixes themselves*) are
+open. **Run it in an isolated Opus venue via passdown — never in #custodian,
+never in a channel a resident backfills** (DEFERRED.md, "Safeguard
+backfill-poisoning"). Two items are probes that should run before anything is
+flipped: **KB-D1** (why the model pin is being overridden in production) and
+**KB-D6** (whether a resident can exfiltrate its own credential in its replies —
+this one gates the Max/OAuth cutover specifically).
+
+### 1. Deploy the wrappers  *(nothing works without this)*
+```
+sudo install -m 0755 harness/cc/run-resident.sh /usr/local/lib/disjorn/run-resident.sh
+sudo install -m 0755 harness/cc/run-build.sh    /usr/local/lib/disjorn/run-build.sh
+sudo systemctl --user -M res-gable@ restart gable-summon
+```
+`run-build.sh` **has never been deployed**, while `[start_build].command`
+already points at it — so `start-build` would have failed on invocation
+regardless of its verb flag. The deployed `run-resident.sh` is the Jul-20
+pre-cutover copy; the repo version adds the `/config/env` credential mask, the
+container reaper, and the optional spine mount. This IS a live change to the
+summon path — expect it, and watch one summon after.
+
+### 2. Rebuild the resident images, then honour `refresh-mirror`
+The broker CLI is COPY'd into the image, and the live image predates
+`refresh-mirror` and `start-build` — I turned `refresh-mirror` **OFF** for both
+residents this session because it was `true` while wired to nothing (KB-D9).
+Rebuild in **each resident's own rootless podman store** (they are per-user;
+plink's store is separate and rebuilding there does nothing for them), then flip
+`refresh-mirror` back on in `/etc/disjorn-broker/verbs.toml`.
+
+### 3. Max / OAuth cutover  *(optional; gated on KB-D6)*
+Steps are in `harness/cc/config-template/README.md`. **Conditions before you
+rely on it**: mint a *dedicated* token (`claude setup-token`), **prove
+revocation works before the cutover** — a credential you cannot demonstrably
+revoke does not belong in a container — and cut Gable over first. Also worth
+doing first: KB-D13, both residents currently share one `ANTHROPIC_API_KEY`, so
+revoking one revokes both.
+
+### 4. The spine wall  *(closes the hole in §5)*
+Two lines, host-side then container-side, in that order — see §5a. Reversible
+by reverting the same two lines; the in-volume copy is deliberately left in
+place so rollback is a config edit, not a data restore.
+
+### 5. The model gate  *(the BL-G1 decision)*
+`session_argv` → `--output-format stream-json --verbose` **first**, then run at
+`model_gate = "alert"` until real summons confirm init matches the pin, then
+`"refuse"`. Flipping `refuse` without the `session_argv` change refuses every
+summon — loudly, with the fix named, but the resident goes silent.
+
+### 6. Consolidation
+`sudo systemctl enable --now disjorn-consolidation@claudette.timer`. Keep the
+delay a few more days so her retrieval log accumulates real reference counts.
+Gable stays `active = false` until he has an episodic store.
+
+### 7. `start-build` — last, and deliberately
+Add the `[start_build]` section to `/etc/disjorn-broker/broker.toml`, install
+the sudoers drop-in, restart the broker, THEN flip the verb per resident.
+**Order is load-bearing**: the broker now hard-asserts at startup that
+`specs_dir` is resident-unwritable and **refuses to start** if it is not, so
+point it at `/srv/disjorn-ro/SPECS` and refresh the mirror first — an
+un-refreshed mirror has no `SPECS/` directory and the assertion will stop the
+broker. Verify the config passes before restarting, not after.
+
+---
+
 # KEYBOARD-NEXT — plink's sitting after the H8/H9/H12 wave (2026-07-20)
 
 One consolidated runbook distilled from the three INTEGRATION-NEEDS files
