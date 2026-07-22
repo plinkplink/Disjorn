@@ -385,6 +385,20 @@ def test_broker_template_parses_and_has_required_sections():
     assert {"url", "api_key_path", "custodian_channel_id"} <= set(tmpl["disjorn"])
 
 
+def test_unit_template_keeps_the_dead_mount_fix():
+    """systemd deletes a RuntimeDirectory= on STOP; resident containers
+    bind-mount /run/disjorn-broker, so every broker restart used to unlink the
+    directory under a running container's bind and silently kill its hands (the
+    'dead mount', diagnosed twice). The live unit carries
+    RuntimeDirectoryPreserve=yes; the repo is what a reinstall copies, so a
+    template without it silently regresses the fix."""
+    unit = (TEMPLATE_DIR / "disjorn-broker.service").read_text()
+    directives = [ln.strip() for ln in unit.splitlines()
+                  if ln.strip() and not ln.strip().startswith("#")]
+    assert "RuntimeDirectoryPreserve=yes" in directives
+    assert "RuntimeDirectory=disjorn-broker" in directives
+
+
 def test_no_shell_true_anywhere_in_brokerd():
     src = (TEMPLATE_DIR / "brokerd.py").read_text()
     assert "shell=True" not in src

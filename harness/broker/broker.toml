@@ -18,6 +18,27 @@ socket_path = "/run/disjorn-broker/broker.sock"
 # /var/log/disjorn-broker is created by the unit's LogsDirectory=.
 audit_log = "/var/log/disjorn-broker/audit.jsonl"
 
+# BL-D2: where a detached build's stdout/stderr are spooled (0600 temp files,
+# deleted when the build reaches a terminal state; only a 64 KiB tail is ever
+# read back into the broker, so a flooding build can no longer balloon the
+# broker's RSS). Default when unset: <dir of audit_log>/build-logs, i.e.
+# /var/log/disjorn-broker/build-logs — plink-owned, resident-unreachable, and
+# on DISK. Do not point this at /tmp on this host: /tmp is tmpfs, so the flood
+# would simply move back into RAM.
+#
+# WP-L4 open fork, two more things live here:
+#   * <slug>.build.json — one 0600 sidecar per in-flight build (unit, branch,
+#     both spool paths, the ORIGINAL deadline). A build now runs in a transient
+#     unit outside this daemon's cgroup, so a broker restart no longer kills it;
+#     the sidecar is how the NEXT broker process finds it, re-claims its slug and
+#     still posts its done/failed line. Removed on every terminal path, and
+#     swept at startup along with any spool file whose build died with its broker.
+#   * disk bounding: the build's stdout is a regular file (a spool here), so the
+#     unit carries LimitFSIZE (RLIMIT_FSIZE) — a flooding build dies loudly on
+#     SIGXFSZ instead of filling /. The ceiling is a constant in the launch
+#     helper, deliberately not a config value a caller could widen.
+# build_log_dir = "/var/lib/disjorn-broker/build-logs"
+
 [uids]
 # Kernel uid -> resident identity. THE authentication table: the broker trusts
 # SO_PEERCRED, maps the uid here, and denies anything unlisted.
@@ -30,6 +51,14 @@ audit_log = "/var/log/disjorn-broker/audit.jsonl"
 # The ONLY file read-own-log will serve to res-claudette. No other path is
 # ever accepted, whatever the caller sends.
 log_path = "/home/res-claudette/logs/disjorn_bot.log"
+# OPTIONAL (BL-D1): host directories this resident can WRITE that the broker
+# cannot infer from the /home/<resident> convention — e.g. a shared rw volume
+# mounted into the container from elsewhere. The start-build guard treats these
+# as resident volumes and refuses to start if start_build.specs_dir lands in
+# one. Declare any such mount here; the guard's permission walk is a backstop,
+# not a substitute (a bind mount can be rw inside the container while the host
+# path looks read-only to the res-* uid).
+# writable_roots = ["/srv/shared-scratch"]
 
 [residents.res-claudette.path_map]
 # classify-diff path translation AND allowlist: residents pass their
@@ -121,10 +150,44 @@ protected_paths = "/etc/disjorn-broker/protected-paths.toml"
 # — and the spec (the chat-derived design) is fed on STDIN, never spliced into
 # argv. The verb ships OFF in verbs.toml; this section is inert until flipped.
 #
-# The container-launch wrapper (sibling of run-resident.sh; worktree rw, longer
-# cap). Installed world-readable, same as run-resident.sh (res-* users cannot
-# read /home/plink).
-command = ["/usr/local/lib/disjorn/run-build.sh"]
+# HOW THE BUILD IS LAUNCHED (WP-L4 open fork, KEYBOARD-NEXT 6b).
+#
+# NOT run-build.sh directly. The broker runs as plink, so a build launched
+# straight from it ran podman as PLINK: `--userns keep-id` mapped the container
+# to uid 1000 (so a callback to this socket presented plink in SO_PEERCRED),
+# `$HOME/resident-home` resolved to /home/plink/resident-home, a
+# resident-authored spec drove a session with plink's filesystem access, and the
+# session sat in the broker's cgroup so any broker restart killed it.
+#
+# Instead the launch goes through ONE validating root helper
+# (harness/broker/disjorn-build-launch), which execs:
+#     systemd-run --unit=disjorn-build-<slug> --uid=res-<resident> --pipe
+#                 --collect <fixed limits> -- <run-build.sh> <resident> <slug> …
+# so the build is a TRANSIENT SYSTEM SERVICE under the resident's own uid:
+# correct identity by construction, outside this daemon's cgroup (survives a
+# broker restart — see the sidecar/re-adoption note under build_log_dir), and
+# with kernel-enforced memory/disk/wall-clock ceilings.
+#
+# `sudo -n` succeeds only because of /etc/sudoers.d/91-disjorn-build, which
+# names that ONE helper in exactly two shapes (run/stop) with regex-constrained
+# arguments — never systemd-run, which cannot be granted safely (any wildcard in
+# a sudoers rule for it is equivalent to a grant of full root; the file explains
+# why at length). Install the helper root:root 0755 FIRST or every launch fails
+# closed. The trailing "run" is the helper's subcommand; the broker appends
+# <resident> <slug> <session_argv…> after it, exactly as run-build.sh expects.
+command = ["sudo", "-n", "/usr/local/lib/disjorn/disjorn-build-launch", "run"]
+# How the reaper KILLS a build at the cap. The unit lives outside the broker's
+# cgroup, so killing the local sudo/systemd-run process no longer kills the
+# build: the cap only bites because of this. Same helper, second fixed shape;
+# the broker appends <resident> <slug>.
+stop_command = ["sudo", "-n", "/usr/local/lib/disjorn/disjorn-build-launch", "stop"]
+# How a build's unit is POLLED (unprivileged — no sudo, read-only). Used when
+# re-adopting a build that outlived a broker restart; the broker appends the
+# unit name. A unit systemd has forgotten answers "inactive", which is terminal.
+unit_state_command = ["systemctl", "show", "--property=ActiveState", "--value"]
+# WHICH resident the build runs AS — this is now a kernel identity (res-<name>),
+# not a label. It must have a line in /etc/sudoers.d/91-disjorn-build; adding a
+# build resident is a keyboard act with a visible diff, on purpose.
 resident = "gable"
 # The command run INSIDE the container: a headless Claude Code build session.
 # The trailing "$@" + the "build-session" argv0 are load-bearing (WP-L5): the
@@ -140,6 +203,17 @@ model = "claude-opus-4-8"
 # mirror's SPECS/ (refreshed by refresh-mirror). A spec must resolve DIRECTLY
 # inside this dir — no `..`, no symlink escape — and be status `confirmed` with
 # a filled confirm record, or the build is refused.
+#
+# BL-D1 — THIS LINE IS THE AUTHORIZATION, NOT A PATH PREFERENCE. The confirm
+# record is a presence check on text; it only means anything because residents
+# cannot write this directory. Point it at anything a resident can write (a
+# resident home, a shared rw volume, a world-writable dir) and any resident can
+# forge "Confirmed by: plink" and self-authorize builds. The broker therefore
+# VERIFIES this at startup — resident volumes by path, plus a stat() of the
+# directory and every parent up to / — and REFUSES TO START if it cannot prove
+# the directory is resident-unwritable. There is no override flag. Keep it on
+# the RO mirror; if you must move it, move it somewhere plink owns and
+# residents never mount.
 specs_dir = "/srv/disjorn-ro/SPECS"
 # Wall-clock cap for the detached build (seconds). Longer than the 300s summon
 # — a build is a whole feature, not a chat turn. The reaper kills at the cap

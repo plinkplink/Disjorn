@@ -8,6 +8,8 @@ other denial. Budgets are set on the live broker instance the harness exposes
 
 from __future__ import annotations
 
+import os
+
 
 def test_default_off_never_denies(harness):
     """No budget configured => the cap check is a no-op, however many calls."""
@@ -86,3 +88,68 @@ def test_budget_template_section_parses_all_off():
     # Present but empty of active caps: no default, no per-resident subtable.
     assert "default_daily_action_cap" not in budgets
     assert all(not isinstance(v, dict) for v in budgets.values())
+
+
+# --- H13-D4 regressions: count-with-reservation for EVERY numeric budget ---
+
+def test_action_budget_race_guard(harness):
+    """H13-D4: the cap check used to be check-then-act — read today's count
+    from the audit log, then run the verb, then write the audit line. N
+    concurrent dispatches all read the same pre-cap count and ALL ran, bursting
+    past the cap. Count and reserve now happen under one lock, so a cap of 5
+    admits exactly 5 however many callers arrive at once."""
+    import threading
+
+    harness.set_verbs(**{"read-metrics": True})
+    harness.broker.budgets = {"res-test": {"daily_action_cap": 5}}
+    results: list[dict] = []
+    lock = threading.Lock()
+
+    def fire():
+        r = harness.call("read-metrics", {})
+        with lock:
+            results.append(r)
+
+    threads = [threading.Thread(target=fire) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    ok = [r for r in results if r["ok"]]
+    over = [r for r in results if not r["ok"] and r["error"]["code"] == "over-budget"]
+    assert len(ok) == 5, [r for r in results]
+    assert len(over) == 15
+    # and the audit agrees: exactly 5 allowed lines for the verb.
+    allowed = [ln for ln in harness.audit_lines()
+               if ln["verb"] == "read-metrics" and ln["allowed"]]
+    assert len(allowed) == 5
+
+
+def test_reserved_slot_is_refunded_when_the_verb_denies(harness):
+    """A reservation is taken BEFORE the verb runs, so a bad-args denial must
+    give it back — denials never consume budget (the WP-H12 contract)."""
+    harness.set_verbs(**{"read-metrics": True})
+    harness.broker.budgets = {"res-test": {"daily_action_cap": 2}}
+    for _ in range(3):  # bad args: denied, refunded
+        assert harness.call("read-metrics", {"bogus": 1})["error"]["code"] == "bad-args"
+    assert harness.call("read-metrics", {})["ok"] is True
+    assert harness.call("read-metrics", {})["ok"] is True
+    assert harness.call("read-metrics", {})["error"]["code"] == "over-budget"
+
+
+def test_action_budget_count_survives_a_restart(harness, tmp_path):
+    """The in-memory reservation is SEEDED from the audit log, so a restart
+    does not hand a resident a fresh allowance."""
+    from brokerd import Broker
+
+    harness.set_verbs(**{"read-metrics": True})
+    harness.broker.budgets = {"res-test": {"daily_action_cap": 3}}
+    for _ in range(3):
+        assert harness.call("read-metrics", {})["ok"] is True
+    fresh = Broker(harness.broker.config, str(harness.verbs_path),
+                   transport=lambda cfg, body: {})
+    fresh.budgets = {"res-test": {"daily_action_cap": 3}}
+    assert fresh._count_today_allowed("res-test") >= 3
+    resp = fresh.dispatch(os.getuid(), "read-metrics", {})
+    assert resp["ok"] is False and resp["error"]["code"] == "over-budget"

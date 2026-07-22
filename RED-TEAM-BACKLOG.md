@@ -15,6 +15,37 @@ record is DEFERRED.md; this file is the checklist view.
 
 ---
 
+## KB-D0 (CRITICAL — read this before anything else on this page)
+
+- [ ] **`plink ALL=(ALL) NOPASSWD:ALL` makes every narrow sudoers rule in this
+  system decorative.** Verified at the keyboard 2026-07-22:
+  `/etc/sudoers.d/plink-nopasswd` (29 bytes, since 2026-06-14) grants
+  unrestricted passwordless root, and `sudo -l -U plink` confirms
+  `(ALL) NOPASSWD: ALL` alongside the carefully-scoped entries.
+
+  **Why this is the top item and not a footnote:** the broker runs as plink.
+  Its whole privilege story is "the daemon is unprivileged; the ONLY thing it
+  can do as root is the single line in `/etc/sudoers.d/90-disjorn-broker`
+  (`systemctl restart disjorn`), and the sudoers line, not NoNewPrivileges, is
+  the privilege boundary" (`disjorn-broker.service` header). That sentence is
+  false today. Anything that reaches code execution as the broker's uid already
+  has full root, so `restart-disjorn` being the "single genuinely privileged
+  verb" is not a property the system currently has. The same applies to the new
+  `91-disjorn-build` helper boundary, and to every future narrow grant.
+
+  **Consequence for activation:** revoking this is a **prerequisite** for
+  `start-build` being ON meaning anything at all — the containment it is
+  designed to provide does not exist until then. It does not weaken the
+  resident→host walls (those are uid/nftables/mount-based and are real), but it
+  removes the plink→root wall entirely, which is the one every sudoers rule in
+  the repo is written against.
+
+  Cross-reference: plink's own standing "revoke sudo" reminder in the NAS
+  stack notes. Revoke, then re-run the broker and build boundaries to confirm
+  they behave as designed rather than as currently unenforced comments.
+
+---
+
 ## Blocks `start-build` activation (BUILD-LOOP red-team) — ALL CLOSED 2026-07-22
 - [x] **BL-D1 (HIGH)** — CLOSED. `assert_specs_dir_resident_unwritable()` runs at
   broker CONSTRUCTION and refuses to start (exit 2, loud stderr) unless

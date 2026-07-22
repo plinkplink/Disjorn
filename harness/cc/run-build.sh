@@ -18,8 +18,21 @@
 #   run-build.sh <resident-name> <slug> [command...]
 #     <resident-name>  e.g. "gable" (no res- prefix) — the identity the build
 #                      runs as (keep-id; SO_PEERCRED at the broker socket).
-#     <slug>           the spec slug (branch is loop/<slug>); used only to name
-#                      the container. Broker-validated kebab, safe as an arg.
+#                      HOW that identity is actually acquired (WP-L4's open
+#                      fork, closed 2026-07-22): the broker does NOT exec this
+#                      script directly. It runs
+#                        sudo -n /usr/local/lib/disjorn/disjorn-build-launch run <name> <slug> ...
+#                      and that helper does `systemd-run --uid=res-<name>`, so
+#                      the uid is set by PID 1 before exec — not by a userspace
+#                      privilege drop inside a sudo'd process. That is what
+#                      makes keep-id and SO_PEERCRED true rather than aspirational:
+#                      run directly by plink, podman would map the container to
+#                      uid 1000 and $HOME would resolve to the wrong tree entirely.
+#     <slug>           the spec slug; branch is loop/<slug> and the slug KEEPS
+#                      its YYYY-MM-DD- prefix (BL-D4), so branch name == spec
+#                      basename 1:1. The container name and the transient unit
+#                      name deliberately share the `disjorn-build-<slug>` stem.
+#                      Broker-validated kebab, safe as an arg.
 #     [command...]     the headless CC build-session argv, forwarded verbatim.
 #                      Carries the WP-L5 model pin: the broker appends
 #                      `--model <id>`, which rides into the container command via
@@ -124,6 +137,23 @@ if [ -d "$HOUSE_MEMORY" ]; then
   args+=( -v "$HOUSE_MEMORY:/opt/house_memory:ro" )
 else
   echo "run-build: WARNING house_memory absent: $HOUSE_MEMORY (skipping mount)" >&2
+fi
+
+# The read-only repo mirror at /opt/disjorn. This was MISSING here while
+# run-resident.sh has had it since WP-H1 — run-build.sh only ever mentioned
+# RESIDENT_DISJORN_RO inside a comment copied from its sibling, so a build
+# session had no /opt/disjorn at all. That is not cosmetic: /opt/disjorn is the
+# container-side prefix `[residents.<r>.path_map]` maps for classify-diff, so a
+# build could not have tier-classified its own diff. Added 2026-07-22.
+#
+# Same contract as run-resident.sh: the source MUST be a git-clean clone
+# readable by res-* (/srv/disjorn-ro, refreshed after merges) and NEVER the
+# live working tree — /home/plink is 0700 so rootless podman cannot mount it,
+# and the working tree carries runtime data/ including the prod DB, which is a
+# privacy wall, not an inconvenience.
+if [ -n "${RESIDENT_DISJORN_RO:-}" ]; then
+  [ -d "$RESIDENT_DISJORN_RO" ] || { echo "run-build: RESIDENT_DISJORN_RO not a dir: $RESIDENT_DISJORN_RO" >&2; exit 1; }
+  args+=( -v "$RESIDENT_DISJORN_RO:/opt/disjorn:ro" )
 fi
 
 # ── BEGIN spine mount block ──────────────────────────────────────────────

@@ -1,0 +1,63 @@
+# /etc/sudoers.d/91-disjorn-build — the SECOND (and only other) privileged
+# escape hatch of the disjorn-broker daemon. Sibling of 90-disjorn-broker.
+#
+# NOT INSTALLED. Ships inert, like the verb it serves: `start-build` is false
+# for every resident in verbs.toml. Install it only when activating builds —
+# see harness/KEYBOARD-NEXT.md 6b, and install the helper it names FIRST or
+# every launch simply fails closed.
+#
+#   sudo install -D -o root -g root -m 0755 \
+#       /home/plink/Disjorn/Disjorn/harness/broker/disjorn-build-launch \
+#       /usr/local/lib/disjorn/disjorn-build-launch
+#   sudo visudo -cf /home/plink/Disjorn/Disjorn/harness/keyboard/91-disjorn-build.sudoers
+#   sudo install -o root -g root -m 0440 \
+#       /home/plink/Disjorn/Disjorn/harness/keyboard/91-disjorn-build.sudoers \
+#       /etc/sudoers.d/91-disjorn-build
+#
+# WHAT IT GRANTS
+#   plink (the uid the broker runs as) may run exactly one root program — the
+#   disjorn-build-launch helper — in exactly two modes, for exactly one named
+#   resident, with a slug-shaped third argument. The helper takes NO path, NO
+#   unit name, NO uid and NO resource limit from its caller: it derives all of
+#   them from (mode, resident, slug) and execs a fixed systemd-run argv that
+#   runs the build AS res-<resident>, never as root.
+#
+# WHY NOT `sudo systemd-run …` DIRECTLY, WITH A PATTERN
+#   Because it cannot be written safely. sudoers matches command arguments as
+#   ONE concatenated string (sudoers(5), "Wildcards in command arguments"), and
+#   any rule permissive enough to carry a real launch — a wrapper path plus a
+#   session argv — must end in a wildcard. A wildcard matches spaces, so
+#   `systemd-run --uid=res-gable … <wrapper> *` ALSO matches
+#   `… <wrapper> x --uid=0 --property=ExecStartPre=/bin/sh -c …`: systemd-run
+#   honours the LAST --uid= and accepts properties anywhere in its option run.
+#   A sudoers grant for systemd-run with any wildcard is a grant of full root.
+#   The privileged surface has to be a fixed-argv program that validates its
+#   own arguments; the regexes below are a second fence, not the fence.
+#
+# HOW FAR THE REGEXES ACTUALLY GO (read this before trusting them)
+#   sudo 1.9.10+ matches command arguments against a POSIX ERE, which is much
+#   tighter than a glob — but still against the arguments JOINED BY SPACES. So
+#   the regex cannot tell "three arguments" from "one argument containing two
+#   spaces": a caller could pass the single argument
+#   `2026-01-01-x --something` and the joined string would still match. That is
+#   exactly why the helper re-validates the slug itself and refuses. Treat
+#   these lines as narrowing, and the helper as the boundary.
+#
+# WHAT AN ATTACKER WHO OWNS THE plink UID GAINS: the ability to run
+# run-build.sh — and nothing else — as res-gable. That is a LATERAL step into a
+# contained resident identity, not a step up to root. Nothing here can start a
+# root process, set a unit property, or name a program.
+#
+# ONE RESIDENT PER LINE, ON PURPOSE. Adding a build resident is a keyboard act
+# with a visible diff, not a config value someone can widen. Uncomment
+# Claudette's pair only when [start_build].resident actually names her.
+
+Cmnd_Alias DISJORN_BUILD_GABLE = \
+    /usr/local/lib/disjorn/disjorn-build-launch ^run gable [0-9]{4}-[0-9]{2}-[0-9]{2}-[a-z0-9][a-z0-9-]{0,50}( .*)?$, \
+    /usr/local/lib/disjorn/disjorn-build-launch ^stop gable [0-9]{4}-[0-9]{2}-[0-9]{2}-[a-z0-9][a-z0-9-]{0,50}$
+
+# Cmnd_Alias DISJORN_BUILD_CLAUDETTE = \
+#     /usr/local/lib/disjorn/disjorn-build-launch ^run claudette [0-9]{4}-[0-9]{2}-[0-9]{2}-[a-z0-9][a-z0-9-]{0,50}( .*)?$, \
+#     /usr/local/lib/disjorn/disjorn-build-launch ^stop claudette [0-9]{4}-[0-9]{2}-[0-9]{2}-[a-z0-9][a-z0-9-]{0,50}$
+
+plink ALL=(root) NOPASSWD: DISJORN_BUILD_GABLE

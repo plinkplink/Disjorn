@@ -1,0 +1,309 @@
+#!/usr/bin/python3
+"""disjorn-build-launch — the ONE privileged step of the start-build verb (WP-L4).
+
+INSTALLED AT /usr/local/lib/disjorn/disjorn-build-launch, root:root 0755, and
+named EXACTLY by /etc/sudoers.d/91-disjorn-build. The broker (uid plink) reaches
+it only through `sudo -n`; residents never touch sudo at all.
+
+WHY IT EXISTS
+-------------
+`start-build` launches a detached headless build session. Launched straight from
+the broker it ran as PLINK, which meant:
+  * podman's `--userns keep-id` mapped the container to plink's uid, so a build
+    that called back to the broker socket presented plink in SO_PEERCRED — an
+    unknown caller at best, a privileged one at worst;
+  * `$HOME` was /home/plink, so run-build.sh's documented default worktree
+    (`$HOME/resident-home`) was the wrong directory;
+  * a resident-authored spec drove a session with plink's filesystem access,
+    including both 0700 resident homes and the live production tree;
+  * the session sat in the broker's cgroup, so `systemctl restart
+    disjorn-broker` killed any build in flight and lost its narration.
+
+Running the build as a TRANSIENT SYSTEM SERVICE under the resident's own uid
+fixes all four by construction: the kernel identity is right (so keep-id, $HOME
+and SO_PEERCRED are right), the unit lives outside the broker's cgroup, and
+resource limits are declarative and kernel-enforced instead of polled.
+
+WHY A HELPER AND NOT A SUDOERS LINE FOR systemd-run
+---------------------------------------------------
+sudoers matches command arguments as ONE concatenated string (sudoers(5),
+"Wildcards in command arguments"). Any pattern permissive enough to carry a
+real systemd-run invocation — the wrapper path, the session argv — must end in
+a wildcard, and a wildcard matches spaces. So `sudo systemd-run --uid=res-gable
+... <wrapper> *` also permits `... --uid=0 --property=ExecStartPre=/bin/sh ...`,
+because systemd-run takes the LAST --uid= and honours properties anywhere in
+its option run. A sudoers rule for systemd-run with ANY wildcard is therefore
+equivalent to full root. The privileged surface has to be a fixed-argv program
+that validates its own inputs — this one. sudoers additionally pins the
+subcommand, the resident and the slug shape with a POSIX ERE (belt and braces);
+the validation below is the actual boundary.
+
+CONTRACT
+--------
+    disjorn-build-launch run  <resident> <slug> [session argv...]
+    disjorn-build-launch stop <resident> <slug>
+
+`run` execs, with stdin/stdout/stderr passed through untouched (`--pipe`):
+
+    systemd-run --unit=disjorn-build-<slug> --uid=res-<resident> --gid=<gid>
+                --collect --pipe <fixed limits...> --
+                /usr/local/lib/disjorn/run-build.sh <resident> <slug> [args...]
+
+stdin is the broker's pipe (the spec — argv is config, chat is data) and
+stdout/stderr are the broker's 0600 spool files (BL-D2: build output never
+enters the broker's address space; only a bounded tail is read back). The
+service inherits those descriptors directly, so it keeps writing to them even
+if the broker — and this process — die.
+
+NOTHING HERE IS POLICY. The confirm gate, the budget, the branch, the model pin
+and the wall-clock cap all live in the broker. This program decides exactly one
+thing: that the identity, the unit name and the resource envelope are the ones
+the design allows, or nothing runs.
+"""
+
+from __future__ import annotations
+
+import datetime as _dt
+import grp
+import json
+import os
+import pwd
+import re
+import stat
+import sys
+
+# ---------------------------------------------------------------- fixed paths
+SYSTEMD_RUN = "/usr/bin/systemd-run"
+SYSTEMCTL = "/usr/bin/systemctl"
+# The ONLY program this helper will ever start. Not an argument: a caller that
+# could name the program could run anything as a resident.
+WRAPPER = "/usr/local/lib/disjorn/run-build.sh"
+UNIT_PREFIX = "disjorn-build-"
+
+# ------------------------------------------------------------- fixed envelope
+# Deliberately NOT arguments. A limit a caller can widen is not a limit, and
+# these are the kernel-enforced half of "a runaway build cannot hurt the host".
+# plink tunes them by sudoediting THIS file (root-owned), which is the same
+# discipline as the kill switches: the levers live outside every caller.
+#
+# RUNTIME_MAX_SEC is an OUTER backstop, not the build cap. The build cap is the
+# broker's [start_build].timeout_sec (3600s), enforced by the reaper, which also
+# `stop`s this unit. This one only matters when the broker itself is gone: a
+# build orphaned by a broker crash still dies on its own. Keep it comfortably
+# LONGER than timeout_sec so the two never race — they are not meant to agree.
+RUNTIME_MAX_SEC = 14400          # 4h
+# RLIMIT_FSIZE: the disk bound. Inherited by every descendant (podman and the
+# session inside it), and it applies to the build's stdout — which IS a regular
+# file (the broker's spool). A build that floods stdout dies on SIGXFSZ at this
+# size instead of filling /. Loud, not silent: the broker narrates the failure.
+LIMIT_FSIZE = 512 * 1024 * 1024  # 512 MiB per file
+MEMORY_MAX = "8G"
+TASKS_MAX = 1024
+
+# run-build.sh's documented defaults assume they are read from plink's account;
+# a res-* uid cannot traverse /home/plink (0700). These are the same three
+# deviations gable-summon.service already carries for run-resident.sh, for the
+# same reason — env belongs in the unit, not in the wrapper.
+SRV_CONFIG_ROOT = "/srv/disjorn-resident-config"
+HOUSE_MEMORY = "/usr/local/lib/disjorn/house_memory"
+DISJORN_RO = "/srv/disjorn-ro"
+# DELIBERATELY NOT SET: RESIDENT_SPINE_HOST. It is opt-in per resident and
+# run-build.sh refuses to launch when it is set but the source directory is
+# absent (correctly — a mis-pointed spine mount is the one thing worth failing
+# closed over). When plink cuts the spine over for builds, add
+# f"--setenv=RESIDENT_SPINE_HOST=/srv/disjorn-spine/{resident}" below and make
+# sure harness/keyboard/06-spine-mirror.sh has published that resident's mirror.
+
+# ------------------------------------------------------------- validation
+# The slug is the ONLY resident-influenced token that reaches this program, and
+# it arrives already validated by the broker (brokerd._SPEC_STEM_RE). It is
+# re-validated here anyway: a sudoers rule is a privilege boundary, and a
+# boundary that trusts its caller is decoration. Kept byte-identical to the
+# broker's pattern on purpose — brokerd.build_unit_name() must always agree.
+SLUG_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})-([a-z0-9][a-z0-9-]{0,50})$")
+RESIDENT_RE = re.compile(r"^[a-z][a-z0-9]{0,30}$")
+UNIT_RE = re.compile(r"^disjorn-build-[0-9a-z][0-9a-z.-]{0,80}\.service$")
+MAX_FORWARDED_ARGS = 64
+MAX_ARG_LEN = 4096
+
+
+def die(msg: str) -> "None":
+    sys.stderr.write(f"disjorn-build-launch: REFUSED: {msg}\n")
+    raise SystemExit(2)
+
+
+def check_slug(raw: str) -> str:
+    """A dated kebab slug and nothing else. It names a systemd unit, a git
+    branch and a podman container, so anything that could be read as a flag, a
+    path segment, a unit-name escape (`@`, `/`, `\\x2d`) or whitespace is out."""
+    if len(raw) > 64:
+        die("slug too long")
+    m = SLUG_RE.match(raw)
+    if not m:
+        die(f"slug is not a dated kebab name: {raw!r}")
+    try:
+        _dt.date.fromisoformat(m.group(1))
+    except ValueError:
+        die(f"slug date is not a real date: {raw!r}")
+    return raw
+
+
+def check_resident(raw: str) -> "tuple":
+    """Resolve <resident> to the res-<resident> POSIX account, or refuse.
+
+    The account must ALREADY EXIST — creating one needs root, so passwd
+    membership is a fact this program cannot be talked into. uid 0 and gid 0 are
+    refused explicitly: the whole point is that the build does NOT run as root,
+    and a future `res-root` (or a res-* account edited to uid 0) must not
+    silently become an escalation."""
+    if not RESIDENT_RE.match(raw):
+        die(f"resident is not a plain lowercase name: {raw!r}")
+    account = "res-" + raw
+    try:
+        pw = pwd.getpwnam(account)
+    except KeyError:
+        die(f"no such resident account: {account}")
+    if pw.pw_uid == 0 or pw.pw_gid == 0:
+        die(f"{account} resolves to uid/gid 0 — refusing to run a build as root")
+    if not pw.pw_name.startswith("res-"):        # belt and braces
+        die(f"{account} does not look like a resident account")
+    try:
+        group = grp.getgrgid(pw.pw_gid).gr_name
+    except KeyError:
+        group = str(pw.pw_gid)
+    return account, pw, group
+
+
+def check_forwarded(args: "list") -> "list":
+    """The session argv (broker config: `bash -lc … --model <id>`), forwarded
+    verbatim to run-build.sh. It cannot reach systemd-run's option parser — it
+    sits after both the `--` terminator and the command path, and systemd-run
+    stops option parsing at the command (verified: `systemd-run /bin/echo
+    --uid=0` prints `--uid=0`). Bounded and control-character-free so nothing
+    weird lands in the process table or a journal line."""
+    if len(args) > MAX_FORWARDED_ARGS:
+        die(f"too many forwarded arguments ({len(args)} > {MAX_FORWARDED_ARGS})")
+    for a in args:
+        if len(a) > MAX_ARG_LEN:
+            die("forwarded argument too long")
+        if "\n" in a or "\0" in a or "\r" in a:
+            die("forwarded argument contains a control character")
+    return list(args)
+
+
+def check_wrapper(path: str) -> None:
+    """The launch wrapper must be a root-owned regular file that no one else can
+    write. If plink could rewrite it, `sudo <helper>` would become `sudo
+    <anything>` — as a resident, not as root, but still not a boundary anyone
+    should have to argue about."""
+    try:
+        st = os.stat(path)
+    except OSError as exc:
+        die(f"launch wrapper unusable: {exc}")
+    if not stat.S_ISREG(st.st_mode):
+        die(f"launch wrapper is not a regular file: {path}")
+    if st.st_uid != 0:
+        die(f"launch wrapper is not root-owned: {path} (uid {st.st_uid})")
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        die(f"launch wrapper is group- or world-writable: {path}")
+
+
+# ------------------------------------------------------------------ the modes
+
+def build_run_argv(resident: str, slug: str, forwarded: "list", wrapper: str) -> "list":
+    account, pw, group = check_resident(resident)
+    slug = check_slug(slug)
+    forwarded = check_forwarded(forwarded)
+    unit = f"{UNIT_PREFIX}{slug}"
+    if not UNIT_RE.match(unit + ".service"):     # unreachable; asserted anyway
+        die(f"refusing to create unit {unit!r}")
+    return [
+        SYSTEMD_RUN,
+        # Deterministic and greppable, and a second launch of the same spec
+        # collides LOUDLY ("Unit … was already loaded") instead of racing the
+        # branch and the podman --name. The broker's own in-flight slug claim
+        # (BL-D4) is the first line of that defence; this is the kernel's.
+        f"--unit={unit}",
+        f"--description=Disjorn build {slug} ({account})",
+        # THE IDENTITY FIX. PID 1 sets the credentials, so podman's keep-id,
+        # $HOME and the SO_PEERCRED the broker socket sees are all the
+        # resident's — not plink's — by construction rather than by convention.
+        f"--uid={account}",
+        f"--gid={group}",
+        # Unload the transient unit when it finishes, success or failure, so a
+        # failed build never blocks the next build of the same spec on a stale
+        # unit name and nothing accumulates in PID 1's memory.
+        "--collect",
+        # Pass OUR stdin/stdout/stderr to the service untouched: stdin is the
+        # broker's pipe (the spec), stdout/stderr are the broker's 0600 spool
+        # files. The service holds its own dups, so it keeps running — and
+        # keeps writing — after this process and the broker are gone.
+        "--pipe",
+        # Kernel-enforced envelope (see the constants above).
+        f"--property=RuntimeMaxSec={RUNTIME_MAX_SEC}",
+        f"--property=LimitFSIZE={LIMIT_FSIZE}",
+        "--property=LimitCORE=0",
+        f"--property=MemoryMax={MEMORY_MAX}",
+        "--property=MemorySwapMax=0",
+        f"--property=TasksMax={TASKS_MAX}",
+        # rootless podman needs the resident's runtime dir (lingering is on,
+        # 02-podman.sh) and run-build.sh's documented defaults live under
+        # /home/plink, which a res-* uid cannot traverse — same three
+        # deviations gable-summon.service carries for run-resident.sh.
+        f"--setenv=XDG_RUNTIME_DIR=/run/user/{pw.pw_uid}",
+        f"--setenv=RESIDENT_CONFIG_DIR={SRV_CONFIG_ROOT}/{resident}",
+        f"--setenv=RESIDENT_HOUSE_MEMORY={HOUSE_MEMORY}",
+        f"--setenv=RESIDENT_DISJORN_RO={DISJORN_RO}",
+        "--",
+        wrapper, resident, slug, *forwarded,
+    ]
+
+
+def build_stop_argv(resident: str, slug: str) -> "list":
+    check_resident(resident)          # refuse a bogus resident even to stop
+    slug = check_slug(slug)
+    return [SYSTEMCTL, "stop", f"{UNIT_PREFIX}{slug}.service"]
+
+
+def main(argv: "list") -> int:
+    # DRY RUN is for the test suite and for reading the argv at the keyboard.
+    # It is UNREACHABLE through the privileged path: sudo's env_reset (Debian
+    # default) drops DISJORN_* before this process starts, so the sudoers rule
+    # can only ever reach the exec'ing branch. It still runs every check.
+    dry = os.environ.get("DISJORN_BUILD_LAUNCH_DRY_RUN") == "1"
+    wrapper = WRAPPER
+    if dry and os.environ.get("DISJORN_BUILD_LAUNCH_WRAPPER"):
+        wrapper = os.environ["DISJORN_BUILD_LAUNCH_WRAPPER"]
+
+    if len(argv) < 4:
+        die("usage: disjorn-build-launch run|stop <resident> <slug> [args...]")
+    mode, resident, slug = argv[1], argv[2], argv[3]
+
+    if mode == "run":
+        check_wrapper(wrapper)
+        out = build_run_argv(resident, slug, argv[4:], wrapper)
+    elif mode == "stop":
+        if len(argv) > 4:
+            die("stop takes exactly <resident> <slug>")
+        out = build_stop_argv(resident, slug)
+    else:
+        die(f"unknown mode {mode!r} (expected 'run' or 'stop')")
+
+    if dry:
+        print(json.dumps(out))
+        return 0
+    # Fixed argv, no shell, and exec (not fork): the file descriptors the broker
+    # handed us pass straight through, and sudo's child IS systemd-run, so the
+    # service's exit status comes back to the broker unchanged.
+    #
+    # A scrubbed environment too. sudo's env_reset already does most of this,
+    # and the SERVICE's environment comes from PID 1 rather than from here
+    # (which is why the --setenv= flags above exist at all) — but this program
+    # runs as root, so it inherits nothing it was not handed on purpose.
+    os.execve(out[0], out, {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"})
+    die(f"exec failed: {out[0]}")   # pragma: no cover — execv does not return
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

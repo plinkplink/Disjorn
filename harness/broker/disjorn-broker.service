@@ -35,6 +35,45 @@ LogsDirectory=disjorn-broker
 Restart=on-failure
 RestartSec=3
 
+# THE DEAD-MOUNT FIX — DO NOT REMOVE (Architecture.md §13 "Dead-mount
+# investigation"; #custodian seq 133/138; twice diagnosed, each time looking
+# like a different bug).
+#
+#   systemd DELETES a RuntimeDirectory= when the service STOPS. Resident
+#   containers bind-mount the socket's DIRECTORY (/run/disjorn-broker) rather
+#   than the socket file, precisely so a restarted socket inode is picked up.
+#   But every broker restart removed that directory out from under any RUNNING
+#   container's bind: the container kept a bind to a now-unlinked directory and
+#   silently lost its hands — broker calls failed forever, with the resident
+#   still up and looking healthy.
+#
+#   RuntimeDirectoryPreserve=yes keeps /run/disjorn-broker across restarts, so
+#   the bind stays valid and a restarted broker reappears inside live
+#   containers. This line was added to the LIVE unit at the keyboard and is
+#   mirrored here because the repo is the source of truth for reinstall
+#   (harness/keyboard/04-broker.sh) — without it a reinstall silently regresses
+#   the fix.
+RuntimeDirectoryPreserve=yes
+
+# KillMode stays the systemd default (control-group) — DELIBERATE, and no longer
+# the deferral KEYBOARD-NEXT 6b recorded.
+#
+#   That deferral was: a restart killed any in-flight start-build, because the
+#   detached build sat in this daemon's cgroup even with its own session, and
+#   the reaper died with the daemon so the build's done/failed narration was
+#   lost. The fix was NOT to loosen KillMode (which would change what a restart
+#   does to every other subprocess). A build is now launched as a TRANSIENT
+#   SYSTEM UNIT (`systemd-run --unit=disjorn-build-<slug>`, under the resident's
+#   own uid, via the sudo helper) — so it is in ITS OWN cgroup, a restart cannot
+#   reach it, and the broker re-adopts it at startup from the JSON sidecar in
+#   build_log_dir and still posts its terminal line.
+#
+#   What a restart DOES still kill is the local `sudo systemd-run --pipe`
+#   process that carries the build's stdin/stdout/exit status. The build keeps
+#   running and keeps writing (it holds its own dups of the spool files); the
+#   new broker process picks the story back up. That is the intended behaviour,
+#   and it is what the reattachment tests cover.
+
 # Modest hardening. ProtectSystem=full makes /usr /boot /etc read-only for the
 # daemon (it only READS /etc/disjorn-broker); RuntimeDirectory/LogsDirectory
 # stay writable. Deliberately absent: NoNewPrivileges (see header).

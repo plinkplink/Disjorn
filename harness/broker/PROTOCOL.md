@@ -57,6 +57,11 @@ Every request — success, failure, or denial — appends exactly one line to th
 audit log: `{ts, resident, verb, args, allowed, result_summary}`. Denials have
 `allowed: false`. Unknown uids are recorded as `"uid:<n>"`.
 
+A verb may add extra FACT fields to its own line; they can never overwrite the
+six core keys. Today there is exactly one: `start-build` success lines carry
+`"build_started": true`, which is how the build budget distinguishes "a build
+ran" from "the call was authorized but nothing ever launched" (BL-D3).
+
 ## Verb table
 
 All verbs are per-resident toggleable in `verbs.toml` and default OFF.
@@ -90,11 +95,21 @@ All verbs are per-resident toggleable in `verbs.toml` and default OFF.
   the configured `SPECS/` dir. Absolute paths, `..` traversal, and symlink
   escape are all rejected (`bad-args`); a leading `-` or NUL is rejected.
 - result: `{"started": true, "branch": str, "slug": str, "pid": int?,
-  "confirmed_by": str, "seq": int}` — the build was accepted and launched
-  DETACHED; the branch is `loop/<slug>`.
+  "unit": str, "confirmed_by": str, "seq": int}` — the build was accepted and
+  launched DETACHED; the branch is `loop/<slug>` and the build runs in the
+  transient systemd unit `disjorn-build-<slug>.service` under the resident's own
+  uid (see **Identity** below). `pid` is the broker's LOCAL launch process, not
+  the build.
 - Launches a headless Claude Code **build session** that builds the confirmed
-  spec to a NEW branch `loop/<slug>` (slug = the spec filename minus its
-  `YYYY-MM-DD-` date prefix and `.md`). The session runs in the resident's
+  spec to a NEW branch `loop/<slug>`, where **slug = the spec filename minus
+  `.md`, date prefix INCLUDED** (`2026-07-21-gif-picker.md` →
+  `loop/2026-07-21-gif-picker`, container `disjorn-build-2026-07-21-gif-picker`).
+  The date prefix is required and is the collision disambiguator (BL-D4): two
+  specs with the same name on different dates used to derive the same branch
+  and the same podman `--name`. Branch name is now 1:1 with the spec file.
+  A second build of the SAME slug while one is in flight is refused
+  `bad-args` ("a build for … is already running"), which burns no budget.
+  The session runs in the resident's
   worktree (rw) with a longer wall-clock cap than the 300s summon
   (`[start_build].timeout_sec`, suggest 3600s) and the model pinned via the
   WP-L5 idiom (`--model <id>`, no fallback). It **does NOT merge, does NOT
@@ -108,16 +123,100 @@ All verbs are per-resident toggleable in `verbs.toml` and default OFF.
   spec's `## Status` must be `confirmed` AND the `## Confirm record` must be
   filled — a real `Confirmed by` (not the `<...>` placeholder) and an integer
   `#custodian seq`. No confirm record → refuse, fail-loud (`bad-args`).
+- **What makes the confirm gate real: `specs_dir` must be resident-unwritable**
+  (BL-D1). The record is a presence check on *text*; it is only trustworthy
+  because the text lives in the plink-gated read-only mirror
+  (`/srv/disjorn-ro/SPECS`). The broker now **asserts that at startup** and
+  **refuses to start** (exit 2, loud on stderr) if `realpath(specs_dir)`:
+  - sits inside any resident volume — `/home/<resident>` for any resident in
+    `[uids]`/`[residents]`, any `[residents.<r>].writable_roots` entry, or any
+    `[residents.<r>.path_map]` host target that resolves inside one of those; or
+  - does not exist / is not a directory; or
+  - has any path component (the directory itself or ANY parent up to `/`)
+    writable by a resident uid, by a group a resident belongs to, or by
+    "other". Sticky directories (e.g. `/tmp`) are exempt as *parents* only —
+    the kernel forbids replacing entries you do not own there — never as the
+    SPECS directory itself.
+
+  There is no degraded mode and no opt-out: a broker that cannot prove SPECS/
+  is resident-unwritable does not come up. One deliberate carve-out: a resident
+  uid equal to the broker's own euid is not counted, because such a caller
+  already *is* the broker.
 - **Budget**: a per-day build cap (`[start_build].daily_build_cap`, ratified
   default **2**; CAPPED by default, unlike the action budget). Enforced
   race-safely — count-with-reservation under a lock (H13-D4) — so concurrent
   calls can never both pass a cap of N. At/over the cap the call is denied
-  `over-budget` and audited like any denial.
-- **Detachment**: the broker execs the launch wrapper via `subprocess.Popen`
-  with `start_new_session=True` (its own session/process group) and does NOT
-  wait, so the build outlives this request. A daemon reaper thread feeds the
-  spec on stdin, holds the wall-clock cap (kill on timeout), and posts the
-  terminal state transition to #custodian.
+  `over-budget` and audited like any denial. The day's count is seeded from the
+  audit log at first use, counting only lines that carry the `build_started`
+  marker: a call that was authorized but whose spawn failed never started a
+  build and must not consume a slot after a broker restart (BL-D3).
+- **Identity — the build runs AS the resident, not as the broker.** The broker
+  runs as plink, so a build launched straight from it ran podman as plink:
+  `--userns keep-id` mapped the container to uid 1000 (a callback to this socket
+  presented **plink** in SO_PEERCRED), `$HOME/resident-home` resolved to
+  plink's home, and a resident-authored spec drove a session with plink's
+  filesystem access — both 0700 resident homes and the live production tree.
+  The launch therefore goes through **one validating root helper**
+  (`harness/broker/disjorn-build-launch`, installed
+  `/usr/local/lib/disjorn/disjorn-build-launch`, root:root 0755), reached by
+  `sudo -n` and named exactly by `/etc/sudoers.d/91-disjorn-build`. It execs
+
+      systemd-run --unit=disjorn-build-<slug> --uid=res-<resident> --gid=…
+                  --collect --pipe <fixed limits> -- <run-build.sh> <resident>
+                  <slug> <session argv…>
+
+  so the build is a **transient system service under the resident's own uid**:
+  keep-id, `$HOME` and SO_PEERCRED are all correct *by construction*. The
+  helper takes NO path, unit name, uid or limit from its caller — it derives
+  every one of them from `(mode, resident, slug)` and re-validates both, because
+  a sudoers rule is a privilege boundary and a boundary that trusts its caller
+  is decoration. There is deliberately **no sudoers rule for `systemd-run`**:
+  sudoers matches arguments as one concatenated string, so any wildcard
+  permissive enough to carry a real launch also permits appending `--uid=0`,
+  which makes such a rule equivalent to a grant of full root.
+  `result.unit` names the unit; `systemctl status disjorn-build-<slug>` is the
+  way to look at a running build.
+- **Detachment**: the broker execs the launch via `subprocess.Popen` with
+  `start_new_session=True` and does NOT wait, so the build outlives this
+  request. Because `systemd-run --pipe` passes the broker's own descriptors
+  through, that local process still carries the build's stdin, stdout, stderr
+  and exit status — but the BUILD itself is a unit **outside the broker's
+  cgroup**, so `systemctl restart disjorn-broker` no longer kills it (and
+  killing the local process no longer kills the build: the reaper's timeout
+  path stops the *unit*, via the helper's `stop` shape).
+- **Reattachment across a broker restart**: at spawn the broker writes a 0600
+  JSON sidecar `<slug>.build.json` next to the spool files (unit, branch, both
+  spool paths, pid, the ORIGINAL deadline). At startup `adopt_inflight_builds()`
+  reads them: a unit still running is **re-adopted** — its slug is re-claimed
+  (so a duplicate `start-build` is still refused) and a polling reaper narrates
+  the terminal transition when it lands, honouring the original deadline rather
+  than granting a fresh one; a unit already gone is narrated from the spool tail
+  (a parseable report ⇒ done, anything else ⇒ a loud "outcome unknown"). Spool
+  files with no live sidecar are swept in the same pass — that is the only thing
+  that bounds `build-logs` across crashes. Adoption never launches anything, and
+  never blocks startup.
+- **Resource ceilings are kernel-enforced, not polled.** The transient unit
+  carries `RuntimeMaxSec` (an outer backstop, longer than `timeout_sec`, so a
+  build orphaned by a broker crash still dies), `MemoryMax` / `MemorySwapMax=0`,
+  `TasksMax`, `LimitCORE=0`, and — closing the BL-D2 follow-up — **`LimitFSIZE`,
+  the disk bound**. BL-D2 bounded build output in the broker's RAM but left it
+  unbounded on disk; because the build's stdout *is* a regular file (the spool),
+  RLIMIT_FSIZE caps it, and a flooding build dies loudly on SIGXFSZ instead of
+  filling `/`. The values are constants in the helper, not config: a limit a
+  caller can widen is not a limit.
+- **Build output is bounded** (BL-D2). Only **stdin** is a pipe (that is how
+  the spec is delivered). The build's **stdout and stderr are redirected at
+  spawn to two 0600 temp files** in `[broker].build_log_dir` (default:
+  `<dir of audit_log>/build-logs`, plink-owned and disk-backed — deliberately
+  not `/tmp`, which is tmpfs here and would put the flood back in RAM), and
+  the reaper reads back at most a **64 KiB tail of each**
+  (`MAX_BUILD_LOG_TAIL`) for the done/failed narration. Piping a
+  resident-influenced session that runs up to `timeout_sec` used to buffer the
+  whole stream in the privileged broker (180 MB of stdout → 540 MB broker RSS
+  → OOM for every resident). Both files are deleted on every exit path — done,
+  failed, timed out, crashed, and launch-failed. The final JSON report is
+  looked for in the whole tail and then in its last line, so a truncated head
+  never costs the report.
 - **Narration** (STATE TRANSITIONS ONLY — never timer-driven; a stalled build
   goes quiet then fails loud): posts to #custodian (channel 4) via the broker's
   OWN bot identity (same transport as `file-proposal`) at **started** (spec,
@@ -205,12 +304,15 @@ optional per-resident daily cap on broker verb calls lives in `broker.toml`:
   abuse. Every verb call is already audited; plink reads real counts (in
   `read-metrics` / the daily #custodian line) before setting a number.
 - **Enforcement**: checked in `dispatch()` after the `verbs.toml` kill switch
-  passes and before the verb runs. The broker counts today's (UTC) **allowed**
-  actions for the caller from the audit log; at or over the cap the call is
-  denied with `over-budget` and audited (`allowed: false`) like any denial.
-  Denied calls do not count toward the cap, so a resident cannot exhaust its
-  own budget by being refused. The count is read from the audit log, so it
-  survives a broker restart.
+  passes and before the verb runs. The day's count of **allowed** actions is
+  seeded from the audit log (so it survives a broker restart) and then held as
+  an in-memory **reservation taken under a lock** — counting and acting are one
+  atomic step (H13-D4), so N concurrent dispatches can never all read the same
+  pre-cap count and all run. At or over the cap the call is denied with
+  `over-budget` and audited (`allowed: false`) like any denial. Denied calls do
+  not count toward the cap — a denial refunds its reservation — so a resident
+  cannot exhaust its own budget by being refused. The same discipline applies
+  to every numeric budget, including the `start-build` per-day build cap.
 - **Live-ness**: unlike `verbs.toml` (re-read every request), budgets load at
   broker start — a cap change takes a broker restart. Kill switches stay the
   instant lever; budgets are a tunable backstop.
