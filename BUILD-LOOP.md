@@ -357,6 +357,15 @@ it says. The *content* split waits for a consistent Fable.
 therefore promotes the ingest-hygiene fix (see DEFERRED.md "bot ingest / summon
 path", Gable's own analysis) onto the critical path.
 
+**UNBLOCKED, same day.** Reverting the #custodian backfill window to 30
+restored a stable Fable (KB-D14, confirmed by plink over several summons). The
+condition D-4 waited on is met: Gable can now be asked about his own spine *as
+Fable*, which was the whole point of deferring. Two consequences:
+- The spine-split question goes to him on the next summon. Ask while the window
+  is shallow — the stopgap holds only until the poison scrolls back into range
+  or new flagged content lands near the tail.
+- The read-only mount cutover, always separable, has no reason left to wait.
+
 ### D-3: consolidation was already approved, with conditions that shipped (seq 70–71)
 
 Recorded because the shipped behaviour should be checkable against what she

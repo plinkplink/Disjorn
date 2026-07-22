@@ -400,9 +400,79 @@ Opus venue, not a patch written from a guess.
 
 ---
 
-## KB-D14 — live test running now: is the drift caused by MY backfill change?
+## KB-D14 — CONFIRMED: the drift was inbound-context poisoning via backfill depth
 
-- [ ] **Test in flight, started 2026-07-22 ~15:30, one config line to undo.**
+- [x] **RESULT 2026-07-22: reverting #custodian backfill 100 → 30 restored a
+  stable Fable.** plink ran several summons after the revert; no drift, no
+  substitution. **The mechanism in Gable's analysis is now confirmed rather than
+  hypothesised**, and by the cheapest possible experiment — one config value,
+  no code.
+
+  What this establishes, and it is worth being precise because a lot rests on it:
+  1. The provider-side gate keys on **inbound context content**, not on the
+     account, the entitlement, the credential, or the container. Fable is
+     entitled and serves fine; it is declined only when the turn carries flagged
+     content.
+  2. The poison is **positional** — it lives at specific seqs, and whether a
+     summon drifts is decided by whether the backfill window happens to reach
+     them. That is why it looked intermittent-then-persistent for two days.
+  3. **KB-D2 (persisted `.claude.json` session state) is NOT the vector.** The
+     revert did not touch it, and the drift stopped. Keep KB-D2 open as an
+     isolation gap worth closing on its own merits, but it is not this bug.
+  4. `models_seen` / the init event is a **usable oracle** — see KB-D15.
+
+  Standing caveat: this is a stopgap that works by keeping the window shallower
+  than the poison is old. It degrades silently as the channel grows and the
+  poison scrolls further back — and it will *stop* working the moment new
+  flagged content lands near the tail. Restore 100 only after KB-D15.
+
+## KB-D15 — the real fix: use the gate as its own oracle
+
+- [ ] **Design available, not built.** Gable's write-up correctly rejects a
+  keyword/regex pre-filter: it is a heuristic shadow of a classifier we cannot
+  observe, it will drift from the real gate in both directions, and any
+  blocklist is itself flagged content that must never be rendered into a channel
+  or a context window. All true — and it means we should not try to *guess* what
+  the gate dislikes.
+
+  **We do not have to guess. We can ask it.** The BL-G1 pre-act gate built this
+  session reads the resolved model from the `system/init` event **before the
+  turn runs**. That is a free, exact, per-turn signal for "is this context
+  poisoned?" — the real classifier's own verdict, not a shadow of it.
+
+  The loop:
+  1. Assemble the summon prompt as today.
+  2. Start the session pinned. Read `system/init`.
+  3. Init reports the pin → proceed. Nothing changes; zero added cost on the
+     happy path.
+  4. Init reports the fallback (or the turn is refused) → **kill before the
+     reply exists**, then bisect the backfill window host-side: re-probe with
+     half the messages, then a quarter, to find the offending seq(s). ~5 probes
+     for a 30-message window, each a trivial no-tool call.
+  5. Mark the offending message(s) quarantined **host-side**, replace them in
+     the read path with a visible `[quarantined …]` marker exactly like the
+     existing redaction markers, and re-run the summon.
+
+  Why this satisfies every constraint Gable named: no blocklist exists, so
+  none can leak; the filter cannot drift from the real gate because it *is* the
+  real gate; it covers bot-authored content automatically since it works on the
+  assembled context regardless of author; and quarantine is visible, so a
+  resident knows content was removed rather than reasoning around a hole.
+
+  Needs: a `quarantined` flag on messages (server), a read-path filter on the
+  backfill/summon assembly, and the bisect driver (harness/residency). The
+  quarantine marking is the only privileged act and belongs host-side, never as
+  a resident verb. Note it also fixes the flagged-content **DoS** in the same
+  stroke — refuse and substitute are the same gate, so the same repair loop
+  clears both.
+
+- [ ] **Superseded note:** the older per-incident hand-scrub (`scrub_channel.py`)
+  stays as the break-glass tool, but it is a human noticing after the fact.
+  KB-D15 is the version that does not require anyone to notice.
+
+## KB-D14 (original test framing, kept for the record)
+
+- [x] **Test was started 2026-07-22 ~15:30, one config line to undo.**
   WP-L1's deeper #custodian window (100) was wired into the live summon.toml
   that morning. Arithmetic found later the same day, at the channel's current
   length:
