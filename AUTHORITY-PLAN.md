@@ -1,6 +1,55 @@
 # AUTHORITY-PLAN — give the broker its own identity, take root off plink's login
 
-**Status: DRAFT, awaiting plink's sign-off. Nothing here is built.**
+**Status: RULED 2026-07-22. WP-A1 approved and is the work. WP-A2 approved with
+`NOPASSWD:ALL` (not the enumerated list this draft recommended). WP-A3
+REJECTED — plink accepts the residual risk, with reasons recorded below.**
+
+> **plink's ruling, verbatim:**
+> *"I've read and understand the AUTH plan, I'm going to have to reject it.
+> I've tried doing extended builds while stopping every ten seconds to
+> copy/paste sudo commands and enter a password and it's not practical. The
+> current security footing for Claude Code is acceptable to me. Broker gets its
+> own uid, dedicated cc agent gets passwordless sudo on root. I have other
+> projects inside /home/plink that I use claude code for on this machine and
+> we're going to have to either migrate a few more projects, or accept the
+> risk. This whole thing runs on a home-baked server made out of an old desktop
+> that I was going to throw away and ended up keeping anyway."*
+
+**This is a sound call and the plan should say so rather than re-litigate.**
+The load-bearing security win survives his decision fully intact, and it is
+worth being precise about why:
+
+- **WP-A1 delivers everything it promised even with `plink-nopasswd` in place.**
+  The broker would run as `disjorn-broker`, a uid that does **not** hold blanket
+  sudo. An attacker who reaches code execution as the broker gets that uid's
+  narrow grants and nothing more — plink's blanket grant is useless to someone
+  who is not plink. So the sentence in `disjorn-broker.service`'s header becomes
+  true again, which was the entire point of KB-D0.
+- **What remains accepted, stated plainly so it is a choice and not an
+  oversight:** anything running *as plink* or *as the agent account* has root.
+  That includes a Claude Code session, and therefore includes prompt injection
+  that reaches a Bash call. On a single-user home server behind a tailnet, with
+  the operator making the call knowingly, that is a legitimate risk posture —
+  it is the same one almost every developer workstation runs.
+- **The enumerated-grant recommendation is withdrawn on evidence.** The
+  objection is empirical, not philosophical: a build that stops every ten
+  seconds for a password is not a build. A security control that makes the work
+  impossible gets removed in a hurry, and then you have neither.
+
+**Consequence for KB-D0**: it is downgraded from "prerequisite for `start-build`
+being ON" to "closed by WP-A1 for the broker; consciously accepted for plink and
+the agent account." Update the backlog entry rather than leaving it reading as
+an open critical.
+
+**Still worth doing, cheaply, and NOT rejected:** the `/home/plink` question
+plink raises himself. If the agent account cannot read `/home/plink`, his other
+projects break; if it can, the isolation is cosmetic. Neither is urgent, but
+migrating the Disjorn worktree to a shared-group location is the version that
+costs least and buys most — see WP-A2.
+
+---
+
+**Original draft below, kept for its reasoning. Nothing here is built.**
 Drafted 2026-07-22 at the keyboard, from KB-D0 (RED-TEAM-BACKLOG.md).
 plink's ruling: *"skip the five-minute bandaid, write up the migration WP"*,
 plus *"consider a new user with passwordless sudo that you can have, as well."*

@@ -15,7 +15,7 @@ record is DEFERRED.md; this file is the checklist view.
 
 ---
 
-## KB-D0 (CRITICAL — read this before anything else on this page)
+## KB-D0 (RULED 2026-07-22 — downgraded; see AUTHORITY-PLAN.md)
 
 - [ ] **`plink ALL=(ALL) NOPASSWD:ALL` makes every narrow sudoers rule in this
   system decorative.** Verified at the keyboard 2026-07-22:
@@ -39,6 +39,19 @@ record is DEFERRED.md; this file is the checklist view.
   resident→host walls (those are uid/nftables/mount-based and are real), but it
   removes the plink→root wall entirely, which is the one every sudoers rule in
   the repo is written against.
+
+  **RULING 2026-07-22 — this is no longer an open critical.** plink read the
+  migration plan and ruled: the broker gets its own uid (WP-A1, which closes
+  this for the broker completely — a `disjorn-broker` uid does not hold blanket
+  sudo, so plink's grant is useless to anything that compromises the daemon);
+  a dedicated agent account gets `NOPASSWD:ALL`; and `plink-nopasswd` STAYS.
+  The enumerated-grant recommendation was withdrawn on evidence — a build that
+  stops every ten seconds for a password is not a build, and a control that
+  makes the work impossible gets removed in a hurry, leaving neither.
+  Residual, consciously accepted: anything running as plink or as the agent
+  account has root, prompt injection reaching a Bash call included. Single-user
+  home server, tailnet-only, operator's informed call. Do not re-raise this as
+  a finding; raise WP-A1 not being done yet, which is the part that matters.
 
   Cross-reference: plink's own standing "revoke sudo" reminder in the NAS
   stack notes. Revoke, then re-run the broker and build boundaries to confirm
