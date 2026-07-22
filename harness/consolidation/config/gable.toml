@@ -31,9 +31,19 @@ collection = "gable_memory"
 path = "/home/res-gable/resident-home/memory/memory_retrieval.jsonl"
 
 [spine]
-# Gable IS the resident with a real on-disk spine (6 entries). This is the
-# true path; see blocker 2 above about readability from the res-gable uid.
-dir = "/home/plink/bots/fable/spine"
+# Gable IS the resident with a real on-disk spine (6 entries).
+# Blocker 2 is CLOSED as of 2026-07-22: the read-only mirror now exists at
+# /srv/disjorn-spine/<resident>, plink-owned 0755/0644, verified readable and
+# NOT writable from the res-gable uid (find -writable returns nothing; eight
+# write shapes all refused). It is published from the canonical
+# /home/plink/bots/fable/spine by harness/keyboard/06-spine-mirror.sh, which is
+# also what plink re-runs after approving a spine change.
+#
+# Point here rather than at the canonical copy: /home/plink is 0700 and res-*
+# cannot traverse it. Do NOT "fix" that by loosening the canonical spine — it
+# is the protected authorization surface the kernel loads from, and it stays
+# resident-unwritable BY DESIGN. Consolidation only ever READS the spine.
+dir = "/srv/disjorn-spine/gable"
 
 [consolidation]
 soft_target_spine_size = 60

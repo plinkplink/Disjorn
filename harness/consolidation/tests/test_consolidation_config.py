@@ -40,9 +40,20 @@ def test_gable_ships_inactive():
     assert cfg.resident == "gable"
     assert cfg.active is False  # second client, not yet switched on
     assert cfg.episodic_collection == "gable_memory"
-    # Gable is the one WITH a real on-disk spine (plink-owned, resident-
-    # unwritable by design — it is the authorization surface his kernel loads).
-    assert cfg.spine_dir == "/home/plink/bots/fable/spine"
+    # Gable is the one WITH a real on-disk spine. It points at the read-only
+    # MIRROR, not the canonical copy: /home/plink is 0700 and res-* cannot
+    # traverse it, so the canonical path was unreadable by the uid this job
+    # actually runs as. The mirror is plink-owned, published from the canonical
+    # copy by harness/keyboard/06-spine-mirror.sh, and verified unwritable from
+    # the res-gable uid. Updated 2026-07-22 when the mirror landed.
+    #
+    # The assertion that matters is not the literal string but the property:
+    # never point this at anything the resident can write, and never "fix" a
+    # traversal problem by loosening the canonical spine.
+    assert cfg.spine_dir == "/srv/disjorn-spine/gable"
+    assert not cfg.spine_dir.startswith("/home/res-"), (
+        "spine_dir must never be inside a resident-writable home"
+    )
 
 
 def test_missing_config_raises():

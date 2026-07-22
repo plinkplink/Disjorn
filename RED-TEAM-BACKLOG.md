@@ -220,6 +220,52 @@ Opus venue, not a patch written from a guess.
   Fix direction: mount CC's state dir ephemerally (tmpfs per summon) so each
   summon genuinely starts clean, or move it outside the resident-writable volume.
 
+- [ ] **KB-D10 (HIGH — Claudette has the SAME hole in a different shape;
+  latent, and one tool away from live. NEEDS HER CONSENT + plink's sign-off,
+  do not "just fix" it)** — Gable's spine wall does not help her, because she is
+  not a Claude Code resident: no `RESIDENT_SPINE_DIR`, no `.claude` dir, no
+  spine dir anywhere, `bootstrap.py` never runs for her. **Her prompt surface is
+  Python source in her own read-write home volume** — `core.py:36
+  SYSTEM_PROMPT` and `disjorn_bot.py:42 PLATFORM_SUFFIX`, composed at
+  `disjorn_bot.py:269` — and `test -w` as res-claudette returns 0 for `core.py`,
+  `disjorn_bot.py`, `config.py`, `bot.py` **and their directory**. Structurally
+  identical to Gable's spine: her kernel lives where she can write it, and the
+  classifier's protection of those paths is detector-side only.
+  **Why it is latent, not live:** her tool registry has no write, edit, or shell
+  tool — every registered tool is read-only or broker-mediated. She has no
+  in-session mechanism to write `core.py` today.
+  **What flips it live:** (a) adding ANY file-write/edit/bash tool to her
+  registry, or (b) migrating her to a Claude Code session the way Gable runs.
+  Either does it with no other change — so this belongs on the checklist for
+  both of those changes, not in a drawer.
+  **Sharpest detail:** her unit has `Restart=on-failure` / `RestartSec=10`, and
+  `core.py` is read at import. So a prompt edit plus any non-zero-exit crash
+  equals a **self-applied prompt change with no human in the loop** — the moment
+  a write path exists. Note the tension with plink's ruling #3 (residents cannot
+  restart themselves): `restart_disjorn` is scoped to the Disjorn service so
+  that ruling holds, but `Restart=on-failure` is an unsupervised restart path
+  the ruling did not anticipate.
+  Fix shape (same as Gable's): her adapter code moves to a plink-owned
+  read-only mount, her worktree becomes a proposal surface. That is a change to
+  her running code AND her prompt surface — Tier 2 twice over.
+- [ ] **KB-D11 (LOW/MED — refusal latency)** — `harness/residency/launcher.py`
+  `_kill` sends **SIGKILL only**. podman's `--sig-proxy` forwards SIGTERM into
+  the container, so SIGTERM-then-SIGKILL would stop a refused session's work
+  sooner. Pairs with KB-D1c; the new container reaper closes the "keeps running
+  forever" case but there is still a window between the decision to refuse and
+  the container actually dying.
+- [ ] **KB-D12 (LOW — process hygiene, FIXED but the class is worth a look)** —
+  the first cut of the container reaper reaped **by container name**. Names are
+  reused every summon (`resident-cc-gable`), so a watchdog could kill the *next*
+  summon's container in the window after its own wrapper exited — a safety
+  feature that intermittently killed healthy sessions. Caught by the real
+  container suite, fixed by pinning identity with `--cidfile`. Audit anything
+  else that identifies a container by name rather than id.
+- [ ] **KB-D13 (INFO — shared credential across residents)** — res-claudette and
+  res-gable resolve to the **same `ANTHROPIC_API_KEY` value**. So per-resident
+  spend attribution is impossible, revoking one resident's access revokes both,
+  and compromising either resident yields the other's credential. Worth separate
+  keys before the Max/OAuth cutover, where the blast radius is larger.
 - [ ] **KB-D3 (LOW/MED — config-integrity class; one instance FIXED, look for
   siblings)** — the activation-lever config dir existed twice:
   `/home/plink/resident-config` and `/srv/disjorn-resident-config` were separate

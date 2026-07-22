@@ -92,19 +92,68 @@ running early just yields low-evidence proposals for humans to reject.
 and his spine is under `/home/plink`, which `res-*` cannot traverse — he needs
 the read-only spine mirror (see §5a) before his config will work.
 
-## 5. Gable activation (WP-H9/H10 — no rush, order matters)
+## 5. Gable activation (WP-H9/H10) — DONE; verified live 2026-07-22
 
-- Spine review first: /home/plink/bots/fable/spine (posted seq 66). After
-  review, copy into res-gable's volume as the repo the kernel loads from.
-- Key: create/copy a Gable bot key to res-gable's config dir
-  (`/config/gable-key`).
-- Confirm the session shape (residency/INTEGRATION-NEEDS.md §2): per-summon
-  `podman run --rm` (current run-resident.sh) vs `podman exec` into a
-  long-lived container — config-only choice.
-- Install `gable-summon.service` (user unit, res-gable) pointing at
-  harness/residency/run_summon.py with a summon.toml from the template.
-- Flip res-gable verbs in /etc/disjorn-broker/verbs.toml deliberately,
-  one at a time, same as hers.
+Verified at the keyboard: `gable-summon.service` up 15h under res-gable's user
+manager, key in place, spine reviewed, session shape settled as per-summon
+`podman run --rm`, verbs still deliberately narrow (`read-own-log`,
+`read-metrics`, `file-proposal`, `query-own-audit` ON; the rest OFF).
+
+Two things were found unwired and fixed while verifying — both were "shipped in
+the template, never reached the live config", the same class as §3 and §4:
+
+- **WP-L1's per-channel backfill.** The ratified deeper #custodian window (100)
+  was in `summon.toml.template` but the live `summon.toml` had only the flat
+  `count = 30`, so design threads were being read at a #main depth. Wired, and
+  verified safe at wire time: a 100-deep window reaches back to seq 133 and the
+  four redacted messages (170/182/190/192) are already placeholders.
+- **The config-dir drift trap.** `resident-cc.service` documents
+  `/home/plink/resident-config` as *a symlink* to `/srv/disjorn-resident-config`.
+  It was actually a **separate directory whose files were hardlinked twins** —
+  so any editor that writes-then-renames (sudoedit included) would break the
+  link and leave plink editing one copy while the daemons read the other, on the
+  kill-switch/key/budget surface. Reconciled to the documented symlink after
+  verifying all 17 files were still identical. Filed as KB-D3; the *class* is
+  the backlog item — audit other protected paths for the same pattern.
+
+**Open, and now the most important thing on this page — the spine is
+resident-writable.** `RESIDENT_SPINE_DIR=/home/resident/bots/fable/spine` maps
+to `/home/res-gable/resident-home/bots/fable/spine`, which res-gable OWNS. His
+kernel is reassembled from it every summon, so he can edit his own spine and it
+takes effect with no diff, no classifier, no #custodian — while
+`bootstrap.py`'s own docstring says a spine edit should be "witnessed, merged".
+The classifier half is closed (his spine paths are now enumerated protected, and
+before that fix a spine rewrite classified **Tier 0 inert**), but that is a
+detector for diffs, not a wall against direct writes. See §5a.
+
+## 5a. Spine placement — the wall (built this session, NOT cut over)
+
+*(The old §5 checklist — spine review, key, session shape, unit install, verb
+flips — is complete; see the verification note above.)*
+
+The canonical spine at `/home/plink/bots/fable/spine` is already plink-owned and
+correctly resident-unwritable. The problem is only that it is **not what the
+container loads**: `/home/plink` is 0700 so `res-*` cannot traverse it, which is
+why the writable in-volume copy got used in the first place.
+
+The fix built this session: a plink-owned, world-readable, resident-UNWRITABLE
+spine mirror under `/srv` (same idiom as `/srv/disjorn-ro` and
+`/srv/disjorn-resident-config`), mounted `:ro` into the container, with
+`RESIDENT_SPINE_DIR` repointed at the mount. **Shipped closed — the live env
+file is untouched, so behaviour today is unchanged.** Cutover is a single line
+in `/srv/disjorn-resident-config/res-gable/env`, and rollback is the same line.
+
+What it costs, stated plainly so the trade is deliberate: Gable can no longer
+iterate his own spine unattended. `broker file-proposal` to #custodian becomes
+the only route for a resident-originated spine change — which is exactly the
+"fast eyes, slow hands" shape the house already ratified for Claudette, and
+what `bootstrap.py` always claimed was happening.
+
+Same mirror also unblocks **consolidation for Gable** (§4): his config needs a
+res-readable spine dir and `/home/plink` is not it.
+
+Exact paths, mount var, cutover line and rollback: see the spine section in
+`harness/cc/config-template/README.md`.
 
 ## 6a. refresh-mirror verb activation (added 2026-07-21, Gable)
 

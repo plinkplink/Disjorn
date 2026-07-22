@@ -30,13 +30,34 @@
 #                              Mounted, not baked, so a package fix does not
 #                              require an image rebuild.
 #
-# ── Env contract (set by run-resident.sh / the env file) ──────────────────
-#   ANTHROPIC_API_KEY  from /home/plink/resident-config/<name>/env via
-#                      podman --env-file. NEVER baked into this image.
+# ── Env contract (set by run-resident.sh / run-build.sh / the env file) ───
+#   Exactly ONE of the two credentials below is present in a running
+#   container. Both come from /home/plink/resident-config/<name>/env; the
+#   wrappers pick one (OAuth wins) and pass it with podman's NAME-ONLY
+#   `--env VAR` form, so no credential value is ever in podman's argv.
+#   NEITHER is ever baked into this image — there is no key at build time.
+#
+#   CLAUDE_CODE_OAUTH_TOKEN  PREFERRED. Long-lived OAuth token minted at the
+#                      keyboard by `claude setup-token`; the session bills
+#                      plink's Claude Max SUBSCRIPTION instead of metered
+#                      API credit. NOTE the risk delta: this is a credential
+#                      for plink's Claude ACCOUNT, not a scoped API key —
+#                      see config-template/README.md § Security note.
+#   ANTHROPIC_API_KEY  FALLBACK. Metered API key. Used only when no OAuth
+#                      token is in the env file.
 #   BROKER_SOCKET      where the broker CLI connects (default below).
 #   BROKER_DISABLE     if set (any non-empty value), the broker CLI refuses
 #                      all calls — a per-resident kill switch plink flips by
 #                      editing the env file and restarting the unit.
+#
+#   Neither credential is written into the container's writable layer by
+#   anything in this file: no ENV line below sets one, and the wrappers pass
+#   them only in the process environment. NOT VERIFIED: whether Claude Code
+#   itself caches CLAUDE_CODE_OAUTH_TOKEN to ~/.claude/.credentials.json. If
+#   it does, that file lands in the /home/resident VOLUME (host bind mount
+#   /home/res-<name>/, mode 0700) rather than the image — the container is
+#   --rm and its writable layer dies with it, but the volume persists.
+#   Re-check on any CC version bump; see config-template/README.md.
 #
 # ── Governance notes ──────────────────────────────────────────────────────
 # * Subagents inherit the sandbox: a CC subagent is just another process in
