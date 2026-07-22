@@ -68,9 +68,28 @@ def test_unknown_uid_is_denied_and_audited(tmp_path):
     broker = Broker(config, str(verbs), transport=lambda c, b: {})
     t = threading.Thread(target=broker.serve_forever, daemon=True)
     t.start()
-    deadline = time.time() + 5
+    # Wait for the broker thread to create its socket.
+    #
+    # The 5s wall-clock deadline this used to carry made the test flaky once the
+    # harness suite grew past ~600 tests: run alone, harness/broker is stable
+    # 6/6, but in the full tree it failed roughly 1 run in 3 (2026-07-22). Test
+    # order is deterministic here — no pytest-randomly, no xdist — so it is not
+    # an ordering leak; it is resource contention. The chromadb-backed
+    # consolidation tests run earlier in the same process and leave the machine
+    # loaded enough that thread scheduling occasionally misses a 5s budget.
+    #
+    # Racing a wall clock is the wrong shape for "has the thread got there yet".
+    # A generous ceiling does NOT mask a real failure — a broker that never
+    # listens still fails, just later — and checking liveness makes the genuine
+    # failure (thread died during construction) fail FAST with a useful message
+    # instead of timing out opaquely and blaming the clock.
+    deadline = time.time() + 30
     while not os.path.exists(config["broker"]["socket_path"]):
-        assert time.time() < deadline
+        assert t.is_alive(), "broker thread died before it created its socket"
+        assert time.time() < deadline, (
+            "broker did not create its socket within 30s (thread alive; "
+            "machine likely saturated)"
+        )
         time.sleep(0.01)
     try:
         with socket.socket(socket.AF_UNIX) as s:
