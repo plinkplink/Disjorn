@@ -240,11 +240,21 @@ session state persisting across the `--rm` boundary (KB-D2), or with neither.
 Six occurrences are on record so far (2026-07-21 18:41/20:41/20:50, 2026-07-22
 06:14/06:24, plus #custodian seq 240 during the closure sweep).
 
-**Open sub-decision, deliberately not folded in**: whether a detached BUILD
-should get `refuse` earlier than summons do. A mis-modelled summon costs one
-chat turn; a mis-modelled build runs unattended for up to an hour and commits
-code. The two are not obviously the same risk and need not take the same
-setting.
+**Sub-decision SETTLED 2026-07-22** — whether a detached BUILD should reach
+`refuse` earlier than summons do. plink:
+
+> "I'm OK with an Opus model doing an hour of unattended work for now. If this
+> becomes an issue, we'll deal with it then."
+
+So builds take the same setting as summons: `alert`, not `refuse`. The reasoning
+holds up — the thing a build produces is a **branch**, not a merge. A
+mis-modelled build costs tokens and a branch nobody merges; it cannot reach
+production, because nothing lands itself and a human reads the diff. The
+asymmetry I flagged (an hour unattended vs. one chat turn) is real about *spend*
+and mostly false about *blast radius*, which is what actually governs here.
+
+Revisit if either of those stops being true: if `merge-tier1` ever auto-merges,
+or if build spend becomes material.
 
 ## Decision records 2026-07-22 — reciprocity, and Claudette's prompt
 

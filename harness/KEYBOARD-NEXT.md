@@ -18,7 +18,26 @@ flipped: **KB-D1** (why the model pin is being overridden in production) and
 **KB-D6** (whether a resident can exfiltrate its own credential in its replies —
 this one gates the Max/OAuth cutover specifically).
 
-### 1. Deploy the wrappers  *(nothing works without this)*
+> **PROGRESS 2026-07-22 (keyboard).** Steps 1, 4 and 5 are DONE and verified;
+> step 2 in progress; step 3 blocked on a real Max token; steps 6–7 pending.
+> Live state now: Gable runs on the RO spine mount at `/opt/spine`, on
+> `stream-json --verbose` with `model_gate = "alert"`, backfill 30, Fable pin —
+> and Fable is being served (verified in-container as res-gable). Kill switches
+> unchanged: every action verb still OFF except the read-only set.
+>
+> Verifications worth keeping, because each caught something:
+> - Wrapper deploy: `run-resident: auth: ANTHROPIC_API_KEY from …/env` — proves
+>   the credential-selection logic works and names which one it chose.
+> - Spine cutover, from **inside a real container**: `assembled from /opt/spine`,
+>   6 entries, and `touch /opt/spine/EVIL.md` → **"Read-only file system."**
+> - Stream-json: **the init event is NOT the first line in the resident
+>   container.** Hooks emit `system/hook_started` and `system/hook_response`
+>   first; `system/init` is line 3. The host-side probe had no hooks, so this
+>   only appears in the real environment. The gate scans for init rather than
+>   assuming line 1, so it is correct — but anything else parsing that stream
+>   must not assume position. Assistant events also carry `model=None` here.
+
+### 1. Deploy the wrappers  *(nothing works without this)*  — **DONE**
 ```
 sudo install -m 0755 harness/cc/run-resident.sh /usr/local/lib/disjorn/run-resident.sh
 sudo install -m 0755 harness/cc/run-build.sh    /usr/local/lib/disjorn/run-build.sh
