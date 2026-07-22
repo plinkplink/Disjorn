@@ -13,6 +13,7 @@ import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 # Packaged config dir (harness/consolidation/config), overridable via env so
 # tests point at synthetic configs and prod points at the mounted lever.
@@ -35,8 +36,14 @@ class ConsolidationConfig:
     # unified retrieval log (house_memory.RetrievalLog)
     retrieval_log_path: str
 
-    # markdown spine (house_memory.Spine)
-    spine_dir: str
+    # markdown spine (house_memory.Spine). OPTIONAL: `None` means "this
+    # resident has no on-disk spine" — a real deployment shape, not an error.
+    # Claudette's spine is her system prompt (managed through her bot config),
+    # not a directory of markdown entries, so her config declares no dir and
+    # her run does the episodic-promotion half only. A dir that IS configured
+    # but does not exist is a hard error (see analyze._open_spine) — a stale
+    # path must never be read as "empty spine, evict everything".
+    spine_dir: Optional[str]
 
     # consolidation knobs
     soft_target_spine_size: int = 60
@@ -70,6 +77,17 @@ class ConsolidationConfig:
 
     # how proposals reach #custodian (the broker file-proposal verb CLI)
     broker_cli: str = DEFAULT_BROKER_CLI
+
+
+def _optional_dir(value) -> Optional[str]:
+    """`[spine] dir` may be omitted, null, or "" — all meaning "this resident
+    has no on-disk spine". Anything else is taken literally (and must exist at
+    run time; a configured-but-missing dir is a hard error, never an empty
+    spine)."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def config_dir(explicit: str | os.PathLike | None = None) -> Path:
@@ -107,7 +125,7 @@ def load_config(
         "episodic_data_dir": episodic["data_dir"],
         "episodic_collection": episodic["collection"],
         "retrieval_log_path": rlog["path"],
-        "spine_dir": spine["dir"],
+        "spine_dir": _optional_dir(spine.get("dir")),
         "broker_cli": broker_cli,
     }
     # optional knobs (fall back to dataclass defaults when absent)

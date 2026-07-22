@@ -5,6 +5,47 @@ WP15 end-to-end pass. Deliberate **v2 features** live in Architecture.md §13
 and are not repeated here — this file is the "known rough edges of what
 shipped" list.
 
+---
+
+## STATUS 2026-07-22 — closure sweep (Opus keyboard session)
+
+A wave of parallel WPs closed most of the standing backlog. **Everything below
+shipped CLOSED**: no verb was flipped on, no scheduled job was enabled, no live
+resident behaviour was changed. Activation remains plink's, after the red-team.
+
+**CLOSED this session** (details in the sections below and in
+RED-TEAM-BACKLOG.md, which is the checklist view):
+- **BL-D1, BL-D2, BL-D3, BL-D4** — all four `start-build` activation blockers.
+- **BL-D5, BL-D6** — backlog DM-leak + caps/pagination/rate-limit.
+- **H13-D1, H13-D2, H13-D3** — classifier reachability + the dynamic-import ban.
+  D3 was the stated blocker on `merge-tier1`.
+- **H13-D4, H13-D5** — budget check-then-act race; hook tripwire honesty.
+- **server**: `orig_url`/`thumb_url` in payloads; `bots_admin.py` filled in
+  (was an empty stub) with a new admin gate; `cli.py create-bot --chibi-pack`.
+- **client**: sidebar snippet (it was never rendered at all), search-jump seam
+  divider with click-to-load, DM bot-membership UI with a consequence screen,
+  bot avatars, "view original".
+
+**STILL OPEN and deliberately so:**
+- **H13-D6** — the git-config-exec check. It is a *verification* task, not a
+  code fix: point classify-diff at a resident-writable repo carrying a hostile
+  `.git/config` and confirm git refuses. Belongs in the red-team venue.
+- **BL-G1** — the model-integrity governance call. **No longer hypothetical:**
+  the drift detector fired five times in production this week (pinned
+  `claude-fable-5`, actually ran `claude-opus-4-8`). See the new KB-D1 entry in
+  RED-TEAM-BACKLOG.md — it also shows a ratified BUILD-LOOP premise is wrong,
+  because the summon path is Claude Code (`claude -p`), not the raw API.
+- Everything under "needs real device" — unchanged, needs hardware.
+
+**NEW findings from this session** are filed in RED-TEAM-BACKLOG.md as KB-D1..D9
+(live drift; non-ephemeral summon containers; config-integrity; credential
+exfil via the resident's own words; a `settings.json` deny that was decoration;
+a "read-only" job that mutated live memory; an ON verb wired to nothing) and as
+successors BL-D7..D11 / H13-D7..D11. The highest-value single follow-up is
+**BL-D7**: closing BL-D2 traded RAM exhaustion for *disk* exhaustion.
+
+---
+
 ## server
 
 - **`orig_url` absent from message payloads.** `message_payload()` signs only

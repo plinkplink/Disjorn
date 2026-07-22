@@ -9,6 +9,7 @@ const API_PREFIXES = [
   "/me",
   "/channels",
   "/dms",
+  "/bots",
   "/messages",
   "/search",
   "/media",

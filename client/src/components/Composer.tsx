@@ -36,6 +36,15 @@ import { MicButton } from "./MicButton";
 const MAX_TEXTAREA_PX = 8 * 22 + 20; // ~8 lines + padding
 const TYPING_THROTTLE_MS = 2500;
 
+/* Mirrors messages.MAX_MESSAGE_CHARS server-side, where it is a pydantic
+   max_length: over the cap the API answers 422 with a *structured* validation
+   body, which our ApiError flattens to "Unprocessable Entity". A long paste
+   failing under that label is exactly the opaque failure to avoid, so the
+   limit is shown before the send and named in the error after one. */
+const MAX_MESSAGE_CHARS = 16000;
+/** Show the counter only once it's about to matter. */
+const COUNTER_FROM = MAX_MESSAGE_CHARS - 500;
+
 const isCoarsePointer =
   typeof window !== "undefined" &&
   window.matchMedia("(pointer: coarse)").matches;
@@ -292,9 +301,16 @@ export function Composer({
 
   /* ---- send ---- */
 
+  const tooLongError = (n: number) =>
+    `Message is ${n.toLocaleString()} characters — the limit is ${MAX_MESSAGE_CHARS.toLocaleString()}. Split it into a few messages (nothing is truncated for you).`;
+
   const doSend = async () => {
     if (sending) return;
     const content = value.trim();
+    if (content.length > MAX_MESSAGE_CHARS) {
+      setError(tooLongError(content.length));
+      return;
+    }
 
     if (editing !== null) {
       if (content.length === 0) return; // empty edit = no-op (delete is explicit)
@@ -307,7 +323,13 @@ export function Composer({
         setValue(draftBeforeEditRef.current);
         draftBeforeEditRef.current = "";
       } catch (err) {
-        setError(err instanceof ApiError ? err.detail : "Edit failed");
+        setError(
+          err instanceof ApiError && err.status === 422
+            ? tooLongError(content.length)
+            : err instanceof ApiError
+              ? err.detail
+              : "Edit failed",
+        );
       } finally {
         setSending(false);
       }
@@ -347,7 +369,13 @@ export function Composer({
         return [];
       });
     } catch (err) {
-      setError(err instanceof ApiError ? err.detail : "Failed to send");
+      setError(
+        err instanceof ApiError && err.status === 422
+          ? tooLongError(content.length)
+          : err instanceof ApiError
+            ? err.detail
+            : "Failed to send",
+      );
     } finally {
       setSending(false);
     }
@@ -415,6 +443,8 @@ export function Composer({
   };
 
   const placeholder = editing !== null ? "Edit your message…" : `Message ${channelName}`;
+  const contentLength = value.trim().length;
+  const overLimit = contentLength > MAX_MESSAGE_CHARS;
 
   return (
     <div className="composer-wrap">
@@ -515,6 +545,14 @@ export function Composer({
           }}
           onKeyDown={onKeyDown}
         />
+        {contentLength >= COUNTER_FROM && (
+          <span
+            className={`composer-count${overLimit ? " over" : ""}`}
+            aria-live="polite"
+          >
+            {(MAX_MESSAGE_CHARS - contentLength).toLocaleString()}
+          </span>
+        )}
         <div className="composer-btns">
           <button
             className="icon-btn composer-btn"
@@ -532,9 +570,15 @@ export function Composer({
           />
           <button
             className="icon-btn composer-btn composer-send"
-            title={editing !== null ? "Save edit" : "Send"}
+            title={
+              overLimit
+                ? `Over the ${MAX_MESSAGE_CHARS.toLocaleString()}-character limit`
+                : editing !== null
+                  ? "Save edit"
+                  : "Send"
+            }
             aria-label={editing !== null ? "Save edit" : "Send message"}
-            disabled={sending}
+            disabled={sending || overLimit}
             onClick={() => void doSend()}
           >
             ➤

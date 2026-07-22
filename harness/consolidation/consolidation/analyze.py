@@ -17,10 +17,26 @@ spine retrieval-on-demand MUST log the spine entry name it served into the
 same log's `returned_ids` — otherwise every spine entry reads as unreferenced.
 Until then the age guard (`min_spine_age_days`) keeps young entries out of the
 removal set, and — decisive — nothing is ever acted on without human review.
+
+Absent inputs (deployment reality, and a safety property):
+  * A resident may have NO on-disk spine at all — Claudette's spine is her
+    system prompt, managed through her bot config, not a directory of markdown
+    entries. `spine.dir` unset means "no spine": the run does the episodic
+    promotion half and emits ZERO evict/compress proposals. That is enforced
+    by an explicit short-circuit, not by "the loop happened to be empty", so
+    "no spine dir" can never degrade into "empty spine, evict everything".
+  * A spine dir that IS configured but missing on disk, or an episodic store
+    dir that is missing, raises `MissingInputError`. Silently continuing would
+    turn a stale path into either a phantom mass-eviction or (for the store)
+    chromadb CREATING an empty collection in the resident's memory — a write.
+    Read-only-by-construction means we refuse, loudly, instead.
 """
 
 from __future__ import annotations
 
+import contextlib
+import shutil
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -37,45 +53,62 @@ from consolidation.model import (
 )
 
 
+class MissingInputError(RuntimeError):
+    """A CONFIGURED input path does not exist. Refuse the run rather than
+    guess: a stale spine path must never read as 'empty spine', and a stale
+    episodic path must never let chromadb create a fresh empty collection."""
+
+
+# Sentinel so callers can inject `spine=None` meaning "this resident has no
+# spine" and still be distinguished from "not injected, build it from cfg".
+_UNSET = object()
+
+
 def build_proposals(
     cfg: ConsolidationConfig,
     *,
     now: Optional[datetime] = None,
     store=None,
-    spine: Optional[Spine] = None,
+    spine=_UNSET,
     log: Optional[RetrievalLog] = None,
 ) -> ConsolidationReport:
     """Run the consolidation pass. Inputs may be injected (tests); otherwise
     they are built read-only from `cfg`. NEVER mutates anything."""
+    with contextlib.ExitStack() as stack:
+        if store is None:
+            store = stack.enter_context(_read_only_store(cfg))
+        return _build(cfg, now=now, store=store, spine=spine, log=log)
+
+
+def _build(cfg, *, now, store, spine, log) -> ConsolidationReport:
     now = now or datetime.now(timezone.utc)
 
-    if store is None:
-        # imported lazily so tests that inject a store need no chromadb at all
-        from house_memory import MemoryStore
-
-        store = MemoryStore(
-            data_dir=cfg.episodic_data_dir,
-            collection_name=cfg.episodic_collection,
-            embedder=NullEmbedder(),  # read-only: cannot embed, no network
-        )
-    if spine is None:
-        spine = Spine(cfg.spine_dir)
+    if spine is _UNSET:
+        spine = _open_spine(cfg)
     if log is None:
         log = RetrievalLog(cfg.retrieval_log_path, resident=cfg.resident)
 
     ref_counts = log.reference_counts(cfg.window_days, now=now)
     last_seen = _last_seen_map(log)
 
-    spine_entries = spine.list_entries()
+    # spine is None <=> this resident has no on-disk spine at all.
+    spine_present = spine is not None
+    spine_entries = spine.list_entries() if spine_present else []
     spine_size = len(spine_entries)
     spine_bodies = [e.body.lower() for e in spine_entries]
 
     promotions = _promotion_proposals(
         cfg, store, ref_counts, last_seen, spine_bodies
     )
-    evictions, compressions = _removal_proposals(
-        cfg, spine_entries, ref_counts, last_seen, now
-    )
+    if spine_present:
+        evictions, compressions = _removal_proposals(
+            cfg, spine_entries, ref_counts, last_seen, now
+        )
+    else:
+        # EXPLICIT short-circuit, not an incidentally-empty loop: with no
+        # spine there is nothing whose rent could be assessed, so the run is
+        # episodic-promotion only. "No spine dir" must never mean "evict all".
+        evictions, compressions = [], []
 
     proposals = promotions + evictions + compressions
 
@@ -86,10 +119,77 @@ def build_proposals(
         spine_size=spine_size,
         soft_target=cfg.soft_target_spine_size,
         proposals=proposals,
+        spine_present=spine_present,
     )
 
     _apply_soft_target_bias(cfg, report, promotions, evictions, compressions)
     return report
+
+
+# ── input opening (read-only, fail loud on stale paths) ──────────────────────
+
+@contextlib.contextmanager
+def _read_only_store(cfg: ConsolidationConfig):
+    """The episodic store, opened against a THROWAWAY SNAPSHOT — never the
+    resident's live chroma dir.
+
+    Why a snapshot and not just NullEmbedder: measured on the deployment host
+    (2026-07-22), chromadb's `PersistentClient` rewrites parts of a store
+    merely by OPENING it — `chroma.sqlite3` and the HNSW segment's
+    `length.bin` both change content and every file's mtime moves. No
+    consolidation code has run at that point, so `NullEmbedder` cannot prevent
+    it. A job whose load-bearing property is "never writes the resident's
+    memory" therefore must not open the live store at all. The snapshot also
+    removes the hazard of two processes holding one sqlite store open while
+    the resident is live.
+
+    Two other guards live here:
+      * a missing data_dir is a hard error — `get_or_create_collection` would
+        otherwise CREATE an empty collection under a stale/typo'd path, i.e. a
+        write into the resident's memory;
+      * the store is still built with `NullEmbedder`, so even against the
+        snapshot the pass cannot embed and cannot reach the network.
+    """
+    data_dir = Path(cfg.episodic_data_dir)
+    if not data_dir.is_dir():
+        raise MissingInputError(
+            f"episodic store dir does not exist: {data_dir} "
+            f"(resident {cfg.resident!r}). Refusing to run: chromadb would "
+            f"CREATE it, and consolidation never writes. Fix "
+            f"[episodic].data_dir in the resident's consolidation config."
+        )
+    # imported lazily so tests that inject a store need no chromadb at all
+    from house_memory import MemoryStore
+
+    workdir = Path(tempfile.mkdtemp(prefix="consolidation-ro-"))
+    try:
+        snapshot = workdir / "chroma_data"
+        shutil.copytree(data_dir, snapshot)
+        yield MemoryStore(
+            data_dir=str(snapshot),
+            collection_name=cfg.episodic_collection,
+            embedder=NullEmbedder(),  # read-only: cannot embed, no network
+        )
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _open_spine(cfg: ConsolidationConfig) -> Optional[Spine]:
+    """`None` when the resident has no on-disk spine (spine.dir unset) — a
+    supported deployment shape (Claudette: her spine is her system prompt).
+    A CONFIGURED-but-missing dir is a hard error, never a silent empty spine."""
+    if not cfg.spine_dir:
+        return None
+    path = Path(cfg.spine_dir)
+    if not path.is_dir():
+        raise MissingInputError(
+            f"spine dir configured but missing: {path} (resident "
+            f"{cfg.resident!r}). Refusing to run: an absent spine dir must "
+            f"never be read as an empty spine, or every entry would look "
+            f"unreferenced. Either fix [spine].dir or unset it (leave it out) "
+            f"to declare that this resident has no on-disk spine."
+        )
+    return Spine(path)
 
 
 # ── promotions: episodic -> spine ────────────────────────────────────────────

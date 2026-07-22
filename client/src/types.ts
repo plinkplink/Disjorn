@@ -32,7 +32,13 @@ export interface Attachment {
   size_bytes: number;
   width: number | null;
   height: number | null;
-  url: string | null; // signed media URL
+  url: string | null; // signed media URL (display variant)
+  /* The server grew thumb/orig variants on the message payload after the
+     first clients shipped — optional here so a message from an older payload
+     (or an older server) is still a valid Attachment. */
+  thumb_url?: string | null;
+  /** Preserved upload, pre-conversion. Absent -> no "view original". */
+  orig_url?: string | null;
 }
 
 export interface Message {
@@ -90,6 +96,15 @@ export interface DmResponse {
   name: string;
   dm_user_id: number;
   created: boolean;
+}
+
+/** Public bot shape (GET /bots) — never carries the API key. */
+export interface Bot {
+  id: number;
+  name: string;
+  avatar_path: string | null;
+  chibi_pack: string | null;
+  created_at: string;
 }
 
 export interface ChannelMemberOut {

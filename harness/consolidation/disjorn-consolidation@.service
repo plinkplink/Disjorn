@@ -1,0 +1,72 @@
+# TEMPLATE (WP-H8) — witnessed memory consolidation, one instance per resident.
+#
+#   disjorn-consolidation@claudette   -> runs as res-claudette (uid 997)
+#   disjorn-consolidation@gable       -> runs as res-gable     (uid 996)
+#
+# WHY A SYSTEM UNIT WITH User=, NOT A --user TIMER
+# The broker authenticates callers by SO_PEERCRED on /run/disjorn-broker/
+# broker.sock, so this job MUST run as the resident's own uid to be recognised
+# as her — running it as plink would post under the wrong identity. Both a
+# res-claudette systemd *user* timer (she has lingering) and a system unit with
+# User= satisfy that. The system unit wins because its unit file lives in
+# /etc/systemd/system (root-owned, resident-unwritable), whereas a user unit
+# would live in ~res-claudette/.config/systemd/user — a directory the resident
+# owns. The schedule is plink's lever, so it belongs on plink's side of the
+# fence, exactly like verbs.toml and the consolidation config.
+#
+# INSTALL (keyboard): copy this file and the .timer to /etc/systemd/system/,
+# `systemctl daemon-reload`. Do NOT enable until her retrieval logs have
+# accumulated real reference counts (KEYBOARD-NEXT §4). Activation is one
+# command:  systemctl enable --now disjorn-consolidation@claudette.timer
+#
+# This runs WITHOUT --dry-run: a real run posts one file-proposal per proposal
+# to #custodian. It is still proposes-never-acts — a proposal is text a human
+# reviews; the job never writes a store, a spine file, or a retrieval log.
+# The second safety catch is the config's `active` flag: a resident whose
+# config says active=false is forced to dry-run and can never post.
+
+[Unit]
+Description=Disjorn witnessed memory consolidation for %i (proposes to #custodian, never acts)
+Documentation=file:///srv/disjorn-ro/harness/consolidation/README.md
+After=disjorn-broker.service
+Wants=disjorn-broker.service
+
+[Service]
+Type=oneshot
+# %i is the resident name; the unix account is res-<name>.
+User=res-%i
+Group=res-%i
+
+# The activation lever: plink-owned, resident-unreadable-for-write, placed
+# outside anything the resident controls. /home/plink is not traversable by
+# res-* users, so the /srv path (which /home/plink/resident-config symlinks
+# to) is the one that actually works from this uid.
+Environment=CONSOLIDATION_CONFIG_DIR=/srv/disjorn-resident-config/res-%i/consolidation
+# The broker CLI's built-in default socket (/run/broker.sock) is the
+# in-container bind; host-side the socket is here.
+Environment=BROKER_SOCKET=/run/disjorn-broker/broker.sock
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=ANONYMIZED_TELEMETRY=False
+
+ExecStart=/usr/local/lib/disjorn/consolidation-venv/bin/python -m consolidation --resident %i
+
+# --- sandbox: the read-only guarantee, enforced by the kernel, not by trust --
+# The pass reads the resident's memory volume and writes NOTHING there. It
+# needs a writable temp dir only for the throwaway snapshot it opens instead
+# of the live chroma store (chromadb rewrites a store just by opening it).
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=read-only
+ProtectSystem=full
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+# No network of any kind: consolidation uses NullEmbedder and never embeds;
+# the only "transport" is the broker's unix socket.
+RestrictAddressFamilies=AF_UNIX
+PrivateNetwork=yes
+
+TimeoutStartSec=900

@@ -4,27 +4,50 @@
 # rent"), so she is the first live client. `active = true` lets a real
 # (non-dry-run) run post to #custodian; Gable's config ships inactive.
 #
-# In production this file is mounted read-only from OUTSIDE her container
-# (the same lever pattern as broker.toml / verbs.toml) — activation is plink's,
-# not the resident's.
+# In production this file is NOT read from here. It is placed read-only from
+# OUTSIDE resident control at
+#   /srv/disjorn-resident-config/res-claudette/consolidation/claudette.toml
+# (plink-owned; /home/plink/resident-config is a symlink to that dir) and the
+# job is pointed at it with CONSOLIDATION_CONFIG_DIR. Same lever pattern as
+# broker.toml / verbs.toml — activation is plink's, not the resident's. This
+# repo copy is the source of truth for what gets placed there.
+#
+# PATHS BELOW ARE THE REAL ONES ON THIS HOST (verified 2026-07-22). The
+# resident's 0700 home is /home/res-claudette; the world-readable volume
+# inside it is /home/res-claudette/resident-home — everything lives there,
+# NOT directly under the home. Same correction was already made in
+# /etc/disjorn-broker/broker.toml.
 
 resident = "claudette"
 active = true
 
 [episodic]
-data_dir = "/home/res-claudette/memory/chroma_data"
+data_dir = "/home/res-claudette/resident-home/memory/chroma_data"
 collection = "claudette_memory"
 
 [retrieval_log]
-path = "/home/res-claudette/memory/memory_retrieval.jsonl"
+path = "/home/res-claudette/resident-home/memory/memory_retrieval.jsonl"
 
 [spine]
-dir = "/home/res-claudette/repo/spine"
+# DELIBERATELY UNSET. Claudette has NO on-disk spine directory on this host —
+# her spine is her system prompt, managed through her bot config, not a
+# directory of markdown entries. (Identical note in broker.toml's
+# [residents.res-claudette].) With no spine dir her run does the
+# episodic-promotion half only and emits ZERO evict/compress proposals; the
+# report header says so in as many words.
+#
+# Do NOT "fix" this by pointing at a directory that does not exist: a
+# configured-but-missing spine dir is a hard error by design, because an
+# absent spine read as an empty spine is how "no spine dir" would silently
+# become "every entry is unreferenced". If she ever gets a real spine dir,
+# uncomment and set it.
+# dir = "/path/to/her/spine"
 
 [consolidation]
 # Soft target on spine size (entry count) — plink's knob. Over target,
 # consolidation proposes >= as much reduction (evict+compress) as addition
-# (promote). A bias on suggestions, never a wall on approval.
+# (promote). A bias on suggestions, never a wall on approval. (Inert while
+# she has no on-disk spine.)
 soft_target_spine_size = 60
 
 # Trailing window for the retrieval-log rent assessment.
@@ -39,6 +62,8 @@ evict_max_references = 0
 
 # Entries younger than this are never judged "unreferenced" — they have not
 # spanned the window yet. (Age from frontmatter `since`/`created`, else mtime.)
+# LOAD-BEARING while INTEGRATION-NEEDS §1 is open: spine reads are not yet
+# logged, so every spine entry reads as unreferenced. Do not lower this.
 min_spine_age_days = 30
 
 # Kernel entries are the hardest rent in the house; consolidation does not
@@ -56,5 +81,13 @@ constraint_tags = ["lesson", "why", "promise", "constraint", "boundary", "rule"]
 constraint_keywords = ["never", "always", "because", "must not", "do not", "learned", "the reason"]
 
 [broker]
-# The file-proposal verb CLI (WP-H5). Overridable via CONSOLIDATION_BROKER_CLI.
-cli = "/usr/local/bin/broker"
+# The file-proposal verb CLI. `/usr/local/bin/broker` is the IN-CONTAINER
+# install path (WP-H5) and does NOT exist on the host. This job runs host-side
+# as the res-claudette uid, so it must point at the res-readable mirror.
+# Overridable via CONSOLIDATION_BROKER_CLI (the systemd unit does not need to:
+# this value is already correct for the host).
+#
+# The CLI also needs BROKER_SOCKET=/run/disjorn-broker/broker.sock — its
+# built-in default (/run/broker.sock) is the in-container bind. The systemd
+# unit sets it.
+cli = "/srv/disjorn-ro/harness/cc/broker-cli/broker"

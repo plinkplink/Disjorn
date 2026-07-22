@@ -1,0 +1,27 @@
+# TEMPLATE (WP-H8) — nightly cadence for witnessed memory consolidation.
+#
+# "Sleep, but out loud." MEMORY-DESIGN leaves nightly-vs-threshold open
+# ("both, data decides"); nightly is the first cadence, per INTEGRATION-NEEDS
+# §4 — Claudette only, Gable added after her runs prove out.
+#
+# SHIPS DISABLED ON PURPOSE. KEYBOARD-NEXT §4: enable a few days out so her
+# retrieval logs accumulate real reference counts first — running early just
+# yields low-evidence proposals for humans to reject.
+#
+#   systemctl enable --now disjorn-consolidation@claudette.timer
+#
+# 03:20 UTC keeps it clear of the 23:55 UTC end-of-day #custodian line, so a
+# batch of proposals never lands on top of the daily summary.
+
+[Unit]
+Description=Nightly Disjorn memory consolidation for %i
+
+[Timer]
+Unit=disjorn-consolidation@%i.service
+OnCalendar=*-*-* 03:20:00 UTC
+RandomizedDelaySec=900
+# Catch up after a reboot/downtime rather than silently skipping a night.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

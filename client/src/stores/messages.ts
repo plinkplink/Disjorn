@@ -12,6 +12,12 @@ export interface ChannelMessages {
   reachedStart: boolean;
   /** True after the first history load for this channel. */
   loaded: boolean;
+  /**
+   * Seams: seq values whose successor in `list` is NOT known to be adjacent —
+   * i.e. two independently fetched ranges butted together (search jump).
+   * Ascending. MessageList draws a divider after each of these.
+   */
+  gaps: number[];
 }
 
 const HISTORY_PAGE = 50;
@@ -20,7 +26,48 @@ const emptyChannel = (): ChannelMessages => ({
   list: [],
   reachedStart: false,
   loaded: false,
+  gaps: [],
 });
+
+/**
+ * Recompute the seam set after merging a freshly fetched page into `merged`.
+ *
+ * A bare "seq jumped" test would be wrong: soft-deleted messages are omitted
+ * from history, so perfectly contiguous ranges routinely skip seq numbers and
+ * a divider on every deletion would be a lie. What we can state precisely is
+ * *provenance*: a fetched page is contiguous by construction (the server
+ * returns consecutive non-deleted messages), so a seq jump inside one page is
+ * deletions, while a seq jump across the boundary between two independently
+ * fetched ranges has genuinely unknown contents. Seams already recorded stay
+ * recorded until a later fetch spans them.
+ *
+ * `contiguousWith` is the `before_seq` the page was fetched with when that seq
+ * is itself in the list: the server returned everything (non-deleted) directly
+ * below it, so the page's top edge butts that message with nothing in between.
+ */
+function recomputeGaps(
+  merged: Message[],
+  fetchedSeqs: Set<number>,
+  previous: number[],
+  contiguousWith: number | null = null,
+): number[] {
+  const out: number[] = [];
+  for (let i = 1; i < merged.length; i++) {
+    const a = merged[i - 1];
+    const b = merged[i];
+    if (a === undefined || b === undefined) continue;
+    if (b.seq <= a.seq + 1) continue; // adjacent: nothing can be missing
+    const aFetched = fetchedSeqs.has(a.seq);
+    const bFetched = fetchedSeqs.has(b.seq);
+    if (aFetched && bFetched) continue; // one contiguous page: deletions only
+    if (aFetched && b.seq === contiguousWith) continue; // page's anchored edge
+    // Re-anchor rather than match exactly: an edge message can be deleted out
+    // from under a seam, and the seam is still there.
+    const survives = previous.some((g) => g >= a.seq && g < b.seq);
+    if (aFetched !== bFetched || survives) out.push(a.seq);
+  }
+  return out;
+}
 
 /** Insert/replace by seq, preserving ascending order. Idempotent. */
 function upsertBySeq(list: Message[], message: Message): Message[] {
@@ -73,10 +120,18 @@ interface MessagesState {
   /**
    * Search jump: make sure `message` (by id/seq) is in the loaded window,
    * fetching a history page around its seq if not. May leave a seq gap
-   * between the fetched window and the live window — acceptable for jump
-   * viewing; scrollback from the oldest edge still paginates contiguously.
+   * between the fetched window and the live window — that seam is recorded in
+   * `gaps` so the feed can draw it instead of silently butting two
+   * non-adjacent ranges together; scrollback from the oldest edge still
+   * paginates contiguously.
    */
   ensureAround: (channelId: number, messageId: number, seq: number) => Promise<void>;
+  /**
+   * Load the page immediately below a seam (`afterSeq` = the seam's upper
+   * edge in the list). Repeatable: the seam survives until the two sides meet,
+   * each call closing HISTORY_PAGE messages of it.
+   */
+  fillGap: (channelId: number, afterSeq: number) => Promise<void>;
 
   /* -- jump-to-message (search results) -- */
   requestJump: (channelId: number, messageId: number) => void;
@@ -199,7 +254,39 @@ export const useMessages = create<MessagesState>()((set, get) => {
       update(channelId, (cm) => {
         let list = cm.list;
         for (const message of page) list = upsertBySeq(list, message);
-        return { ...cm, list };
+        const fetched = new Set(page.map((m) => m.seq));
+        return { ...cm, list, gaps: recomputeGaps(list, fetched, cm.gaps) };
+      });
+    },
+
+    fillGap: async (channelId, afterSeq) => {
+      const cm = get().byChannel[channelId];
+      if (cm === undefined) return;
+      const idx = cm.list.findIndex((m) => m.seq === afterSeq);
+      const below = idx === -1 ? undefined : cm.list[idx + 1];
+      if (below === undefined) return;
+      const page = await fetchHistory(channelId, {
+        beforeSeq: below.seq,
+        limit: HISTORY_PAGE,
+      });
+      update(channelId, (current) => {
+        let list = current.list;
+        for (const message of page) list = upsertBySeq(list, message);
+        // Nothing between the two edges after all (everything in there was
+        // deleted): the seam is resolved, drop it rather than loop forever.
+        if (page.length === 0) {
+          return {
+            ...current,
+            list,
+            gaps: current.gaps.filter((s) => s !== afterSeq),
+          };
+        }
+        const fetched = new Set(page.map((m) => m.seq));
+        return {
+          ...current,
+          list,
+          gaps: recomputeGaps(list, fetched, current.gaps, below.seq),
+        };
       });
     },
 

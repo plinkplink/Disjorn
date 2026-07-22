@@ -51,13 +51,39 @@ Output (stdout):
    emitted in `proposed_promotions`. Changed protected `.ts`/`.tsx` files
    get the same treatment via a static `import ... from '...'` /
    `export ... from '...'` specifier delta (regex — no TS compiler);
-   relative specifiers are resolved to repo paths.
-5. **Dynamic-import ban**: a diff *introducing*
-   `importlib.import_module` / `__import__` / `exec` / `eval` into a
-   protected Python file, or a computed (non-string-literal, including
-   template literals) `import(...)` into a protected `.ts`/`.tsx` file, is
-   flagged in `banned_constructs` → Tier 2. Pre-existing occurrences don't
-   re-flag; string-literal `import('./x')` is allowed.
+   relative specifiers are resolved to repo paths. Since WP-H13:
+   - **absent targets are promoted too** (D1). A new import that resolves to
+     *nothing* in the tree still emits a proposal for the path(s) the target
+     would occupy, so a follow-up diff cannot create it as a fresh
+     unprotected (auto-mergeable) file. Reason lines say `ABSENT TARGET`.
+     Third-party/stdlib imports therefore produce declinable false
+     positives — that is the intended trade.
+   - **`from pkg import sub` promotes the submodule** (D2), not just
+     `pkg/__init__.py`; when both could be meant, BOTH are promoted, and
+     `import a.b.c` also promotes the `__init__.py` chain it executes.
+5. **Dynamic-load ban** (widened in WP-H13, finding D3): a diff *introducing*
+   any dynamic code-loading construct into a protected Python file is flagged
+   in `banned_constructs` → Tier 2. AST-based and deliberately over-broad:
+   `exec`/`eval`/`compile`/`__import__`, `importlib`/`imp`/`runpy`/`pkgutil`/
+   `code`/`marshal`/`ctypes`/`builtins` (any use), `sys.modules`/`sys.path`
+   mutation, `types.ModuleType`, loader attributes (`exec_module`,
+   `module_from_spec`, `spec_from_file_location`, …), `getattr` with a
+   computed name or on the import machinery, a `getattr` alias, a call whose
+   callee is not statically nameable (`getattr(m, n)(...)`,
+   `globals()["x"]()`), banned tokens appearing as string data, and strings
+   reassembled from fragments (`"__imp" "ort__"`, `"ev" + "al"`). The one
+   carve-out is `re.compile`. **A protected `.py` that does not parse fails
+   closed**: it gets a token-scan fallback plus an `unparseable-python`
+   banned construct. Pre-existing occurrences don't re-flag (new-set minus
+   old-set); if the *old* side is unparseable, everything on the new side
+   counts as newly introduced.
+   For `.ts`/`.tsx`, a computed (non-string-literal, including template
+   literal) `import(...)` is banned; string-literal `import('./x')` is
+   allowed.
+5b. **Stricter reachability mode** (`[modes] strict_reachability`, default
+   `false`, ships OFF): when on, every promotion target is *also* emitted as
+   a banned construct `unpromoted-reference:<path>` — a protected file may
+   not reference a module that is not already protected.
 6. **Tier logic**:
    - any protected hit / promotion / banned construct / failed gate → **Tier 2**
    - else inert paths only (`[inert]` patterns) + gates pass → **Tier 0**
@@ -86,3 +112,9 @@ server/.venv/bin/python -m pytest harness/classifier/tests/ -q
 
 Fixture git repos are built in tmpdirs; no fixture touches the live repo,
 the running service, or `server/data/`.
+
+`tests/test_bypass_h13.py` is the red-team regression suite for findings
+H13-D1/D2/D3 — one test per named evasion, each verified red against the
+pre-fix classifier. Treat it as part of the spec: if a change to the
+resolver or the ban makes one of those go green-by-weakening, the change is
+wrong.

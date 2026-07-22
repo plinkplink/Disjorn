@@ -127,10 +127,15 @@ class ConsolidationReport:
     # soft-target bias bookkeeping (transparency for reviewers)
     bias_applied: bool = False
     promotions_suppressed: int = 0
+    # False = this resident has no on-disk spine (e.g. Claudette, whose spine
+    # is her system prompt). The run is episodic-promotion only; reviewers are
+    # told so in the header rather than seeing a silent "spine 0/60".
+    spine_present: bool = True
 
     @property
     def over_target(self) -> bool:
-        return self.spine_size > self.soft_target
+        # No spine on disk => nothing to be over target with.
+        return self.spine_present and self.spine_size > self.soft_target
 
     def counts(self) -> dict[str, int]:
         c = {k.value: 0 for k in ProposalKind}
@@ -146,10 +151,17 @@ class ConsolidationReport:
 
     def batch_header(self) -> str:
         c = self.counts()
-        target_state = "OVER target" if self.over_target else "at/under target"
+        if self.spine_present:
+            target_state = "OVER target" if self.over_target else "at/under target"
+            spine_clause = f"spine {self.spine_size}/{self.soft_target} ({target_state})"
+        else:
+            spine_clause = (
+                "spine: NONE on disk for this resident — episodic-promotion "
+                "only, no evict/compress proposals are possible this run"
+            )
         header = (
             f"[consolidation run for {self.resident} @ {self.generated_at[:19]}] "
-            f"spine {self.spine_size}/{self.soft_target} ({target_state}); "
+            f"{spine_clause}; "
             f"proposals: {c['promote']} promote, {c['evict']} evict, "
             f"{c['compress']} compress; window {self.window_days}d."
         )

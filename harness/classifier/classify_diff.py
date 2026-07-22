@@ -45,6 +45,12 @@ class Config:
     inert_patterns: list[str] = field(default_factory=list)
     size_cap: int = 150
     daily_auto_apply_budget: int = 12
+    # H13-D1 stricter mode, default OFF (ships closed). When ON, a protected
+    # file may not reference an unpromoted module at all: every promotion
+    # target is ALSO emitted as a banned construct, so the diff is refused
+    # rather than merely proposed for promotion. plink's lever, not a
+    # resident's — it lives in the plink-owned protected-paths.toml.
+    strict_reachability: bool = False
 
 
 def load_config(path: str) -> Config:
@@ -53,6 +59,7 @@ def load_config(path: str) -> Config:
     prot = raw.get("protected", {})
     inert = raw.get("inert", {})
     limits = raw.get("limits", {})
+    modes = raw.get("modes", {})
     return Config(
         protected_files={_norm(p) for p in prot.get("files", [])},
         protected_dirs=[_norm(p) for p in prot.get("dirs", [])],
@@ -60,6 +67,8 @@ def load_config(path: str) -> Config:
         inert_patterns=list(inert.get("patterns", [])),
         size_cap=int(limits.get("size_cap", 150)),
         daily_auto_apply_budget=int(limits.get("daily_auto_apply_budget", 12)),
+        # Only the literal boolean true enables it (a truthy string must not).
+        strict_reachability=modes.get("strict_reachability", False) is True,
     )
 
 
@@ -212,27 +221,369 @@ def py_import_keys(source: str) -> set[tuple]:
     return keys
 
 
+# --------------------------------------------------------------------------
+# H13-D3: the dynamic-load ban
+# --------------------------------------------------------------------------
+#
+# THREAT MODEL (WP-H13 red-team finding D3, and why this is deliberately
+# over-broad):
+#
+#   The classifier is the gate that decides whether a resident-authored diff
+#   can be auto-merged (Tier 1) or must be seen by a human (Tier 2). The whole
+#   reachability-promotion machinery below is a STATIC import graph: it can
+#   only see edges that are written as import statements. Any construct that
+#   loads code by a name computed at runtime makes an edge the classifier
+#   cannot see, so a protected file could reach unprotected code (and the
+#   follow-up diff creating that code would look like an ordinary Tier 1
+#   change). That is why dynamic loading is forbidden outright inside
+#   protected files, not merely "reviewed".
+#
+#   The pre-H13 check was a literal-token check (`exec` / `eval` /
+#   `__import__` / `import_module` as bare Name or Attribute). The red team
+#   evaded it with, among others:
+#       getattr(importlib, "import_module")("x")   # attribute name is data
+#       builtins.exec(src)                         # different receiver
+#       getattr(builtins, "__imp" "ort__")("x")    # token split across
+#                                                  #   adjacent literals
+#       globals()["ev" + "al"](src)                # namespace dict + concat
+#       sys.modules["x"] = fake                    # module table mutation
+#       types.ModuleType("x")                      # fabricate a module
+#
+# DESIGN RULE: this ban FAILS CLOSED and accepts false positives on purpose.
+#   These constructs are forbidden in resident-authored protected code anyway,
+#   so an over-broad ban costs a human an occasional "yes, that's fine, Tier 2
+#   it" — while an under-broad ban costs an invisible reachability edge. When
+#   in doubt, flag. Every entry below is a *label*; classify() only reports
+#   labels the diff INTRODUCED (new set minus old set), so pre-existing code
+#   does not re-flag on every touch.
+#
+# The check is AST-based (a token/regex scan cannot tell `re.compile` from
+# `builtins.compile`, and cannot see implicit string concatenation, which the
+# parser folds for us). If the file does not parse, we DO NOT pass it: we fall
+# back to a squash-then-token scan AND emit `unparseable-python`, because an
+# unparseable protected .py file is itself a red flag (it cannot be the tested,
+# gate-passing artifact it claims to be).
+
+# Modules whose mere presence in a protected file is banned: their entire
+# surface is code loading. Touching the name at all (import, attribute base,
+# bare reference) is enough.
+_BAN_MODULE_ROOTS = {
+    "importlib", "imp", "runpy", "zipimport", "pkgutil", "code", "codeop",
+    "marshal", "ctypes", "builtins", "__builtin__",
+}
+
+# Modules that are fine in general but have specific loader-shaped attributes.
+_BAN_MODULE_ATTRS = {
+    # sys.modules / sys.path* rewrite what an import statement resolves to,
+    # which silently invalidates every promotion this classifier computes.
+    "sys": {
+        "modules", "path", "meta_path", "path_hooks", "path_importer_cache",
+        "settrace", "setprofile", "_getframe",
+    },
+    # types.ModuleType fabricates a module object out of thin air;
+    # CodeType/FunctionType fabricate callables from raw code objects.
+    "types": {"ModuleType", "CodeType", "FunctionType", "LambdaType"},
+}
+
+# Builtins that execute or import data.
+_BAN_BUILTIN_NAMES = {
+    "exec", "eval", "compile", "__import__", "execfile", "reload",
+    "__builtins__", "__loader__", "__spec__",
+}
+
+# Builtins that hand out a namespace dict — the standard laundering step
+# (`globals()["ex" + "ec"]`) that turns a string into a callable.
+_BAN_REFLECT_NAMES = {"globals", "locals", "vars"}
+
+# Attribute names banned regardless of receiver. A receiver can be aliased
+# (`il = importlib; il.import_module(...)`) or arrive as a parameter, so the
+# attribute name itself must be load-bearing.
+_BAN_ATTR_NAMES = {
+    "import_module", "__import__", "exec", "eval", "compile", "execfile",
+    "reload", "exec_module", "load_module", "create_module",
+    "module_from_spec", "spec_from_file_location", "spec_from_loader",
+    "find_spec", "find_module", "get_loader", "run_path", "run_module",
+    "ModuleType", "CodeType", "SourceFileLoader", "SourcelessFileLoader",
+    "ExtensionFileLoader", "MetaPathFinder", "PathFinder",
+    "InteractiveInterpreter", "InteractiveConsole", "compile_command",
+    "load_source", "load_compiled", "resource_loader",
+}
+
+# The one carve-out: `re.compile` (and the drop-in `regex`) is not a code
+# loader and is common in real protected code. Narrow, receiver-pinned, and
+# deliberately NOT extended to aliases — `r = re; r.compile(...)` still flags,
+# which is the fail-closed direction.
+_ATTR_RECEIVER_EXEMPT = {"compile": {"re", "sre_compile", "regex"}}
+
+# Tokens that must not appear as data. A string containing one of these is
+# either building an import/exec call or documenting one; both go to a human.
+_BAN_STRING_TOKENS = {
+    "__import__", "import_module", "exec", "eval", "compile", "execfile",
+    "importlib", "builtins", "__builtins__", "runpy", "imp", "zipimport",
+    "ModuleType", "exec_module", "load_module", "module_from_spec",
+    "spec_from_file_location", "InteractiveInterpreter", "run_path",
+    "run_module", "reload",
+}
+
+# String constants longer than this are treated as prose, not as a token being
+# assembled; keeps ordinary error messages/comments out of the ban.
+_STRING_SCAN_MAX = 60
+# A string is only read as a *name* (the thing getattr/import_module take)
+# when it is a bare identifier or dotted path. Without this, prose like
+# "exec-failure" or "cannot eval that" would flag; with it, "__import__",
+# "exec" and "importlib.import_module" still do.
+_NAME_LIKE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
+# Minimum length of a literal fragment considered a deliberate token split.
+# 3 is required to catch the canonical `"imp" + "ort"` evasion.
+_FRAGMENT_MIN = 3
+
+_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# Squashes `"a" "b"`, `"a" + "b"`, `'a'\n  'b'` into `ab` so the textual
+# fallback (unparseable files only) sees reconstructed tokens.
+_SQUASH_CONCAT_RE = re.compile(r"""["']\s*\+?\s*["']""")
+
+
+def _attr_root(node: ast.AST) -> str | None:
+    """Leftmost Name of an attribute chain: importlib.util.find_spec -> 'importlib'."""
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else None
+
+
+def _string_tokens(value: str) -> set[str]:
+    return set(_IDENT_RE.findall(value))
+
+
+def _literal_fragments(node: ast.AST) -> list[str]:
+    """Literal str pieces of a runtime string-building expression.
+
+    Covers `a + b`, f-strings, `"".join([...])`, `"{}".format(...)`,
+    `s.replace(...)` and `%` formatting — the ways a banned token can be
+    reassembled from pieces that are individually innocuous.
+    """
+    out: list[str] = []
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        out.append(node.value)
+    elif isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Mod)):
+        out += _literal_fragments(node.left)
+        out += _literal_fragments(node.right)
+    elif isinstance(node, ast.JoinedStr):
+        for v in node.values:
+            out += _literal_fragments(v)
+    elif isinstance(node, ast.FormattedValue):
+        out += _literal_fragments(node.value)
+    elif isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        for e in node.elts:
+            out += _literal_fragments(e)
+    elif isinstance(node, ast.Call):
+        if isinstance(node.func, ast.Attribute) and node.func.attr in (
+            "join", "format", "replace", "removeprefix", "removesuffix",
+            "lstrip", "rstrip", "strip",
+        ):
+            out += _literal_fragments(node.func.value)
+            for a in node.args:
+                out += _literal_fragments(a)
+    return out
+
+
+def _fragment_is_token_piece(frag: str) -> bool:
+    """True if `frag` looks like a deliberate piece of a banned token."""
+    if len(frag) < _FRAGMENT_MIN or not frag.replace("_", "").isalnum():
+        return False
+    return any(frag in tok for tok in _BAN_STRING_TOKENS)
+
+
 def py_banned_labels(source: str) -> set[str]:
-    """Banned dynamic-load constructs present in the source."""
+    """AST scan for banned dynamic-load constructs. Raises SyntaxError.
+
+    Callers must treat a SyntaxError as suspicious, not as a pass — see
+    py_scan_banned(), which is what classify() uses.
+    """
     labels: set[str] = set()
     tree = ast.parse(source)
+
+    # Nodes used as the callee of a call, and string constants that are bare
+    # expression statements (docstrings / commented-out prose). Identity sets,
+    # because ast nodes are not hashable-by-value.
+    call_funcs = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+    doc_consts = {
+        id(n.value)
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant)
+    }
+    # Names actually bound by an import statement in this file. The
+    # module-root rules are gated on this because several banned module names
+    # are ordinary English identifiers — `code` is the module, but also the
+    # commonest name for an exit code or an invite code (server/cli.py has
+    # `def _fail(msg, code=1)`), and `imp`/`marshal` are equally plausible
+    # locals. Nothing is lost by the gate: obtaining one of these modules
+    # WITHOUT an import statement requires getattr / sys.modules /
+    # __import__, each of which is banned on its own, and loader-shaped
+    # attribute names (_BAN_ATTR_NAMES) are still flagged on any receiver.
+    bound_imports: set[str] = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            for alias in n.names:
+                bound_imports.add((alias.asname or alias.name).split(".")[0])
+        elif isinstance(n, ast.ImportFrom):
+            for alias in n.names:
+                bound_imports.add(alias.asname or alias.name)
+
+    def flag_attr(name: str, root: str | None) -> None:
+        if name not in _BAN_ATTR_NAMES:
+            return
+        if root in _ATTR_RECEIVER_EXEMPT.get(name, ()):
+            return
+        # Keep the historical label for the canonical construct so existing
+        # audit records / tests stay meaningful.
+        if name == "import_module":
+            labels.add("importlib.import_module")
+        elif name in ("exec", "eval", "compile", "__import__"):
+            labels.add(name)
+        else:
+            labels.add(f"attr:{name}")
+
     for node in ast.walk(tree):
-        if isinstance(node, ast.Name):
-            if node.id in ("exec", "eval", "__import__"):
+        # -- import statements naming the loader machinery ------------------
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.split(".")[0]
+                if root in _BAN_MODULE_ROOTS:
+                    labels.add(f"import-machinery:{root}")
+        elif isinstance(node, ast.ImportFrom):
+            root = (node.module or "").split(".")[0]
+            if root in _BAN_MODULE_ROOTS:
+                labels.add(f"import-machinery:{root}")
+            for alias in node.names:
+                flag_attr(alias.name, None)
+                if alias.name in _BAN_BUILTIN_NAMES:
+                    labels.add(alias.name)
+                if alias.name in _BAN_MODULE_ATTRS.get(root, ()):
+                    labels.add(f"{root}.{alias.name}")
+                if alias.name.split(".")[0] in _BAN_MODULE_ROOTS:
+                    labels.add(f"import-machinery:{alias.name.split('.')[0]}")
+
+        # -- attribute access ----------------------------------------------
+        elif isinstance(node, ast.Attribute):
+            root = _attr_root(node)
+            if root in _BAN_MODULE_ROOTS and root in bound_imports:
+                labels.add(f"import-machinery:{root}")
+            if root in _BAN_MODULE_ATTRS and node.attr in _BAN_MODULE_ATTRS[root]:
+                labels.add(f"{root}.{node.attr}")
+            flag_attr(node.attr, root)
+
+        # -- bare names ------------------------------------------------------
+        elif isinstance(node, ast.Name):
+            if node.id in _BAN_BUILTIN_NAMES:
                 labels.add(node.id)
+            elif node.id in _BAN_REFLECT_NAMES:
+                labels.add(f"namespace-reflection:{node.id}")
             elif node.id == "import_module":
                 labels.add("importlib.import_module")
-        elif isinstance(node, ast.Attribute):
-            if node.attr == "import_module":
-                labels.add("importlib.import_module")
-            elif node.attr == "__import__":
-                labels.add("__import__")
-        elif isinstance(node, ast.ImportFrom):
-            if node.module == "importlib" and any(
-                a.name == "import_module" for a in node.names
+            elif node.id in _BAN_MODULE_ROOTS and node.id in bound_imports:
+                labels.add(f"import-machinery:{node.id}")
+            elif node.id in ("getattr", "setattr", "delattr"):
+                # Called forms are judged at the Call node (a literal, benign
+                # attribute name is allowed there). A *reference* to getattr
+                # that is not an immediate call is an alias — `g = getattr` —
+                # and defeats that judgement, so it is banned outright.
+                if id(node) not in call_funcs:
+                    labels.add("dynamic-attribute-alias")
+
+        # -- calls -----------------------------------------------------------
+        elif isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name) and func.id in (
+                "getattr", "setattr", "delattr"
             ):
-                labels.add("importlib.import_module")
+                recv_root = _attr_root(node.args[0]) if node.args else None
+                if recv_root in _BAN_MODULE_ROOTS or recv_root in _BAN_MODULE_ATTRS:
+                    labels.add("getattr-on-import-machinery")
+                name_arg = node.args[1] if len(node.args) > 1 else None
+                if name_arg is None or not (
+                    isinstance(name_arg, ast.Constant)
+                    and isinstance(name_arg.value, str)
+                ):
+                    # The attribute name is computed: the classifier cannot
+                    # know what is being reached. Fail closed.
+                    labels.add("computed-attribute-access")
+                else:
+                    tokens = _string_tokens(name_arg.value)
+                    for tok in sorted(tokens & _BAN_STRING_TOKENS):
+                        labels.add(f"getattr-banned-name:{tok}")
+            elif not isinstance(func, (ast.Name, ast.Attribute)):
+                # `getattr(m, n)(...)`, `globals()["x"](...)`, `tbl[k](...)`:
+                # the callee is not statically nameable. This is the generic
+                # shape of "an attribute/lookup value flows to a call" that
+                # D3 asks for, and it is what every evasion above ends in.
+                labels.add("computed-callable-call")
+
+        # -- string data -------------------------------------------------
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            value = node.value.strip()
+            if id(node) in doc_consts or len(value) > _STRING_SCAN_MAX:
+                continue  # docstring / prose: not a token under construction
+            if not _NAME_LIKE_RE.match(value):
+                continue  # prose ("exec-failure", "cannot eval that"), not a name
+            for tok in sorted(set(value.split(".")) & _BAN_STRING_TOKENS):
+                labels.add(f"import-token-in-string:{tok}")
+
+        # -- strings assembled at runtime ------------------------------------
+        if isinstance(node, (ast.BinOp, ast.JoinedStr)) or (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("join", "format", "replace")
+        ):
+            frags = _literal_fragments(node)
+            if len(frags) >= 2 or isinstance(node, ast.JoinedStr):
+                joined = "".join(frags)
+                if _string_tokens(joined) & _BAN_STRING_TOKENS or any(
+                    _fragment_is_token_piece(f) for f in frags
+                ):
+                    labels.add("reconstructed-import-token")
+
     return labels
+
+
+def py_banned_labels_textual(source: str) -> set[str]:
+    """Token fallback for sources the AST cannot parse. Never a pass.
+
+    Squashes adjacent/`+`-joined string literals first so `"__imp" "ort__"`
+    is seen as `__import__`, then scans every identifier-shaped token against
+    the union of the ban tables. Coarse by design: it only runs on files that
+    are already being escalated for being unparseable.
+    """
+    banned = (
+        _BAN_STRING_TOKENS
+        | _BAN_BUILTIN_NAMES
+        | _BAN_ATTR_NAMES
+        | _BAN_MODULE_ROOTS
+        | _BAN_REFLECT_NAMES
+        | {"getattr", "setattr", "delattr"}
+    )
+    labels: set[str] = set()
+    for text in (source, _SQUASH_CONCAT_RE.sub("", source)):
+        for tok in set(_IDENT_RE.findall(text)):
+            if tok in banned:
+                labels.add(f"token:{tok}")
+    return labels
+
+
+def py_scan_banned(source: str) -> tuple[set[str], bool]:
+    """(labels, parsed_ok). A file that does not parse fails CLOSED:
+    it gets the textual scan plus an explicit `unparseable-python` label, so
+    the diff carries a banned construct and can never be auto-merged."""
+    try:
+        return py_banned_labels(source), True
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        # ValueError: source with NUL bytes. RecursionError: deliberately
+        # deep nesting. Both are hostile shapes, not honest code.
+        return py_banned_labels_textual(source) | {"unparseable-python"}, False
+
+
+# --------------------------------------------------------------------------
+# H13-D1 / H13-D2: import resolution for reachability promotion
+# --------------------------------------------------------------------------
 
 
 def _py_candidates(anchor: str, module: str) -> list[str]:
@@ -241,38 +592,20 @@ def _py_candidates(anchor: str, module: str) -> list[str]:
     return [f"{stem}.py", f"{stem}/__init__.py"]
 
 
-def resolve_py_import(key: tuple, importer: str, tree: set[str]) -> str | None:
-    """Resolve one import key to a repo-relative path in the new tree."""
-    importer_dir = posixpath.dirname(importer)
-    if key[0] == "abs":
-        _, module, _ = key
-        anchors = _ancestor_anchors(importer_dir)
-        for anchor in anchors:
-            for cand in _py_candidates(anchor, module):
-                if cand in tree:
-                    return cand
-        return None
-    # ("from", level, module, name)
-    _, level, module, name = key
-    if level == 0:
-        anchors = _ancestor_anchors(importer_dir)
-    else:
-        base = importer_dir
-        for _ in range(level - 1):
-            base = posixpath.dirname(base)
-        anchors = [base]
-    for anchor in anchors:
-        stems = _py_candidates(anchor, module) if module else []
-        # `from X import name` where name is itself a module
-        modpath = posixpath.join(anchor, module.replace(".", "/")) if module else anchor
-        modpath = _norm(modpath) if modpath else ""
-        name_cand = _norm(posixpath.join(modpath, name)) if name != "*" else None
-        for cand in stems + (
-            [f"{name_cand}.py", f"{name_cand}/__init__.py"] if name_cand else []
-        ):
-            if cand in tree:
-                return cand
-    return None
+def _py_package_chain(anchor: str, module: str, tree: set[str]) -> list[str]:
+    """`__init__.py` of every parent package along a dotted module path.
+
+    `import a.b.c` executes a/__init__.py and a/b/__init__.py as well as
+    a/b/c.py — all three are newly reachable and all three must be promoted.
+    """
+    parts = [p for p in module.split(".") if p]
+    out = []
+    for i in range(1, len(parts)):
+        stem = posixpath.normpath(posixpath.join(anchor, "/".join(parts[:i])))
+        cand = f"{stem}/__init__.py"
+        if cand in tree:
+            out.append(cand)
+    return out
 
 
 def _ancestor_anchors(importer_dir: str) -> list[str]:
@@ -284,6 +617,107 @@ def _ancestor_anchors(importer_dir: str) -> list[str]:
         d = posixpath.dirname(d)
     anchors.append("")
     return anchors
+
+
+def _prediction_anchors(anchors: list[str], module: str) -> list[str]:
+    """Where an absent import target would plausibly be created.
+
+    An unresolved import is either (a) a third-party/stdlib package — noise,
+    but harmless noise a human declines — or (b) a wire to a file a LATER diff
+    will create, which is exactly H13-D1. We cannot tell them apart, so we
+    predict. To keep the report readable we only spray every anchor when the
+    top-level name is NOT a stdlib module; for stdlib-shadowing names (`import
+    code`, later `server/app/code.py`) the nearest anchor still gets a
+    proposal, so the case is covered rather than silent.
+    """
+    top = module.split(".")[0] if module else ""
+    if top and top in sys.stdlib_module_names:
+        return anchors[:1]
+    return anchors
+
+
+def resolve_py_import_targets(
+    key: tuple, importer: str, tree: set[str]
+) -> tuple[list[str], list[str]]:
+    """Resolve one import key to (present_targets, predicted_targets).
+
+    present  — files that exist in the new tree and are newly reachable.
+    predicted — files that do NOT exist yet but that this import wires the
+                protected file to. H13-D1: emitting these is the whole point;
+                without them a protected file can be wired to an absent module
+                today and the module created as an ordinary unprotected file
+                tomorrow.
+    """
+    importer_dir = posixpath.dirname(importer)
+    present: list[str] = []
+    predicted: list[str] = []
+
+    if key[0] == "abs":
+        _, module, _ = key
+        anchors = _ancestor_anchors(importer_dir)
+        for anchor in anchors:
+            hits = [c for c in _py_candidates(anchor, module) if c in tree]
+            if hits:
+                present += hits
+                present += _py_package_chain(anchor, module, tree)
+                break
+        else:
+            for anchor in _prediction_anchors(anchors, module):
+                predicted += _py_candidates(anchor, module)
+        return present, predicted
+
+    # ("from", level, module, name)
+    _, level, module, name = key
+    if level == 0:
+        anchors = _ancestor_anchors(importer_dir)
+    else:
+        base = importer_dir
+        for _ in range(level - 1):
+            base = posixpath.dirname(base)
+        anchors = [base]
+
+    for anchor in anchors:
+        pkgdir = _norm(posixpath.join(anchor, module.replace(".", "/"))) if module else _norm(anchor or ".")
+        pkgdir = "" if pkgdir == "." else pkgdir
+        # H13-D2: the SUBMODULE is checked first. `from pkg import sub`
+        # executes pkg/sub.py, and that is the file that must be protected;
+        # the old resolver checked the package stem first and promoted only
+        # pkg/__init__.py, leaving the reachable code file unprotected.
+        name_cands = (
+            [f"{_norm(posixpath.join(pkgdir, name))}.py",
+             f"{_norm(posixpath.join(pkgdir, name))}/__init__.py"]
+            if name != "*" else []
+        )
+        stem_cands = _py_candidates(anchor, module) if module else []
+        sub_hits = [c for c in name_cands if c in tree]
+        stem_hits = [c for c in stem_cands if c in tree]
+        if not sub_hits and not stem_hits:
+            continue
+        # Ambiguous (`sub` is both a submodule and a name re-exported by the
+        # package __init__): promote BOTH. Fail closed — over-promoting costs
+        # a human a decline, under-promoting leaves live code unguarded.
+        present += sub_hits + stem_hits
+        present += _py_package_chain(anchor, module, tree)
+        if not sub_hits and f"{pkgdir}/__init__.py" in stem_hits and name != "*":
+            # H13-D1, package variant: `pkg` exists as a package but `sub`
+            # does not exist as a submodule. `sub` may be an attribute of
+            # __init__ (false positive, declined) or a submodule a later diff
+            # will create (the attack). Predict it.
+            predicted += name_cands
+        break
+    else:
+        # Nothing about this import resolves anywhere: predict both the module
+        # itself and, for `from mod import name`, the submodule under it.
+        for anchor in _prediction_anchors(anchors, module):
+            predicted += _py_candidates(anchor, module) if module else []
+        near = anchors[0]
+        pkgdir = _norm(posixpath.join(near, module.replace(".", "/"))) if module else _norm(near or ".")
+        pkgdir = "" if pkgdir == "." else pkgdir
+        if name != "*":
+            stem = _norm(posixpath.join(pkgdir, name))
+            predicted += [f"{stem}.py", f"{stem}/__init__.py"]
+
+    return present, predicted
 
 
 # --------------------------------------------------------------------------
@@ -330,15 +764,27 @@ def ts_has_computed_import(source: str) -> bool:
     return False
 
 
-def resolve_ts_specifier(spec: str, importer: str, tree: set[str]) -> str | None:
+# Suffixes proposed for a relative specifier that resolves to nothing today.
+# Only the TS-authored forms: this repo's client is TypeScript, and a
+# resident creating the absent target will create one of these.
+_TS_PREDICT_SUFFIXES = [".ts", ".tsx", "/index.ts", "/index.tsx"]
+
+
+def resolve_ts_specifier_targets(
+    spec: str, importer: str, tree: set[str]
+) -> tuple[list[str], list[str]]:
+    """(present, predicted) for one specifier — TS mirror of the py resolver.
+
+    H13-D1 applies identically here: `import { x } from './helper'` where
+    helper.ts does not exist yet is a wire to a file a later diff creates.
+    """
     if not spec.startswith("."):
-        return None  # bare specifier: package import, not a repo path
+        return [], []  # bare specifier: package import, not a repo path
     stem = _norm(posixpath.join(posixpath.dirname(importer), spec))
-    for suffix in _TS_RESOLVE_SUFFIXES:
-        cand = stem + suffix
-        if cand in tree:
-            return cand
-    return None
+    hits = [stem + s for s in _TS_RESOLVE_SUFFIXES if stem + s in tree]
+    if hits:
+        return hits, []
+    return [], [stem + s for s in _TS_PREDICT_SUFFIXES]
 
 
 # --------------------------------------------------------------------------
@@ -411,28 +857,73 @@ def classify(
             continue
         old_src = old_blob(repo, base, e.old_path, staged) if e.old_path else None
 
-        if path.endswith(".py"):
-            try:
-                new_keys = py_import_keys(new_src)
-                new_banned = py_banned_labels(new_src)
-            except SyntaxError:
-                reasons.append(f"unparseable protected python file: {path}")
-                continue
-            old_keys: set = set()
-            old_banned: set = set()
-            if old_src is not None:
-                try:
-                    old_keys = py_import_keys(old_src)
-                    old_banned = py_banned_labels(old_src)
-                except SyntaxError:
-                    pass  # old unparseable: treat everything new as new
-            for key in sorted(new_keys - old_keys):
-                target = resolve_py_import(key, path, tree)
-                if target and target != path and not is_protected(target, cfg):
+        def record_promotions(wire: str, present: list[str], predicted: list[str]) -> None:
+            """Emit promotion proposals for one new import edge.
+
+            `present` targets exist today; `predicted` ones do NOT (H13-D1) —
+            they are proposed anyway so that the follow-up diff which creates
+            the file cannot land as a fresh, unprotected, auto-mergeable file.
+            """
+            for target in dict.fromkeys(present):
+                if target != path and not is_protected(target, cfg):
                     promotions.add(target)
                     reasons.append(
                         f"reachability promotion: {path} newly imports {target}"
                     )
+            absent = [
+                t for t in dict.fromkeys(predicted)
+                if t != path and not is_protected(t, cfg)
+            ]
+            if absent:
+                promotions.update(absent)
+                reasons.append(
+                    f"reachability promotion (ABSENT TARGET, H13-D1): {path} "
+                    f"newly wires to '{wire}', which resolves to nothing in "
+                    f"this tree; proposing predicted path(s) "
+                    f"{', '.join(absent)} so a later diff cannot create the "
+                    f"target as an unprotected file (decline if '{wire}' is a "
+                    f"third-party/stdlib package)"
+                )
+            if cfg.strict_reachability:
+                # Stricter mode (default OFF): a protected file may not
+                # reference an unpromoted module at all — the reference itself
+                # is refused rather than merely proposed for promotion.
+                for target in sorted(set(present) | set(predicted)):
+                    if target != path and not is_protected(target, cfg):
+                        banned.append({
+                            "file": path,
+                            "construct": f"unpromoted-reference:{target}",
+                        })
+
+        if path.endswith(".py"):
+            # Banned-construct scan first: it must run even when the file does
+            # not parse (fail closed — see py_scan_banned).
+            new_banned, new_ok = py_scan_banned(new_src)
+            new_keys: set = set()
+            if new_ok:
+                new_keys = py_import_keys(new_src)
+            else:
+                reasons.append(
+                    f"unparseable protected python file (fail-closed: treated "
+                    f"as a banned construct, import graph unknown): {path}"
+                )
+            old_keys: set = set()
+            old_banned: set = set()
+            if old_src is not None:
+                old_banned, old_ok = py_scan_banned(old_src)
+                if old_ok:
+                    old_keys = py_import_keys(old_src)
+                else:
+                    # Old side unparseable: nothing about it can be trusted as
+                    # a baseline, so every construct on the new side counts as
+                    # newly introduced.
+                    old_banned = set()
+            for key in sorted(new_keys - old_keys):
+                present, predicted = resolve_py_import_targets(key, path, tree)
+                wire = key[1] if key[0] == "abs" else (
+                    "." * key[1] + (key[2] or "") + f" import {key[3]}"
+                )
+                record_promotions(wire, present, predicted)
             for label in sorted(new_banned - old_banned):
                 banned.append({"file": path, "construct": label})
                 reasons.append(
@@ -443,12 +934,8 @@ def classify(
             new_specs = ts_import_specifiers(new_src)
             old_specs = ts_import_specifiers(old_src) if old_src else set()
             for spec in sorted(new_specs - old_specs):
-                target = resolve_ts_specifier(spec, path, tree)
-                if target and target != path and not is_protected(target, cfg):
-                    promotions.add(target)
-                    reasons.append(
-                        f"reachability promotion: {path} newly imports {target}"
-                    )
+                present, predicted = resolve_ts_specifier_targets(spec, path, tree)
+                record_promotions(spec, present, predicted)
             new_computed = ts_has_computed_import(new_src)
             old_computed = ts_has_computed_import(old_src) if old_src else False
             if new_computed and not old_computed:
@@ -480,6 +967,11 @@ def classify(
                        "of booleans (fail-closed)")
 
     # -- tier decision
+    # PRECEDENCE (load-bearing, do not reorder): protection is decided BEFORE
+    # the inert allowlist. A path can match both — a resident's spine entry is
+    # markdown, and `*.md` is on the Tier-0 allowlist — and in that case it
+    # must be Tier 2. Inert is an allowlist of last resort, never an override.
+    # Pinned by tests/test_resident_paths.py.
     if protected_hits or promotions or banned or not gates_pass:
         tier = 2
     else:

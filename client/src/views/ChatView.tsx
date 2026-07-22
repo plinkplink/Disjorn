@@ -121,7 +121,7 @@ export function ChatView() {
       {imageAtt !== null && imageAtt.url !== null && (
         <ImageModal
           src={imageAtt.url}
-          origUrl={imageAtt.url}
+          origUrl={imageAtt.orig_url}
           filename={imageAtt.original_filename}
           onClose={() => setImageAtt(null)}
         />

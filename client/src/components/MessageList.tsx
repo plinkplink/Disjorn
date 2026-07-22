@@ -17,7 +17,7 @@ import { useMembers } from "../stores/members";
 import { useMessages } from "../stores/messages";
 import { useSession } from "../stores/session";
 import type { Attachment, Message } from "../types";
-import { Avatar } from "./Avatar";
+import { Avatar, BotAvatar } from "./Avatar";
 import { firstHttpUrl, Markdown } from "./Markdown";
 import { UnfurlCard } from "./UnfurlCard";
 
@@ -87,13 +87,26 @@ function chibiUrls(message: Message): string[] {
 
 type FeedItem =
   | { kind: "divider"; key: string; label: string }
+  /** A seq seam (search jump landed a non-adjacent range here). */
+  | { kind: "gap"; key: string; afterSeq: number }
   | { kind: "message"; key: string; message: Message; withHeader: boolean };
 
-function buildFeed(list: Message[]): FeedItem[] {
+/** `gaps` (from the messages store) = seq values whose successor in the list
+    is not known to be the next message — see recomputeGaps there. A seam is
+    matched by range so a deleted edge message can't hide it. */
+function buildFeed(list: Message[], gaps: number[]): FeedItem[] {
   const out: FeedItem[] = [];
   let prev: Message | null = null;
   let prevDay = "";
   for (const m of list) {
+    const before = prev; // const so the closure below narrows
+    const seam =
+      before !== null &&
+      gaps.length > 0 &&
+      gaps.some((g) => g >= before.seq && g < m.seq);
+    if (seam && before !== null) {
+      out.push({ kind: "gap", key: `g${before.seq}`, afterSeq: before.seq });
+    }
     const date = new Date(m.created_at);
     const day = date.toDateString();
     let newDay = false;
@@ -105,6 +118,7 @@ function buildFeed(list: Message[]): FeedItem[] {
     const withHeader =
       prev === null ||
       newDay ||
+      seam || // never group an author across a seam
       prev.author_type !== m.author_type ||
       prev.author_id !== m.author_id ||
       m.reply_to_id !== null ||
@@ -121,12 +135,16 @@ function AuthorAvatar({ message }: { message: Message }) {
   if (message.author_type === "user") {
     return <Avatar userId={message.author_id} name={message.author.name} size={38} />;
   }
-  // Bots have no /avatars/{id} endpoint — letter fallback, never a wrong
-  // user's avatar (bot ids can collide with user ids).
+  // Bots have their own avatar endpoint (bot ids can collide with user ids, so
+  // /avatars/{id} would show the wrong face). The payload tells us whether one
+  // exists; without it we go straight to the letter tile and skip the request.
   return (
-    <div className="avatar avatar-bot" style={{ width: 38, height: 38 }} aria-hidden>
-      {message.author.name.slice(0, 1).toUpperCase()}
-    </div>
+    <BotAvatar
+      botId={message.author_id}
+      name={message.author.name}
+      size={38}
+      hasAvatar={message.author.avatar_path !== null}
+    />
   );
 }
 
@@ -370,6 +388,7 @@ export function MessageList({
   const list = cm?.list ?? EMPTY_LIST;
   const loaded = cm?.loaded ?? false;
   const reachedStart = cm?.reachedStart ?? false;
+  const gaps = cm?.gaps ?? EMPTY_GAPS;
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const innerRef = useRef<HTMLDivElement | null>(null);
@@ -378,8 +397,9 @@ export function MessageList({
   const prependRef = useRef<{ height: number; top: number } | null>(null);
   const lastSeqRef = useRef(0);
   const [showJump, setShowJump] = useState(false);
+  const [fillingSeq, setFillingSeq] = useState<number | null>(null);
 
-  const items = useMemo(() => buildFeed(list), [list]);
+  const items = useMemo(() => buildFeed(list, gaps), [list, gaps]);
   const byId = useMemo(() => new Map(list.map((m) => [m.id, m])), [list]);
   const repliedTo = useMemo(() => {
     // Client-side reverse index over the LOADED window only — WP4 has no
@@ -414,6 +434,22 @@ export function MessageList({
       .finally(() => {
         fetchingRef.current = false;
       });
+  };
+
+  // Seam fill: the page lands ABOVE the current viewport, so preserve the
+  // scroll position exactly the way a scrollback prepend does.
+  const fillGap = (afterSeq: number) => {
+    const el = containerRef.current;
+    if (el === null || fillingSeq !== null) return;
+    setFillingSeq(afterSeq);
+    prependRef.current = { height: el.scrollHeight, top: el.scrollTop };
+    void useMessages
+      .getState()
+      .fillGap(channelId, afterSeq)
+      .catch(() => {
+        prependRef.current = null;
+      })
+      .finally(() => setFillingSeq(null));
   };
 
   // WP11: scrolling to the bottom of the active channel with the window
@@ -531,6 +567,19 @@ export function MessageList({
             <div className="day-divider" key={item.key}>
               <span>{item.label}</span>
             </div>
+          ) : item.kind === "gap" ? (
+            <div className="gap-divider" key={item.key}>
+              <button
+                className="gap-load"
+                disabled={fillingSeq !== null}
+                title="These messages were skipped by a search jump"
+                onClick={() => fillGap(item.afterSeq)}
+              >
+                {fillingSeq === item.afterSeq
+                  ? "Loading…"
+                  : "Messages not loaded — load them"}
+              </button>
+            </div>
           ) : (
             <MessageRow
               key={item.key}
@@ -573,3 +622,4 @@ export function MessageList({
 }
 
 const EMPTY_NAMES: string[] = [];
+const EMPTY_GAPS: number[] = [];

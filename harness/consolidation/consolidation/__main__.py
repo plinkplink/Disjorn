@@ -19,7 +19,7 @@ import os
 import sys
 from datetime import datetime, timezone
 
-from consolidation.analyze import build_proposals
+from consolidation.analyze import MissingInputError, build_proposals
 from consolidation.config import load_config
 from consolidation.poster import post_report
 
@@ -75,7 +75,14 @@ def main(argv: list[str] | None = None, environ=None, out=None) -> int:
         )
         dry_run = True
 
-    report = build_proposals(cfg, now=now)
+    try:
+        report = build_proposals(cfg, now=now)
+    except MissingInputError as exc:
+        # A configured input path does not exist (stale path). Refuse loudly —
+        # guessing here is how "no spine dir" would become "evict everything".
+        print(f"config error: {exc}", file=sys.stderr)
+        return EXIT_CONFIG
+
     outcome = post_report(report, cfg, dry_run=dry_run, out=out)
 
     if outcome.dry_run:

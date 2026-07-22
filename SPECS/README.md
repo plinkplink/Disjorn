@@ -39,4 +39,15 @@ section, and the split is agreed in #custodian before the build starts.
 
 One file per spec: `SPECS/YYYY-MM-DD-<slug>.md`, e.g.
 `SPECS/2026-07-21-gif-picker.md`. Date is the draft date; slug is a short
-kebab-case handle that also names the build branch (`loop/<slug>`).
+kebab-case handle.
+
+**The build branch keeps the date too** — `SPECS/2026-07-21-gif-picker.md`
+builds to branch `loop/2026-07-21-gif-picker` and container
+`disjorn-build-2026-07-21-gif-picker`. So the branch name and the spec
+basename are the same string, 1:1, and any `loop/…` branch traces back to
+exactly one spec with no lookup. (Changed 2026-07-22, closing BL-D4: a
+date-less slug meant two specs with the same handle on different dates
+collided — concurrently on the podman `--name`, sequentially by clobbering
+each other's branch. The date is already in the filename, so carrying it
+through costs nothing.) The broker REQUIRES the `YYYY-MM-DD-` prefix and
+validates it as a real calendar date; a spec filename without one is refused.

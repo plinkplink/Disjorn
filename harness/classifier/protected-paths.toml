@@ -25,6 +25,33 @@ files = [
     "client/package.json",
     "client/package-lock.json",
     "sdk/pyproject.toml",
+
+    # --- Per-resident: Gable (repo at bots/fable) --------------------------
+    "bots/fable/GENESIS.md",      # origin doc, read on wake
+    "bots/fable/PICKUP.md",       # session handoff, read on wake
+
+    # --- Per-resident: Claudette (repo at bots/claudette) ------------------
+    "bots/claudette/disjorn_bot.py",   # residency adapter
+    "bots/claudette/core.py",
+    "bots/claudette/bot.py",
+    "bots/claudette/config.py",
+    "bots/claudette/requirements.txt",  # dependency file
+    "bots/claudette/PROMPT-PROPOSAL.md",
+
+    # --- The same files as seen from INSIDE a resident's own repo ----------
+    # A resident's repo IS a git repo (bots/fable, bots/claudette are its
+    # roots), so a diff classified against that repo carries root-relative
+    # paths with no bots/<name>/ prefix. Both views are enumerated because
+    # the classifier is a pure function of paths and cannot know which repo
+    # it was pointed at. None of these exist in the Disjorn repo, so the
+    # duplication costs nothing there.
+    "GENESIS.md",
+    "PICKUP.md",
+    "PROMPT-PROPOSAL.md",
+    "disjorn_bot.py",
+    "core.py",
+    "bot.py",
+    "config.py",
 ]
 
 # Protected directories: any change under these (including file CREATION)
@@ -33,27 +60,62 @@ dirs = [
     "server/app/migrations",
     "deploy",
     "sdk/disjorn_sdk",            # SDK protocol files
+
+    # --- Per-resident (WP-H5/H9/H11 have landed; filled in 2026-07-22) ----
+    # A dir entry covers file CREATION as well as modification, which is the
+    # point here: adding a NEW spine entry must be Tier 2 exactly like
+    # editing an existing one.
+    "bots/fable/spine",           # Gable's spine (00-kernel.md .. 50-genesis.md)
+    "bots/claudette/memory",      # Claudette's memory subsystem
+    "bots/claudette/services",    # her own running code
+    "bots/claudette/scripts",
+    # ...and the same, seen from inside the resident's own repo root:
+    "spine",
+    "memory",
 ]
 
 # fnmatch patterns, matched against the full repo-relative path AND the
 # basename ('*' crosses '/').
 patterns = [
     ".env*",                      # .env, .env.local, ... at any depth
+
+    # --- Prompt-bearing files, wherever they live -------------------------
+    # An enumerated list cannot cover a resident who does not exist yet, and
+    # the failure mode is silent (see the [inert] note below): a resident's
+    # spine is markdown, and markdown is on the Tier-0 auto-apply allowlist.
+    # These patterns are the backstop. Protection ALWAYS beats inert — the
+    # classifier checks protected paths before it checks the inert
+    # allowlist, and tests/test_resident_paths.py pins that ordering.
+    "*spine/*",                   # any spine directory at any depth
+    "CLAUDE.md",                  # assembled kernel (and its template)
+    "MEMORY.md",                  # auto-generated spine index
+    "kernel.md",
 ]
 
 # --- Per-resident protected paths -----------------------------------------
-# Filled in when WP-H5/H9/H11 land; paths are relative to each resident's
-# repo as mounted in their container. For each resident add:
-#   - the residency adapter file      (e.g. "claudette/disjorn_bot.py")
-#   - "core.py"
-#   - "memory/"                       (as a dir entry)
-#   - the spine directory             (e.g. "spine/")
-#   - the kernel                      (e.g. "kernel.md" / CLAUDE.md source)
-# A resident's OWN code and prompt are always Tier 2 per AGENTHOOD.md.
+# Per AGENTHOOD.md a resident's OWN code and prompt are ALWAYS Tier 2, and
+# house_memory/bootstrap.py's contract is that a spine edit is witnessed and
+# merged. Entries above cover, for each resident: the spine directory, the
+# kernel (CLAUDE.md, assembled from the spine), the residency adapter,
+# core.py, memory/, and the dependency file.
+#
+# LIMIT OF THIS FILE, stated plainly: enumeration classifies DIFFS. It is a
+# detector, not a wall. RESIDENT_SPINE_DIR points at a directory the resident
+# owns and can write (e.g. /home/res-gable/resident-home/bots/fable/spine),
+# so a resident can still edit their own spine in place without ever
+# producing a diff for this classifier to see. Making that directory
+# read-only to the resident is the wall; it is plink's lever, not this
+# file's.
 
 [inert]
 # Tier-0 allowlist: paths whose changes are inert (auto-apply when gates
 # pass). fnmatch semantics as above.
+#
+# NB `*.md` is broad, and a resident's spine/kernel/genesis docs are markdown.
+# That is safe ONLY because protection is checked first and wins outright: a
+# path matching both a [protected] entry and an [inert] pattern is Tier 2.
+# If you add a resident, add their prompt-bearing paths to [protected] above
+# — do not assume markdown is harmless.
 patterns = [
     "*.md",
     "docs/*",
@@ -71,3 +133,18 @@ size_cap = 150
 # number just lives here so plink owns it in one place. Over budget ->
 # everything escalates to Tier 2.
 daily_auto_apply_budget = 12
+
+[modes]
+# WP-H13 D1, stricter option — SHIPS OFF.
+#
+# false (default): a protected file that gains an import to an unprotected or
+#   not-yet-existing module gets that path emitted in `proposed_promotions`.
+#   The human decides; the diff is Tier 2 either way.
+# true: the reference itself is refused — every promotion target is ALSO
+#   emitted as a banned construct (`unpromoted-reference:<path>`), so
+#   merge-tier1 refuses the diff outright rather than proposing a promotion.
+#   Turn this on only when the protected surface has settled; it means "a
+#   protected file may not name a module that is not already protected".
+#
+# Only the literal boolean `true` enables it (a truthy string does not).
+strict_reachability = false

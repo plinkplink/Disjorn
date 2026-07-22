@@ -78,7 +78,7 @@ def append_log(
 def make_config(
     *,
     store,
-    spine_dir: Path,
+    spine_dir: Path | None,
     log_path: Path,
     resident: str = "claudette",
     active: bool = True,
@@ -93,7 +93,8 @@ def make_config(
         episodic_data_dir=str(store.data_dir),
         episodic_collection=store.collection_name,
         retrieval_log_path=str(log_path),
-        spine_dir=str(spine_dir),
+        # None = "this resident has no on-disk spine" (Claudette's real shape)
+        spine_dir=None if spine_dir is None else str(spine_dir),
         soft_target_spine_size=60,
         window_days=30,
         promote_min_references=3,

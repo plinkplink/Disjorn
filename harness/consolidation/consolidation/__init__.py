@@ -18,6 +18,10 @@ Load-bearing invariants (MEMORY-DESIGN.md, AGENTHOOD.md):
 - **constraint-shaped entries default to compression, never eviction**
   (anti-Chesterton's-fence).
 - **eviction = supersession commit, not deletion** (reversible forgetting).
+- **absent inputs fail loud, never fail open**: a resident with no on-disk
+  spine runs episodic-promotion only (explicit short-circuit); a configured
+  input path that is missing raises `MissingInputError` rather than being read
+  as an empty spine or letting chromadb create a fresh store.
 """
 
 from consolidation.config import ConsolidationConfig, load_config
@@ -28,10 +32,11 @@ from consolidation.model import (
     Proposal,
     ProposalKind,
 )
-from consolidation.analyze import build_proposals
+from consolidation.analyze import MissingInputError, build_proposals
 from consolidation.poster import PostOutcome, post_report
 
 __all__ = [
+    "MissingInputError",
     "ConsolidationConfig",
     "load_config",
     "NullEmbedder",

@@ -196,6 +196,22 @@
   font-weight: 600;
 }
 
+/* Two-line row: name + unread badge above, last-message preview below. */
+.channel-item-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.channel-item-top {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
 .channel-item .name {
   flex: 1;
   overflow: hidden;
@@ -206,6 +222,18 @@
 .channel-item.unread .name {
   color: var(--text-0);
   font-weight: 600;
+}
+
+.channel-preview {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-xs);
+  color: var(--text-2);
+}
+
+.channel-item.unread .channel-preview {
+  color: var(--text-1);
 }
 
 .unread-badge {
@@ -426,6 +454,45 @@
   flex: 1;
   height: 1px;
   background: var(--border-subtle);
+}
+
+/* Seq seam: a search jump butted two non-adjacent ranges together. Dashed so
+   it never reads as an ordinary day divider. */
+.gap-divider {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin: var(--space-4);
+}
+
+.gap-divider::before,
+.gap-divider::after {
+  content: "";
+  flex: 1;
+  border-top: 1px dashed var(--border-subtle);
+}
+
+.gap-load {
+  flex-shrink: 0;
+  min-height: 32px;
+  padding: 0 var(--space-3);
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius-round);
+  background: transparent;
+  color: var(--text-2);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.gap-load:hover:not(:disabled) {
+  background: var(--bg-3);
+  color: var(--text-0);
+}
+
+.gap-load:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 
 /* ---- message rows ---- */
@@ -1077,6 +1144,21 @@
   color: var(--text-2);
 }
 
+/* Characters left before the server's hard cap; red once it's blown. */
+.composer-count {
+  align-self: flex-end;
+  padding-bottom: var(--space-2);
+  color: var(--text-2);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.composer-count.over {
+  color: var(--danger);
+  font-weight: 700;
+}
+
 .composer-btns {
   display: flex;
   align-items: center;
@@ -1310,9 +1392,16 @@
 
 .image-modal-name {
   flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.image-modal-bar a {
+  flex-shrink: 0;
+  white-space: nowrap;
+  padding: var(--space-1) 0;
 }
 
 .summarize-modal {
@@ -1496,10 +1585,149 @@
   color: var(--text-2);
 }
 
+.member-section-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.add-bot-btn {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  font-size: var(--text-sm);
+  line-height: 1;
+}
+
 .member-hint {
   padding: var(--space-2);
   color: var(--text-2);
   font-size: var(--text-sm);
+}
+
+.member-remove {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-m);
+  background: transparent;
+  color: var(--text-2);
+  font-size: var(--text-xs);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.member-remove:hover {
+  background: var(--danger);
+  color: var(--text-on-accent);
+}
+
+/* ---- add-a-bot modal ---- */
+
+.bot-modal {
+  width: min(94vw, 420px);
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-l);
+  box-shadow: var(--shadow-raised);
+  overflow: hidden;
+}
+
+.bot-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.bot-modal-title {
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: var(--text-0);
+}
+
+.bot-modal-body {
+  overflow-y: auto;
+  padding: var(--space-3) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.bot-modal-note {
+  margin: 0;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+
+.bot-modal-error {
+  margin: 0;
+  padding: 0 var(--space-4) var(--space-3);
+  color: var(--danger);
+  font-size: var(--text-sm);
+}
+
+.bot-pick {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: 44px;
+  padding: var(--space-2);
+  border: none;
+  border-radius: var(--radius-m);
+  background: transparent;
+  color: var(--text-1);
+  text-align: left;
+  cursor: pointer;
+}
+
+.bot-pick:hover {
+  background: var(--bg-3);
+  color: var(--text-0);
+}
+
+.bot-pick-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.bot-confirm-who {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-0);
+}
+
+/* The consequence of adding a reader to a private room — stated, not hinted. */
+.bot-consequence {
+  margin: 0;
+  padding: var(--space-3);
+  border-left: 3px solid var(--danger);
+  border-radius: var(--radius-m);
+  background: var(--bg-3);
+  color: var(--text-0);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}
+
+.bot-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--border-subtle);
 }
 
 .member-row {
@@ -1831,6 +2059,15 @@
   .msg-actions button {
     min-width: 40px;
     min-height: 40px;
+  }
+
+  .member-remove,
+  .gap-load {
+    min-height: 40px;
+  }
+
+  .member-remove {
+    min-width: 40px;
   }
 }
 

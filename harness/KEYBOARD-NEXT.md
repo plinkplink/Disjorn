@@ -27,30 +27,70 @@ All wired; her next restart picks it up:
 - Still open: MERGE-CONTRACT.md sign-off after she reads it herself (pinned,
   seq 63), before her first real diff.
 
-## 3. Metrics timers + broker config (WP-H12)
+## 3. Metrics timers + broker config (WP-H12) — DONE 2026-07-22 (Opus keyboard)
 
-- `sudo cp harness/metrics/disjorn-metrics-*.{service,timer} /etc/systemd/system/`
-  then `daemon-reload` + `enable --now` both timers.
-- Hand-merge (sudoedit) additive keys into /etc/disjorn-broker/broker.toml:
-  per-resident `retrieval_log`, `action_log`, `budget_json`, `spine_dir`;
-  `[budgets]` stays commented until real counts exist (instrument first).
-- Broker restart to load them (budgets/paths are construction-time, unlike
-  verbs.toml).
-- DECISION NEEDED — 0700 homes vs the plink-run build timer: either run
-  disjorn-metrics-build as root, or `setfacl` plink read on each resident's
-  retrieval log + .action-log. (metrics/INTEGRATION-NEEDS.md §3.)
+- Both units installed to /etc/systemd/system/, daemon-reloaded, and both
+  timers `enable --now`. Build timer runs every 10 min; daily #custodian line
+  fires 23:55 UTC.
+- Additive keys merged into /etc/disjorn-broker/broker.toml (root:plink 0640):
+  per-resident `retrieval_log`, `action_log`, `budget_json`, and `spine_dir`
+  for res-gable. `[budgets]` landed fully commented — OFF, as specced.
+- **The "DECISION NEEDED" dissolved — no root timer, no setfacl.** The
+  templates pointed at `/home/res-<r>/{memory,.action-log}`, which live inside
+  the 0700 home and are unreadable by plink. The real files are in the
+  `resident-home/` VOLUME (`/home/res-<r>/resident-home/...`), which is
+  world-readable, and plink already holds a `u:plink:--x` traverse ACL on the
+  home. Repointing there needs no privilege widening at all. metrics/
+  INTEGRATION-NEEDS.md §3 is closed at the least-privilege end.
+  NB the repo template `harness/broker/broker.toml` still carries the stale
+  paths — fix it there too or the next install regresses.
+- Verified live: all four sections populate (broker_actions, retrieval — her
+  chroma history back to April, spine — Gable's 6 entries/1 kernel, and
+  tool_actions with real per-session counts).
+- Still owed: a broker restart to load the construction-time keys (deferred to
+  the end of the session so it picks up the brokerd.py fixes at the same time).
 
-## 4. Consolidation schedule (WP-H8 — Claudette first, deliberately delayed)
+## 4. Consolidation schedule (WP-H8) — INSTALLED, DISABLED 2026-07-22
 
-- Mount `harness/consolidation/config/claudette.toml` (active=true) via the
-  resident-config dir; `pip install -e harness/consolidation` into her venv.
-- Nightly run: `python -m consolidation --resident claudette` (as the job's
-  systemd timer or broker-launched — plink's pick; NO Voyage key needed,
-  read-only, proposes-never-acts, posts via her file-proposal verb).
-- Suggested: enable the timer a few days from now so her retrieval logs
-  accumulate real reference counts first; running early just yields
-  low-evidence proposals for humans to reject.
-- Gable's config ships active=false; flips only after her runs prove out.
+**This section is now stale in its details — `harness/consolidation/
+INTEGRATION-NEEDS.md` §0 is the accurate source.** Summary of what is on disk:
+
+- Run shape decided: a **system** timer `disjorn-consolidation@.timer` with
+  `User=res-%i`, nightly 03:20 UTC + jitter. It must run as the resident uid
+  because the broker authenticates by SO_PEERCRED — as plink it would fail or
+  post under the wrong identity. A *system* unit was chosen over a res-*
+  **user** unit deliberately: a user unit's file lives in a directory the
+  resident owns and can rewrite, and the schedule is plink's lever. Sandboxed
+  with `ProtectHome=read-only`, `PrivateNetwork=yes`, `AF_UNIX` only.
+- Its own venv at `/usr/local/lib/disjorn/consolidation-venv` (NOT residency-venv
+  — chromadb drags in ~90 packages and that venv hosts the live summon path).
+- Config levers placed plink-owned at
+  `/srv/disjorn-resident-config/res-<r>/consolidation/<r>.toml`; verified the
+  resident can read but not modify them or write beside them.
+- **Shipped config paths were wrong and are fixed** — same stale-path class as
+  §3: they pointed at `/home/res-<r>/memory/...` instead of the real
+  `resident-home/` volume, and at a `repo/spine` that does not exist.
+- **A real bug was found and fixed doing this**: the job's headline "read-only"
+  property was false — chromadb's `PersistentClient` mutates the store at
+  *open* time, so a dry-run measurably modified Claudette's live episodic
+  memory. It now snapshots to a temp copy and opens that. Filed as KB-D8.
+- Also fixed: an absent spine dir raised `FileNotFoundError` (would have
+  crashed her first real run), and "no spine declared" is now explicitly
+  distinct from "configured but missing" so it can never become
+  "empty spine, evict everything".
+
+**The timer is installed and DISABLED.** Dry-run proven end-to-end as
+res-claudette (10 promote proposals, 0 evict — she has no on-disk spine, and
+the report header says so in words). Nothing posted; audit log confirms zero
+`file-proposal` calls today. One command to activate when ready:
+
+    sudo systemctl enable --now disjorn-consolidation@claudette.timer
+
+Keep the delay: her retrieval log needs to accumulate reference counts, and
+running early just yields low-evidence proposals for humans to reject.
+**Gable cannot run yet** (`active = false` anyway): he has no episodic store,
+and his spine is under `/home/plink`, which `res-*` cannot traverse — he needs
+the read-only spine mirror (see §5a) before his config will work.
 
 ## 5. Gable activation (WP-H9/H10 — no rush, order matters)
 

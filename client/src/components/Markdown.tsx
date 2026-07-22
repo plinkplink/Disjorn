@@ -113,9 +113,27 @@ interface Ctx {
 interface PatternDef {
   re: RegExp; // non-global: .exec() finds the earliest match
   render: (m: RegExpExecArray, ctx: Ctx, key: number) => ReactNode;
+  /** Same match, projected to bare text (see stripMarkdown). Required so a
+      new syntax can never be added to the renderer and forgotten here. */
+  plain: (m: RegExpExecArray) => string;
 }
 
 const inner = (m: RegExpExecArray): string => m[1] ?? "";
+
+/** Default plain projection: keep the contents, drop the markers. */
+const plainInner = (m: RegExpExecArray): string => stripInline(inner(m));
+
+/** A URL in a one-line preview is noise. Images announce themselves; anything
+    else collapses to its host, which is the readable part. */
+function plainUrl(raw: string): string {
+  const { url, tail } = trimUrl(raw);
+  if (isImageUrl(url)) return `(image)${tail}`;
+  try {
+    return `${new URL(url).host.replace(/^www\./, "")}${tail}`;
+  } catch {
+    return raw;
+  }
+}
 
 /* Order = priority when two patterns match at the same index (e.g. `**` must
    beat `*`, `__` must beat `_`). */
@@ -127,12 +145,15 @@ const PATTERNS: PatternDef[] = [
         {inner(m)}
       </code>
     ),
+    plain: (m) => inner(m), // code is literal — never re-parsed
   },
   {
     re: /\|\|([\s\S]+?)\|\|/,
     render: (m, ctx, key) => (
       <Spoiler key={key}>{parseInline(inner(m), ctx)}</Spoiler>
     ),
+    // A preview that spells out the spoiler is not a spoiler.
+    plain: () => "(spoiler)",
   },
   {
     // (?!\*) lets ***x*** resolve as bold(italic) instead of eating a star.
@@ -140,23 +161,28 @@ const PATTERNS: PatternDef[] = [
     render: (m, ctx, key) => (
       <strong key={key}>{parseInline(inner(m), ctx)}</strong>
     ),
+    plain: plainInner,
   },
   {
     // Discord-ism: double underscore is UNDERLINE, not bold.
     re: /__([\s\S]+?)__(?!_)/,
     render: (m, ctx, key) => <u key={key}>{parseInline(inner(m), ctx)}</u>,
+    plain: plainInner,
   },
   {
     re: /~~([\s\S]+?)~~/,
     render: (m, ctx, key) => <s key={key}>{parseInline(inner(m), ctx)}</s>,
+    plain: plainInner,
   },
   {
     re: /\*([^\s*][^*\n]*?)\*/,
     render: (m, ctx, key) => <em key={key}>{parseInline(inner(m), ctx)}</em>,
+    plain: plainInner,
   },
   {
     re: /(?<![A-Za-z0-9])_([^_\n]+)_(?![A-Za-z0-9])/,
     render: (m, ctx, key) => <em key={key}>{parseInline(inner(m), ctx)}</em>,
+    plain: plainInner,
   },
   {
     re: HTTP_URL_RE,
@@ -169,11 +195,13 @@ const PATTERNS: PatternDef[] = [
         </Fragment>
       );
     },
+    plain: (m) => plainUrl(m[0]),
   },
   {
     // Relative picker-file URLs (what the picker posts) render as images.
     re: PICKER_URL_RE,
     render: (m, _ctx, key) => <UrlNode key={key} url={m[0]} />,
+    plain: () => "(image)",
   },
 ];
 
@@ -185,6 +213,7 @@ function mentionDef(mentionRe: RegExp): PatternDef {
         {m[0]}
       </span>
     ),
+    plain: (m) => m[0], // "@Name" is already its own text
   };
 }
 
@@ -275,6 +304,56 @@ function parseBlocks(src: string, ctx: Ctx): ReactNode[] {
     rest = rest.slice(m.index + m[0].length).replace(/^\n/, "");
   }
   return out;
+}
+
+/* --------------------------------------------------- plain-text projection */
+
+/* The sidebar's last-message preview is one line in a narrow column: formatted
+   HTML would not fit and raw markers ("**bold**") are exactly the bug. So the
+   same syntax table that drives the renderer is walked a second time, with
+   every pattern collapsing to its text content. Output is a plain string —
+   callers hand it to React as a child (textContent), never as markup, so a
+   crafted snippet has no path to the DOM as HTML. */
+
+/** Inline pass: identical scan to parseInline, `plain` instead of `render`. */
+function stripInline(text: string): string {
+  const out: string[] = [];
+  let rest = text;
+  while (rest.length > 0) {
+    let best: { index: number; def: PatternDef; m: RegExpExecArray } | null =
+      null;
+    for (const def of PATTERNS) {
+      const m = def.re.exec(rest);
+      if (m !== null && (best === null || m.index < best.index)) {
+        best = { index: m.index, def, m };
+        if (m.index === 0) break; // PATTERNS is priority-ordered
+      }
+    }
+    if (best === null) {
+      out.push(rest);
+      break;
+    }
+    if (best.index > 0) out.push(rest.slice(0, best.index));
+    out.push(best.def.plain(best.m));
+    rest = rest.slice(best.index + best.m[0].length);
+  }
+  return out.join("");
+}
+
+const FENCE_G_RE = new RegExp(FENCE_RE.source, "g");
+
+/**
+ * Discord-flavored markdown -> single-line plain text (emphasis, code fences,
+ * quote markers and link URLs reduced to their content). Whitespace is
+ * collapsed; the result is safe to render as a text node and nothing else.
+ */
+export function stripMarkdown(content: string): string {
+  const unfenced = content.replace(
+    FENCE_G_RE,
+    (_all: string, _lang: string, code: string) => code,
+  );
+  const unquoted = unfenced.replace(/^>\s?/gm, "");
+  return stripInline(unquoted).replace(/\s+/g, " ").trim();
 }
 
 /* ------------------------------------------------------------- component */

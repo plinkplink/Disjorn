@@ -5,26 +5,44 @@
 # on. Claudette activates first (her request); Gable follows once her run has
 # proven itself.
 #
-# Mounted read-only from outside his container in production.
+# Placed read-only from outside resident control in production, at
+#   /srv/disjorn-resident-config/res-gable/consolidation/gable.toml
+# and reached via CONSOLIDATION_CONFIG_DIR. Nothing here is resident-writable.
+#
+# NOT YET RUNNABLE ON THIS HOST (2026-07-22) — two blockers, both deliberate:
+#   1. He has no episodic store yet: /home/res-gable/resident-home/memory is
+#      empty (no chroma_data). Consolidation refuses to run rather than let
+#      chromadb create one — it never writes.
+#   2. His spine dir (below) is plink-owned under /home/plink, which res-*
+#      users cannot traverse. Before activation it needs a res-gable-readable
+#      read-only mirror (the /srv/disjorn-ro pattern), and this path updated
+#      to point at the mirror. Do NOT solve this by loosening permissions on
+#      /home/plink/bots/fable/spine — it is the protected authorization
+#      surface his kernel loads from and is resident-unwritable BY DESIGN.
 
 resident = "gable"
 active = false
 
 [episodic]
-data_dir = "/home/res-gable/memory/chroma_data"
+data_dir = "/home/res-gable/resident-home/memory/chroma_data"
 collection = "gable_memory"
 
 [retrieval_log]
-path = "/home/res-gable/memory/memory_retrieval.jsonl"
+path = "/home/res-gable/resident-home/memory/memory_retrieval.jsonl"
 
 [spine]
-dir = "/home/res-gable/repo/spine"
+# Gable IS the resident with a real on-disk spine (6 entries). This is the
+# true path; see blocker 2 above about readability from the res-gable uid.
+dir = "/home/plink/bots/fable/spine"
 
 [consolidation]
 soft_target_spine_size = 60
 window_days = 30
 promote_min_references = 3
 evict_max_references = 0
+# LOAD-BEARING while INTEGRATION-NEEDS §1 is open (spine reads unlogged, so
+# every entry reads as unreferenced). His spine is 6 entries of kernel/
+# authorization material — do not lower this.
 min_spine_age_days = 30
 exclude_kernel = true
 max_promotions = 10
@@ -32,4 +50,5 @@ constraint_tags = ["lesson", "why", "promise", "constraint", "boundary", "rule"]
 constraint_keywords = ["never", "always", "because", "must not", "do not", "learned", "the reason"]
 
 [broker]
-cli = "/usr/local/bin/broker"
+# Host-side res-readable mirror, not the in-container /usr/local/bin/broker.
+cli = "/srv/disjorn-ro/harness/cc/broker-cli/broker"

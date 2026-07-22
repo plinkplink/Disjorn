@@ -6,7 +6,9 @@ inputs the production way (from cfg, with a NullEmbedder) to prove the real read
 path embeds nothing.
 """
 
+import hashlib
 import io
+from pathlib import Path
 
 import pytest
 
@@ -49,6 +51,35 @@ def test_run_mutates_nothing(store, spine_dir, log_path):
     assert store.count() == before_count
     assert {p.name: p.read_bytes() for p in spine_dir.glob("*.md")} == before_spine
     assert log_path.read_bytes() == before_log
+
+
+def test_live_episodic_dir_is_not_even_touched(store, spine_dir, log_path):
+    """Stronger than 'the data is unchanged': the resident's chroma dir must be
+    BYTE-identical after a production-shaped run.
+
+    chromadb's PersistentClient rewrites chroma.sqlite3 and the HNSW segment
+    files just by opening a store — before any consolidation code runs, so
+    NullEmbedder cannot stop it. Consolidation therefore reads a throwaway
+    snapshot. This test is the tripwire on that: it fails the moment anyone
+    points the pass back at the live directory.
+    """
+    _seed(store, spine_dir, log_path)
+    data_dir = Path(store.data_dir)
+
+    def fingerprint():
+        return {
+            str(p.relative_to(data_dir)): (p.stat().st_size, hashlib.md5(p.read_bytes()).hexdigest())
+            for p in sorted(data_dir.rglob("*")) if p.is_file()
+        }
+
+    before = fingerprint()
+    assert before  # the fixture store really is on disk
+
+    cfg = make_config(store=store, spine_dir=spine_dir, log_path=log_path)
+    report = build_proposals(cfg, now=FIXED_NOW)  # store=None -> built from cfg
+    assert report.proposals
+
+    assert fingerprint() == before
 
 
 def test_null_embedder_refuses_to_embed():

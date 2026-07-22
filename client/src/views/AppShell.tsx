@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { ApiError, createChannel, listMembers } from "../api";
 import { Avatar } from "../components/Avatar";
 import { CheatSheet } from "../components/CheatSheet";
+import { stripMarkdown } from "../components/Markdown";
 import { SearchBar } from "../components/SearchBar";
 import { UserPanel } from "../components/UserPanel";
 import {
@@ -42,6 +43,13 @@ function ChannelRow({
   ]
     .filter(Boolean)
     .join(" ");
+  // The server's snippet is the raw message content; markdown markers are
+  // noise at preview size, so it is flattened to text (never markup — this is
+  // user/bot-authored content and it goes in as a React text child).
+  const preview =
+    channel.last_message !== null
+      ? stripMarkdown(channel.last_message.snippet)
+      : "";
   return (
     <button className={classes} onClick={() => onSelect(channel.id)}>
       {isHashChannel ? (
@@ -49,12 +57,19 @@ function ChannelRow({
       ) : (
         channel.dm_user_id !== null && <PresenceDot userId={channel.dm_user_id} />
       )}
-      <span className="name">{channel.name ?? "unnamed"}</span>
-      {channel.unread > 0 && (
-        <span className="unread-badge">
-          {channel.unread > 99 ? "99+" : channel.unread}
+      <span className="channel-item-text">
+        <span className="channel-item-top">
+          <span className="name">{channel.name ?? "unnamed"}</span>
+          {channel.unread > 0 && (
+            <span className="unread-badge">
+              {channel.unread > 99 ? "99+" : channel.unread}
+            </span>
+          )}
         </span>
-      )}
+        {preview.length > 0 && (
+          <span className="channel-preview">{preview}</span>
+        )}
+      </span>
     </button>
   );
 }

@@ -5,6 +5,7 @@
 import type {
   AvatarUploadResponse,
   BackfillItem,
+  Bot,
   ChannelListItem,
   ChannelMemberOut,
   DmResponse,
@@ -114,6 +115,32 @@ export function markRead(
 
 export function listMembers(channelId: number): Promise<ChannelMemberOut[]> {
   return request<ChannelMemberOut[]>("GET", `/channels/${channelId}/members`);
+}
+
+/* ---- bots ---- */
+
+/** Every bot on the server (public shape), for the "add a bot" picker. */
+export function listBots(): Promise<Bot[]> {
+  return request<Bot[]>("GET", "/bots");
+}
+
+/**
+ * Add a bot to a channel. Participant-gated server-side — a DM only accepts
+ * this from one of its two members, and that gate, not this call site, is the
+ * privacy wall. 403 surfaces as ApiError.detail.
+ */
+export function addChannelBot(
+  channelId: number,
+  botId: number,
+): Promise<{ ok: boolean; added: boolean }> {
+  return request("POST", `/channels/${channelId}/bots`, { bot_id: botId });
+}
+
+export function removeChannelBot(
+  channelId: number,
+  botId: number,
+): Promise<{ ok: boolean; removed: boolean }> {
+  return request("DELETE", `/channels/${channelId}/bots/${botId}`);
 }
 
 /* ---- messages ---- */
@@ -322,7 +349,13 @@ export function putNotifyPrefs(prefs: NotifyPrefs): Promise<NotifyPrefs> {
 /* ---- avatars ---- */
 
 /* Cache-buster bumped after an avatar upload so every <img> rendered from
-   then on bypasses the browser's cached copy of /avatars/{id}. */
+   then on bypasses the browser's cached copy of /avatars/{id}. Bot avatars
+   ride the same counter: their path is equally stable across re-uploads
+   (avatars/bot_{id}.webp) and the server serves both with the same short
+   max-age, so one knob is enough. Note the client has no bot-avatar upload
+   surface (that is admin-side), so within a session the counter only advances
+   when the viewer changes their OWN avatar; a bot repainted out of band shows
+   through when the server's max-age expires. */
 let avatarVersion = 0;
 
 export function bumpAvatarVersion(): void {
@@ -334,6 +367,14 @@ export function avatarUrl(userId: number): string {
   return avatarVersion > 0
     ? `/avatars/${userId}?v=${avatarVersion}`
     : `/avatars/${userId}`;
+}
+
+/** Unsigned bot avatar URL (mirrors /avatars/{user_id}); 404s when unset, so
+    callers render it behind an onError fallback rather than pre-checking. */
+export function botAvatarUrl(botId: number): string {
+  return avatarVersion > 0
+    ? `/bots/${botId}/avatar?v=${avatarVersion}`
+    : `/bots/${botId}/avatar`;
 }
 
 /** POST /me/avatar (multipart). Server converts to 256px WebP. */
