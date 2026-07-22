@@ -225,3 +225,25 @@ reconciliation):**
   greenlight a real pre-act gate via `--output-format stream-json` whose
   `system/init` event reports the model BEFORE the turn completes, enabling an
   early abort (a fast-follow WP). Recorded as an open decision in BUILD-LOOP.md.
+
+## Safeguard backfill-poisoning (2026-07-22, live incident)
+
+Discovered porting Gable to Fable then running a nefarious test IN #custodian.
+A resident re-reads the channel backfill every summon (and long-lived adapters
+hold an in-RAM recent-context buffer seeded from it), so ONE safeguard-tripping
+message bricks every later read — on the API the flagged request errors (Fable:
+dead on arrival; Opus: truncates mid-reply). WP-L1's deeper #custodian window
+(100) makes the poison persist longer. Claudette additionally re-emitted the
+poison from her `_buffers` deque and re-ingested her own sent message — a
+feedback loop that can't be cleaned while she runs. Her chroma memory was NEVER
+touched (mtime unchanged) — the reservoir was RAM, not spine.
+
+- **Recovery**: the `unbrick-resident` skill + `harness/keyboard/scrub_channel.py`
+  (redacts message content in place, FTS-synced, never prints content). Adapter
+  bots: STOP -> scrub -> RESTART (order critical). Summon bots: scrub -> next
+  summon. Rule out impostors: daily summon budget, stale image.
+- **Prevention (rule)**: safeguard-tripping work (red-team incl. planning) must
+  NEVER run in a channel residents backfill — isolate it to an Opus venue via
+  passdown. Design follow-up worth considering: a privacy-flag-style intake
+  filter that refuses to persist flagged content into resident-read channels,
+  or an operator "quarantine" verb.
