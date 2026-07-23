@@ -40,24 +40,22 @@ git rm 00-kernel.md
 cp "$PROPOSED/00-nonnegotiables.md" 00-nonnegotiables.md
 cp "$PROPOSED/05-bearings.md"       05-bearings.md
 
-# 2. Mark 50-genesis resident-only. It is biography and the seat end-state
-#    keeps it OUT of the build seat; the seat mechanism reads this from
-#    frontmatter, so the one-line addition below is REQUIRED for the build
-#    seat to skip genesis. (10/20/30/40 need NO change — absent `seats:`
-#    already means both seats, which is what the operational set wants.)
+# 2. Declare seats on EVERY remaining entry — redline 1 (2026-07-23): seat
+#    membership is DECLARED, never inferred. The loader now REFUSES an entry
+#    with no `seats:` key (loud error, names the file), so this step is not
+#    optional and there is no absent-means-both default any more.
 #
-#    Edit 50-genesis.md frontmatter from:
-#        ---
-#        name: genesis
-#        ---
-#    to:
-#        ---
-#        name: genesis
+#    Add to the frontmatter of 10-people.md, 20-load-bearing-walls.md,
+#    30-build-rhythm.md, 40-cautions.md (the operational set):
+#        seats: [resident, build]
+#    Add to the frontmatter of 50-genesis.md (biography):
 #        seats: [resident]
-#        ---
+#    (00-nonnegotiables.md and 05-bearings.md arrive from $PROPOSED with
+#    their declarations already in place.)
 
-git add 00-nonnegotiables.md 05-bearings.md 50-genesis.md
-git commit -m "spine: split 00-kernel -> 00-nonnegotiables (both seats) + 05-bearings (resident); genesis resident-only"
+git add 00-nonnegotiables.md 05-bearings.md 10-people.md \
+        20-load-bearing-walls.md 30-build-rhythm.md 40-cautions.md 50-genesis.md
+git commit -m "spine: split 00-kernel -> 00-nonnegotiables (both seats) + 05-bearings (resident); declare seats on every entry (redline 1)"
 ```
 
 ## Verify the split (before publishing the mirror)
@@ -66,8 +64,9 @@ The seat loader lives in `harness/house_memory`. A quick check that the split
 spine assembles the intended sets (run from the Disjorn repo, with the venv):
 
 ```sh
+PYTHONPATH=/home/plink/Disjorn/Disjorn/harness/house_memory \
 /home/plink/Disjorn/Disjorn/server/.venv/bin/python - <<'PY'
-from house_memory import Spine
+from house_memory.spine import Spine
 s = Spine("/home/plink/bots/fable/spine")
 res = [e.name for e in s.entries_for_seat("resident")]
 bld = [e.name for e in s.entries_for_seat("build")]
@@ -76,9 +75,24 @@ print("build:   ", bld)   # expect nonnegotiables, people, load-bearing-walls,
                           #        build-rhythm, cautions — NO bearings, NO genesis
 assert "bearings" not in bld and "genesis" not in bld
 assert s.assemble_for_seat("resident") == s.load_kernel()  # zero-regression
+# redline 1 sanity: a spine entry with no `seats:` declaration must refuse to
+# load at all, so reaching here proves every entry is explicitly declared.
 print("OK")
 PY
 ```
+
+Note the loader import: `house_memory.spine` via PYTHONPATH, so the check runs
+the REPO's seat-aware loader without needing chroma (the package `__init__`
+pulls in the embedding stack) and without depending on what the server venv
+has installed.
+
+**Deploy ordering (redline 1 makes this matter):** the new loader REFUSES a
+spine whose entries lack `seats:` declarations, and the OLD loader ignores
+`seats:` entirely (it would silently bake the pre-split kernel shape). So sync
+`/usr/local/lib/disjorn/house_memory` from the merged branch FIRST, then
+commit the declared spine and publish the mirror. In the gap a summon fails
+LOUD (bootstrap exit 2, the adapter posts its error line) rather than running
+on a silently-partial spine — that ordering is deliberate; do not reverse it.
 
 ## Publish the mirror
 

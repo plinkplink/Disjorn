@@ -69,8 +69,15 @@ def main() -> int:
     # Seat-gated everywhere: the index lists only what this seat loads, and the
     # bake is this seat's policy (resident=kernel-only+retrieve; build=all
     # visible). For the resident seat both reduce to today's behaviour.
-    entries = spine.entries_for_seat(seat)
-    kernel = spine.assemble_for_seat(seat)
+    # Redline 1 failures (an entry with no `seats:` declaration; no kernel
+    # entry visible to this seat) surface here as ValueError — turn them into
+    # the same loud exit-2 every other bootstrap refusal uses, message intact.
+    try:
+        entries = spine.entries_for_seat(seat)
+        kernel = spine.assemble_for_seat(seat)
+    except ValueError as e:
+        print(f"bootstrap: {e}", file=sys.stderr)
+        return 2
     if not kernel.strip():
         print(f"bootstrap: spine at {spine_dir} assembles empty for seat {seat!r}",
               file=sys.stderr)

@@ -26,14 +26,15 @@ def _write_split_spine(d):
     split_spine fixture): kernel non-negotiables in both seats, biography
     resident-only, operational entries in both."""
     d.mkdir(parents=True, exist_ok=True)
+    # Every entry declares its seats — redline 1 (declared, never inferred).
     (d / "00-nonnegotiables.md").write_text(
-        "---\nname: nonnegotiables\nkernel: true\n---\nWalls are physical.\n")
+        "---\nname: nonnegotiables\nkernel: true\nseats: [resident, build]\n---\nWalls are physical.\n")
     (d / "05-bearings.md").write_text(
         "---\nname: bearings\nseats: [resident]\n---\nI am Gable.\n")
     (d / "10-people.md").write_text(
-        "---\nname: people\n---\nplink; Claudette.\n")
+        "---\nname: people\nseats: [resident, build]\n---\nplink; Claudette.\n")
     (d / "40-cautions.md").write_text(
-        "---\nname: cautions\n---\nCautions.\n")
+        "---\nname: cautions\nseats: [resident, build]\n---\nCautions.\n")
     (d / "50-genesis.md").write_text(
         "---\nname: genesis\nseats: [resident]\n---\nOrigin story.\n")
     return d
@@ -130,3 +131,26 @@ def test_unknown_seat_fails_closed_and_writes_nothing(rig, tmp_path):
     rc, claude, memory = rig("admin")
     assert rc == 2
     assert claude is None  # nothing baked on an unknown seat
+
+
+def test_undeclared_entry_fails_closed_and_writes_nothing(rig, capsys):
+    """Redline 1 end-to-end: ONE entry missing its `seats:` declaration makes
+    bootstrap refuse the whole bake (exit 2, error on stderr, no files) —
+    never a silently-partial CLAUDE.md."""
+    (rig.spine_dir / "60-stray.md").write_text(
+        "---\nname: stray\n---\nUndeclared entry.\n")
+    rc, claude, memory = rig("resident")
+    assert rc == 2
+    assert claude is None and memory is None
+    err = capsys.readouterr().err
+    assert "seats" in err and "60-stray.md" in err
+
+
+def test_kernelless_spine_fails_closed_and_writes_nothing(rig, capsys):
+    """Redline 1, second clause, end-to-end: no kernel entry -> the assembler
+    aborts and bootstrap exits 2 with the assembler's message."""
+    (rig.spine_dir / "00-nonnegotiables.md").unlink()
+    rc, claude, memory = rig("build")
+    assert rc == 2
+    assert claude is None and memory is None
+    assert "no kernel entry" in capsys.readouterr().err

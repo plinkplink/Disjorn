@@ -13,7 +13,7 @@ open with simple frontmatter:
 Recognized keys:
   `name`   defaults to the filename stem.
   `kernel` true/false, defaults false.
-  `seats`  which SEATS load this entry (see below); defaults to ALL seats.
+  `seats`  which SEATS load this entry (see below). REQUIRED — see redline.
 Unknown keys are preserved in `SpineEntry.meta`. No YAML dependency — key:
 value lines only.
 
@@ -26,11 +26,15 @@ the same thing:
                          knowledge travels, biography doesn't": a build seat
                          needs the guardrails and the map of the house, not
                          the autobiography.
-`seats:` on an entry declares which seats load it. Absent => BOTH seats (the
-documented default; house knowledge travels by default, only biography is
-marked down to `[resident]`). An UNKNOWN seat name — in frontmatter or passed
-to a query — is an ERROR, never a silent load-nothing/load-everything: this
-surface fails closed and loud.
+`seats:` on an entry declares which seats load it, and it is REQUIRED — seat
+membership is DECLARED, never INFERRED (Gable's review redline 1, 2026-07-23;
+an earlier draft defaulted absent to both, and he rejected that inference: a
+silently-included entry is exactly the partial-him this surface must never
+emit). A MISSING `seats:` key, an UNKNOWN seat name, or an EMPTY declaration
+— in frontmatter or passed to a query — is an ERROR, never a silent
+load-nothing/load-everything: this surface fails closed and loud. The same
+redline makes assembly refuse a spine whose kernel entry is absent for the
+queried seat (see assemble_for_seat).
 
 READ-ONLY by design: git operations (the witnessed-self-edit mechanism) are
 WP-H8 consolidation tooling's job, not this library's. Kernel assembly into
@@ -53,12 +57,6 @@ RESIDENT_SEAT = "resident"
 BUILD_SEAT = "build"
 SEATS: frozenset[str] = frozenset({RESIDENT_SEAT, BUILD_SEAT})
 
-# A `seats:` key that is ABSENT means the entry loads in every seat. This is the
-# deliberate default — operational/house knowledge travels; only biography is
-# explicitly narrowed to `[resident]`. (An entry that is PRESENT-but-empty is a
-# footgun, not this default, and _parse_seats rejects it.)
-DEFAULT_SEATS: tuple[str, ...] = (RESIDENT_SEAT, BUILD_SEAT)
-
 
 @dataclass
 class SpineEntry:
@@ -67,10 +65,23 @@ class SpineEntry:
     body: str
     path: Path
     meta: dict = field(default_factory=dict)
-    # Which seats load this entry. Parsed from `seats:` frontmatter; defaults
-    # to all seats when the key is absent. Order-preserving list, not a set, so
-    # a diff of the spine reads the way the author wrote it.
-    seats: list[str] = field(default_factory=lambda: list(DEFAULT_SEATS))
+    # Which seats load this entry. Parsed from `seats:` frontmatter, which is
+    # REQUIRED (redline 1: declared, never inferred) — there is deliberately no
+    # default here, and __post_init__ refuses an empty or unknown declaration
+    # so even a hand-built entry cannot dodge the rule. Order-preserving list,
+    # not a set, so a diff of the spine reads the way the author wrote it.
+    seats: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.seats:
+            raise ValueError(
+                f"SpineEntry {self.name!r}: no seats declared — seat membership "
+                f"is declared, never inferred")
+        unknown = [s for s in self.seats if s not in SEATS]
+        if unknown:
+            raise ValueError(
+                f"SpineEntry {self.name!r}: unknown seat(s) {unknown}; "
+                f"valid seats: {sorted(SEATS)}")
 
     def loads_in(self, seat: str) -> bool:
         """True if `seat` loads this entry. Caller is responsible for having
@@ -139,11 +150,11 @@ class Spine:
         return seat
 
     def entries_for_seat(self, seat: str) -> list[SpineEntry]:
-        """All entries THIS seat loads, in filename order.
-
-        resident => every entry (resident sees the whole spine).
-        build    => only entries whose `seats:` includes `build` (the
-                    operational set; biography, marked `[resident]`, is absent).
+        """All entries THIS seat loads — those whose declared `seats:` include
+        it — in filename order. (In Gable's spine of record every entry
+        declares `resident`, so the resident seat sees the whole spine;
+        biography declares ONLY `[resident]`, so the build seat gets the
+        operational set. Both facts are read off declarations, never assumed.)
         This gates BOTH the CLAUDE.md bake (via assemble_for_seat) AND the
         MEMORY.md index (bootstrap.py), so a build seat is never even told a
         resident-only entry exists."""
@@ -177,9 +188,21 @@ class Spine:
         build seat's declared set actually present. Left for review: whether a
         build seat should instead gain a retrieval loop of its own (then it
         could bake kernel-only like the resident). That is a bigger change than
-        this spec authorises; flagged, not taken."""
+        this spec authorises; flagged, not taken.
+
+        REFUSES (redline 1, second clause) when no KERNEL entry is visible to
+        `seat`: a spine without its `00`/kernel entry must abort assembly, not
+        emit a kernel-less bake. The bootstrap-level "assembled empty" check
+        is not enough — a build seat would happily bake 10/20/30/40 with the
+        non-negotiables absent, which is exactly the partial-him this wall
+        exists to prevent. The assembler itself fails, so every caller is
+        covered."""
         self._require_seat(seat)
         entries = self.entries_for_seat(seat)
+        if not any(e.kernel for e in entries):
+            raise ValueError(
+                f"spine at {self.spine_dir} has no kernel entry visible to "
+                f"seat {seat!r} — refusing to assemble a partial spine")
         if seat == BUILD_SEAT:
             bodies = [e.body for e in entries]                 # bake all visible
         else:  # RESIDENT_SEAT: kernel-only, retrieve the rest (today's model)
@@ -205,14 +228,20 @@ def _parse_seats(raw) -> list[str]:
 
     Accepts the natural spellings, since frontmatter values are bare strings
     (no YAML): `[resident, build]`, `resident, build`, or a single `resident`.
-      absent (None)     -> DEFAULT_SEATS  (both; house knowledge travels)
+      absent (None)     -> ValueError     (redline 1: seat membership is
+                                           DECLARED, never inferred — an
+                                           undeclared entry must fail loud,
+                                           not silently ride every seat)
       present but empty  -> ValueError     (an entry loading in no seat is a
-                                            footgun, not the default)
+                                            footgun, not a default)
       any unknown name   -> ValueError     (fail closed: never silently drop a
                                             seat or leak biography to a build)
     Order is preserved so the spine diff reads as authored."""
     if raw is None:
-        return list(DEFAULT_SEATS)
+        raise ValueError(
+            "seats: missing — seat membership is declared, never inferred; "
+            "every spine entry must carry an explicit `seats: [...]` "
+            "declaration (Gable's review redline 1, 2026-07-23)")
     text = str(raw).strip()
     if text.startswith("[") and text.endswith("]"):
         text = text[1:-1]

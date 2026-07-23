@@ -16,7 +16,6 @@ from house_memory.schema import (
 )
 from house_memory.spine import (
     BUILD_SEAT,
-    DEFAULT_SEATS,
     RESIDENT_SEAT,
     SEATS,
     Spine,
@@ -38,7 +37,6 @@ __all__ = [
     "SEATS",
     "RESIDENT_SEAT",
     "BUILD_SEAT",
-    "DEFAULT_SEATS",
     "migrate",
     "parallel_diff",
     "MigrationReport",
