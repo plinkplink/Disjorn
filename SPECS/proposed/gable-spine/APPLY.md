@@ -64,9 +64,15 @@ The seat loader lives in `harness/house_memory`. A quick check that the split
 spine assembles the intended sets (run from the Disjorn repo, with the venv):
 
 ```sh
-PYTHONPATH=/home/plink/Disjorn/Disjorn/harness/house_memory \
-/home/plink/Disjorn/Disjorn/server/.venv/bin/python - <<'PY'
-from house_memory.spine import Spine
+python3 - <<'PY'
+import sys
+# Import spine.py DIRECTLY, not via the package: `from house_memory.spine
+# import ...` executes the package __init__, which pulls in the chroma/voyage
+# embedding stack — exactly the dependency a bare python3 doesn't have.
+# Same direct-file trick bootstrap.py uses, same reason. (Gable hit the
+# package-import failure verifying this doc from his seat, 2026-07-23.)
+sys.path.insert(0, "/home/plink/Disjorn/Disjorn/harness/house_memory/house_memory")
+from spine import Spine
 s = Spine("/home/plink/bots/fable/spine")
 res = [e.name for e in s.entries_for_seat("resident")]
 bld = [e.name for e in s.entries_for_seat("build")]
@@ -81,10 +87,9 @@ print("OK")
 PY
 ```
 
-Note the loader import: `house_memory.spine` via PYTHONPATH, so the check runs
-the REPO's seat-aware loader without needing chroma (the package `__init__`
-pulls in the embedding stack) and without depending on what the server venv
-has installed.
+The direct-file import means the check runs the REPO's seat-aware loader on a
+bare `python3` — no venv, no chroma — and cannot silently pick up a stale
+installed copy of the package.
 
 **Deploy ordering (redline 1 makes this matter):** the new loader REFUSES a
 spine whose entries lack `seats:` declarations, and the OLD loader ignores
