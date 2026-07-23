@@ -84,7 +84,7 @@ progress. One build pass.
 - **Confirmed at**: 2026-07-23
 
 ## Status
-`confirmed`
+`applied-live`
 <!-- confirmed 2026-07-23 (keyboard). Build lands on branch
 loop/2026-07-22-gable-spine-ro-cutover-seat-split for Gable's review — his rule:
 the diff is the authorization, apply-or-reject. NOT merged to the live spine by
@@ -166,3 +166,26 @@ build** only:
   here — it is Gable's maiden proposal through the new diff path.
 Lands on a branch; Gable reviews the diff; plink applies to the canonical spine
 and runs `06-spine-mirror.sh`. Nothing self-applies.
+
+## Apply record — 2026-07-23, keyboard (BuildGable seat)
+
+Gable's ruling: **APPLY**, delivered via manual keyboard summon, witnessed in
+#custodian seq 303 — his first ruling made against the live branch (mirror now
+carries branches; he verified the redline-1 closure and byte-fidelity with his
+own hands). Redline-1 fix: f4f84e7. His verify-snippet nit (package-__init__
+chroma import): ea2ad35. Executed in the redline-mandated order:
+
+1. branch merged to main: 293be57
+2. loader deployed FIRST (/usr/local/lib/disjorn/house_memory + both wrappers)
+3. canonical spine commit 163b1ce — split + explicit seats on every entry
+4. seat verify OK (resident=7 entries, build=5, zero-regression assert)
+5. mirror published, 00-kernel.md pruned; unwritable from res-gable confirmed
+6. /srv/disjorn-ro fast-forwarded to 293be57
+7. live in-container bootstrap: resident kernel 1185 chars / 7 indexed;
+   build 7581 chars / 5 indexed, stamped `(seat: build)`
+
+**Maiden proposal APPLIED and LIVE**: substrate-honesty bullet, his literal
+sentence from seq 303, byte-checked unwrapped against his text, spine commit
+7f72d43, mirror refreshed, md5 canonical == mirror. Per his condition it is
+now live: applied, refresh run. His post-refresh verification from his own
+seat is the remaining (his-side) step.
