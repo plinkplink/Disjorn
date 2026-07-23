@@ -14,7 +14,14 @@ from house_memory.schema import (
     normalize_tag,
     normalize_tags,
 )
-from house_memory.spine import Spine, SpineEntry
+from house_memory.spine import (
+    BUILD_SEAT,
+    DEFAULT_SEATS,
+    RESIDENT_SEAT,
+    SEATS,
+    Spine,
+    SpineEntry,
+)
 from house_memory.store import MemoryStore
 
 __all__ = [
@@ -28,6 +35,10 @@ __all__ = [
     "read_records",
     "Spine",
     "SpineEntry",
+    "SEATS",
+    "RESIDENT_SEAT",
+    "BUILD_SEAT",
+    "DEFAULT_SEATS",
     "migrate",
     "parallel_diff",
     "MigrationReport",

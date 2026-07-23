@@ -717,6 +717,66 @@ def test_detached_run_gets_no_cidfile(rig, script):
     assert "--cidfile" not in argv
 
 
+# ── the seat (spec 2026-07-22 seat-split) ────────────────────────────────
+#
+# One spine of record serves two seats. The wrapper decides which: a summon
+# (run-resident.sh) is the resident seat and loads the whole spine; a detached
+# build (run-build.sh) is the build seat and loads the operational set only,
+# never biography. bootstrap.py reads RESIDENT_SEAT inside the container, so
+# the wrapper's only job is to put the right value there. It is passed by
+# NAME=VALUE (not a secret), and it must win over any /config env-file value —
+# the seat is a property of which wrapper launched, never of per-resident
+# config.
+
+EXPECTED_SEAT = {"run-resident.sh": "resident", "run-build.sh": "build"}
+
+
+@pytest.mark.parametrize("script", ALL)
+def test_wrapper_sets_its_seat_in_the_container_env(rig, script):
+    proc, argv, environ, envfile = rig(script, "BROKER_DISABLE=1\n")
+    assert proc.returncode == 0, proc.stderr
+    cenv = container_env(argv, environ, envfile)
+    assert cenv["RESIDENT_SEAT"] == EXPECTED_SEAT[script]
+
+
+@pytest.mark.parametrize("script", ALL)
+def test_seat_is_passed_by_name_value_not_via_env_file(rig, script):
+    """It rides `-e RESIDENT_SEAT=<seat>` in argv (harmless — not a secret),
+    so the value is fixed by the wrapper, not read from the filtered env-file."""
+    proc, argv, environ, envfile = rig(script, "BROKER_DISABLE=1\n")
+    joined = list(zip(argv, argv[1:]))
+    assert ("-e", f"RESIDENT_SEAT={EXPECTED_SEAT[script]}") in joined
+    assert "RESIDENT_SEAT" not in envfile
+
+
+@pytest.mark.parametrize("script", ALL)
+def test_wrapper_seat_wins_over_an_env_file_value(rig, script):
+    """A /config env file must not be able to reclassify the seat: podman
+    honours the last --env/--env-file for a given name, and the wrapper's
+    `-e RESIDENT_SEAT` is emitted AFTER the credential block's --env-file."""
+    # Point the env file at the WRONG seat; the wrapper's own value must win.
+    wrong = "build" if EXPECTED_SEAT[script] == "resident" else "resident"
+    proc, argv, environ, envfile = rig(
+        script, f"BROKER_DISABLE=1\nRESIDENT_SEAT={wrong}\n")
+    assert proc.returncode == 0, proc.stderr
+    env_file_idx = argv.index("--env-file")
+    seat_idx = argv.index(f"RESIDENT_SEAT={EXPECTED_SEAT[script]}")
+    assert seat_idx > env_file_idx, "wrapper seat must be emitted after --env-file"
+    cenv = container_env(argv, environ, envfile)
+    assert cenv["RESIDENT_SEAT"] == EXPECTED_SEAT[script]
+
+
+def test_the_two_wrappers_declare_different_seats():
+    """The seat line is the ONE line that must differ between the wrappers —
+    it is deliberately outside every byte-identical block."""
+    res = (CC_DIR / "run-resident.sh").read_text()
+    bld = (CC_DIR / "run-build.sh").read_text()
+    assert 'args+=( -e "RESIDENT_SEAT=resident" )' in res
+    assert 'args+=( -e "RESIDENT_SEAT=build" )' in bld
+    assert 'RESIDENT_SEAT=build' not in res
+    assert 'RESIDENT_SEAT=resident' not in bld
+
+
 # ── drift guard ──────────────────────────────────────────────────────────
 
 BLOCK_RE = re.compile(

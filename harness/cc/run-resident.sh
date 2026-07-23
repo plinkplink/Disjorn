@@ -294,6 +294,20 @@ fi
 unset _cred_value _oauth_value _apikey_value
 # ── END credential block ─────────────────────────────────────────────────
 
+# SEAT (spec 2026-07-22 seat-split). This wrapper is the RESIDENT seat: a
+# summon loads the whole spine, biography included. bootstrap.py reads
+# RESIDENT_SEAT inside the container and gates both the CLAUDE.md bake and the
+# MEMORY.md index on it; 'resident' is also its default, so this line is
+# belt-and-braces, not load-bearing — but it is set EXPLICITLY so the two
+# wrappers say plainly which seat they are, and so a stray RESIDENT_SEAT in a
+# unit's Environment= cannot silently reclassify a summon. Passed AFTER the
+# credential block (whose --env-file is already in `args`), so the wrapper's
+# seat wins over any value a /config env file might carry: the seat is a
+# property of WHICH wrapper launched, never of per-resident config. This is
+# deliberately NOT inside a byte-identical block — it is the one line that
+# MUST differ from run-build.sh.
+args+=( -e "RESIDENT_SEAT=resident" )
+
 # Per-summon sessions feed the prompt on stdin; podman drops stdin unless
 # -i is passed. Opt-in (RESIDENT_STDIN=1 in the summon unit) so long-lived
 # residence containers (stdin=/dev/null under systemd) keep their exact
