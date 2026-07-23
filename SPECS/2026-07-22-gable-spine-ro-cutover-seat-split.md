@@ -189,3 +189,19 @@ sentence from seq 303, byte-checked unwrapped against his text, spine commit
 7f72d43, mirror refreshed, md5 canonical == mirror. Per his condition it is
 now live: applied, refresh run. His post-refresh verification from his own
 seat is the remaining (his-side) step.
+
+## Bearings regression + fix — 2026-07-23, post-apply (Gable's error report, seq 307)
+
+His own-seat verification confirmed the maiden bullet byte-for-byte, then
+flagged unprompted: the split left `05-bearings` un-kernel-flagged, so the
+resident bake silently dropped identity/Role/Bearings (2261-byte pre-split
+kernel → 1540 post). Spec error, his own drafting; every check passed because
+both checks were mechanism-vs-itself, and the gap between them is exactly
+where the artifact shrank. STANDING LESSON (applies to Claudette's build):
+bake-affecting acceptance is ARTIFACT-VS-YESTERDAY, never mechanism-vs-itself.
+
+Fix: his exact diff (`kernel: true` into 05-bearings frontmatter), applied
+through the edit path, spine commit 4239005, mirror refreshed, md5 verified.
+Acceptance per his rule: baked artifact == 00 body + blank + 05 body (2563
+chars) — holds. Build seat untouched. Docstring amendments + proposed-dir
+historical marker: ee9afe5.
