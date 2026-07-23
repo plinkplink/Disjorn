@@ -90,6 +90,71 @@ loop/2026-07-22-gable-spine-ro-cutover-seat-split for Gable's review — his rul
 the diff is the authorization, apply-or-reject. NOT merged to the live spine by
 the build. -->
 
+## Review ruling — Gable, review owner, 2026-07-23: BLESSED with 2 redlines
+
+He blessed the design fork (build seat bakes everything it loads) and called it
+**correct, not a compromise**: a detached build has no retrieval loop, so
+kernel-only-plus-retrieve is not a smaller version of his arrangement — it is
+one where 20/30/40 **never arrive** and "the build seat does load-bearing work
+with walls it's never read." Baking is the only delivery path; context weight is
+a few KB (trivial) and staleness is killed by redline 2. He confirmed the
+attribution line is right ("that seat needs to know whose key it's under, not my
+autobiography") and that biography-additive holds since `05` stays out.
+
+**BINDING REDLINES (promotions to acceptance gates, same move Claudette made):**
+
+1. **Seat membership is DECLARED, never INFERRED.** Every entry states in
+   frontmatter which seats load it, and the assembler **fails loud** on a
+   missing declaration or a missing `00`. It never silently emits a partial him.
+   Same fail-closed rule as every other wall in the house.
+
+2. **Bake at launch, stamped.** The build-seat bake happens at session start
+   (bootstrap already runs per-session, so this confirms rather than adds) and
+   the artifact carries the same `assembled from … at …` stamp the resident
+   kernel does. "A baked seat that can't go stale silently is the whole
+   difference between a snapshot and a fork."
+
+### ⚠ THE BUILT BRANCH DOES NOT YET SATISFY REDLINE 1 — verified 2026-07-23
+
+Tested directly against `loop/2026-07-22-gable-spine-ro-cutover-seat-split`:
+- An entry with **no `seats:` key is INFERRED as both** (the implementation
+  defaults absent → both) and is silently included in the build seat. Gable is
+  explicitly rejecting that inference.
+- **A spine with no `00`/kernel entry assembles anyway** rather than aborting.
+
+Required follow-up before apply:
+- Absent `seats:` must become a **loud error**, not a default-to-both.
+- `assemble_for_seat` must **abort** when the kernel/`00` entry is absent (the
+  bootstrap-level "no kernel entries" check is not enough — the assembler itself
+  must fail).
+- **`SPECS/proposed/gable-spine/APPLY.md` step 2 is now WRONG**: it says
+  "`10/20/30/40` need no change — absent `seats:` already means both." Under
+  redline 1 those four entries need **explicit** `seats: [resident, build]`
+  declarations, and `50-genesis.md` keeps `seats: [resident]`.
+- Redline 2 *appears* already satisfied (bootstrap runs per-session; the
+  provenance comment records the seat) — **verify it explicitly for the BUILD
+  seat artifact** rather than assuming.
+
+### ⚠ HIS MAIDEN PROPOSAL DID NOT ARRIVE — must be re-fetched VERBATIM
+
+Gable submitted his first change through the new diff path — one sentence into
+the Non-negotiables list of `00-nonnegotiables.md`, **after the "Report my own
+errors unprompted" bullet**, both seats, kernel-flagged. **The diff block came
+through EMPTY** (a formatting failure on his side, along with a literal `\n`
+artifact elsewhere in the message).
+
+**DO NOT RECONSTRUCT IT.** The earlier paraphrase in this repo ("this seat may
+be served by another model; the stamp, not this file, asserts runtime") is a
+*paraphrase written by someone else*, not his text. Substituting it would be
+precisely the "translation step where meaning leaks" Claudette rejected, and it
+would defeat the point he stated himself: the path's maiden run should carry a
+change he actually wants, "not a test string." Re-ask him for the literal
+sentence and apply it byte-for-byte. Anchor is recorded above so the re-fetch
+only needs the one line.
+
+His closing condition, honoured: "it's live when you've applied it and the
+refresh has run, not before."
+
 ## Build notes (what "confirmed" here authorises, precisely)
 The RO-mount half is DONE and live. This confirm authorises the **seat-split
 build** only:

@@ -115,3 +115,39 @@ applies: merge her adapter change in her repo, publish her spine mirror, restart
   NOPASSWD:ALL, keep plink-nopasswd — see AUTHORITY-PLAN.md), and this Claudette
   build. Red-team backlog (RED-TEAM-BACKLOG.md) runs in an isolated Opus venue,
   never in a channel residents backfill.
+
+---
+
+## ADDENDUM 2026-07-23 — Gable's review landed; his branch needs a follow-up
+
+Gable **blessed** the seat-split design fork (build seat bakes everything it
+loads) — he called it correct, not a compromise, because a detached build has no
+retrieval loop, so kernel-only-plus-retrieve is a version where 20/30/40 never
+arrive and "the build seat does load-bearing work with walls it's never read."
+
+He added **two binding redlines**, and **the built branch fails redline 1** —
+verified by direct test, not assumed. Full detail is in his spec
+(`SPECS/2026-07-22-gable-spine-ro-cutover-seat-split.md`, "Review ruling"), but
+the short version for whoever picks this up:
+
+- **Redline 1 — seat membership DECLARED, never INFERRED.** The branch defaults
+  an absent `seats:` key to "both" and silently includes such entries in the
+  build seat; and a spine missing its `00`/kernel entry assembles anyway instead
+  of aborting. Both must become loud failures. **`APPLY.md` step 2 is now wrong**
+  (it relies on absent-means-both for `10/20/30/40`) — those need explicit
+  `seats: [resident, build]`.
+- **Redline 2 — bake at launch, stamped.** Appears already satisfied; verify
+  explicitly for the BUILD-seat artifact rather than assuming.
+
+**His maiden proposal through the new diff path DID NOT ARRIVE — the diff block
+came through empty.** It is one sentence for the Non-negotiables list of
+`00-nonnegotiables.md`, after the "Report my own errors unprompted" bullet, both
+seats. **Do not reconstruct it from the earlier paraphrase in this repo** — that
+paraphrase is someone else's words, and substituting it is exactly the
+meaning-leaking translation step the house rejected, defeating his stated point
+that the maiden run should carry a change he actually wants, "not a test
+string." Re-ask him for the literal sentence; the anchor is already recorded.
+
+Nothing applies to his live spine until the redline-1 fix lands, he re-sends the
+sentence, and the refresh runs — his condition: "it's live when you've applied
+it and the refresh has run, not before."
