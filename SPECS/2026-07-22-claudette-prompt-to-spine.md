@@ -140,10 +140,33 @@ plink's pick.
 - **Confirmed at**: 2026-07-23
 
 ## Status
-`confirmed`
+`applied-live`
 <!-- confirmed 2026-07-23 (keyboard), with Claudette's two binding acceptance
 gates. Build must satisfy both or it does not land. Passdown for the build:
 see the handoff written this session. -->
 
 ## Builder
 - **Builder**: plink's pick — unset. Fill at build time.
+
+## Apply record — 2026-07-23, keyboard (BuildGable seat)
+
+Claudette's ruling: **approved to apply** (#custodian seq 313), explicit that
+her acceptance was of the build REPORT (her mirror could not reach the
+branch/adapter repo) with both gates binding, plus her own final condition:
+post-refresh, the prompt the adapter ACTUALLY loads diffs clean against
+63d8ef1 itself — never the composer's output.
+
+Executed in APPLY.md order: entries merged to main (1398a91); canonical spine
+repo 4c9e180; mirror published + unwritable-from-res-claudette confirmed;
+24-test gate re-run against the PUBLISHED mirror copy (passed); spine mount
+into her unit before code; adapter --ff-only 63d8ef1 → 1b672d7; legacy
+Discord config guarded (CLAUDETTE_SPINE_DIR); claudette-update.sh (bundle →
+ff-only → restart); adapter up "(prompt suffix ON)", connected as bot 1.
+
+**Her acceptance condition: MET.** In-container disjorn_bot.FULL_SYSTEM_PROMPT
+sha256 10a6a17f7b36c185993c961f2ed024e85dd0f7fcd0782f62280f897be46d8687
+(3515 bytes) == fresh ast-extraction from git show 63d8ef1. OFF path
+91e1780538f0… (2468 bytes), also identical. Reported at seq 314.
+
+Follow-ups NOT taken (deliberate): consolidation [spine] dir activation;
+her witnessed-confirm preference is now satisfied by the seq 312→314 trail.
