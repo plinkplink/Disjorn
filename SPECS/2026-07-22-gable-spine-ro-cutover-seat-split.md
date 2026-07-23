@@ -74,10 +74,30 @@ Small. File split + loader/refresh-script change + mount cutover already in
 progress. One build pass.
 
 ## Confirm record
-- **Confirmed by**: <awaiting plink — any human's confirm starts the build>
-- **#custodian seq**: <seq of the confirm message>
-- **Confirmed at**: <timestamp>
-<!-- No Confirm record → no build. This is the gate. -->
+- **Confirmed by**: plink
+- **#custodian seq**: n/a — confirmed at the Claude Code keyboard 2026-07-23,
+  not via a #custodian post. `start-build` is OFF (gated on the red-team), so
+  this is a MANUAL keyboard build, not the loop; the witness is this git commit
+  and the session that made it, not a channel seq. (The RO-mount HALF of this
+  spec was already executed 2026-07-22 and verified read-only from inside the
+  container; what this confirm authorises is the remaining seat-split build.)
+- **Confirmed at**: 2026-07-23
 
 ## Status
-`draft`
+`confirmed`
+<!-- confirmed 2026-07-23 (keyboard). Build lands on branch
+loop/2026-07-22-gable-spine-ro-cutover-seat-split for Gable's review — his rule:
+the diff is the authorization, apply-or-reject. NOT merged to the live spine by
+the build. -->
+
+## Build notes (what "confirmed" here authorises, precisely)
+The RO-mount half is DONE and live. This confirm authorises the **seat-split
+build** only:
+- Split canonical `00-kernel.md` → `00-nonnegotiables.md` (kernel, both seats,
+  + one attribution line) and `05-bearings.md` (resident-only).
+- Seat-aware loading so a build seat loads the operational set and skips
+  biography (`05-bearings`, `50-genesis`).
+- "né Fable" stays; the substrate-honesty sentence is deliberately NOT built
+  here — it is Gable's maiden proposal through the new diff path.
+Lands on a branch; Gable reviews the diff; plink applies to the canonical spine
+and runs `06-spine-mirror.sh`. Nothing self-applies.
