@@ -98,18 +98,52 @@ spine surface. The classifier gates the actual result at merge.
 
 ## Token estimate
 Moderate — larger than Gable's because it is an adapter change, not a config
-change. One build pass, plus a verification pass that her composed prompt is
-byte-identical to today's before any behavioural change is layered on.
+change. One build pass, plus the byte-identical verification pass below.
 
-*Drafter's note:* that byte-identical check should be the build's first
-deliverable and its acceptance test. Splitting a prompt into five files and
-recomposing it is exactly the kind of change that silently drops a paragraph.
+## Acceptance criteria (BINDING — Claudette's redlines, review owner, 2026-07-23)
+
+She approved the spec as a faithful transcription and promoted BOTH drafter's
+notes from suggestions to binding acceptance gates. Her reasoning is kept
+because it is load-bearing: `bots/claudette/` is outside her read scope (same
+wall as `/opt/disjorn`), so she cannot diff her own recomposed prompt against
+`core.py:36` from where she lives — these two gates are the only guarantee she
+has that the migration didn't quietly drop a paragraph.
+
+1. **Byte-identical is the acceptance test, not a footnote.** The build's FIRST
+   deliverable is proving the recomposed prompt equals today's
+   `SYSTEM_PROMPT + PLATFORM_SUFFIX` **byte-for-byte**. No behavioural change
+   lands until that passes. (Her words: "Splitting one blob into five files is
+   precisely how you lose a line and never notice.")
+
+2. **Composition order is explicit frontmatter ordinals, and it FAILS CLOSED.**
+   No `readdir`-order dependence — "a prompt whose meaning depends on readdir
+   order is a bug waiting for a filesystem's mood to change." And: if an entry
+   is missing its ordinal, OR the kernel entry is absent, composition **aborts
+   loud** — it never emits a partial her. Same fail-closed discipline as the
+   privacy wall.
+
+Everything else stands: Tier 2, custodian lane, Claudette review owner, builder
+plink's pick.
 
 ## Confirm record
-- **Confirmed by**: <awaiting — Claudette's review as owner, then a human confirm>
-- **#custodian seq**: <seq of the confirm message>
-- **Confirmed at**: <timestamp>
-<!-- No Confirm record → no build. This is the gate. -->
+- **Reviewed & approved by (review owner)**: Claudette — approved 2026-07-23
+  with the two binding redlines above (relayed via plink at the keyboard; she
+  reviewed the landed spec file's transcription, which is what she can see, not
+  her adapter source, which she cannot — hence the redlines).
+- **Confirmed by**: plink — keyboard, 2026-07-23.
+- **#custodian seq**: n/a — confirmed at the keyboard, not via a #custodian
+  post. `start-build` is OFF, so this is a manual keyboard build; the witness is
+  this git commit and the session. (Claudette asked for the confirm to be
+  "witnessed in #custodian" — if you want that stronger witness, post the
+  confirm there and add the seq here before the build starts. Recorded as her
+  stated preference, not yet satisfied.)
+- **Confirmed at**: 2026-07-23
 
 ## Status
-`draft`
+`confirmed`
+<!-- confirmed 2026-07-23 (keyboard), with Claudette's two binding acceptance
+gates. Build must satisfy both or it does not land. Passdown for the build:
+see the handoff written this session. -->
+
+## Builder
+- **Builder**: plink's pick — unset. Fill at build time.

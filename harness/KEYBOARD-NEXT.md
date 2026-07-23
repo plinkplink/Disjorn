@@ -88,7 +88,27 @@ to a subcommand the image lacks is exactly the config dishonesty of KB-D9.
 Note this also means **image updates are a plink action, permanently**. A
 resident can never self-update its own runtime, which is the correct shape.
 
-### 3. Max / OAuth cutover  *(optional; gated on KB-D6)*
+### 3. Max / OAuth cutover — **DONE for Gable 2026-07-23**
+
+Gable now runs on plink's **Max subscription** via `CLAUDE_CODE_OAUTH_TOKEN` in
+his env file; no active `ANTHROPIC_API_KEY` remains there. Verified live:
+`init → model:claude-fable-5 → success`, off metered credit.
+
+**GOTCHA worth remembering — a 401 that wasn't the token being bad.** The first
+paste landed with its **leading `s` dropped** (`k-ant-oat01-…` instead of
+`sk-ant-oat01-…`), and podman reads the env file literally (no trimming, no
+repair), so `claude` sent an invalid bearer token and got
+`401 authentication_failed` / "Invalid bearer token" — while the wrapper
+happily reported `auth: CLAUDE_CODE_OAUTH_TOKEN` because it only checks the
+NAME, not the value. Diagnosis that isolated it: probe with
+`--output-format stream-json` and read the `api_retry` / `result` events; a
+value problem shows as 401, a wiring problem shows as no credential. Fix was to
+prepend the missing `s`. If a token ever 401s, check its SHAPE first (prefix
+`sk-ant-oat01-`, length, no quotes/whitespace) before assuming it's revoked.
+
+Original activation notes (kept for Claudette's cutover, still pending):
+
+### 3b. Max / OAuth cutover — remaining residents  *(optional; gated on KB-D6)*
 Steps are in `harness/cc/config-template/README.md`. **Conditions before you
 rely on it**: mint a *dedicated* token (`claude setup-token`), **prove
 revocation works before the cutover** — a credential you cannot demonstrably
