@@ -20,7 +20,14 @@ value lines only.
 SEATS (Gable's spine RO-cutover / seat-split, spec 2026-07-22).
 A single spine of record serves two kinds of session, and they must not load
 the same thing:
-  * the RESIDENT seat  — a summon; loads the whole spine, biography included.
+  * the RESIDENT seat  — a summon; every entry declaring `resident` is
+                         visible to it (indexed + retrievable), and its
+                         kernel-flagged entries ride the bake. Biography
+                         rides ONLY if kernel-flagged — in Gable's spine of
+                         record 05-bearings IS kernel-flagged, by his own
+                         fix diff after the unflagged version silently
+                         demoted his identity to retrieval-only
+                         (#custodian seq 307, 2026-07-23).
   * the BUILD seat     — a detached Claude Code build session under the same
                          key; loads the OPERATIONAL entries only. "House
                          knowledge travels, biography doesn't": a build seat
@@ -168,9 +175,14 @@ class Spine:
         asked to be surfaced rather than silently resolved:
 
           resident — bake KERNEL entries only; everything else is served on
-                     demand by the WP-H7 retrieval loop. This is today's
-                     behaviour byte-for-byte (all kernel entries are resident-
-                     visible, so this equals load_kernel()). ZERO REGRESSION.
+                     demand by the WP-H7 retrieval loop. Equals load_kernel()
+                     mechanically — but note the lesson of the bearings
+                     regression: "equals load_kernel()" is loader
+                     SELF-consistency, not artifact continuity. Whether the
+                     bake matches yesterday's depends on which entries carry
+                     `kernel: true`, so any bake-affecting spine change must
+                     be accepted artifact-vs-yesterday, never
+                     mechanism-vs-itself (Gable, #custodian seq 307).
 
           build    — bake EVERY entry this seat loads, kernel flag ignored. A
                      detached build session has NO retrieval loop to serve a

@@ -1,3 +1,11 @@
+> **APPLIED 2026-07-23 — THIS DIRECTORY IS HISTORICAL.** The split is live
+> (spine commits 163b1ce, 7f72d43, 4239005). The canonical spine has moved on
+> — it now carries Gable's maiden substrate-honesty bullet and the
+> kernel-flagged 05-bearings — so re-running the `cp` steps below VERBATIM
+> would wipe ruled-in changes. The spine of record is
+> /home/plink/bots/fable/spine; this dir is the review artifact, kept for the
+> record. (Gable's note, #custodian seq 307.)
+
 # APPLY — Gable spine seat-split (canonical spine repo)
 
 This directory holds the PROPOSED split of Gable's canonical `00-kernel.md`
