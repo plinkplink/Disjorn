@@ -328,6 +328,19 @@ fi
 unset _cred_value _oauth_value _apikey_value
 # ── END credential block ─────────────────────────────────────────────────
 
+# SEAT (spec 2026-07-22 seat-split). This wrapper is the BUILD seat: a
+# detached build session loads the OPERATIONAL set only (00-nonnegotiables,
+# 10-people, 20-load-bearing-walls, 30-build-rhythm, 40-cautions) and NEVER
+# biography (05-bearings, 50-genesis). "House knowledge travels, biography
+# doesn't." bootstrap.py reads RESIDENT_SEAT inside the container and, for the
+# build seat, BAKES every entry the seat loads — a detached build has no
+# retrieval loop, so an un-baked operational entry would simply be absent.
+# Passed AFTER the credential block so the wrapper's seat wins over any
+# /config env-file value: the seat is a property of WHICH wrapper launched.
+# Deliberately NOT inside a byte-identical block — the one line that MUST
+# differ from run-resident.sh.
+args+=( -e "RESIDENT_SEAT=build" )
+
 if [ -n "${RESIDENT_PODMAN_EXTRA:-}" ]; then
   # shellcheck disable=SC2206  # deliberate word-splitting of extra flags
   args+=( ${RESIDENT_PODMAN_EXTRA} )
