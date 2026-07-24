@@ -17,6 +17,10 @@ Resolution (used by routers/messages.py on bot message create — call signature
   pack name looked up under DATA_DIR/assets/chibi_packs/<name>/.
 - Emotions match case-insensitively against PNG filenames across all category
   subdirs; spaces/hyphens/underscores are ignored ("Heart-Eyes" == "heart eyes").
+- A non-exact tag falls through to services/emotion_match.py: a deterministic
+  ladder of pack-level Aliases.txt overrides, a built-in synonym lexicon,
+  stemming, and high-cutoff fuzzy matching ("Wry" -> Sly.png). Misses are
+  logged and still resolve to None.
 - Returns an emote_ref string "chibi:{pack_name}/{Category}/{File.png}" or None.
   The client resolves emote_refs to GET /chibi/{pack}/{category}/{filename}
   (served by routers/summarize.py, the content-services router).
@@ -29,17 +33,27 @@ app/assets_seed/chibi_packs/ into DATA_DIR/assets/chibi_packs/ on first use.
 It is called lazily from the resolver/serving paths — never at import time.
 """
 
+import logging
 import re
 import shutil
 from pathlib import Path
 from typing import Optional
 
 from ..config import get_settings
+from . import emotion_match
+
+logger = logging.getLogger(__name__)
 
 SEED_DIR = Path(__file__).resolve().parent.parent / "assets_seed" / "chibi_packs"
 
-# str(pack_dir) -> (mtime_signature, {normalized_emotion: (category, filename)})
-_index_cache: dict[str, tuple[tuple, dict[str, tuple[str, str]]]] = {}
+ALIASES_FILENAME = "Aliases.txt"
+
+# str(pack_dir) -> (mtime_signature,
+#                   {normalized_emotion: (category, filename)},
+#                   parsed Aliases.txt)
+_index_cache: dict[
+    str, tuple[tuple, dict[str, tuple[str, str]], dict[str, tuple[str, ...]]]
+] = {}
 
 _SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]*$")
 
@@ -95,6 +109,12 @@ def pack_exists(pack: str) -> bool:
 
 def _mtime_signature(pack_dir: Path) -> tuple:
     sig: list = [pack_dir.stat().st_mtime_ns]
+    # Editing a file doesn't touch its directory's mtime, so Aliases.txt
+    # joins the signature explicitly (0 = absent).
+    try:
+        sig.append((pack_dir / ALIASES_FILENAME).stat().st_mtime_ns)
+    except OSError:
+        sig.append(0)
     for sub in sorted(p for p in pack_dir.iterdir() if p.is_dir()):
         sig.append((sub.name, sub.stat().st_mtime_ns))
     return tuple(sig)
@@ -109,19 +129,27 @@ def _build_index(pack_dir: Path) -> dict[str, tuple[str, str]]:
     return index
 
 
-def _get_index(pack_dir: Path) -> dict[str, tuple[str, str]]:
+def _get_pack(
+    pack_dir: Path,
+) -> tuple[dict[str, tuple[str, str]], dict[str, tuple[str, ...]]]:
+    """(emotion index, parsed Aliases.txt) for a pack, mtime-cached together."""
     key = str(pack_dir)
     try:
         sig = _mtime_signature(pack_dir)
     except OSError:
         _index_cache.pop(key, None)
-        return {}
+        return {}, {}
     cached = _index_cache.get(key)
     if cached is not None and cached[0] == sig:
-        return cached[1]
+        return cached[1], cached[2]
     index = _build_index(pack_dir)
-    _index_cache[key] = (sig, index)
-    return index
+    aliases = emotion_match.parse_aliases(pack_dir / ALIASES_FILENAME)
+    _index_cache[key] = (sig, index, aliases)
+    return index, aliases
+
+
+def _get_index(pack_dir: Path) -> dict[str, tuple[str, str]]:
+    return _get_pack(pack_dir)[0]
 
 
 def load_taxonomy(pack_dir: Path) -> dict[str, list[str]]:
@@ -149,6 +177,12 @@ def load_taxonomy(pack_dir: Path) -> dict[str, list[str]]:
 def resolve(pack: Optional[str], emotion: str) -> Optional[str]:
     """Resolve a bot's emotion tag to an emote_ref string, or None.
 
+    Exact (normalized) filename match first; on a miss the tag goes through
+    emotion_match's deterministic ladder (pack Aliases.txt -> built-in
+    lexicon -> stemming -> fuzzy), so bots tag freely without being boxed
+    into the pack's exact vocabulary. Total misses are logged — tune the
+    lexicon/aliases from those lines, not from imagination.
+
     Never raises on bad input — unknown pack/emotion simply yields None
     (messages.py ignores unresolvable emotions silently).
     """
@@ -157,9 +191,20 @@ def resolve(pack: Optional[str], emotion: str) -> Optional[str]:
     pack_dir = _pack_dir(pack)
     if pack_dir is None:
         return None
-    hit = _get_index(pack_dir).get(_normalize(emotion))
+    index, aliases = _get_pack(pack_dir)
+    hit = index.get(_normalize(emotion))
     if hit is None:
-        return None
+        matched = emotion_match.match(emotion, index.keys(), aliases)
+        if matched is None:
+            logger.info(
+                "chibi: unresolved emotion %r for pack %s", emotion, pack_dir.name
+            )
+            return None
+        hit = index[matched]
+        logger.debug(
+            "chibi: mapped emotion %r -> %r for pack %s",
+            emotion, hit[1], pack_dir.name,
+        )
     category, filename = hit
     return f"chibi:{pack_dir.name}/{category}/{filename}"
 
