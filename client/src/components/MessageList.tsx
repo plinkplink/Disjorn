@@ -72,12 +72,21 @@ function truncate(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
-/** emote_refs "chibi:{pack}/{Category}/{File.png}" -> served chibi URL. */
-function chibiUrls(message: Message): string[] {
-  const out: string[] = [];
+/** emote_refs "chibi:{pack}/{Category}/{File.png}" -> served URL + emotion.
+
+    The emotion name is the resolved filename's stem ("Heart-Eyes"): free-form
+    tags go through the server's matcher, so this is the emote that actually
+    rendered, not necessarily the word the bot typed. Shown as title/alt. */
+function chibiEmotes(message: Message): { url: string; emotion: string }[] {
+  const out: { url: string; emotion: string }[] = [];
   for (const ref of message.emote_refs) {
     if (typeof ref === "string" && ref.startsWith("chibi:")) {
-      out.push(`/chibi/${ref.slice("chibi:".length)}`);
+      const path = ref.slice("chibi:".length);
+      const file = path.split("/").pop() ?? "";
+      out.push({
+        url: `/chibi/${path}`,
+        emotion: file.replace(/\.png$/i, ""),
+      });
     }
   }
   return out;
@@ -233,7 +242,7 @@ function MessageRow({
   onSummarize,
   onJumpTo,
 }: RowProps) {
-  const chibis = message.author_type === "bot" ? chibiUrls(message) : [];
+  const chibis = message.author_type === "bot" ? chibiEmotes(message) : [];
   const unfurlUrl = useMemo(
     () => firstHttpUrl(message.content),
     [message.content],
@@ -324,7 +333,13 @@ function MessageRow({
             </div>
           )}
           {chibis[0] !== undefined && (
-            <img className="chibi" src={chibis[0]} alt="" loading="lazy" />
+            <img
+              className="chibi"
+              src={chibis[0].url}
+              title={chibis[0].emotion}
+              alt={chibis[0].emotion}
+              loading="lazy"
+            />
           )}
           {hasText && (
             <div className="msg-content">
@@ -339,8 +354,15 @@ function MessageRow({
           {!hasText && message.edited_at !== null && (
             <span className="msg-edited">(edited)</span>
           )}
-          {chibis.slice(1).map((url) => (
-            <img key={url} className="chibi" src={url} alt="" loading="lazy" />
+          {chibis.slice(1).map(({ url, emotion }) => (
+            <img
+              key={url}
+              className="chibi"
+              src={url}
+              title={emotion}
+              alt={emotion}
+              loading="lazy"
+            />
           ))}
           {message.attachments.length > 0 && (
             <div className="msg-attachments">

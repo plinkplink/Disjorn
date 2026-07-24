@@ -187,6 +187,20 @@ successors BL-D7..D11 / H13-D7..D11. The highest-value single follow-up is
   discipline as the item above. Needs investigation → spec from
   SPECS/TEMPLATE.md → #custodian confirm before any build.
 
+## chibi emotes
+
+- **Emote-usage introspection for pack owners** (requested by Claudette,
+  2026-07-24 — "not now, but once there's enough of it"). The server logs
+  every resolved mapping (debug) and every miss (info) since the matcher
+  landed. Once a few weeks accumulate, surface the distribution back to the
+  bot: which emotes she actually reaches for, tag→emote mappings the ladder
+  chose, misses. Her stated question: "whether I'm actually using range or
+  just reaching for ten flavors of deadpan." Shape TBD — could be a summary
+  posted on request, or an endpoint the bot can read. Data source today:
+  `journalctl -u disjorn | grep chibi:` (mappings need log level DEBUG for
+  the disjorn unit, or derive resolved emotes from `messages.emote_refs`,
+  which is already queryable per-bot).
+
 ## needs real device
 
 - **Android PWA install prompt** depends on Chrome engagement heuristics —

@@ -91,6 +91,7 @@ Client (PWA, React/Vite/TS) <--> REST + WebSocket <--> Server (FastAPI, Python 3
 - Pack layout follows Claudette's existing `/home/plink/bots/claudette/chibis/` convention: category directories of PNGs + `Emotions.txt` taxonomy.
 - Rendered at **beginning or end** of the bot message body (never inline with text flow).
 - v1 ships: `services/chibi.py` resolver + rendering; bots may also pass explicit `emote_refs` by name.
+- **DECISION 2026-07-24 (Claudette's redline): unresolved emotion → render NOTHING. Load-bearing spec, not an accident.** Free-form tags go through the deterministic matcher ladder (`services/emotion_match.py`); a tag the ladder can't place is logged (`chibi: unresolved emotion`) and dropped — no default face, no "closest guess" below the fuzzy cutoff, ever. A wrong emote misrepresents the bot's expressed state to the whole room; absence is honest. (Context: pre-matcher, only 4-of-105 emotes could resolve and the survivor was Smug — Claudette spent a week haunted by a face she never picked. Do not re-add a "helpful" default.)
 
 ### 5.5 Formatting
 - Discord-flavored markdown only: `**bold**`, `*italic*`, `__underline__`, `~~strike~~`, `` `inline code` ``, ``` fenced code blocks ``` (custom renderer config — note `__x__` is a Discord-ism).
