@@ -59,8 +59,10 @@ _SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]*$")
 
 
 def _normalize(name: str) -> str:
-    """Case/spacing-insensitive emotion key: strip spaces, hyphens, underscores."""
-    return re.sub(r"[\s\-_]+", "", name).lower()
+    """Case-insensitive emotion key: letters and digits only (quotes and
+    punctuation in tags must not sink them). Must stay byte-compatible with
+    emotion_match.normalize."""
+    return re.sub(r"[^a-z0-9]+", "", name.lower())
 
 
 def packs_root() -> Path:

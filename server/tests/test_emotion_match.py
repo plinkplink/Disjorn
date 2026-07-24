@@ -57,6 +57,17 @@ def test_multiword_tokens():
     assert emotion_match.match("evil grin", KEYS) == "scheming"
 
 
+def test_punctuation_never_sinks_a_tag():
+    # Claudette's live miss 2026-07-24: Fired Up / Fired-Up, and the quoted
+    # form plink reported. All must land on the same chibi.
+    keys = KEYS | {"pumped", "chargedup"}
+    assert emotion_match.match("Fired Up", keys) == "pumped"
+    assert emotion_match.match("Fired-Up", keys) == "pumped"
+    assert emotion_match.match('"Fired Up"', keys) == "pumped"
+    assert emotion_match.match("'Smug'", KEYS) == "smug"
+    assert emotion_match.match("Heart-Eyes!", KEYS) == "hearteyes"
+
+
 def test_pack_aliases_beat_lexicon():
     aliases = {"wry": ("Eye-Roll",)}
     assert emotion_match.match("Wry", KEYS, aliases) == "eyeroll"

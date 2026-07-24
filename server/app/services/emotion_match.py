@@ -39,7 +39,7 @@ import re
 from pathlib import Path
 from typing import Iterable, Optional
 
-_NORM_RE = re.compile(r"[\s\-_]+")
+_NORM_RE = re.compile(r"[^a-z0-9]+")
 _TOKEN_RE = re.compile(r"[\s\-_]+")
 
 # Minimum stem length left after suffix-stripping; shorter stems ("s" from
@@ -54,12 +54,14 @@ _FUZZY_CUTOFF = 0.86
 
 
 def normalize(name: str) -> str:
-    """Case/spacing-insensitive key: strip spaces, hyphens, underscores.
+    """Case-insensitive key: strip everything but letters and digits, so
+    quotes and stray punctuation ('"Fired Up"') can't sink a tag. Lowercase
+    FIRST — the character class only knows lowercase.
 
     Byte-compatible with chibi._normalize — the two must agree or ladder
     hits would name keys the index doesn't have.
     """
-    return _NORM_RE.sub("", name).lower()
+    return _NORM_RE.sub("", name.lower())
 
 
 # ---------------------------------------------------------------------------
@@ -74,6 +76,7 @@ def normalize(name: str) -> str:
 
 LEXICON: dict[str, tuple[str, ...]] = {
     # -- happy / confident -------------------------------------------------
+    "amped": ("pumped", "chargedup"),
     "beaming": ("cheerful", "happy"),
     "cackling": ("laughing", "scheming"),
     "cheeky": ("mischievous", "sly", "smug"),
@@ -85,6 +88,7 @@ LEXICON: dict[str, tuple[str, ...]] = {
     "elated": ("ecstatic", "happy"),
     "energized": ("pumped", "chargedup", "excited"),
     "enthusiastic": ("excited", "pumped"),
+    "firedup": ("pumped", "chargedup", "excited"),
     "giddy": ("excited", "goofy"),
     "giggling": ("snickering", "laughing"),
     "glad": ("happy", "cheerful"),
@@ -93,6 +97,7 @@ LEXICON: dict[str, tuple[str, ...]] = {
     "grinning": ("smug", "happy"),
     "hyped": ("pumped", "excited"),
     "hysterical": ("cryinglaughing", "laughing"),
+    "jazzed": ("excited", "pumped"),
     "jolly": ("cheerful", "happy"),
     "joyful": ("happy", "ecstatic"),
     "lol": ("laughing", "amused"),
@@ -100,6 +105,8 @@ LEXICON: dict[str, tuple[str, ...]] = {
     "overjoyed": ("ecstatic", "happy"),
     "playful": ("mischievous", "goofy"),
     "pleased": ("content", "happy"),
+    "psyched": ("pumped", "excited"),
+    "raring": ("pumped", "excited"),
     "rofl": ("cryinglaughing", "laughing"),
     "sassy": ("smug", "sly"),
     "satisfied": ("content", "proud"),
@@ -107,6 +114,7 @@ LEXICON: dict[str, tuple[str, ...]] = {
     "smartass": ("smug", "sly"),
     "smirk": ("sly", "smug"),
     "smirking": ("sly", "smug"),
+    "stoked": ("excited", "pumped"),
     "teasing": ("mischievous", "sly", "flirty"),
     "thrilled": ("excited", "ecstatic"),
     "victorious": ("triumphant", "proud"),
