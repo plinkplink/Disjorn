@@ -21,7 +21,9 @@ import type { ChangeEvent, KeyboardEvent as ReactKeyboardEvent } from "react";
 
 import {
   ApiError,
+  addPickerItem,
   claimAttachments,
+  deletePickerItem,
   editMessage,
   fetchPicker,
   sendMessage,
@@ -69,6 +71,29 @@ let uploadCounter = 0;
 
 /* -------------------------------------------------------------- picker */
 
+/**
+ * Filename match for the picker search box.
+ *
+ * The name IS the only metadata a picker item has, so search is a filename
+ * match. Punctuation is flattened to spaces on both sides and every query
+ * token must appear, so "iron chef" finds `iron-chef-allez-cuisine-4078.gif`
+ * and adding a token narrows rather than widens. The extension is stripped
+ * first, otherwise typing "gif" would match the entire tab.
+ *
+ * This leans on files being named for their content — which download names
+ * from the GIF sites mostly are, junk numeric suffix aside. Rename on the way
+ * in if you want something findable.
+ */
+function matchesQuery(name: string, query: string): boolean {
+  const q = query.trim().toLowerCase();
+  if (q === "") return true;
+  const hay = name
+    .replace(/\.[^.]+$/, "")
+    .replace(/[^a-z0-9]+/gi, " ")
+    .toLowerCase();
+  return q.split(/\s+/).every((token) => hay.includes(token));
+}
+
 function PickerPopover({
   onPick,
   onClose,
@@ -79,6 +104,10 @@ function PickerPopover({
   const [tab, setTab] = useState<"gif" | "image">("gif");
   const [items, setItems] = useState<Partial<Record<"gif" | "image", PickerItem[]>>>({});
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const [query, setQuery] = useState("");
+  const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (items[tab] !== undefined) return;
@@ -108,11 +137,75 @@ function PickerPopover({
   }, [onClose]);
 
   const current = items[tab];
+  const visible = (current ?? []).filter((item) => matchesQuery(item.name, query));
+
+  /* Adds are sequential rather than Promise.all'd: the server resolves name
+     collisions by probing the directory, so concurrent adds of same-named
+     files could race onto one path. Picker adds are a handful of small files,
+     so the serial cost is invisible. */
+  const addFiles = async (files: File[]) => {
+    if (files.length === 0 || busy) return;
+    setBusy(true);
+    setError(null);
+    const added: PickerItem[] = [];
+    let failure: string | null = null;
+    for (const file of files) {
+      try {
+        added.push(await addPickerItem(tab, file));
+      } catch (err) {
+        failure = err instanceof ApiError ? err.detail : "Could not add to picker";
+      }
+    }
+    if (added.length > 0) {
+      // Server lists sorted by name; keep the open grid in that same order.
+      setItems((s) => ({
+        ...s,
+        [tab]: [...(s[tab] ?? []), ...added].sort((a, b) =>
+          a.name.localeCompare(b.name),
+        ),
+      }));
+      // An active filter would otherwise hide what was just added, which reads
+      // as the add having silently failed.
+      setQuery("");
+    }
+    setError(failure);
+    setBusy(false);
+  };
+
+  const removeItem = async (item: PickerItem) => {
+    if (!window.confirm(`Remove ${item.name} from the picker for everyone?`)) return;
+    try {
+      await deletePickerItem(tab, item.name);
+      setItems((s) => ({
+        ...s,
+        [tab]: (s[tab] ?? []).filter((i) => i.name !== item.name),
+      }));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.detail : "Could not remove");
+    }
+  };
+
+  const accept =
+    tab === "gif" ? "image/gif" : "image/png,image/jpeg,image/webp,image/gif";
 
   return (
     <>
       <div className="picker-scrim" onClick={onClose} />
-      <div className="picker-popover" role="dialog" aria-label="Image picker">
+      <div
+        className={`picker-popover${dragging ? " dropping" : ""}`}
+        role="dialog"
+        aria-label="Image picker"
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDragging(true);
+        }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDragging(false);
+          void addFiles(Array.from(e.dataTransfer.files));
+        }}
+      >
         <div className="picker-tabs">
           {(["gif", "image"] as const).map((t) => (
             <button
@@ -123,24 +216,64 @@ function PickerPopover({
               {t === "gif" ? "GIFs" : "Images"}
             </button>
           ))}
+          <button
+            className="picker-add"
+            title={`Add to ${tab === "gif" ? "GIFs" : "Images"}`}
+            aria-label={`Add to ${tab === "gif" ? "GIFs" : "Images"}`}
+            disabled={busy}
+            onClick={() => fileRef.current?.click()}
+          >
+            {busy ? "…" : "＋"}
+          </button>
+          <input
+            ref={fileRef}
+            type="file"
+            accept={accept}
+            multiple
+            hidden
+            onChange={(e) => {
+              void addFiles(Array.from(e.target.files ?? []));
+              e.target.value = "";
+            }}
+          />
         </div>
+        <input
+          className="picker-search"
+          type="search"
+          value={query}
+          placeholder="Search by name…"
+          aria-label="Search picker"
+          onChange={(e) => setQuery(e.target.value)}
+        />
         <div className="picker-grid">
           {error !== null && <p className="form-error">{error}</p>}
           {error === null && current === undefined && (
             <p className="picker-empty">Loading…</p>
           )}
           {current !== undefined && current.length === 0 && (
-            <p className="picker-empty">Nothing here yet.</p>
+            <p className="picker-empty">Nothing here yet — drop a file in, or hit ＋.</p>
           )}
-          {current?.map((item) => (
-            <button
-              key={item.name}
-              className="picker-item"
-              title={item.name}
-              onClick={() => onPick(item.url)}
-            >
-              <img src={item.url} alt={item.name} loading="lazy" />
-            </button>
+          {current !== undefined && current.length > 0 && visible.length === 0 && (
+            <p className="picker-empty">No matches for “{query.trim()}”.</p>
+          )}
+          {visible.map((item) => (
+            <div key={item.name} className="picker-item">
+              <button
+                className="picker-item-pick"
+                title={item.name}
+                onClick={() => onPick(item.url)}
+              >
+                <img src={item.url} alt={item.name} loading="lazy" />
+              </button>
+              <button
+                className="picker-item-remove"
+                title={`Remove ${item.name}`}
+                aria-label={`Remove ${item.name}`}
+                onClick={() => void removeItem(item)}
+              >
+                ×
+              </button>
+            </div>
           ))}
         </div>
       </div>

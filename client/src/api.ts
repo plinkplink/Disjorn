@@ -311,6 +311,49 @@ export function fetchPicker(tab: "gif" | "image"): Promise<PickerItem[]> {
   return request<PickerItem[]>("GET", `/picker?tab=${tab}`);
 }
 
+/**
+ * Add one image to a picker tab. Multipart, so it bypasses request()'s JSON
+ * body handling. The server derives the stored extension from the decoded
+ * image format and resolves name collisions, so the returned item's `name`
+ * may differ from the file you handed in — always append what comes back.
+ */
+export async function addPickerItem(
+  tab: "gif" | "image",
+  file: File,
+): Promise<PickerItem> {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("tab", tab);
+  let res: Response;
+  try {
+    res = await fetch("/picker/add", {
+      method: "POST",
+      credentials: "include",
+      body: form,
+    });
+  } catch {
+    throw new ApiError(0, "Network error — server unreachable");
+  }
+  if (!res.ok) {
+    throw new ApiError(
+      res.status,
+      detailFromBody(await res.text(), "Could not add to picker"),
+    );
+  }
+  return (await res.json()) as PickerItem;
+}
+
+/** Remove a picker asset. The picker is a shared shelf — this affects everyone. */
+export function deletePickerItem(
+  tab: "gif" | "image",
+  name: string,
+): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(
+    "DELETE",
+    `/picker/file/${tab}/${encodeURIComponent(name)}`,
+  );
+}
+
 /* ---- unfurl / summarize ---- */
 
 export function fetchUnfurl(url: string): Promise<UnfurlData> {

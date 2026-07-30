@@ -59,6 +59,15 @@ def png_bytes(size=(64, 64), color=(200, 30, 30)) -> bytes:
     return buf.getvalue()
 
 
+def gif_bytes(size=(32, 32), colors=((240, 200, 40), (40, 200, 160))) -> bytes:
+    frames = [Image.new("RGB", size, c) for c in colors]
+    buf = io.BytesIO()
+    frames[0].save(
+        buf, format="GIF", save_all=True, append_images=frames[1:], duration=200, loop=0
+    )
+    return buf.getvalue()
+
+
 def jpeg_with_gps(size=(80, 60)) -> bytes:
     exif = Image.Exif()
     exif[ExifTags.IFD.GPSInfo] = {
@@ -476,6 +485,133 @@ async def test_picker_path_traversal_blocked(client):
     assert r.status_code == 404
     r = await client.get("/picker/file/image/does-not-exist.png")
     assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Picker add / remove
+# ---------------------------------------------------------------------------
+
+async def add_picker(client, tab: str, filename: str, content: bytes, mime: str):
+    return await client.post(
+        "/picker/add", files=[("file", (filename, content, mime))], data={"tab": tab}
+    )
+
+
+async def test_picker_add_then_pick_then_remove(client):
+    await make_user("alice")
+    await login(client, "alice")
+
+    r = await add_picker(client, "gif", "Happy Dance!.gif", gif_bytes(), "image/gif")
+    assert r.status_code == 200, r.text
+    item = r.json()
+    assert item["name"] == "Happy-Dance.gif"          # slugified
+    assert item["url"] == "/picker/file/gif/Happy-Dance.gif"
+
+    # Visible in the listing and actually servable.
+    listing = (await client.get("/picker", params={"tab": "gif"})).json()
+    assert item in listing
+    fetched = await client.get(item["url"])
+    assert fetched.status_code == 200
+    assert fetched.headers["content-type"] == "image/gif"
+
+    # ...and removable.
+    r = await client.delete(item["url"])
+    assert r.status_code == 200 and r.json() == {"ok": True}
+    listing = (await client.get("/picker", params={"tab": "gif"})).json()
+    assert all(i["name"] != item["name"] for i in listing)
+    assert (await client.get(item["url"])).status_code == 404
+    assert (await client.delete(item["url"])).status_code == 404
+
+
+async def test_picker_add_extension_comes_from_content_not_filename(client):
+    """The picker dir is served unauthenticated, so a client-supplied
+    extension must never decide how the file is served back."""
+    await make_user("alice")
+    await login(client, "alice")
+
+    r = await add_picker(client, "image", "payload.html", png_bytes(), "text/html")
+    assert r.status_code == 200, r.text
+    assert r.json()["name"] == "payload.png"
+    served = await client.get(r.json()["url"])
+    assert served.headers["content-type"] == "image/png"
+
+
+async def test_picker_add_rejects_non_images_and_tab_mismatch(client):
+    await make_user("alice")
+    await login(client, "alice")
+
+    # Not decodable at all.
+    r = await add_picker(client, "image", "x.png", b"definitely not an image", "image/png")
+    assert r.status_code == 400
+    assert "readable image" in r.json()["detail"]
+
+    # A still PNG is fine in `image` but not in `gif` — the tab keeps its meaning.
+    assert (await add_picker(client, "image", "ok.png", png_bytes(), "image/png")).status_code == 200
+    r = await add_picker(client, "gif", "still.png", png_bytes(), "image/png")
+    assert r.status_code == 400
+    assert "PNG" in r.json()["detail"]
+
+    # Unknown tab.
+    assert (await add_picker(client, "nope", "a.gif", gif_bytes(), "image/gif")).status_code == 400
+
+    # Nothing was left behind by the rejections.
+    names = [i["name"] for i in (await client.get("/picker", params={"tab": "gif"})).json()]
+    assert not any(n.startswith(".tmp_") or n.endswith(".png") for n in names)
+
+
+async def test_picker_add_never_clobbers_an_existing_name(client):
+    await make_user("alice")
+    await login(client, "alice")
+
+    first = (await add_picker(client, "gif", "same.gif", gif_bytes(), "image/gif")).json()
+    second = (await add_picker(
+        client, "gif", "same.gif", gif_bytes(colors=((10, 10, 200), (200, 10, 10))), "image/gif"
+    )).json()
+    assert first["name"] == "same.gif"
+    assert second["name"] == "same-2.gif"
+    # Both survive, and the first still has its original bytes.
+    assert (await client.get(first["url"])).status_code == 200
+    assert (await client.get(second["url"])).status_code == 200
+    a = (await client.get(first["url"])).content
+    b = (await client.get(second["url"])).content
+    assert a != b
+
+
+async def test_picker_add_enforces_size_cap(client, monkeypatch):
+    from app.config import reset_settings_cache
+
+    await make_user("alice")
+    await login(client, "alice")
+    monkeypatch.setenv("MAX_PICKER_BYTES", "512")
+    reset_settings_cache()
+
+    r = await add_picker(client, "gif", "big.gif", gif_bytes(size=(600, 600)), "image/gif")
+    assert r.status_code == 413
+    # The oversized temp file is not left in the served directory.
+    listing = (await client.get("/picker", params={"tab": "gif"})).json()
+    assert all(i["name"] != "big.gif" for i in listing)
+
+
+async def test_picker_add_and_delete_require_a_session(client):
+    await make_user("alice")
+    await login(client, "alice")
+    item = (await add_picker(client, "gif", "keep.gif", gif_bytes(), "image/gif")).json()
+
+    client.cookies.clear()
+    assert (await add_picker(client, "gif", "sneak.gif", gif_bytes(), "image/gif")).status_code == 401
+    assert (await client.delete(item["url"])).status_code == 401
+    # ...and the anonymous delete really did not happen.
+    assert (await client.get(item["url"])).status_code == 200
+
+
+async def test_picker_delete_blocks_traversal(client):
+    await make_user("alice")
+    await login(client, "alice")
+    await client.get("/picker", params={"tab": "image"})  # ensure seeded
+
+    assert (await client.delete("/picker/file/image/..%2F..%2Fdisjorn.db")).status_code in (400, 404)
+    assert (await client.delete("/picker/file/image/.hidden")).status_code == 400
+    assert (await client.delete("/picker/file/nope/x.png")).status_code == 404
 
 
 # ---------------------------------------------------------------------------

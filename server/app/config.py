@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     # Media (WP6)
     MAX_UPLOAD_BYTES: int = 200 * 1024 * 1024  # generous — trusted users
     MEDIA_URL_TTL: int = 3600  # seconds a signed media URL stays valid
+    # Picker assets are served raw (no display/thumb conversion) and the popover
+    # loads a whole tab at once, so this cap is deliberately much tighter than
+    # MAX_UPLOAD_BYTES — one fat GIF degrades the grid for everyone.
+    MAX_PICKER_BYTES: int = 8 * 1024 * 1024
     # Pluggable services (WP8)
     OLLAMA_MODEL: str = "llama3.2"
     STT_ENGINE: str = "faster_whisper"      # key into services.stt.ENGINES

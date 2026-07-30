@@ -39,6 +39,18 @@ ENDPOINTS
 
   GET  /picker?tab=gif|image        (user)   list picker assets
   GET  /picker/file/{tab}/{name}    (open)   static picker asset (traversal-safe)
+  POST /picker/add                  (user)   add one file to a tab (multipart)
+  DEL  /picker/file/{tab}/{name}    (user)   remove a picker asset
+
+  Picker add/remove is open to any signed-in user, matching the trusted-server
+  posture of MAX_UPLOAD_BYTES — the picker is a shared shelf, not per-user.
+  Tighten to `user.is_admin` here if that ever stops being true.
+
+  Because GET /picker/file is unauthenticated, an added file becomes publicly
+  readable at a guessable URL. So add_picker_item decodes every upload with
+  Pillow and derives the extension from the DETECTED format, never from the
+  client filename — that is what stops the directory being used to serve
+  arbitrary (or scriptable, e.g. SVG/HTML) content.
 
 SIGNED URLS
   sign_media_url(attachment_id, variant="display", expires_in=None) -> str  (sync)
@@ -87,6 +99,10 @@ CurrentActor = Annotated[Actor, Depends(get_actor)]
 
 VARIANTS = ("orig", "display", "thumb")
 PICKER_TABS = {"gif": "gifs", "image": "images"}
+# Pillow format names accepted per tab. The gif tab stays GIF-only so "GIFs"
+# keeps meaning what it says; the image tab takes any still raster.
+PICKER_TAB_FORMATS = {"gif": {"GIF"}, "image": {"PNG", "JPEG", "WEBP", "GIF"}}
+PICKER_EXT = {"GIF": ".gif", "PNG": ".png", "JPEG": ".jpg", "WEBP": ".webp"}
 _CHUNK = 256 * 1024
 
 
@@ -512,11 +528,12 @@ async def list_picker(user: CurrentUser, tab: str = Query(...)) -> list[dict[str
     return out
 
 
-@router.get("/picker/file/{tab}/{name}")
-async def get_picker_file(tab: str, name: str) -> FileResponse:
-    if tab not in PICKER_TABS:
-        raise HTTPException(status_code=404, detail="Unknown tab")
-    # Traversal safety: the name must be a plain filename component.
+def _picker_path(tab: str, name: str) -> Path:
+    """Resolve a picker asset path, rejecting anything but a plain filename.
+
+    Shared by GET/DELETE so the traversal rules cannot drift apart. Raises 400
+    on a malformed name; whether a *missing* file is a 404 is the caller's call.
+    """
     if (
         name != Path(name).name
         or name in (".", "..")
@@ -525,10 +542,30 @@ async def get_picker_file(tab: str, name: str) -> FileResponse:
         or "\\" in name
     ):
         raise HTTPException(status_code=400, detail="Invalid file name")
-    _seed_picker()
     base = _picker_dir(tab).resolve()
     path = (base / name).resolve()
-    if path.parent != base or not path.is_file():
+    if path.parent != base:
+        raise HTTPException(status_code=400, detail="Invalid file name")
+    return path
+
+
+def _unique_picker_path(directory: Path, slug: str, ext: str) -> Path:
+    """First free `{slug}{ext}`, `{slug}-2{ext}`, … so an add never clobbers."""
+    candidate = directory / f"{slug}{ext}"
+    n = 2
+    while candidate.exists():
+        candidate = directory / f"{slug}-{n}{ext}"
+        n += 1
+    return candidate
+
+
+@router.get("/picker/file/{tab}/{name}")
+async def get_picker_file(tab: str, name: str) -> FileResponse:
+    if tab not in PICKER_TABS:
+        raise HTTPException(status_code=404, detail="Unknown tab")
+    _seed_picker()
+    path = _picker_path(tab, name)
+    if not path.is_file():
         raise HTTPException(status_code=404, detail="Not found")
     mime, _ = mimetypes.guess_type(name)
     return FileResponse(
@@ -536,3 +573,59 @@ async def get_picker_file(tab: str, name: str) -> FileResponse:
         media_type=mime or "application/octet-stream",
         headers={"Cache-Control": "public, max-age=3600"},
     )
+
+
+@router.post("/picker/add")
+async def add_picker_item(
+    user: CurrentUser,
+    file: UploadFile = File(...),
+    tab: str = Form(...),
+) -> dict[str, str]:
+    """Add one image to a picker tab; returns the same {name,url} shape as GET
+    /picker so the client can append it to the open grid without a refetch."""
+    from PIL import Image
+
+    if tab not in PICKER_TABS:
+        raise HTTPException(status_code=400, detail="tab must be 'gif' or 'image'")
+    _seed_picker()
+    directory = _picker_dir(tab)
+    directory.mkdir(parents=True, exist_ok=True)
+
+    # Dotted temp name: list_picker skips dotfiles, so a half-written upload is
+    # never visible to a concurrent listing.
+    tmp = directory / f".tmp_{uuid.uuid4().hex}"
+    await _save_upload(file, tmp, get_settings().MAX_PICKER_BYTES)
+    try:
+        try:
+            with Image.open(tmp) as im:
+                fmt = (im.format or "").upper()
+                im.verify()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Not a readable image file")
+        allowed = PICKER_TAB_FORMATS[tab]
+        if fmt not in allowed:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"The {tab} tab accepts {', '.join(sorted(allowed))} — "
+                    f"that file is {fmt or 'unrecognized'}"
+                ),
+            )
+        slug, _ = _slugify(file.filename)
+        final = _unique_picker_path(directory, slug, PICKER_EXT[fmt])
+        tmp.rename(final)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    return {"name": final.name, "url": f"/picker/file/{tab}/{final.name}"}
+
+
+@router.delete("/picker/file/{tab}/{name}")
+async def delete_picker_file(user: CurrentUser, tab: str, name: str) -> dict[str, bool]:
+    if tab not in PICKER_TABS:
+        raise HTTPException(status_code=404, detail="Unknown tab")
+    path = _picker_path(tab, name)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Not found")
+    path.unlink()
+    return {"ok": True}

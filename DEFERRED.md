@@ -545,3 +545,58 @@ one file, two paths, which is the documented and correct pattern. A shared
 inode alone does not prove a hardlink; check the link count and the directory
 type before calling it one.
 
+
+---
+
+## Picker: favorites/recents + payload weight (2026-07-29, keyboard session)
+
+The picker gained add (`POST /picker/add`), remove
+(`DELETE /picker/file/{tab}/{name}`) and client-side name search in this
+session. Two follow-ups were deliberately left open.
+
+### PK-D1 — favorites vs recents: decide the primitive before building
+
+"Favorites" was requested, but the requirement was not interrogated, and the
+storage shape depends entirely on the answer:
+
+- **Per-user favorites** — new table keyed on `user_id`, router, client state,
+  migration. A real WP. Also semantically odd here: several "users" are bots,
+  and a bot has no taste to record.
+- **Shared pins** — near-free (a naming convention, or one flat file), but
+  "favorites" implies personal, so this may answer a question nobody asked.
+- **Recents (per-user, client-side)** — the strong candidate. It is what people
+  actually use in a GIF picker; it needs zero curation discipline, it
+  self-maintains as taste drifts, and a first cut is `localStorage` only: no
+  schema, no migration, and the per-user-vs-shared question never arises.
+  Discord ships Favorites *and* Recents and everyone lives in Recents.
+
+**Do not build favorites without first deciding whether recents makes it
+unnecessary.** Sequencing note: if a tab ever outgrows list-everything, the
+real fix is server-side pagination + search, and any pinning scheme has to
+survive that migration — so know which world it is being built into.
+
+### PK-D2 — the gif tab is heavy, and nothing bounds it
+
+As of 2026-07-29 the gif tab holds 42 files / **60MB**, averaging ~1.4MB with
+a 5.2MB worst case. All of it passed validation: `MAX_PICKER_BYTES` is 8MB per
+*file* and there is no cap on the tab as a whole. `GET /picker` lists
+everything and the grid renders every match, so the only thing keeping this
+usable is `loading="lazy"` on the thumbnails — scroll the tab on mobile and you
+pull real megabytes.
+
+Untaken options, cheapest first:
+
+1. **Lower `MAX_PICKER_BYTES`** (8MB → ~2MB). Bounds new adds only; does
+   nothing about what is already there.
+2. **Generate a thumbnail variant** for grid rendering and serve the full file
+   only on pick. Correct fix, most work — the picker currently has no
+   variant concept at all, unlike attachments.
+3. **Transcode to animated WebP** — typically 50-70% smaller at the same
+   quality. Blocked by our own validation: `PICKER_TAB_FORMATS["gif"]` is
+   `{"GIF"}` so the gif tab rejects WebP by design, to stop the tab meaning
+   something other than what it says. Would need that rule relaxed, or a
+   "still vs animated" distinction replacing the "gif vs image" one.
+
+Note option 3 is a self-inflicted constraint and worth revisiting on its own
+terms: the tabs are really *animated vs still*, and they are named for a file
+format instead.
