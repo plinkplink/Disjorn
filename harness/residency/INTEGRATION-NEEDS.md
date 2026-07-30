@@ -4,6 +4,32 @@ Changes this package needs OUTSIDE harness/residency/. Written here (not made)
 because harness/residency/ is this WP's exclusive file territory. Each item is
 a keyboard/config or a sibling-WP task, not adapter code.
 
+**Status 2026-07-22 (Gable went live), recorded here 2026-07-26:** §1–§5 are
+**CLOSED**. This file carried no markers until now, so §1 in particular has been
+reading as a live activation blocker for four days after it was cleared —
+Gable has been a running resident since 2026-07-22 (`harness/KEYBOARD-NEXT.md`
+§5, "DONE; verified live 2026-07-22"). §6 is a flagged limitation, not a task.
+Verified from the keyboard 2026-07-26:
+
+- **§1 CLOSED — no longer a blocker.** Bot id 2 is named **`Gable`** in the live
+  roster, and his key file is in place plink-owned `0640 plink:res-gable` at
+  `/srv/disjorn-resident-config/res-gable/gable-key`.
+- **§2 CLOSED — `podman run --rm` per summon is the settled shape** (confirmed
+  as the intended one, not `podman exec`), and the in-container command reads
+  the prompt on stdin: live `session_argv` is
+  `bash -lc "…bootstrap.py >&2 && exec claude -p --output-format stream-json
+  --verbose \"$@\"" cc-session`. No in-image wrapper was needed.
+- **§3 CLOSED.** `gable-summon.service` — the suggested name was taken — runs
+  under res-gable's own user manager and is `active`.
+- **§4 CLOSED.** Both state paths point into the res-gable-writable volume:
+  `/home/res-gable/resident-home/.summon-budget.json` and `.summon-cursor.json`.
+- **§5 CLOSED — the two configs agree.** `summon.custodian_channel_id = 4` and
+  `/etc/disjorn-broker/broker.toml` `custodian_channel_id = 4`.
+- **§6** is unchanged as a statement of what this package cannot reach, but the
+  "keeps running forever" case it worries about is now covered by the container
+  reaper in `harness/cc/` (see KB-D11/KB-D12 in RED-TEAM-BACKLOG.md); the
+  refusal-latency sliver remains open there, not here.
+
 ## 1. Gable bot identity + key (blocker for live activation)
 
 - Prod bot rename `bots.name` for id 2 to "Gable" awaits plink's blessing

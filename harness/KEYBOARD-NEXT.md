@@ -20,6 +20,16 @@ this one gates the Max/OAuth cutover specifically).
 
 > **PROGRESS 2026-07-22 (keyboard).** Steps 1, 4 and 5 are DONE and verified;
 > step 2 in progress; step 3 blocked on a real Max token; steps 6–7 pending.
+>
+> **PROGRESS UPDATED 2026-07-26 — the line above is the 07-22 snapshot and its
+> steps 2 and 3 are stale; the sections themselves are the current record.**
+> Steps 1, 2, 3 (for Gable), 4 and 5 are DONE and verified — §2 "DONE, verified
+> 2026-07-26" (both resident stores on `b04b97ebe9be`, `refresh-mirror` and
+> `start-build` present) and §3 "DONE for Gable 2026-07-23" (running on
+> `CLAUDE_CODE_OAUTH_TOKEN`, off metered credit; the Max token is no longer a
+> blocker). Still pending: §3b (Claudette's OAuth cutover, optional, gated on
+> KB-D6), §6 (consolidation — one command, see its own 2026-07-26 note) and §7
+> (`start-build`).
 > Live state now: Gable runs on the RO spine mount at `/opt/spine`, on
 > `stream-json --verbose` with `model_gate = "alert"`, backfill 30, Fable pin —
 > and Fable is being served (verified in-container as res-gable). Kill switches
@@ -50,7 +60,17 @@ pre-cutover copy; the repo version adds the `/config/env` credential mask, the
 container reaper, and the optional spine mount. This IS a live change to the
 summon path — expect it, and watch one summon after.
 
-### 2. Refresh the resident images, then honour `refresh-mirror`
+### 2. Refresh the resident images, then honour `refresh-mirror` — **DONE, verified 2026-07-26**
+
+> Verified from the keyboard 2026-07-26: both resident stores hold
+> `b04b97ebe9be` and its `broker --help` lists `refresh-mirror` and
+> `start-build`; Claudette's running container is already on it, so the
+> `refresh-mirror = true` lines in verbs.toml are honest again. The whole
+> procedure below is now a script — `harness/keyboard/07-resident-image.sh`,
+> run as plink (not sudo) — which builds, loads into every resident store,
+> verifies the expected verbs, and flags any running container left on an
+> old image. Rerun it whenever the RUNTIME changes (Containerfile, broker
+> CLI, CC version); Disjorn code changes go through the mirror instead.
 
 The broker CLI is COPY'd into the image, and the live resident image predates
 `refresh-mirror` and `start-build` — `refresh-mirror` was turned **OFF** for
@@ -127,10 +147,20 @@ place so rollback is a config edit, not a data restore.
 `"refuse"`. Flipping `refuse` without the `session_argv` change refuses every
 summon — loudly, with the fix named, but the resident goes silent.
 
-### 6. Consolidation
-`sudo systemctl enable --now disjorn-consolidation@claudette.timer`. Keep the
-delay a few more days so her retrieval log accumulates real reference counts.
-Gable stays `active = false` until he has an episodic store.
+### 6. Consolidation — **DONE. Timer ENABLED and ACTIVE 2026-07-26** (plink flipped it)
+`sudo systemctl enable --now disjorn-consolidation@claudette.timer`.
+
+> 2026-07-26 (keyboard): evidence is ripe (658 retrieval-log lines; dry-run
+> yields 10 promote / 0 evict / 0 compress) and Claudette approved go-live in
+> #custodian (seq ~411) with one condition, now BUILT, TESTED (58/58) and
+> DEPLOYED: `max_evictions = 20` per run — her floor against a bonfire on run
+> one; weakest rent proposed first, the rest deferred and counted in the
+> report header. Both live configs re-placed from repo (also fixed gable.toml's
+> stale pre-mirror spine path). Follow-ups (neutral walker, the distillate)
+> are in DEFERRED.md under "Memory: the walker & the distillate".
+> Gable stays `active = false` until he has an episodic store AND spine reads
+> are logged (INTEGRATION-NEEDS §1) — without §1 his whole spine reads as
+> unreferenced.
 
 ### 7. `start-build` — last, and deliberately
 Add the `[start_build]` section to `/etc/disjorn-broker/broker.toml`, install
@@ -229,6 +259,23 @@ INTEGRATION-NEEDS.md` §0 is the accurate source.** Summary of what is on disk:
   distinct from "configured but missing" so it can never become
   "empty spine, evict everything".
 
+> **FACT CORRECTED 2026-07-26, applies to the paragraph below — "she has no
+> on-disk spine" was true when written and is false since the 2026-07-23
+> prompt→spine swap** (`SPECS/2026-07-22-claudette-prompt-to-spine.md`, status
+> `applied-live`): she has 7 spine entries, canonical at
+> `/home/plink/bots/claudette/spine`, published to `/srv/disjorn-spine/claudette`
+> and mounted read-only into her container, and her adapter composes her system
+> prompt from them every session. **The conclusion is unchanged — 0 evict, and
+> consolidation's `[spine].dir` for her stays deliberately unset — but the
+> REASON is now different: spine reads are not logged into the retrieval log yet
+> (`harness/consolidation/INTEGRATION-NEEDS.md` §1), so every entry would read
+> as unreferenced.** A measurement gap, not an absent spine; the same gate that
+> holds Gable.
+>
+> Also stale below: **the timer is no longer DISABLED.**
+> `disjorn-consolidation@claudette.timer` is enabled and active as of
+> 2026-07-26 — see §6's 2026-07-26 note for the evidence that justified it.
+
 **The timer is installed and DISABLED.** Dry-run proven end-to-end as
 res-claudette (10 promote proposals, 0 evict — she has no on-disk spine, and
 the report header says so in words). Nothing posted; audit log confirms zero
@@ -241,6 +288,17 @@ running early just yields low-evidence proposals for humans to reject.
 **Gable cannot run yet** (`active = false` anyway): he has no episodic store,
 and his spine is under `/home/plink`, which `res-*` cannot traverse — he needs
 the read-only spine mirror (see §5a) before his config will work.
+
+> **PARTLY CLOSED 2026-07-23 — the spine-mirror half of this is done.** The
+> §5a mirror was cut over: his container loads `/opt/spine` (read-only), the
+> canonical spine is published to `/srv/disjorn-spine/gable`, and his live
+> consolidation config's stale pre-mirror spine path was corrected at the
+> keyboard 2026-07-26. So "his spine is under `/home/plink`, which `res-*`
+> cannot traverse" is no longer the blocker it describes. What still holds him
+> at `active = false` is the OTHER two reasons, unchanged: no episodic store,
+> and spine reads are not yet logged (`harness/consolidation/
+> INTEGRATION-NEEDS.md` §1) — without §1 his whole spine reads as
+> unreferenced. See §6's 2026-07-26 note.
 
 ## 5. Gable activation (WP-H9/H10) — DONE; verified live 2026-07-22
 
@@ -267,7 +325,15 @@ the template, never reached the live config", the same class as §3 and §4:
   the backlog item — audit other protected paths for the same pattern.
 
 **Open, and now the most important thing on this page — the spine is
-resident-writable.** `RESIDENT_SPINE_DIR=/home/resident/bots/fable/spine` maps
+resident-writable.**
+**CLOSED 2026-07-23 — the §5a cutover was taken and this is no longer live
+state.** `RESIDENT_SPINE_DIR` is now `/opt/spine`, the read-only mount of the
+plink-owned mirror, verified from inside a real container: `assembled from
+/opt/spine`, and `touch /opt/spine/EVIL.md` → **"Read-only file system."**
+(recorded in §0's verification list; the env line is confirmed live 2026-07-26).
+The analysis below is kept verbatim because it is the reasoning that justified
+the wall — read it as the case for the fix, not as today's exposure.
+`RESIDENT_SPINE_DIR=/home/resident/bots/fable/spine` maps
 to `/home/res-gable/resident-home/bots/fable/spine`, which res-gable OWNS. His
 kernel is reassembled from it every summon, so he can edit his own spine and it
 takes effect with no diff, no classifier, no #custodian — while
@@ -277,6 +343,13 @@ before that fix a spine rewrite classified **Tier 0 inert**), but that is a
 detector for diffs, not a wall against direct writes. See §5a.
 
 ## 5a. Spine placement — the wall (built this session, NOT cut over)
+
+> **CUT OVER 2026-07-23 — the "NOT cut over" in this heading is stale.** The
+> single line in `/srv/disjorn-resident-config/res-gable/env` was flipped:
+> `RESIDENT_SPINE_DIR=/opt/spine` (verified live 2026-07-26), and the in-
+> container check returned "Read-only file system" on a write attempt (§0).
+> Everything below still describes the mechanism accurately, including the
+> rollback, which is the same one line.
 
 *(The old §5 checklist — spine review, key, session shape, unit install, verb
 flips — is complete; see the verification note above.)*

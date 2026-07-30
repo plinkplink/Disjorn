@@ -22,6 +22,11 @@ before flipping any verb/flag ON, all OFF-gated today): BL-D1 confirm-gate
 BL-D3..D6 filed.
 
 **OPEN DECISION owed to plink — BL-G1 (model integrity: refuse vs alert).**
+**SETTLED 2026-07-22 — this header is stale; see "Decision record 2026-07-22 —
+BL-G1 SETTLED" below. plink ruled "alert for now", and `model_gate = "alert"`
+is live in `/srv/disjorn-resident-config/res-gable/summon.toml` (verified
+2026-07-26). The paragraph that follows is the question as it stood on
+2026-07-21 and is kept verbatim for the record.**
 Item 2 below says mismatch → "refuse to act + alert." As built it is
 alert-only: the actual model is only knowable from the FINISHED session's
 output, so the check is post-hoc and the reply ships before the drift alert

@@ -208,6 +208,12 @@ the same footgun Claudette named about the symmetric gate (BUILD-LOOP D-1).
 
 1. WP-A2's grant shape: `NOPASSWD:ALL` or an enumerated list? (I lean
    enumerated, and would rather hit a prompt than hold standing root.)
+   **ANSWERED 2026-07-22 — `NOPASSWD:ALL`.** This file's own header records it:
+   "WP-A2 approved with `NOPASSWD:ALL` (not the enumerated list this draft
+   recommended)." plink's reason, verbatim above: an extended build that stops
+   every ten seconds for a password is not practical. The lean toward
+   enumerated was withdrawn on that evidence — see the accounting section. Not
+   an open question; kept here as the question that was asked.
 2. Does the agent account get repo write via a shared group, or does the
    worktree move out of `/home/plink` entirely?
 3. Metrics timers: move to the broker uid, or leave as plink with group write?

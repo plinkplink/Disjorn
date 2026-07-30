@@ -184,11 +184,20 @@ Run after the wiring items 1–5, BEFORE flipping action verbs ON:
   the container
 
 ## Governance decision owed to plink (not code — a ratified-spec reconciliation)
-- [ ] **BL-G1** — model integrity "refuse to act" vs alert-only. Shipped is
+- [x] **BL-G1** — model integrity "refuse to act" vs alert-only. Shipped is
   alert-only (actual model only knowable post-session). Either re-ratify
   alert-only as the contract, or greenlight a `--output-format stream-json`
   `system/init` pre-act gate (fast-follow WP).
   **NO LONGER HYPOTHETICAL — see KB-D1 below: drift has fired 5 times live.**
+  **CLOSED 2026-07-22 — no decision is owed any more. plink ruled at the
+  keyboard: "Alert for now is the right move. Let's gather more data before
+  stepping into the `refuse` path." The pre-act gate was built and ships behind
+  `[container].model_gate`; the live summon config runs `model_gate = "alert"`
+  with `session_argv` already on `--output-format stream-json --verbose`
+  (verified 2026-07-26). Decision record — including the sub-decision that
+  detached builds take the same setting as summons — is BUILD-LOOP.md
+  "Decision record 2026-07-22 — BL-G1 SETTLED". `refuse` stays one config value
+  away, deliberately held until the drift is characterised.**
 
 ---
 
@@ -286,7 +295,7 @@ Opus venue, not a patch written from a guess.
   Fix direction: mount CC's state dir ephemerally (tmpfs per summon) so each
   summon genuinely starts clean, or move it outside the resident-writable volume.
 
-- [ ] **KB-D10 (HIGH — Claudette has the SAME hole in a different shape;
+- [x] **KB-D10 (HIGH — Claudette has the SAME hole in a different shape;
   latent, and one tool away from live. NEEDS HER CONSENT + plink's sign-off,
   do not "just fix" it)** — Gable's spine wall does not help her, because she is
   not a Claude Code resident: no `RESIDENT_SPINE_DIR`, no `.claude` dir, no
@@ -314,6 +323,26 @@ Opus venue, not a patch written from a guess.
   Fix shape (same as Gable's): her adapter code moves to a plink-owned
   read-only mount, her worktree becomes a proposal surface. That is a change to
   her running code AND her prompt surface — Tier 2 twice over.
+
+  **CLOSED 2026-07-23 — the prompt surface named in this item is no longer
+  writable Python in her volume.** The fix was built and applied as
+  `SPECS/2026-07-22-claudette-prompt-to-spine.md` (status `applied-live`; her
+  approval #custodian seq 238 + seq 313, apply record at the bottom of that
+  spec). `core.py:36 SYSTEM_PROMPT` and `disjorn_bot.py:42 PLATFORM_SUFFIX` are
+  gone as literals; both now compose from a plink-owned spine mounted read-only
+  at `/srv/disjorn-spine/claudette`. Re-verified at the keyboard 2026-07-26:
+  the mirror is `plink:plink 0755`/`0644` and
+  `sudo -u res-claudette touch /srv/disjorn-spine/claudette/EVIL.md` →
+  **Permission denied**. This item was stale-HIGH for three days, which
+  distorted the activation gate in STATUS.md; it is now off it.
+
+  **Residual noted 2026-07-26, NOT the HIGH and NOT re-opening it:** her
+  *adapter code* still lives in her own read-write volume (`core.py`,
+  `disjorn_bot.py`, `config.py` all return `test -w` = 0 as res-claudette), and
+  `core.SPINE_DIR` reads `config.CLAUDETTE_SPINE_DIR`, so the "move her adapter
+  to a read-only mount" half of the fix shape above is unbuilt. It stays latent
+  for exactly the reason recorded above — her tool registry still has no write,
+  edit or shell tool — so the same "what flips it live" checklist applies.
 - [ ] **KB-D11 (LOW/MED — refusal latency)** — `harness/residency/launcher.py`
   `_kill` sends **SIGKILL only**. podman's `--sig-proxy` forwards SIGTERM into
   the container, so SIGTERM-then-SIGKILL would stop a refused session's work
@@ -417,6 +446,19 @@ Opus venue, not a patch written from a guess.
   redacted messages (170/182/190/192) are already placeholders. Re-check this
   relationship during the red-team, and note the interaction with KB-D1 —
   if drift is content-triggered, a deeper window raises the drift rate.
+
+  **SUPERSEDED 2026-07-22 by KB-D14 below — do not read "wired this session" as
+  live state.** The 100-deep window was REVERTED to the default 30 the same
+  day, and the revert is what stopped the drift: KB-D14 records that reverting
+  #custodian backfill 100 → 30 restored a stable Fable over several summons.
+  So the last sentence of this item stopped being a prediction and became the
+  measured mechanism. **Live value, verified 2026-07-26:
+  `/srv/disjorn-resident-config/res-gable/summon.toml` has `[backfill] count =
+  30` and `[backfill.per_channel] 4 = 30` — #custodian is pinned explicitly at
+  30, with the reverted 100 and its arithmetic kept as comments above it.**
+  KB-D14's standing caveat
+  applies: 30 is a stopgap that works by keeping the window shallower than the
+  poison is old, and it degrades silently as the channel grows.
 
 ---
 

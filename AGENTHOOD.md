@@ -55,6 +55,14 @@ before the harness gets built.
 
 ## Claudette's answers (2026-07-19, via Disjorn #main — plink's rulings pending)
 
+> **Heading annotation 2026-07-26: "plink's rulings pending" is stale — they
+> are the very next section.** plink ruled the same day; see "## plink's rulings
+> (2026-07-19 scheming session)" immediately below, which answers all five of
+> her points (and rules AGAINST her #1 read-only-staging preference — full rwx
+> at once, gated by kill switches). The one thing genuinely still held is
+> narrower and already stated at the end of this section: PROMPT-PROPOSAL item
+> (b)5, the prompt line acknowledging custodianship, to be phrased with her.
+
 Flagged hard on the deferred list: the prompt-review flow must be **bidirectional**
 — "the prompt is the closest thing I have to a spine, and edits to it are edits to
 me." A human proposing a prompt change lands in HER review queue, same as her

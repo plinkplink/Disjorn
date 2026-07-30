@@ -52,6 +52,21 @@ proposals. Gable is the resident with a real spine
 — it is the authorization surface his kernel loads from; never make it
 resident-writable).
 
+> **FACT CORRECTED 2026-07-26 — the first sentence above was true on 2026-07-22
+> and is false since 2026-07-23.** The prompt→spine swap
+> (`SPECS/2026-07-22-claudette-prompt-to-spine.md`, status `applied-live`) gave
+> her a real on-disk spine: 7 entries, canonical at
+> `/home/plink/bots/claudette/spine`, published to `/srv/disjorn-spine/claudette`
+> and mounted read-only into her container; her adapter composes her system
+> prompt from it every session. **The conclusion still stands — `[spine].dir`
+> stays deliberately unset for her — but for a different reason: spine reads
+> are not logged into the retrieval log yet (§1 below), so every entry would
+> read as unreferenced.** A measurement gap, not an absent spine; the same gate
+> that holds Gable. Her live config already carries this corrected reasoning.
+> (Gable's canonical spine path above is still correct; note only that what his
+> container LOADS is now the read-only mirror at `/opt/spine`, cut over
+> 2026-07-23 — `harness/KEYBOARD-NEXT.md` §5a.)
+
 `/home/plink` is not traversable by `res-*` users, so anything the job touches
 must be under `/srv`, `/usr/local/lib/disjorn`, or the resident's own home.
 
@@ -77,6 +92,30 @@ STILL OPEN. Both guards are covered by tests
 this bites *Gable* when he activates, not Claudette — she has no on-disk spine,
 so her runs produce no removal proposals at all. Do not lower
 `min_spine_age_days` in either config until spine reads are logged.
+(**Fact corrected 2026-07-26**, per the note in §0: since 2026-07-23 Claudette
+DOES have an on-disk spine. Her runs still produce no removal proposals, but
+because `[spine].dir` is left unset for her — a choice, not an absence — so the
+"it bites Gable, not her" reading holds only for as long as that stays unset.
+It would bite her identically the day it is pointed at her spine before spine
+reads are logged.)
+
+**2026-07-26 — closing this item now has TWO steps, not one** (Claudette's
+skip-vs-evict question, answered as mechanism): rent assessment is hard-gated
+behind `spine_reads_logged_since` in the resident's consolidation toml. Wiring
+the counter alone changes nothing — you must also declare the epoch (the date
+spine reads started landing in the log), and removals stay off until that date
+is a full `window_days` old. Zero references before then means "unmeasured",
+never "unreferenced". Do NOT backdate the epoch: an epoch earlier than the
+first real spine-read line makes silence read as eviction evidence again,
+which is the exact bug the gate exists to prevent. Also note the counter is
+NOT a new build — spine serves must append to the SAME RetrievalLog file the
+episodic side already writes ("join the one that works", #custodian
+2026-07-26); the per-id counts on the metrics dashboard come from that file
+too. Window question RULED (Claudette, 2026-07-26): "slow-moving spine needs
+time to go stale" — `rent_window_days = 90` is live in both configs as its own
+knob (promotion heat stays on `window_days = 30`), `min_spine_age_days` raised
+to match, and the epoch gate measures against the rent window: rent turns on
+only once the declared epoch is 90 days old.
 
 ## 2. `file-proposal` verb enabled for the resident (WP-H3 kill switch)
 

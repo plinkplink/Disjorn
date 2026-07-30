@@ -5,6 +5,40 @@ My territory this wave: `harness/broker/**`, `harness/metrics/**`,
 else's hands — mostly plink at the keyboard. Nothing here blocks the code from
 being correct; it blocks it from being *wired up* on the real host.
 
+**Status 2026-07-22 (host install pass), recorded here 2026-07-26:** §1, §2 and
+§3 are **CLOSED** — all three were done at the Opus keyboard session on
+2026-07-22 (`harness/KEYBOARD-NEXT.md` §3 is the install record) and this file
+carried no marker until now. §4 and §5 were never work items. Verified from the
+keyboard 2026-07-26:
+
+- **§1 CLOSED** — `systemctl list-timers 'disjorn-metrics*'` shows
+  `disjorn-metrics-build.timer` (every 10 min, last run minutes ago) and
+  `disjorn-metrics-daily.timer` (23:55) both active and waiting.
+- **§2 CLOSED** — the additive keys are merged into
+  `/etc/disjorn-broker/broker.toml` (root:plink 0640): per-resident
+  `retrieval_log`, `action_log`, `budget_json`, and `spine_dir` for both
+  residents. `[budgets]` landed fully commented — OFF, as specced.
+- **§3 CLOSED at the least-privilege end — the "options (plink's call)" below
+  were both refused, and neither was needed.** No root timer, no `setfacl`, no
+  new group. The paths in the templates were simply wrong: the real files live
+  in the world-readable `resident-home/` VOLUME
+  (`/home/res-<r>/resident-home/…`), not directly inside the 0700 home, and
+  plink already holds a `u:plink:--x` traverse ACL. Repointing closed it with
+  zero privilege widening. Confirmed live: `/var/lib/disjorn-broker/metrics.json`
+  regenerates on the timer and all four sections populate (`broker_actions`,
+  `retrieval`, `spine` — 7 entries each resident, `tool_actions`).
+- **Watch the REPO TEMPLATE, `harness/broker/broker.toml` — the live `/etc`
+  file and the template are two different files and they drifted for four
+  days.** KEYBOARD-NEXT §3 flagged on 2026-07-22 that the template still had
+  the pre-fix paths, so a fresh install would regress to a metrics system that
+  silently reads nothing (an absent input path just skips its section — there
+  is no error). The template's paths were corrected in the working tree on
+  2026-07-26. Not verified as fixed here: the res-claudette metrics keys in the
+  template are written *below* the `[residents.res-claudette.path_map]` header,
+  so TOML parses them into `path_map` rather than into the resident's own
+  table — check that before trusting a fresh install (res-gable's identical
+  block is correctly placed).
+
 ## 1. [keyboard] Install the metrics timers
 
 Templates ship in `harness/metrics/`:

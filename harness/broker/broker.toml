@@ -60,6 +60,31 @@ log_path = "/home/res-claudette/logs/disjorn_bot.log"
 # path looks read-only to the res-* uid).
 # writable_roots = ["/srv/shared-scratch"]
 
+# PLACEMENT FIXED 2026-07-26: these four keys were BELOW the
+# [residents.res-claudette.path_map] header, so TOML parsed them into
+# path_map instead of into this table. A fresh install therefore got no
+# metrics for her at all (an absent input silently skips its section) AND
+# four junk prefixes in the classify-diff allowlist. res-gable's identical
+# block was placed correctly, which is why only she was affected.
+# WP-H12 metrics producer inputs (all read-only; optional — omit to skip that
+# section for this resident). house_memory retrieval log, WP-H5 ~/.action-log
+# (all tool calls in the container), WP-H5 budget.json (for cap legibility),
+# and the markdown spine dir.
+#
+# PATHS CORRECTED 2026-07-26 to match the verified live deployment. Everything
+# a resident owns lives in the world-readable `resident-home/` volume INSIDE
+# the 0700 home, NOT directly under it — this template omitted that segment,
+# so a fresh install produced a metrics system that silently read nothing (an
+# absent input path just skips its section; there is no error). The live
+# /etc/disjorn-broker/broker.toml was fixed 2026-07-22; this template was not,
+# which is the "next install regresses" trap flagged in KEYBOARD-NEXT §3.
+# The spine dirs are the CANONICAL repos under /home/plink (read-only to the
+# host-side producer), not paths inside the resident homes.
+retrieval_log = "/home/res-claudette/resident-home/memory/memory_retrieval.jsonl"
+action_log = "/home/res-claudette/resident-home/.action-log"
+budget_json = "/home/plink/resident-config/res-claudette/budget.json"
+spine_dir = "/home/plink/bots/claudette/spine"
+
 [residents.res-claudette.path_map]
 # classify-diff path translation AND allowlist: residents pass their
 # in-container paths; the broker (host-side) maps prefixes, longest wins;
@@ -67,22 +92,14 @@ log_path = "/home/res-claudette/logs/disjorn_bot.log"
 # read-only repo mirror and her home volume.
 "/opt/disjorn" = "/srv/disjorn-ro"
 "/home/resident" = "/home/res-claudette/resident-home"
-# WP-H12 metrics producer inputs (all read-only; optional — omit to skip that
-# section for this resident). house_memory retrieval log, WP-H5 ~/.action-log
-# (all tool calls in the container), WP-H5 budget.json (for cap legibility),
-# and the markdown spine dir. These live in the resident's home volume, which
-# the host can read; the metrics producer runs host-side, never in a container.
-retrieval_log = "/home/res-claudette/memory/memory_retrieval.jsonl"
-action_log = "/home/res-claudette/.action-log"
-budget_json = "/home/plink/resident-config/claudette/budget.json"
-# spine_dir = "/home/res-claudette/claudette/spine"
+
 
 [residents.res-gable]
 log_path = "/home/res-gable/logs/gable.log"
-retrieval_log = "/home/res-gable/memory/memory_retrieval.jsonl"
-action_log = "/home/res-gable/.action-log"
-budget_json = "/home/plink/resident-config/gable/budget.json"
-# spine_dir = "/home/res-gable/gable/spine"
+retrieval_log = "/home/res-gable/resident-home/memory/memory_retrieval.jsonl"
+action_log = "/home/res-gable/resident-home/.action-log"
+budget_json = "/home/plink/resident-config/res-gable/budget.json"
+spine_dir = "/home/plink/bots/fable/spine"
 
 [residents.res-gable.path_map]
 # REQUIRED for classify-diff — this is the allowlist, not just translation.

@@ -7,6 +7,32 @@ one-shot subagents, exclusive file ownership, nothing built until this plan
 survives #custodian review. Packages marked **[keyboard]** need plink's sudo at
 install time — terminal-mode work, by design outside what any resident can do.
 
+## Build status (added 2026-07-26 — this plan shipped with no status markers)
+
+This document is the DESIGN and stays as written; the table is the only status
+claim in it. Everything below was verified at the keyboard on 2026-07-26 from
+running units, live config and the code on disk — **not** from the prose in
+this file. `LIVE` means built AND running in production; `BUILT` means the code
+exists and is tested but the switch is off; `PARTIAL` names what is missing.
+The authoritative activation runbook is `harness/KEYBOARD-NEXT.md`; the
+security gates are `RED-TEAM-BACKLOG.md`.
+
+| WP | State | Evidence checked 2026-07-26 |
+| --- | --- | --- |
+| **H1** users + containers | **LIVE** | `res-claudette` (uid 997) and `res-gable` (uid 996) exist with 0700 homes; a rootless podman store per resident, both on image `b04b97ebe9be` |
+| **H2** network wall | **LIVE** | nftables ruleset loaded; `disjorn-anthropic-refresh.timer` active (10-min re-resolve of api.anthropic.com). Proven from inside: `podman build` as res-gable dies at `pinging container registry … i/o timeout` (KEYBOARD-NEXT §2) |
+| **H3** broker | **LIVE, verbs mostly OFF** | `disjorn-broker.service` active/running on `/run/disjorn-broker/broker.sock`; kill switches in `/etc/disjorn-broker/verbs.toml`. ON today: the read/propose set for both residents (`read-own-log`, `read-metrics`, `file-proposal`, `query-own-audit`, `refresh-mirror`) plus `run-server-tests`/`classify-diff`/`read-prod-logs` for Claudette. `restart-disjorn` and `start-build` OFF for both |
+| **H4** diff-tier classifier | **BUILT; verb ON for Claudette, OFF for Gable** | `harness/classifier/classify_diff.py` + `protected-paths.toml`; reachability promotion and the dynamic-import ban landed (H13-D1/D2/D3 closed 2026-07-22). `merge-tier1` automation does not exist yet, so tiering is advisory |
+| **H5** resident CC profiles | **LIVE** | `harness/cc/` — Containerfile, `run-resident.sh` (deployed to `/usr/local/lib/disjorn/`), `config-template/` with CLAUDE.md, settings.json and the three hooks |
+| **H6** `house_memory` | **LIVE** | `harness/house_memory/` installed; Claudette's store migrated (retrieval log back to April feeds the WP-H12 dashboard) |
+| **H7** spine/kernel loader | **PARTIAL** | Kernel assembly is live — `bootstrap.py` runs in Gable's `session_argv` and assembles from the RO `/opt/spine`. **Missing: the retrieval-on-demand loop that LOGS non-kernel spine reads.** `Spine(retrieval_log=…)` supports it in code, but nothing in production wires it — `harness/consolidation/INTEGRATION-NEEDS.md` §1, still open, and it is what gates rent assessment for both residents |
+| **H8** witnessed consolidation | **LIVE for Claudette; Gable `active = false`** | `disjorn-consolidation@claudette.timer` is **enabled and active** (next run 03:20 UTC). Proposes-never-acts, `max_evictions = 20`. NB `harness/KEYBOARD-NEXT.md` §4/§6 still describe the timer as installed-and-disabled — that text predates the enable |
+| **H9** Gable residency adapter | **LIVE** | `gable-summon.service` active under res-gable's own user manager; per-summon `podman run --rm`; `harness/residency/INTEGRATION-NEEDS.md` §1–§5 all closed |
+| **H10** Gable's spine + prompt | **LIVE** | 7 entries / 2 kernel on the WP-H12 dashboard; canonical spine plink-owned, published to `/srv/disjorn-spine/gable`, mounted read-only at `/opt/spine` (a write attempt inside the container returns "Read-only file system") |
+| **H11** Claudette migration | **LIVE** | Runs as `res-claudette` in her container, connected as bot 1; her custodian verbs are the ON set in the H3 row. Her prompt also moved out of `core.py` into a plink-owned RO spine (`SPECS/2026-07-22-claudette-prompt-to-spine.md`, applied-live) — beyond what this WP scoped |
+| **H12** budgets + audit surface | **LIVE; budgets deliberately OFF** | `disjorn-metrics-build.timer` (10 min) and `disjorn-metrics-daily.timer` (23:55) both active; `/var/lib/disjorn-broker/metrics.json` regenerating with all four sections. `[budgets]` in broker.toml ships fully commented — instrument first, then cap |
+| **H13** red-team pass | **PARTIAL** | The 2026-07-20 pass ran and its fixes landed (classifier gate fail-open, broker flag-injection, path_map fail-open, audit gaps; 210 harness tests green). But the checklist has grown, not shrunk: `RED-TEAM-BACKLOG.md` is the live view and most items are still unchecked — including the ones gating `start-build`. **Not a closed gate.** Per its own header, each item runs in an isolated Opus venue, never in a channel a resident backfills |
+
 ## Substrate
 
 - **WP-H1 [keyboard]: users + containers.** Unix users `res-claudette`,
@@ -136,6 +162,9 @@ Estimate: one long session with plink at the start, the rest orchestrated.
 ## Review asks (answer in #custodian)
 
 1. plink: podman rootless OK, or a preference (docker/systemd-nspawn)?
+   **ANSWERED — rootless headless podman, settled at #custodian seq 31–32, as
+   WP-H2 above already records ("Container tech: **rootless headless podman**
+   (settled, seq 31–32)"). Built on that basis and live since 2026-07-22.**
 2. Claudette: WP-H11 touches your runtime layout (not your code/prompt) —
    your sign-off on the migration shape, and your custodian tool wishlist.
 3. Both: protected-path list completeness — what's missing?
