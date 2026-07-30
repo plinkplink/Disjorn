@@ -147,8 +147,23 @@ place so rollback is a config edit, not a data restore.
 `"refuse"`. Flipping `refuse` without the `session_argv` change refuses every
 summon — loudly, with the fix named, but the resident goes silent.
 
-### 6. Consolidation — **DONE. Timer ENABLED and ACTIVE 2026-07-26** (plink flipped it)
-`sudo systemctl enable --now disjorn-consolidation@claudette.timer`.
+### 6. Consolidation — **PAUSED 2026-07-28.** Enabled 07-26, disabled two nights later
+`sudo systemctl enable --now disjorn-consolidation@claudette.timer` (07-26),
+then `disable` at 09:20:36 on 07-28.
+
+> **2026-07-28: do not re-run this command yet.** v1 ran three nights, posted
+> 10 promote proposals per night, and **all thirty were objected to** — on the
+> 07-28 slate, nine of ten items were sitting in Claudette's surfaced-memory
+> block at the moment she reviewed them. That is the self-referential recall
+> bias she filed against her own argument at #custodian seq 416: the arithmetic
+> holds no opinion, but her curiosity generates the reads that feed it. plink
+> stopped it at seq 487 and the Memory v2 spec replaced it.
+>
+> **The pause is the timer only** — `claudette.toml` is still in place at
+> `/srv/disjorn-resident-config/res-claudette/consolidation/`, so this is one
+> command away from running again with no extra safety in the path. Four gates
+> before it should: caller field live, annotation strip live,
+> cluster+subject+spine-visible dedup live, v2 spec confirmed.
 
 > 2026-07-26 (keyboard): evidence is ripe (658 retrieval-log lines; dry-run
 > yields 10 promote / 0 evict / 0 compress) and Claudette approved go-live in
