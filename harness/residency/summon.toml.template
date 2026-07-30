@@ -133,7 +133,13 @@ model_gate = "off"
 # positional args ($0=cc-session, "$@"=--model <id>), which "$@" forwards to
 # claude. Drop either and the pin silently stops reaching claude.
 session_argv = ["bash", "-lc", "python3 /opt/house_memory/house_memory/bootstrap.py >&2 && exec claude -p --output-format stream-json --verbose \"$@\"", "cc-session"]
-timeout_sec = 300              # 5 min: past that the endless typing indicator reads as a hang
+timeout_sec = 600              # 10 min. Was 300; a real summon died at 300.7s
+                               # on 2026-07-26 with all its work done and only
+                               # the reply unposted. Summons run SERIALLY, so
+                               # this is also the worst-case head-of-line block
+                               # — and the typing indicator runs the whole time
+                               # before it reads as a hang. Raise only with a
+                               # queue budget + drop order in place.
 # Optional extra env for the launch subprocess (run-resident.sh reads these):
 # [container.env]
 # RESIDENT_PODMAN_EXTRA = ""

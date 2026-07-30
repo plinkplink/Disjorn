@@ -208,7 +208,15 @@ class SummonAdapter:
         # session reported (best-effort, may be None). display = what's really
         # running, for the visible suffix + audit line.
         pin = self.config.container.model
-        actual = result.model if result.ok else None
+        # A failed session can still have proven its model: the stream's init
+        # event names the resolved id before the turn runs, so a timeout kill
+        # leaves the identity known even though the reply is lost. Gating this
+        # on result.ok discarded that proof and reported every failure as
+        # "actual unverified" — the same words the drift alarm uses (see
+        # #custodian 2026-07-26). Trust the gate's observation, not the
+        # session's exit status. A gate ABORT is the one exception: there the
+        # model is the refusal's subject and the session is disowned entirely.
+        actual = None if result.gate_abort else result.model
         verified = actual is not None
         display_model = actual or pin
         drift = bool(pin and actual and actual != pin)

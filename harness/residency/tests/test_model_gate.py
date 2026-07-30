@@ -453,3 +453,38 @@ def test_off_end_to_end_with_a_real_stream_session(tmp_path):
     assert reply.startswith("Wrong-model answer.")
     assert f"— gable · {OTHER}" in reply
     assert any("MODEL DRIFT" in s.content for s in client.replies_to(4))
+
+
+# ── timeout must not read as a model-identity failure (2026-07-26) ───────────
+#
+# A timeout kill used to discard the model the gate had ALREADY read off the
+# init event, so the footer said "(pinned; actual unverified)" — the same
+# words the drift alarm uses. That cost a #custodian thread: the residents
+# reasonably read a clock failure as a possible identity failure. The init
+# event is emitted before the turn runs, so on a timeout the model is known.
+
+def test_timeout_still_reports_the_model_it_saw(tmp_path, monkeypatch):
+    """Init arrives, then the stream hangs past the wall. Identity survives."""
+    events = make_stream_events(init_model=PIN)
+    cfg = _stream_config(
+        tmp_path, events,
+        timeout_sec=0.4,
+        env={"RESIDENCY_STUB_LINE_SLEEP": "1.0"},  # hang mid-stream
+    )
+    result = asyncio.run(ContainerLauncher(cfg.container).run("x"))
+
+    assert result.ok is False
+    assert "timed out" in (result.error or "")
+    assert result.model == PIN          # the fact the gate observed survives
+    assert result.reply == ""           # a half-written reply is never salvaged
+
+
+def test_gate_abort_still_disowns_the_model(tmp_path):
+    """The one case where a failed session must NOT claim verification: the
+    gate refused it. The model there is the refusal's subject, not a credential."""
+    events = make_stream_events(init_model=OTHER)   # mismatch vs PIN
+    cfg = _stream_config(tmp_path, events, gate="refuse")
+    result = asyncio.run(ContainerLauncher(cfg.container).run("x"))
+
+    assert result.ok is False
+    assert result.gate_abort is True

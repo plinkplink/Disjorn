@@ -544,10 +544,19 @@ class ContainerLauncher:
             )
 
         if timed_out:
+            # Carry the model the gate already saw. The init event names the
+            # resolved model BEFORE the turn runs, so on a timeout it is
+            # normally known — dropping it made the adapter report "(pinned;
+            # actual unverified)", which reads as the model-drift alarm and
+            # cost a #custodian thread on 2026-07-26. A timeout is a clock
+            # failure, not an identity failure; say which one happened.
+            # Deliberately NOT salvaging gate.reply: a half-written reply
+            # posted as if finished is a worse failure than an honest error.
             return SessionResult(
                 ok=False,
                 duration_sec=duration,
                 error=f"session timed out after {self.config.timeout_sec}s",
+                model=gate.model,
                 models_seen=list(gate.models_seen),
             )
 
