@@ -20,6 +20,8 @@ def _write_toml(config_dir, resident, *, active, store, spine_dir, log_path):
             f'dir = "{spine_dir}"',
             "[consolidation]",
             "min_spine_age_days = 0",
+            # open the rent-epoch gate; the gate's own tests cover it closed
+            'spine_reads_logged_since = "2020-01-01"',
             "[broker]",
             'cli = "definitely-not-a-real-broker"',
         ]),

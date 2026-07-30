@@ -127,6 +127,17 @@ class ConsolidationReport:
     # soft-target bias bookkeeping (transparency for reviewers)
     bias_applied: bool = False
     promotions_suppressed: int = 0
+    # eviction-cap bookkeeping (Claudette's floor): candidates over
+    # max_evictions this run — deferred, not spared; they return next run.
+    evictions_deferred: int = 0
+    # non-None = spine exists but rent assessment is OFF (epoch gate): zero
+    # references currently means "unmeasured", not "unreferenced", so no
+    # evict/compress proposals were even computed. The reason is printed in
+    # the header so a quiet run is legibly quiet-by-design.
+    rent_inactive_reason: "str | None" = None
+    # rent's own trailing window when it differs from window_days ("slow-
+    # moving spine needs time to go stale"); None = same as window_days.
+    rent_window_days: "int | None" = None
     # False = this resident has no on-disk spine (e.g. Claudette, whose spine
     # is her system prompt). The run is episodic-promotion only; reviewers are
     # told so in the header rather than seeing a silent "spine 0/60".
@@ -151,7 +162,13 @@ class ConsolidationReport:
 
     def batch_header(self) -> str:
         c = self.counts()
-        if self.spine_present:
+        if self.spine_present and self.rent_inactive_reason:
+            spine_clause = (
+                f"spine {self.spine_size} entries, rent assessment INACTIVE "
+                f"— {self.rent_inactive_reason} — zero reads mean unmeasured, "
+                f"not unreferenced, so no evict/compress proposals this run"
+            )
+        elif self.spine_present:
             target_state = "OVER target" if self.over_target else "at/under target"
             spine_clause = f"spine {self.spine_size}/{self.soft_target} ({target_state})"
         else:
@@ -163,13 +180,25 @@ class ConsolidationReport:
             f"[consolidation run for {self.resident} @ {self.generated_at[:19]}] "
             f"{spine_clause}; "
             f"proposals: {c['promote']} promote, {c['evict']} evict, "
-            f"{c['compress']} compress; window {self.window_days}d."
+            f"{c['compress']} compress; window {self.window_days}d"
+            + (
+                f" (rent {self.rent_window_days}d)."
+                if self.rent_window_days and self.rent_window_days != self.window_days
+                else "."
+            )
         )
         if self.bias_applied:
             header += (
                 f" Soft-target bias active: over target, additions (promotions) "
                 f"held to <= reductions; {self.promotions_suppressed} promotion(s) "
                 f"deferred this run (a bias on suggestions, not a wall on approval)."
+            )
+        if self.evictions_deferred:
+            header += (
+                f" Eviction cap active: {self.evictions_deferred} eviction "
+                f"candidate(s) over the per-run cap held back — deferred, not "
+                f"spared; they return on later runs (a volume limit on "
+                f"suggestions, not a wall on approval)."
             )
         return header
 

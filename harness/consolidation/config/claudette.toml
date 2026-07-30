@@ -29,19 +29,23 @@ collection = "claudette_memory"
 path = "/home/res-claudette/resident-home/memory/memory_retrieval.jsonl"
 
 [spine]
-# DELIBERATELY UNSET. Claudette has NO on-disk spine directory on this host —
-# her spine is her system prompt, managed through her bot config, not a
-# directory of markdown entries. (Identical note in broker.toml's
-# [residents.res-claudette].) With no spine dir her run does the
-# episodic-promotion half only and emits ZERO evict/compress proposals; the
-# report header says so in as many words.
+# DELIBERATELY UNSET — but not because the spine doesn't exist. Since the
+# 2026-07-22/23 prompt->spine swap Claudette DOES have an on-disk spine
+# (7 entries, published to /srv/disjorn-spine/claudette, mounted RO into her
+# container); her BOT reads it every session. What stays disconnected is
+# CONSOLIDATION's pointer to it: with no dir set, the run is episodic-
+# promotion only and emits ZERO evict/compress proposals, and the report
+# header says so in as many words.
 #
-# Do NOT "fix" this by pointing at a directory that does not exist: a
-# configured-but-missing spine dir is a hard error by design, because an
-# absent spine read as an empty spine is how "no spine dir" would silently
-# become "every entry is unreferenced". If she ever gets a real spine dir,
-# uncomment and set it.
-# dir = "/path/to/her/spine"
+# Why the blindfold stays on: rent assessment reads spine-entry reference
+# counts from the retrieval log, and spine reads are NOT LOGGED yet
+# (INTEGRATION-NEEDS §1, open). Until §1 lands, every entry scores zero no
+# matter how load-bearing it is — an audit built on missing data, not
+# evidence. Don't audit what you can't measure.
+#
+# When §1 lands, set the line below; the max_evictions floor and
+# min_spine_age_days guard become the active protection that day.
+# dir = "/srv/disjorn-spine/claudette"
 
 [consolidation]
 # Soft target on spine size (entry count) — plink's knob. Over target,
@@ -64,7 +68,9 @@ evict_max_references = 0
 # spanned the window yet. (Age from frontmatter `since`/`created`, else mtime.)
 # LOAD-BEARING while INTEGRATION-NEEDS §1 is open: spine reads are not yet
 # logged, so every spine entry reads as unreferenced. Do not lower this.
-min_spine_age_days = 30
+# Raised 30 -> 90 alongside rent_window_days (2026-07-26): an entry cannot
+# be called unreferenced over a window it has not spanned.
+min_spine_age_days = 90
 
 # Kernel entries are the hardest rent in the house; consolidation does not
 # propose evicting/compressing them (kernel churn wants a stricter gate — an
@@ -73,6 +79,32 @@ exclude_kernel = true
 
 # Cap promotions per run so a chatty episode can't flood the review queue.
 max_promotions = 10
+
+# Cap EVICT proposals per run — Claudette's floor (#custodian, 2026-07-26).
+# While spine reads are not yet logged (INTEGRATION-NEEDS §1), rent
+# arithmetic could mark nearly every entry unreferenced and propose a
+# bonfire on run one. Weakest-rent candidates are proposed first; the rest
+# are deferred — and the report header says how many — returning on later
+# runs. -1 = uncapped. "Let it be timid once so I can see its taste before
+# it gets volume."
+max_evictions = 20
+
+# THE SKIP KNOB (Claudette's question, #custodian 2026-07-26): "does no read
+# data resolve as skip, or as unreferenced-evict?" SKIP, mechanically. Rent
+# assessment (evict + compress) stays OFF until this is set to the ISO date
+# spine reads started landing in the retrieval log (INTEGRATION-NEEDS §1) —
+# AND that date is at least window_days old. Wiring the counter and declaring
+# the epoch are two deliberate acts, so the day the counter lands cannot
+# silently become the day the whole spine reads as unreferenced. Leave unset
+# until §1 is closed; then set it to that day's date.
+# spine_reads_logged_since = "YYYY-MM-DD"
+
+# Rent window — Claudette's ruling (#custodian 2026-07-26): "slow-moving
+# spine needs time to go stale." Evict/compress rent is assessed over this
+# longer trailing window; promotion heat stays on window_days, so widening
+# rent cannot loosen what earns tenancy. The epoch gate measures against
+# THIS value: rent turns on only once spine_reads_logged_since is 90d old.
+rent_window_days = 90
 
 # Constraint-shaped entries (lessons/whys/promises) default to COMPRESSION,
 # never eviction (anti-Chesterton's-fence). Detected by frontmatter kind/shape,

@@ -29,13 +29,18 @@ def write_spine_entry(
     *,
     name: str | None = None,
     kernel: bool = False,
+    seats: str = "[resident]",
     **frontmatter,
 ) -> Path:
-    """Write a spine .md file with simple key:value frontmatter."""
+    """Write a spine .md file with simple key:value frontmatter. `seats` is
+    mandatory in every real entry since the 2026-07-23 seat split (redline 1:
+    declared, never inferred), so the fixture declares the resident seat by
+    default."""
     lines = ["---"]
     if name is not None:
         lines.append(f"name: {name}")
     lines.append(f"kernel: {'true' if kernel else 'false'}")
+    lines.append(f"seats: {seats}")
     for k, v in frontmatter.items():
         lines.append(f"{k}: {v}")
     lines.append("---")
@@ -86,7 +91,9 @@ def make_config(
     **overrides,
 ) -> ConsolidationConfig:
     """Build a config pointed at the synthetic fixtures. Defaults tuned for
-    removal tests: min_spine_age_days=0 so fresh files aren't age-excluded."""
+    removal tests: min_spine_age_days=0 so fresh files aren't age-excluded,
+    and spine_reads_logged_since far in the past so the rent-epoch gate is
+    open (tests of the gate itself override it)."""
     kwargs: dict = dict(
         resident=resident,
         active=active,
@@ -102,6 +109,7 @@ def make_config(
         min_spine_age_days=0,
         exclude_kernel=True,
         max_promotions=10,
+        spine_reads_logged_since="2020-01-01",
         broker_cli=broker_cli,
     )
     kwargs.update(overrides)

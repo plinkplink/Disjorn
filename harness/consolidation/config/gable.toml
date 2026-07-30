@@ -31,7 +31,10 @@ collection = "gable_memory"
 path = "/home/res-gable/resident-home/memory/memory_retrieval.jsonl"
 
 [spine]
-# Gable IS the resident with a real on-disk spine (6 entries).
+# Gable IS the resident with a real on-disk spine (7 entries, 2 kernel —
+# count verified against the WP-H12 dashboard 2026-07-26; it said 6 from the
+# 22nd until then, and the file that governs composting a spine must not
+# disagree with the ledger about its size).
 # Blocker 2 is CLOSED as of 2026-07-22: the read-only mirror now exists at
 # /srv/disjorn-spine/<resident>, plink-owned 0755/0644, verified readable and
 # NOT writable from the res-gable uid (find -writable returns nothing; eight
@@ -51,11 +54,39 @@ window_days = 30
 promote_min_references = 3
 evict_max_references = 0
 # LOAD-BEARING while INTEGRATION-NEEDS §1 is open (spine reads unlogged, so
-# every entry reads as unreferenced). His spine is 6 entries of kernel/
+# every entry reads as unreferenced). His spine is 7 entries of kernel/
 # authorization material — do not lower this.
-min_spine_age_days = 30
+# Raised 30 -> 90 alongside rent_window_days (2026-07-26): an entry cannot
+# be called unreferenced over a window it has not spanned.
+min_spine_age_days = 90
 exclude_kernel = true
 max_promotions = 10
+
+# Cap EVICT proposals per run — Claudette's floor (#custodian, 2026-07-26).
+# While spine reads are not yet logged (INTEGRATION-NEEDS §1), rent
+# arithmetic could mark nearly every entry unreferenced and propose a
+# bonfire on run one. Weakest-rent candidates are proposed first; the rest
+# are deferred — and the report header says how many — returning on later
+# runs. -1 = uncapped. "Let it be timid once so I can see its taste before
+# it gets volume."
+max_evictions = 20
+
+# THE SKIP KNOB (Claudette's question, #custodian 2026-07-26): "does no read
+# data resolve as skip, or as unreferenced-evict?" SKIP, mechanically. Rent
+# assessment (evict + compress) stays OFF until this is set to the ISO date
+# spine reads started landing in the retrieval log (INTEGRATION-NEEDS §1) —
+# AND that date is at least window_days old. Wiring the counter and declaring
+# the epoch are two deliberate acts, so the day the counter lands cannot
+# silently become the day the whole spine reads as unreferenced. Leave unset
+# until §1 is closed; then set it to that day's date.
+# spine_reads_logged_since = "YYYY-MM-DD"
+
+# Rent window — Claudette's ruling (#custodian 2026-07-26): "slow-moving
+# spine needs time to go stale." Evict/compress rent is assessed over this
+# longer trailing window; promotion heat stays on window_days, so widening
+# rent cannot loosen what earns tenancy. The epoch gate measures against
+# THIS value: rent turns on only once spine_reads_logged_since is 90d old.
+rent_window_days = 90
 constraint_tags = ["lesson", "why", "promise", "constraint", "boundary", "rule"]
 constraint_keywords = ["never", "always", "because", "must not", "do not", "learned", "the reason"]
 

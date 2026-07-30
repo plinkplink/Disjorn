@@ -100,15 +100,34 @@ def _build(cfg, *, now, store, spine, log) -> ConsolidationReport:
     promotions = _promotion_proposals(
         cfg, store, ref_counts, last_seen, spine_bodies
     )
-    if spine_present:
-        evictions, compressions = _removal_proposals(
-            cfg, spine_entries, ref_counts, last_seen, now
+    rent_inactive_reason = (
+        _rent_inactive_reason(cfg, now) if spine_present else None
+    )
+    if spine_present and rent_inactive_reason is None:
+        # Rent is judged over its own (typically longer) window: a slow-
+        # moving spine needs time to go stale. Reuse the promotion counts
+        # only when the two windows coincide.
+        rent_ref_counts = (
+            ref_counts
+            if cfg.rent_window() == cfg.window_days
+            else log.reference_counts(cfg.rent_window(), now=now)
         )
+        evictions, compressions = _removal_proposals(
+            cfg, spine_entries, rent_ref_counts, last_seen, now
+        )
+    elif spine_present:
+        # The no-data answer is SKIP, not evict (Claudette's question,
+        # #custodian 2026-07-26): until spine reads are declared as logged
+        # AND the declaration has aged a full window, zero-reference spine
+        # entries mean "unmeasured", never "unreferenced".
+        evictions, compressions = [], []
     else:
         # EXPLICIT short-circuit, not an incidentally-empty loop: with no
         # spine there is nothing whose rent could be assessed, so the run is
         # episodic-promotion only. "No spine dir" must never mean "evict all".
         evictions, compressions = [], []
+
+    evictions, evictions_deferred = _apply_eviction_cap(cfg, evictions)
 
     proposals = promotions + evictions + compressions
 
@@ -120,6 +139,9 @@ def _build(cfg, *, now, store, spine, log) -> ConsolidationReport:
         soft_target=cfg.soft_target_spine_size,
         proposals=proposals,
         spine_present=spine_present,
+        evictions_deferred=evictions_deferred,
+        rent_inactive_reason=rent_inactive_reason,
+        rent_window_days=cfg.rent_window(),
     )
 
     _apply_soft_target_bias(cfg, report, promotions, evictions, compressions)
@@ -272,7 +294,7 @@ def _evict_proposal(cfg, entry, rc, last_seen) -> Proposal:
         content=entry.body,
         evidence=Evidence(
             reference_count=rc,
-            window_days=cfg.window_days,
+            window_days=cfg.rent_window(),
             last_referenced_at=last_seen.get(entry.name),
         ),
         rationale=(
@@ -311,7 +333,7 @@ def _compress_proposals(cfg, candidates, ref_counts, last_seen) -> list[Proposal
                 target=f"topic:{topic}",
                 subject=topic,
                 content=merged_body,
-                evidence=Evidence(rc, cfg.window_days, last),
+                evidence=Evidence(rc, cfg.rent_window(), last),
                 rationale=(
                     f"{len(group)} constraint-shaped variations of one idea "
                     f"('{topic}'), all under-referenced — merge to one line. "
@@ -330,7 +352,7 @@ def _compress_proposals(cfg, candidates, ref_counts, last_seen) -> list[Proposal
                 target=entry.name,
                 subject=str(entry.meta.get("subject", entry.name)),
                 content=entry.body,
-                evidence=Evidence(rc, cfg.window_days, last_seen.get(entry.name)),
+                evidence=Evidence(rc, cfg.rent_window(), last_seen.get(entry.name)),
                 rationale=(
                     "under-referenced but constraint-shaped (lesson/why/promise): "
                     "defaults to compression, never eviction — evict the 'why' and "
@@ -342,12 +364,69 @@ def _compress_proposals(cfg, candidates, ref_counts, last_seen) -> list[Proposal
     return out
 
 
+# ── rent-epoch gate ──────────────────────────────────────────────────────────
+
+def _rent_inactive_reason(cfg, now) -> Optional[str]:
+    """Why rent assessment (evict/compress) must not run, or None if it may.
+
+    Zero references can mean two opposite things: "measured and unused" or
+    "never measured". The arithmetic cannot tell them apart, so the boundary
+    is DECLARED, never inferred (the seats rule, applied to telemetry):
+    `spine_reads_logged_since` is set by the operator on the day spine reads
+    start landing in the retrieval log (INTEGRATION-NEEDS §1), and rent stays
+    off until that epoch has aged one full window. Fail closed on an
+    unparseable date — a garbled epoch must not read as "measured"."""
+    raw = cfg.spine_reads_logged_since
+    if not raw:
+        return (
+            "spine-read logging epoch not declared "
+            "(spine_reads_logged_since unset; INTEGRATION-NEEDS §1)"
+        )
+    epoch = _parse_iso(str(raw))
+    if epoch is None:
+        return f"spine_reads_logged_since unparseable: {raw!r}"
+    covered = (now - epoch).total_seconds() / 86400.0
+    if covered < cfg.rent_window():
+        return (
+            f"spine-read log covers only {covered:.1f}d of the "
+            f"{cfg.rent_window()}d rent window (epoch {raw})"
+        )
+    return None
+
+
+# ── eviction cap ─────────────────────────────────────────────────────────────
+
+def _apply_eviction_cap(cfg, evictions: list[Proposal]) -> tuple[list[Proposal], int]:
+    """At most `max_evictions` EVICT proposals per run (Claudette's floor,
+    #custodian 2026-07-26: with spine reads unlogged, rent arithmetic could
+    propose a bonfire on run one — "let it be timid once"). Weakest rent goes
+    first: lowest reference count, then stalest last-reference (never-seen
+    sorts stalest). Deferred candidates are counted for the report header and
+    return on later runs; compressions are untouched — they never remove a
+    WHY. `max_evictions < 0` means uncapped."""
+    cap = cfg.max_evictions
+    if cap < 0 or len(evictions) <= cap:
+        return evictions, 0
+    ranked = sorted(
+        evictions,
+        key=lambda p: (
+            p.evidence.reference_count,
+            p.evidence.last_referenced_at or "",
+        ),
+    )
+    return ranked[:cap], len(evictions) - cap
+
+
 # ── soft-target bias ─────────────────────────────────────────────────────────
 
 def _apply_soft_target_bias(cfg, report, promotions, evictions, compressions):
     """Over the soft target, propose >= as much reduction as addition. A bias
     on what gets SUGGESTED, never a wall on what may be approved. We hold the
     weakest-evidence promotions back so promotions <= reductions."""
+    if report.rent_inactive_reason is not None:
+        # The epoch gate forbade reductions this run; demanding promotions
+        # match them would silently zero every promotion. Bias waits for rent.
+        return
     if not report.over_target:
         return
     reductions = len(evictions) + len(compressions)

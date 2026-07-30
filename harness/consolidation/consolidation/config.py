@@ -53,6 +53,32 @@ class ConsolidationConfig:
     min_spine_age_days: int = 30
     exclude_kernel: bool = True
     max_promotions: int = 10
+    # Claudette's floor (#custodian 2026-07-26): while spine reads are not yet
+    # logged (INTEGRATION-NEEDS §1), rent arithmetic can mark nearly every
+    # entry unreferenced and propose a bonfire on run one. At most this many
+    # EVICT proposals per run; the rest are deferred (and said so in the
+    # header), returning on later runs. -1 = uncapped. Compressions are not
+    # capped — they never remove a WHY.
+    max_evictions: int = 20
+    # Claudette's question, answered as mechanism (#custodian 2026-07-26):
+    # "does a memory with no read data resolve as no-data-skip or as
+    # unreferenced-evict?" SKIP — enforced here. Rent assessment (evict +
+    # compress) stays OFF until this is set to the ISO date spine reads
+    # started being logged into the retrieval log (INTEGRATION-NEEDS §1),
+    # AND that epoch is at least window_days old. Declared, never inferred:
+    # wiring the counter and flipping this knob are two deliberate acts, so
+    # the day the counter lands cannot silently become the day the spine
+    # reads as all-unreferenced. Unset = no removal proposals, ever.
+    spine_reads_logged_since: Optional[str] = None
+    # Claudette's ruling (#custodian 2026-07-26): "slow-moving spine needs
+    # time to go stale." Rent (evict/compress) is assessed over THIS trailing
+    # window, while promotion heat stays on window_days — one dial per
+    # question, so widening rent cannot quietly loosen what earns tenancy.
+    # Also the yardstick the epoch gate measures against. None = window_days.
+    rent_window_days: Optional[int] = None
+
+    def rent_window(self) -> int:
+        return self.rent_window_days or self.window_days
     constraint_tags: list[str] = field(
         default_factory=lambda: [
             "lesson",
@@ -137,6 +163,9 @@ def load_config(
         "min_spine_age_days",
         "exclude_kernel",
         "max_promotions",
+        "max_evictions",
+        "spine_reads_logged_since",
+        "rent_window_days",
         "constraint_tags",
         "constraint_keywords",
     ):
