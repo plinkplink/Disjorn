@@ -798,6 +798,16 @@
   margin: var(--space-1) 0;
 }
 
+/* Rendered where the bot's [emotion: X] tag sat. On its own line (the usual
+   case — start, end, or a paragraph break) this reads the same as the block
+   form; dropped mid-sentence it stretches that one line, which is the honest
+   cost of letting the tag land wherever the beat is. */
+.chibi-inline {
+  display: inline-block;
+  vertical-align: middle;
+  margin: var(--space-1) var(--space-1) var(--space-1) 0;
+}
+
 /* ---- attachments ---- */
 
 .msg-attachments {

@@ -12,6 +12,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { ApiError, search } from "../api";
+import { stripEmotionTags } from "./Markdown";
 import { useChannels } from "../stores/channels";
 import { useMessages } from "../stores/messages";
 import type { SearchResult } from "../types";
@@ -22,7 +23,7 @@ const SNIPPET_RADIUS = 36;
 
 /** Context snippet around the first query-term hit, term wrapped in <mark>. */
 function Snippet({ content, query }: { content: string; query: string }) {
-  const flat = content.replace(/\s+/g, " ").trim();
+  const flat = stripEmotionTags(content).replace(/\s+/g, " ").trim();
   const lower = flat.toLowerCase();
   let hitStart = -1;
   let hitLen = 0;

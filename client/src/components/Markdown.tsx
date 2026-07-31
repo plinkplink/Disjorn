@@ -7,7 +7,15 @@
    label + copy button), > quotes, ||spoilers|| (click to reveal), links
    (new tab, noopener), @mentions matched against channel member names, and
    bare image/GIF URLs (picker files or image extensions) shown as inline
-   images. */
+   images.
+
+   Plus one Disjorn-ism: a bot's `[emotion: X]` tag renders as its chibi right
+   where the tag sits, so the art lands on the beat the bot aimed at instead of
+   being pinned above the message. The tag arrives inside `content` (the
+   adapter no longer strips it); the resolved artwork arrives separately in
+   `emote_refs`, so the caller passes a `chibis` list and the nth tag claims
+   the nth entry. A tag with nothing to claim renders as nothing — raw
+   brackets never reach the reader. */
 
 import { Fragment, memo, useState } from "react";
 import type { ReactNode } from "react";
@@ -18,6 +26,26 @@ const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|avif|svg)$/i;
 const URL_TRAILING_PUNCT_RE = /[)\],.!?;:'"]+$/;
 const HTTP_URL_RE = /https?:\/\/[^\s<>]+/;
 const PICKER_URL_RE = /\/picker\/file\/(?:gif|image)\/[^\s<>]+/;
+const EMOTION_RE = /\[emotion:\s*([^\]\n]+)\]/i;
+const EMOTION_G_RE = new RegExp(EMOTION_RE.source, "gi");
+
+export interface ChibiEmote {
+  url: string;
+  emotion: string;
+}
+
+/** How many `[emotion: X]` tags the text carries — i.e. how many chibi refs
+    the inline renderer will consume before the message body is done. */
+export function countEmotionTags(content: string): number {
+  return content.match(EMOTION_G_RE)?.length ?? 0;
+}
+
+/** Drop emotion tags from text headed somewhere with no room for art — the
+    one-line reply and search previews. `stripMarkdown` already does this as
+    part of its full projection; these callers only want the tags gone. */
+export function stripEmotionTags(content: string): string {
+  return content.replace(EMOTION_G_RE, "");
+}
 
 export function isImageUrl(url: string): boolean {
   const path = url.split("?")[0] ?? url;
@@ -108,6 +136,12 @@ function UrlNode({ url }: { url: string }) {
 
 interface Ctx {
   mentionRe: RegExp | null;
+  /** Chibi art for this message, claimed in document order by emotion tags.
+      `taken` is deliberately mutable and shared across the nested parseInline
+      calls — the scan is depth-first left-to-right, so bumping it as tags are
+      met hands out refs in the order they appear. */
+  chibis: ChibiEmote[];
+  taken: { n: number };
 }
 
 interface PatternDef {
@@ -146,6 +180,29 @@ const PATTERNS: PatternDef[] = [
       </code>
     ),
     plain: (m) => inner(m), // code is literal — never re-parsed
+  },
+  {
+    // Ahead of the emphasis rules: emotion names carry _ and - ("Eye-Roll",
+    // "Heart_Eyes"), which italic/underline would otherwise chew into.
+    re: EMOTION_RE,
+    render: (_m, ctx, key) => {
+      const chibi = ctx.chibis[ctx.taken.n];
+      ctx.taken.n += 1;
+      if (chibi === undefined) return null; // unresolved emotion: show nothing
+      return (
+        <img
+          key={key}
+          className="chibi chibi-inline"
+          src={chibi.url}
+          title={chibi.emotion}
+          alt={chibi.emotion}
+          loading="lazy"
+        />
+      );
+    },
+    // A one-line preview has no room for art, and "[emotion: Smug]" as text is
+    // exactly the leak this feature exists to close.
+    plain: () => "",
   },
   {
     re: /\|\|([\s\S]+?)\|\|/,
@@ -377,12 +434,21 @@ interface MarkdownProps {
   content: string;
   /** Channel member display names + usernames for @mention highlighting. */
   mentionNames?: string[];
+  /** Chibi art available to this message's `[emotion: X]` tags, in order. */
+  chibis?: ChibiEmote[];
 }
+
+const NO_CHIBIS: ChibiEmote[] = [];
 
 export const Markdown = memo(function Markdown({
   content,
   mentionNames,
+  chibis = NO_CHIBIS,
 }: MarkdownProps) {
-  const ctx: Ctx = { mentionRe: buildMentionRe(mentionNames) };
+  const ctx: Ctx = {
+    mentionRe: buildMentionRe(mentionNames),
+    chibis,
+    taken: { n: 0 },
+  };
   return <div className="md">{parseBlocks(content, ctx)}</div>;
 });

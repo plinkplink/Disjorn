@@ -29,6 +29,7 @@ import {
   sendMessage,
   uploadFiles,
 } from "../api";
+import { stripEmotionTags } from "./Markdown";
 import { useMessages } from "../stores/messages";
 import { useSession } from "../stores/session";
 import type { Message, PickerItem } from "../types";
@@ -602,7 +603,10 @@ export function Composer({
           </span>
           <span className="composer-reply-snippet">
             {replyTo.content.trim().length > 0
-              ? replyTo.content.replace(/\s+/g, " ").slice(0, 90)
+              ? stripEmotionTags(replyTo.content)
+                  .replace(/\s+/g, " ")
+                  .trim()
+                  .slice(0, 90)
               : "(attachment)"}
           </span>
           <button className="icon-btn" aria-label="Cancel reply" onClick={onCancelReply}>

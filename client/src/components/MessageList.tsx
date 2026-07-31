@@ -18,7 +18,13 @@ import { useMessages } from "../stores/messages";
 import { useSession } from "../stores/session";
 import type { Attachment, Message } from "../types";
 import { Avatar, BotAvatar } from "./Avatar";
-import { firstHttpUrl, Markdown } from "./Markdown";
+import {
+  countEmotionTags,
+  firstHttpUrl,
+  Markdown,
+  stripEmotionTags,
+} from "./Markdown";
+import type { ChibiEmote } from "./Markdown";
 import { UnfurlCard } from "./UnfurlCard";
 
 const GROUP_GAP_MS = 5 * 60 * 1000;
@@ -77,8 +83,8 @@ function truncate(text: string, max: number): string {
     The emotion name is the resolved filename's stem ("Heart-Eyes"): free-form
     tags go through the server's matcher, so this is the emote that actually
     rendered, not necessarily the word the bot typed. Shown as title/alt. */
-function chibiEmotes(message: Message): { url: string; emotion: string }[] {
-  const out: { url: string; emotion: string }[] = [];
+function chibiEmotes(message: Message): ChibiEmote[] {
+  const out: ChibiEmote[] = [];
   for (const ref of message.emote_refs) {
     if (typeof ref === "string" && ref.startsWith("chibi:")) {
       const path = ref.slice("chibi:".length);
@@ -166,9 +172,10 @@ function ReplyRef({
       </div>
     );
   }
+  const preview = stripEmotionTags(original.content);
   const snippet =
-    original.content.trim().length > 0
-      ? truncate(original.content.replace(/\s+/g, " "), 90)
+    preview.trim().length > 0
+      ? truncate(preview.replace(/\s+/g, " ").trim(), 90)
       : original.attachments.length > 0
         ? "(attachment)"
         : "(empty message)";
@@ -242,7 +249,20 @@ function MessageRow({
   onSummarize,
   onJumpTo,
 }: RowProps) {
-  const chibis = message.author_type === "bot" ? chibiEmotes(message) : [];
+  const chibis = useMemo(
+    () => (message.author_type === "bot" ? chibiEmotes(message) : []),
+    [message.author_type, message.emote_refs],
+  );
+  // A bot that tags inline ("...that landed. [emotion: Smug]") gets its art
+  // rendered by Markdown at the tag. Anything it didn't claim — and every
+  // message from before inline tags, where the adapter stripped them — falls
+  // back to the original layout: first chibi above the text, rest below.
+  const inlineChibis = Math.min(
+    countEmotionTags(message.content),
+    chibis.length,
+  );
+  const leadChibi = inlineChibis === 0 ? chibis[0] : undefined;
+  const tailChibis = chibis.slice(inlineChibis === 0 ? 1 : inlineChibis);
   const unfurlUrl = useMemo(
     () => firstHttpUrl(message.content),
     [message.content],
@@ -332,18 +352,22 @@ function MessageRow({
               )}
             </div>
           )}
-          {chibis[0] !== undefined && (
+          {leadChibi !== undefined && (
             <img
               className="chibi"
-              src={chibis[0].url}
-              title={chibis[0].emotion}
-              alt={chibis[0].emotion}
+              src={leadChibi.url}
+              title={leadChibi.emotion}
+              alt={leadChibi.emotion}
               loading="lazy"
             />
           )}
           {hasText && (
             <div className="msg-content">
-              <Markdown content={message.content} mentionNames={mentionNames} />
+              <Markdown
+                content={message.content}
+                mentionNames={mentionNames}
+                chibis={chibis}
+              />
               {message.edited_at !== null && (
                 <span className="msg-edited" title={fullTime(message.edited_at)}>
                   (edited)
@@ -354,7 +378,7 @@ function MessageRow({
           {!hasText && message.edited_at !== null && (
             <span className="msg-edited">(edited)</span>
           )}
-          {chibis.slice(1).map(({ url, emotion }) => (
+          {tailChibis.map(({ url, emotion }) => (
             <img
               key={url}
               className="chibi"
