@@ -808,6 +808,49 @@
   margin: var(--space-1) var(--space-1) var(--space-1) 0;
 }
 
+/* ---- service-worker update toast ---- */
+
+/* z-index sits above the image modal (40) — it is a small corner notice that
+   blocks nothing, and being buried under a dialog would defeat the point. */
+.update-toast {
+  position: fixed;
+  z-index: 50;
+  right: var(--space-4);
+  bottom: var(--space-4);
+  max-width: min(380px, calc(100vw - var(--space-4) * 2));
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4);
+  background: var(--bg-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-l);
+  box-shadow: var(--shadow-raised);
+}
+
+.update-toast-text {
+  flex: 1;
+  font-size: var(--text-sm);
+  color: var(--text-0);
+}
+
+.update-toast .btn {
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+
+/* Narrow screens: the composer owns the bottom-right corner, so span the
+   width and sit clear of it rather than covering the send button. */
+@media (max-width: 767px) {
+  .update-toast {
+    left: var(--space-2);
+    right: var(--space-2);
+    bottom: var(--space-2);
+    max-width: none;
+  }
+}
+
 /* ---- attachments ---- */
 
 .msg-attachments {

@@ -34,13 +34,21 @@ const precachePaths = new Set(
   precacheUrls.map((url) => new URL(url, self.location.origin).pathname),
 );
 
+/* No skipWaiting() here on purpose. A new worker installs its cache and then
+   WAITS, which is what lets the app notice an update and ask before taking it
+   (see src/pwa.ts). On a first install there is no controller to wait behind,
+   so activation still happens immediately. */
 self.addEventListener("install", (event) => {
   event.waitUntil(
-    caches
-      .open(CACHE_NAME)
-      .then((cache) => cache.addAll(precacheUrls))
-      .then(() => self.skipWaiting()),
+    caches.open(CACHE_NAME).then((cache) => cache.addAll(precacheUrls)),
   );
+});
+
+/* The page accepted the update: stop waiting and take over. workbox-window
+   sends this when pwa.ts calls applyUpdate(), and reloads once we control it. */
+self.addEventListener("message", (event) => {
+  const data = event.data as { type?: string } | null;
+  if (data?.type === "SKIP_WAITING") void self.skipWaiting();
 });
 
 self.addEventListener("activate", (event) => {

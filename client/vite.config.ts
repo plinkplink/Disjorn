@@ -39,7 +39,10 @@ export default defineConfig({
       strategies: "injectManifest",
       srcDir: "src",
       filename: "sw.ts",
-      registerType: "autoUpdate",
+      // "prompt", not "autoUpdate": this is a chat app, and reloading the page
+      // out from under someone mid-message is worse than a stale tab. The new
+      // worker waits; src/pwa.ts surfaces it as a toast the reader can accept.
+      registerType: "prompt",
       injectRegister: false, // we register in main.tsx via virtual:pwa-register
       manifest: {
         name: "Disjorn",

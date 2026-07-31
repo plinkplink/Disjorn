@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 
+import { UpdateToast } from "./components/UpdateToast";
 import { useSession } from "./stores/session";
 import { AppShell } from "./views/AppShell";
 import { LoginPage } from "./views/LoginPage";
@@ -14,5 +15,10 @@ export function App() {
   }, [bootstrap]);
 
   if (booting) return <div className="boot-splash">Loading…</div>;
-  return user === null ? <LoginPage /> : <AppShell />;
+  return (
+    <>
+      {user === null ? <LoginPage /> : <AppShell />}
+      <UpdateToast />
+    </>
+  );
 }
