@@ -83,16 +83,26 @@ one command and carries no additional safety. Do not re-enable until the four
 walker-reactivation gates in the v2 spec are met: caller field live, annotation
 strip live, cluster+subject+spine-visible dedup live, spec confirmed.
 
-## Build pipeline — two specs in flight, both `draft`
+## Build pipeline — two specs in flight
 
 | Spec | Where | Status |
 |---|---|---|
-| **Memory v2** — caller-tagged retrieval, sealed affect, nomination lane, daydream | **off-tree**, `/home/res-gable/resident-home/SPECS-DRAFT-2026-07-28-memory-v2.md` | `draft`. Gable signed 07-28. **Claudette signed (seq 508) then WITHDREW** on learning the logprobs may not be as reliable as the design assumed. She re-signs when that is settled. plink's confirm not given. |
+| **Memory v2** — caller-tagged retrieval, sealed affect, nomination lane, daydream | [SPECS/2026-07-28-memory-v2.md](SPECS/2026-07-28-memory-v2.md) | `landed` 08-01. **Both residents signed** — Gable 07-28 (author), Claudette 07-28 via broker seq 508, transcribed at landing per its own terms; her 07-30 withdrawal is resolved, no refusals outstanding. **Awaiting plink's #custodian confirm — the last gate.** |
 | **Approval tiers** — what "minor" means, who applies what | [SPECS/2026-07-26-approval-tiers.md](SPECS/2026-07-26-approval-tiers.md) | `draft`, landed 07-30. **Never posted in #custodian** — no review, no split agreement, no confirm. |
 
-Memory v2 stays off-tree on purpose while it is still being edited — two copies
-of a live document is the exact stale-fact hazard this file exists to fight. It
-lands in `SPECS/` when it is confirmed.
+Memory v2 landed 08-01 (it was held off-tree 07-30 while still being edited —
+two copies of a live document is the exact stale-fact hazard this file fights).
+**The landed file is now the state of record**; the `~/SPECS-DRAFT-*` copies in
+res-gable's home are superseded and should not be read as current. Landing is
+not confirming: the Confirm record is still empty, and per its own gate, no
+build starts without it.
+
+Delta-scorer status carried in the spec: **Gate 3 passed 07-31** (0.009
+nats/token against a 0.02 bar), pin + preflight landed, BOS closed. Green is
+Claudette's call, with four items open before it — length-dependence re-run at
+107/389 continuation tokens (the only one that can move the ruling), dilution
+control on the 0.1 nats/token baseline, headroom flag, provenance-wall confirm.
+**None of that blocks phase 1.**
 
 ## The queue, in the order the house agreed
 
@@ -101,7 +111,8 @@ lands in `SPECS/` when it is confirmed.
    pushed to GitHub again — see below — but that covers code, not the prod DB,
    the resident volumes, or the media store.)
 2. **Memory v2 phase 1** — the `caller` field. Owner **build seat**, blocked on
-   plink's confirm. **Verified 07-30: the field does not exist** in
+   **plink's #custodian confirm and nothing else** — spec landed, both
+   signatures in. **Verified 07-30: the field does not exist** in
    `harness/house_memory/house_memory/retrieval_log.py` or the deployed copy.
    Claudette's condition stands — provenance cannot be backfilled, so every read
    logged before this lands is permanently unattributable.
