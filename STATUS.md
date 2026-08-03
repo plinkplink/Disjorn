@@ -50,6 +50,7 @@ Verified 2026-07-30 from running units and live config, not from prose.
 | Resident walls (uid/nftables/mount) | **LIVE, verified** | egress wall + 0700 homes + RO mirror all probed 07-20 |
 | Broker + kill switches | **LIVE** | every ACTION verb still OFF; read-only set on |
 | Metrics + daily digest | **LIVE, partly blind** | build timer 10 min, digest 23:55; see "the ledgers" |
+| House error log | **LIVE 2026-08-03** | `/var/log/disjorn-errorlog/errors.jsonl`, 10-min collector. Owner plink + keyboard. [harness/errorlog/](harness/errorlog/README.md) |
 | Consolidation ("dreaming") | **PAUSED 2026-07-28** | v1 failed in use; v2 being specced. See below. |
 | Off-site backup | **DOES NOT EXIST** | both residents rank this #1. A fire is fatal today. |
 
@@ -159,6 +160,7 @@ resident acting. Detail: [DEFERRED.md](DEFERRED.md) § "Telemetry & summon findi
 
 | What | When | Note |
 |---|---|---|
+| **House error log** — the v2 spec's "owner TBD" | 08-03 | ruled plink+keyboard, built, live. First collect found **8 truncations and 3 null turns** for Claudette — the 07-28 lost reply was not a one-off. |
 | **The repo was 4 days behind reality** | 07-30 | ~1,325 lines across 28 files uncommitted, including code serving users since 07-28. Committed in 4 commits + pushed. Nothing was lost; nothing was mirrored either. |
 | Approval-tiers spec landed in `SPECS/` | 07-30 | origin seq 391 filled from the DB; status stays `draft` |
 | Picker add/remove/search | 07-29 | live since 07-28 17:33; follow-ups PK-D1/PK-D2 in DEFERRED.md |

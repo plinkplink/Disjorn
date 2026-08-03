@@ -1,0 +1,13 @@
+# TEMPLATE — collect faults often and cheaply. The collector is pure file I/O
+# over append-only logs, watermarked, so a pass with nothing new costs a stat
+# and a seek. 10 min matches the metrics cadence.
+[Unit]
+Description=Collect Disjorn faults into the house error log
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

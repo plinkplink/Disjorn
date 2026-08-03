@@ -1,0 +1,27 @@
+# TEMPLATE — harvest resident/adapter faults into the house error log.
+# Runs as plink, NOT root: every source it reads is already plink-readable
+# (both resident log dirs carry a `user:plink:r-x` ACL and world-readable log
+# files), so this needs no privilege widening at all — same least-privilege
+# result as the WP-H12 metrics timer.
+#
+# Install (keyboard): copy to /etc/systemd/system/, `systemctl daemon-reload`,
+# `systemctl enable --now disjorn-errorlog.timer`.
+[Unit]
+Description=Disjorn house error log collector (null turns, truncations, faults)
+After=disjorn.service
+
+[Service]
+Type=oneshot
+User=plink
+# StateDirectory owns /var/lib/disjorn-errorlog (the per-source watermarks;
+# losing it is safe, the fingerprint backstop stops a re-scan double-appending).
+# LogsDirectory owns /var/log/disjorn-errorlog — the same mechanism that gives
+# /var/log/disjorn-broker/audit.jsonl its home, so systemd creates the
+# directory with the right owner and no install step has to mkdir as root.
+StateDirectory=disjorn-errorlog
+LogsDirectory=disjorn-errorlog
+ExecStart=/home/plink/Disjorn/Disjorn/server/.venv/bin/python \
+    /home/plink/Disjorn/Disjorn/harness/errorlog/errorlog.py \
+    --log /var/log/disjorn-errorlog/errors.jsonl \
+    --state /var/lib/disjorn-errorlog/state.json \
+    collect --quiet
