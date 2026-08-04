@@ -42,8 +42,13 @@ One JSON object per line, append-only:
 ```
 
 `kind` is the small stable taxonomy you grep at 3am: `truncation`,
-`null_turn`, `timeout`, `session_failed`, `model_drift`, `transport`, `crash`,
-`other`.
+`null_turn`, `refusal`, `timeout`, `session_failed`, `model_drift`,
+`transport`, `crash`, `other`.
+
+**`refusal` vs `null_turn`** — a safety classifier declining a request produces
+the same empty reply as a token-wall death, so `refusal` is matched *first* or
+the cause is stripped off. Three of Claudette's were filed as bare `null_turn`
+before that pattern existed (2026-08-04).
 
 **`ts` vs `logged_at`.** `ts` is when the fault happened; `logged_at` is when
 we saw it. Claudette's adapter log carries no timestamps, so her events have
@@ -110,7 +115,7 @@ container.
 | Source | File | Redact | Catches |
 |---|---|---|---|
 | `gable-summon` | `…/res-gable/resident-home/logs/gable.log` | no | model drift, timeouts, session exits, WS failures |
-| `claudette-adapter` | `…/res-claudette/resident-home/logs/disjorn_bot.log` | **yes** | truncations, null turns, crashes |
+| `claudette-adapter` | `…/res-claudette/resident-home/logs/disjorn_bot.log` | **yes** | truncations, null turns, refusals, crashes |
 
 ## Known gaps
 

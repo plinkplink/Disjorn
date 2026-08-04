@@ -73,6 +73,7 @@ FINGERPRINT_LOOKBACK_DAYS = 30
 KINDS = (
     "truncation",     # a turn hit the token wall; output lost or partial
     "null_turn",      # the adapter produced nothing where a reply belonged
+    "refusal",        # a safety classifier declined the request
     "timeout",        # a session exceeded its wall clock
     "session_failed", # a session exited non-zero
     "model_drift",    # the model that ran was not the model pinned
@@ -112,6 +113,12 @@ SOURCES = (
         "ts_re": None,    # her format ("LEVEL:logger:msg") carries no timestamp
         "patterns": (
             (r"stop_reason=max_tokens", "truncation"),
+            # Ordered BEFORE null_turn: a refusal also produces an empty reply,
+            # so without its own pattern it was collected as a bare null_turn
+            # with the cause stripped off. Three of hers were logged that way
+            # before this line existed (found 2026-08-04).
+            (r"stop_reason=refusal", "refusal"),
+            (r"REFUSAL stop_reason \(category=([^)]*)\)", "refusal"),
             (r"Final answer: No response generated\.", "null_turn"),
             (r"^OSError: .*Bad file descriptor", "crash"),
         ),

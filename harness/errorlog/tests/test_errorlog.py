@@ -353,3 +353,57 @@ def test_new_log_file_is_group_readable_not_world(tmp_path):
     errorlog.append_events(log, [errorlog.make_event(
         source="s", kind="other", detail="d")])
     assert oct(log.stat().st_mode)[-3:] == "640"
+
+
+# --------------------------------------------------------------------------
+# 2026-08-04 — refusals were being collected as bare null turns.
+#
+# Opus 5 ships elevated safety classifiers and can decline a request: HTTP
+# 200, stop_reason="refusal", empty content. That produces the same empty
+# reply as a token-wall death, so without its own pattern the CAUSE was
+# stripped off and three of Claudette's refusals filed as null_turn.
+# --------------------------------------------------------------------------
+
+def test_refusal_is_its_own_kind(tmp_path):
+    src = dict(errorlog.SOURCES[1])
+    p = tmp_path / "bot.log"
+    p.write_text("DEBUG:claudette:[Claudette] stop_reason=refusal\n", encoding="utf-8")
+    src["path"] = str(p)
+    events, _ = errorlog.scan_source(src)
+    assert [e["kind"] for e in events] == ["refusal"]
+
+
+def test_refusal_wins_over_null_turn_ordering(tmp_path):
+    """A refusal turn ALSO emits 'No response generated.' — the refusal
+    pattern must be matched first or the cause is lost."""
+    src = dict(errorlog.SOURCES[1])
+    p = tmp_path / "bot.log"
+    p.write_text(
+        "DEBUG:claudette:[Claudette] stop_reason=refusal\n"
+        "DEBUG:claudette:[Claudette] Final answer: No response generated.\n",
+        encoding="utf-8",
+    )
+    src["path"] = str(p)
+    kinds = [e["kind"] for e in errorlog.scan_source(src)[0]]
+    assert "refusal" in kinds
+
+
+def test_adapter_side_refusal_line_is_caught(tmp_path):
+    """Her adapter now logs an explicit REFUSAL line with the category —
+    catch that shape too, not just the raw stop_reason."""
+    src = dict(errorlog.SOURCES[1])
+    p = tmp_path / "bot.log"
+    p.write_text(
+        "ERROR:claudette:[Claudette] REFUSAL stop_reason (category=cyber): nope\n",
+        encoding="utf-8",
+    )
+    src["path"] = str(p)
+    events, _ = errorlog.scan_source(src)
+    assert [e["kind"] for e in events] == ["refusal"]
+    # redacted source: the explanation text must not survive
+    assert "nope" not in events[0]["detail"]
+
+
+def test_refusal_is_a_known_kind():
+    assert "refusal" in errorlog.KINDS
+    assert errorlog.make_event(source="s", kind="refusal", detail="d")["kind"] == "refusal"
