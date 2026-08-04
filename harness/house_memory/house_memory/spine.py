@@ -54,9 +54,9 @@ from pathlib import Path
 from typing import Optional, Union
 
 try:
-    from .retrieval_log import RetrievalLog
+    from .retrieval_log import CALLER_SERVICE, RetrievalLog
 except ImportError:  # direct-file import (bootstrap.py on a bare python)
-    from retrieval_log import RetrievalLog  # type: ignore[no-redef]
+    from retrieval_log import CALLER_SERVICE, RetrievalLog  # type: ignore[no-redef]
 
 # The only valid seat names. Fail-closed: anything else is an error, whether it
 # appears in an entry's `seats:` frontmatter or is passed to a seat query.
@@ -98,16 +98,25 @@ class SpineEntry:
 
 class Spine:
     def __init__(self, spine_dir: Union[str, Path],
-                 retrieval_log: Optional[RetrievalLog] = None):
+                 retrieval_log: Optional[RetrievalLog] = None,
+                 caller: Optional[str] = CALLER_SERVICE):
         """retrieval_log: when set, serving a non-kernel entry via
         load_entry() appends a retrieval record whose returned_ids is the
         entry's name — spine rent measured in the same unified log episodic
         recalls use (WP-H8 consolidation's reference_counts() keys spine
         entries by name). Kernel loads and list_entries() never log: the
         kernel rides every turn (its rent is capped, not metered) and
-        listing metadata is not serving content into context."""
+        listing metadata is not serving content into context.
+
+        caller: defaults to `service` because putting an entry's body into a
+        context window IS the service read — that is what the rent is for,
+        and a spine that logged unattributably would read as unreferenced
+        and evict itself. Any OTHER holder of a logging Spine (a walker, a
+        daydream job) must say so explicitly; passing the wrong one here is
+        how the v1 loop would grow back on the spine side."""
         self.spine_dir = Path(spine_dir)
         self.retrieval_log = retrieval_log
+        self.caller = caller
         if not self.spine_dir.is_dir():
             raise FileNotFoundError(f"spine dir not found: {self.spine_dir}")
 
@@ -129,6 +138,7 @@ class Spine:
                         raw_ids=[entry.name],
                         distances=[None],
                         returned_ids=[entry.name],
+                        caller=self.caller,
                     )
                 return entry
         raise KeyError(f"no spine entry named {name!r} in {self.spine_dir}")

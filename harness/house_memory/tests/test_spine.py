@@ -89,6 +89,10 @@ def test_load_entry_logs_spine_rent(spine_dir, tmp_path):
     assert all(r.returned_ids == ["lore"] for r in records)
     assert all(r.query == "spine:lore" for r in records)
     assert all(r.resident == "testres" for r in records)
+    # Serving a spine body into a context window is a `service` read — it is
+    # the read the rent exists to measure. Logged unattributably, the whole
+    # spine would read as unreferenced and propose itself for eviction.
+    assert all(r.caller == "service" for r in records)
     assert log.reference_counts(window_days=7)["lore"] == 2
 
 

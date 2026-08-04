@@ -7,7 +7,19 @@ loader (WP-H7 read side) and the WP-H11 parallel-run migration tooling.
 
 from house_memory.embeddings import Embedder, StubEmbedder, VoyageEmbedder
 from house_memory.migration import DiffReport, MigrationReport, QueryDiff, migrate, parallel_diff
-from house_memory.retrieval_log import RetrievalLog, RetrievalRecord, read_records
+from house_memory.retrieval_log import (
+    CALLER_CONSOLIDATION,
+    CALLER_DAYDREAM,
+    CALLER_INCUBATION,
+    CALLER_SELF_QUERY,
+    CALLER_SERVICE,
+    HEAT_CALLERS,
+    KNOWN_CALLERS,
+    RetrievalLog,
+    RetrievalRecord,
+    UnknownCaller,
+    read_records,
+)
 from house_memory.schema import (
     Memory,
     normalize_subject,
@@ -32,6 +44,14 @@ __all__ = [
     "RetrievalLog",
     "RetrievalRecord",
     "read_records",
+    "CALLER_SERVICE",
+    "CALLER_SELF_QUERY",
+    "CALLER_CONSOLIDATION",
+    "CALLER_DAYDREAM",
+    "CALLER_INCUBATION",
+    "KNOWN_CALLERS",
+    "HEAT_CALLERS",
+    "UnknownCaller",
     "Spine",
     "SpineEntry",
     "SEATS",

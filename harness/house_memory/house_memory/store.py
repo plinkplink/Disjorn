@@ -30,7 +30,7 @@ import chromadb
 from chromadb.config import Settings
 
 from house_memory.embeddings import Embedder
-from house_memory.retrieval_log import RetrievalLog
+from house_memory.retrieval_log import RetrievalLog, UnknownCaller
 from house_memory.schema import Memory, normalize_subject
 
 logger = logging.getLogger("house_memory")
@@ -72,13 +72,34 @@ class MemoryStore:
         logger.info(f"[Memory] remembered {memory.id}: {memory.content[:60]}")
         return memory, first_seen
 
-    def recall(self, query: str, subject: Optional[str] = None, limit: int = 5) -> list[Memory]:
+    def recall(
+        self,
+        query: str,
+        subject: Optional[str] = None,
+        limit: int = 5,
+        caller: Optional[str] = None,
+    ) -> list[Memory]:
+        """`caller` records WHO asked, and only `service` reads feed promotion
+        heat — see retrieval_log.py. Omitting it falls back to the log's
+        `default_caller` (None unless the owner set one), which produces an
+        unattributable line rather than a silently heat-bearing one."""
         vec = self.embedder.embed_query(query)
         norm_subject = normalize_subject(subject) if subject else None
         raw_ids, distances, out = query_collection(self._collection, vec, norm_subject, limit)
         if self.retrieval_log is not None:
             try:
-                self.retrieval_log.log(query, norm_subject, raw_ids, distances, [m.id for m in out])
+                self.retrieval_log.log(
+                    query, norm_subject, raw_ids, distances,
+                    [m.id for m in out], caller=caller,
+                )
+            except UnknownCaller:
+                # A bad caller name is a bug in the CALLER, not a reason to
+                # lose the recall — but it must not be written, because a
+                # mislabelled line is worse than a missing one and cannot be
+                # corrected later. Loud, and the read still returns.
+                logger.error(
+                    f"[Memory] retrieval NOT logged: unknown caller {caller!r}"
+                )
             except Exception as e:
                 logger.warning(f"[Memory] retrieval log write failed: {e}")
         logger.info(f"[Memory] recalled {len(out)} for query: {query[:60]}")

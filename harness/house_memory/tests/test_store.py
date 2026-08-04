@@ -109,3 +109,41 @@ def test_instances_are_isolated(tmp_path, embedder):
     s1.remember(make_memory("only in a"))
     assert s2.recall("only in a") == []
     assert s2.count() == 0
+
+
+# ==========================================================================
+# Memory v2 phase 1 — the annotation strip (spec item 2, "the meter goes
+# invisible"). The surfaced-memories block ships bodies only.
+# ==========================================================================
+
+def test_to_display_annotated_keeps_the_date():
+    from house_memory import Memory
+    m = Memory(subject="plink", content="likes RAID1", tags=["hardware"],
+                 source_author="plink")
+    out = m.to_display()
+    assert m.created_at[:10] in out
+    assert "likes RAID1" in out
+
+
+def test_to_display_stripped_drops_the_date():
+    """The creation date is the one annotation in this line a reader can turn
+    into a ranking, so it goes."""
+    from house_memory import Memory
+    m = Memory(subject="plink", content="likes RAID1", tags=["hardware"],
+                 source_author="plink")
+    out = m.to_display(annotated=False)
+    assert m.created_at[:10] not in out
+    assert "[" not in out.split("(tags")[0]
+
+
+def test_strip_keeps_body_tags_and_the_rumor_warning():
+    """What survives is deliberate: none of it is a meter, and hiding the
+    `(unconfirmed)` marker would make a rumor read as fact."""
+    from house_memory import Memory
+    m = Memory(subject="plink", content="maybe likes RAID5",
+               tags=["hardware"], confidence="rumor", source_author="plink")
+    out = m.to_display(annotated=False)
+    assert "maybe likes RAID5" in out
+    assert "about plink" in out
+    assert "tags: hardware" in out
+    assert "(unconfirmed)" in out

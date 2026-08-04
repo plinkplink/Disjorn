@@ -61,8 +61,13 @@ def append_log(
     subject: str | None = None,
     raw_ids: list[str] | None = None,
     now: datetime = FIXED_NOW,
+    caller: str | None = "service",
 ) -> None:
-    """Append one retrieval-log line with an explicit timestamp."""
+    """Append one retrieval-log line with an explicit timestamp.
+
+    `caller` defaults to "service" because these fixtures overwhelmingly mean
+    "a read that counts as evidence". Pass "self_query" (or None, for a
+    pre-v2 line) to exercise the Memory v2 exclusion."""
     if ts is None:
         delta = timedelta(days=days_ago or 0)
         ts = now - delta
@@ -74,6 +79,7 @@ def append_log(
         "raw_ids": raw_ids if raw_ids is not None else list(returned_ids),
         "distances": [0.1] * len(returned_ids),
         "returned_ids": list(returned_ids),
+        "caller": caller,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:

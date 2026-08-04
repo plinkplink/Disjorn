@@ -41,7 +41,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from house_memory import Memory, RetrievalLog, Spine, SpineEntry
+from house_memory import (
+    CALLER_CONSOLIDATION,
+    HEAT_CALLERS,
+    Memory,
+    RetrievalLog,
+    Spine,
+    SpineEntry,
+)
 
 from consolidation.config import ConsolidationConfig
 from consolidation.embedders import NullEmbedder
@@ -86,7 +93,14 @@ def _build(cfg, *, now, store, spine, log) -> ConsolidationReport:
     if spine is _UNSET:
         spine = _open_spine(cfg)
     if log is None:
-        log = RetrievalLog(cfg.retrieval_log_path, resident=cfg.resident)
+        # The walker declares itself. It only READS the log today, but if it
+        # ever recalls through the store, those reads must not feed the heat
+        # the walker is measuring — that circularity is the v1 defect.
+        log = RetrievalLog(
+            cfg.retrieval_log_path,
+            resident=cfg.resident,
+            default_caller=CALLER_CONSOLIDATION,
+        )
 
     ref_counts = log.reference_counts(cfg.window_days, now=now)
     last_seen = _last_seen_map(log)
@@ -492,12 +506,22 @@ def _entry_age_days(entry: SpineEntry, now: datetime) -> float:
         return float("inf")  # unknown age -> treat as old enough to consider
 
 
-def _last_seen_map(log: RetrievalLog) -> dict[str, str]:
+def _last_seen_map(log: RetrievalLog, callers=HEAT_CALLERS) -> dict[str, str]:
     """Most-recent return timestamp per id, across the WHOLE log (not just the
-    window) — evidence enrichment ('last returned <date>')."""
+    window) — evidence enrichment ('last returned <date>').
+
+    Counts only heat-bearing (`service`) reads, for the same reason
+    `reference_counts` does — and this field carried the v1 defect just as
+    hard as the counts did. On the 2026-07-28 slate every item read "last
+    returned today", and it was true: she was reading them, right then, to
+    review them. An entry cannot be kept warm by being looked at.
+
+    Pre-v2 lines have `caller is None` and are excluded, so this map goes
+    quiet until service reads accumulate. That is the honest reading — the
+    rent-epoch gate already resolves no-data to SKIP, never evict."""
     last: dict[str, str] = {}
     for rec in log.read():
-        if not rec.ts:
+        if not rec.ts or rec.caller not in callers:
             continue
         for mid in rec.returned_ids:
             prev = last.get(mid)

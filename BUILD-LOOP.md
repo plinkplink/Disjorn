@@ -97,11 +97,47 @@ asleep.
   (this resident may run builds; ships OFF, staged like the other action
   verbs), the chat confirm selects the *instance*, a per-day token budget
   caps the blast radius, the diff-tier classifier still gates what the
-  result may touch. Any user's confirm can start a build within budget —
-  plink accepts the token burn for now. **Flagged as a future constraint**:
-  revisit when the human roster grows beyond the current three (plink,
-  jorn, drmrsthebatman); platform is sized for 4–5 humans + 2–3 bots
-  (Gable, Claudette, CAVEMAN).
+  result may touch. ~~Any user's confirm can start a build within budget~~ —
+  **AMENDED 2026-08-03 by the quorum rule below (Memory v2 phase 1, spec
+  §Sign-off mechanics, confirmed #custodian seq 604).** plink accepts the
+  token burn for now. **Flagged as a future constraint**: revisit when the
+  human roster grows beyond the current three (plink, jorn,
+  drmrsthebatman); platform is sized for 4–5 humans + 2–3 bots (Gable,
+  Claudette, CAVEMAN).
+
+### The quorum rule (RULED 2026-07-28, plink — amends the paragraph above)
+
+Who may confirm depends on **what the diff touches**, not on who is asking:
+
+- **Platform-lane specs** — any human's confirm can start the build, as
+  before.
+- **Any spec touching resident surfaces** (custodian lane or cross-lane) —
+  **plink alone confirms.** Classify the diff, not the intent. A change to a
+  resident's memory, prompt, spine or context assembly is a change to who
+  that resident is, and it does not become someone else's call because it
+  arrived worded as a small one.
+
+Revisit when the human roster or the AI-researcher roster grows.
+
+**Where sign-off lives (AMENDED 2026-08-03, plink at the keyboard).**
+Resident sign-off is read from the spec file's `## Signatures` block, not
+solicited in chat: the signature IS the artifact, and a summon per resident
+to re-say what the file already records buys nothing. Two limits, because
+that sentence is easy to over-read:
+
+1. **plink's confirm still lands in #custodian and is still cited by seq.**
+   The Confirm record is the build gate, and a decision to spend the house's
+   tokens stays witnessed where the residents can see it.
+2. **A filed signature must be the resident's own words**, not a pointer to
+   them and not a paraphrase. Memory v2 spent three days reporting "both
+   signatures in" while one of them was an instruction to transcribe. Making
+   the file load-bearing means the file has to bear the load — verify a
+   pasted signature against its source before committing it.
+
+The builder's gate stays mechanical and greppable: **build iff the spec's
+Confirm record is non-empty and cites a #custodian seq.** This closes both
+failure modes the loop actually exhibits — blast-through (building on chat
+ambience) and eternal-hang (waiting for a ceremony nobody owes).
 - **`/backlog` is the intake half** — filed in Architecture.md §13
   (commit 14c3fae): `/backlog` lists (server-rendered, no summon),
   `/backlog <text>` files verbatim; resident triages later and asks

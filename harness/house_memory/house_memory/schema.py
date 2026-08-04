@@ -95,9 +95,28 @@ class Memory:
             created_at=meta.get("created_at", ""),
         )
 
-    def to_display(self) -> str:
-        """Format for injection into a resident's context."""
-        parts = [f"[{self.created_at[:10]}] about {self.subject}: {self.content}"]
+    def to_display(self, annotated: bool = True) -> str:
+        """Format for injection into a resident's context.
+
+        `annotated=False` is the Memory v2 annotation strip (spec 2026-07-28
+        item 2, "the meter goes invisible"): the surfaced-memories block ships
+        bodies only, so recurrence is felt as weather rather than read as a
+        gauge. It drops the creation date, which is the only annotation in
+        this line that a reader can turn into a ranking.
+
+        What deliberately SURVIVES the strip, because none of it is a meter:
+        subject and content (the body), tags (semantics), and the
+        `(unconfirmed)` marker (an epistemic warning — hiding it would make
+        a rumor read as fact, which trades one honesty problem for a worse
+        one).
+
+        The strip is only half the job; the caller must also drop the
+        similarity ORDER, since rank is a score with the numbers filed off.
+        See the surfacing site in Claudette's core.py."""
+        head = f"about {self.subject}: {self.content}"
+        if annotated:
+            head = f"[{self.created_at[:10]}] " + head
+        parts = [head]
         if self.tags:
             parts.append(f"(tags: {', '.join(self.tags)})")
         if self.confidence == "rumor":
