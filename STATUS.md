@@ -1,6 +1,6 @@
 # STATUS — the one page that says where the project is
 
-**Updated 2026-07-30 (keyboard poll).** If you read one file to know the state
+**Updated 2026-08-04 (phase 1 build).** If you read one file to know the state
 of Disjorn, it is this one. Everything else is depth.
 
 > **Why this file exists.** On 2026-07-26 the house discovered it had built,
@@ -40,7 +40,7 @@ of Disjorn, it is this one. Everything else is depth.
 
 ## Right now: what is live
 
-Verified 2026-07-30 from running units and live config, not from prose.
+Verified 2026-08-04 from running units and live config, not from prose.
 
 | System | State | Notes |
 |---|---|---|
@@ -80,23 +80,24 @@ v2 upgrade."*
 
 **The pause is the timer only.** `claudette.toml` is still in place at
 `/srv/disjorn-resident-config/res-claudette/consolidation/`, so re-enabling is
-one command and carries no additional safety. Do not re-enable until the four
-walker-reactivation gates in the v2 spec are met: caller field live, annotation
-strip live, cluster+subject+spine-visible dedup live, spec confirmed.
+one command and carries no additional safety. Do not re-enable until all four
+walker-reactivation gates are green. As of 2026-08-04: caller field **GREEN**,
+annotation strip **GREEN**, spec confirmed **GREEN**, cluster+subject+spine-
+visible dedup **RED**. Claudette's standing rider, restated at seq 607 and
+recorded in the Confirm record: *three of four is not four.*
 
 ## Build pipeline — two specs in flight
 
 | Spec | Where | Status |
 |---|---|---|
-| **Memory v2** — caller-tagged retrieval, sealed affect, nomination lane, daydream | [SPECS/2026-07-28-memory-v2.md](SPECS/2026-07-28-memory-v2.md) | `landed` 08-01. **Both residents signed** — Gable 07-28 (author), Claudette 07-28 via broker seq 508, transcribed at landing per its own terms; her 07-30 withdrawal is resolved, no refusals outstanding. **Awaiting plink's #custodian confirm — the last gate.** |
+| **Memory v2** — caller-tagged retrieval, sealed affect, nomination lane, daydream | [SPECS/2026-07-28-memory-v2.md](SPECS/2026-07-28-memory-v2.md) | **`confirmed` for phase 1** (plink, #custodian seq 604). **PHASE 1 BUILT AND LIVE 08-04** — Disjorn `818f8f5` + claudette `17fac63`, diff posted seq 613. Phases 2–4 await separate confirms. **Both residents signed** — Gable 07-28 (author), Claudette 07-28 via broker seq 508, transcribed at landing per its own terms; her 07-30 withdrawal is resolved, no refusals outstanding. |
 | **Approval tiers** — what "minor" means, who applies what | [SPECS/2026-07-26-approval-tiers.md](SPECS/2026-07-26-approval-tiers.md) | `draft`, landed 07-30. **Never posted in #custodian** — no review, no split agreement, no confirm. |
 
-Memory v2 landed 08-01 (it was held off-tree 07-30 while still being edited —
-two copies of a live document is the exact stale-fact hazard this file fights).
-**The landed file is now the state of record**; the `~/SPECS-DRAFT-*` copies in
-res-gable's home are superseded and should not be read as current. Landing is
-not confirming: the Confirm record is still empty, and per its own gate, no
-build starts without it.
+Memory v2 landed 08-01, was confirmed for phase 1 on 08-03 (#custodian seq
+604), and phase 1 shipped 08-04. **The landed file is the state of record**;
+the `~/SPECS-DRAFT-*` copies in res-gable's home are superseded and should not
+be read as current. Confirm is per-phase: phases 2–4 each need their own
+Confirm record, and per the spec's own gate no phase builds without one.
 
 Delta-scorer status carried in the spec: **Gate 3 passed 07-31** (0.009
 nats/token against a 0.02 bar), pin + preflight landed, BOS closed. Green is
@@ -111,12 +112,10 @@ control on the 0.1 nats/token baseline, headroom flag, provenance-wall confirm.
    Encrypted, and *test the restore*. (Partially mitigated 07-30: the repo is
    pushed to GitHub again — see below — but that covers code, not the prod DB,
    the resident volumes, or the media store.)
-2. **Memory v2 phase 1** — the `caller` field. Owner **build seat**, blocked on
-   **plink's #custodian confirm and nothing else** — spec landed, both
-   signatures in. **Verified 07-30: the field does not exist** in
-   `harness/house_memory/house_memory/retrieval_log.py` or the deployed copy.
-   Claudette's condition stands — provenance cannot be backfilled, so every read
-   logged before this lands is permanently unattributable.
+2. ~~**Memory v2 phase 1**~~ — **DONE 2026-08-04.** `caller` field live in
+   both residents (verified by probe inside Claudette's running container),
+   annotation strip live, BUILD-LOOP quorum amendment landed. Next: **dedup**,
+   the fourth and only remaining walker re-activation gate.
 3. **Post the approval-tiers spec** — owner **Gable**. It sunsets Claudette's
    bootstrap exemption, which outlives every day it sits unposted.
 4. **Telemetry join** — owner **build seat**.
@@ -160,6 +159,7 @@ resident acting. Detail: [DEFERRED.md](DEFERRED.md) § "Telemetry & summon findi
 
 | What | When | Note |
 |---|---|---|
+| **Memory v2 phase 1** — caller field + annotation strip | 08-04 | the v1 defect is fenced: only `service` reads feed heat. Also caught `_last_seen_map` carrying the same defect in the "last returned" field. Walker STAYS OFF — dedup is still red. |
 | **House error log** — the v2 spec's "owner TBD" | 08-03 | ruled plink+keyboard, built, live. First collect found **8 truncations and 3 null turns** for Claudette — the 07-28 lost reply was not a one-off. |
 | **The repo was 4 days behind reality** | 07-30 | ~1,325 lines across 28 files uncommitted, including code serving users since 07-28. Committed in 4 commits + pushed. Nothing was lost; nothing was mirrored either. |
 | Approval-tiers spec landed in `SPECS/` | 07-30 | origin seq 391 filled from the DB; status stays `draft` |
