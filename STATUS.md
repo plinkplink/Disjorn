@@ -159,6 +159,7 @@ resident acting. Detail: [DEFERRED.md](DEFERRED.md) § "Telemetry & summon findi
 
 | What | When | Note |
 |---|---|---|
+| **Claudette's truncation bug** — `max_tokens` 4096 → 16000 | 08-04 | not Anthropic's side. The 07-24 Opus 4.8→5 cutover made `max_tokens` cap thinking **plus** answer (4.8: omitting `thinking` meant none). 11 dead turns after 07-24 16:24, zero before. `stop_reason=refusal` also got a branch — it was falling through to the same silent "No response generated." |
 | **Memory v2 phase 1** — caller field + annotation strip | 08-04 | the v1 defect is fenced: only `service` reads feed heat. Also caught `_last_seen_map` carrying the same defect in the "last returned" field. Walker STAYS OFF — dedup is still red. |
 | **House error log** — the v2 spec's "owner TBD" | 08-03 | ruled plink+keyboard, built, live. First collect found **8 truncations and 3 null turns** for Claudette — the 07-28 lost reply was not a one-off. |
 | **The repo was 4 days behind reality** | 07-30 | ~1,325 lines across 28 files uncommitted, including code serving users since 07-28. Committed in 4 commits + pushed. Nothing was lost; nothing was mirrored either. |
