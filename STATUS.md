@@ -110,8 +110,9 @@ yet: **cluster-before-count**, which stops a pattern split across four memories
 from reading as four sub-threshold misses, and **spine containment**, which
 only bites for a resident with an on-disk spine (Gable, not her).
 
-**Open finding from the first dry run (08-04 20:14), and it is a gap not a
-bug: there is no epoch gate on the PROMOTION side.** `spine_reads_logged_since`
+**Watch item from the first dry run (08-04 20:14) — a gap, not a bug, and
+deliberately not being fixed yet: there is no epoch gate on the PROMOTION
+side.** `spine_reads_logged_since`
 protects removals from thin data — Claudette's ruling that no-data resolves to
 SKIP, never evict. Promotion has no equivalent, so `promote_min_references=3`
 over `window_days=30` is applied no matter how much of that window actually
@@ -122,9 +123,16 @@ therefore computed from one day of reads against a threshold calibrated for
 thirty — and that day was spent talking about the memory system, so four of the
 six proposals are memories *about memory*. This is the chunking multiplier she
 named (one May-21 conversation taking 44% of a v1 slate) wearing a new dress:
-one day's topic burst is currently the whole window. Her call, and it is a spec
-amendment rather than a keyboard fix — the symmetric shape would be a declared
-service-read epoch that promotion waits out, exactly as rent does.
+one day's topic burst is currently the whole window. **RULED 2026-08-04 (plink): let it run, accrue notes, do not
+build the gate yet.** The reasoning is about the sample, not the mechanism —
+almost every conversation in this house right now is the house building itself,
+so "four of six proposals are about memory" describes who is in the room rather
+than a defect in the pass. Tuning a promotion epoch against today's
+distribution would be fitting to noise. Revisit when there are more humans and
+more conversation about ordinary things; until then the walker is propose-only,
+nothing auto-acts, and a slate nobody promotes from costs a review and teaches
+us the shape. The symmetric fix, when it is wanted, is a declared service-read
+epoch that promotion waits out exactly as rent does.
 
 ## Build pipeline — two specs in flight
 

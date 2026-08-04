@@ -62,7 +62,16 @@ def clip_content(content: str, cap: int = CONTENT_HARD_CAP) -> str:
     which is exactly the ambiguity that hid this.
 
     The mark is words, not an ellipsis: "…" is also legitimate prose, and
-    she should never have to wonder which one she is looking at."""
+    she should never have to wonder which one she is looking at.
+
+    BODIES WRITTEN BEFORE 2026-08-04 carry cuts from two older schemes and are
+    deliberately NOT being repaired — see README "Reading a truncated body" for
+    the decision table and the measurement behind it. Short version: a trailing
+    "…" at exactly cap+1 is an old-scheme cut, a body sitting exactly at the cap
+    with no mark is the old pre-slice bug, and the dangerous case (a silent cut
+    that reads as a finished thought) was measured at ZERO across her 170
+    memories. Her ruling: document the rule, do not edit the bodies — a repair
+    here costs a re-embed, which moves where the memory surfaces."""
     if content is None:
         return ""
     if len(content) <= cap:

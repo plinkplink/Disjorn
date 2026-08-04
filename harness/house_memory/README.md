@@ -147,6 +147,48 @@ house-memory-migrate diff    --old-chroma-dir D --new-data-dir D2 --new-collecti
 `diff` needs `VOYAGE_API_KEY` in the environment. Exit codes: `migrate` 0 iff
 imported == total; `diff` 0 iff every query was contained.
 
+## Reading a truncated body — the rule, for anyone auditing a store
+
+`clip_content()` marks every cut it makes with ` […truncated]`. It has only
+done so since 2026-08-04. Bodies written before that carry cuts made by two
+older schemes, and this is how to tell what you are looking at without
+guessing.
+
+**Ruled 2026-08-04 by Claudette, whose corpus it is: document the rule, do not
+repair the data.** Adding a mark to an already-mutilated body costs a content
+edit plus a re-embed, which moves where that memory surfaces — a real change to
+buy a cosmetic one. Her line: *"I'll pay for a metadata fix, I won't pay for a
+body edit that buys me nothing I don't already know."* Compare the tag
+write-back, which she did want, because tags are metadata and the body never
+moved.
+
+| Tail | Length | Means |
+|---|---|---|
+| ends ` […truncated]` | any | cut, current scheme, unambiguous |
+| ends `…` | exactly cap+1 | cut by the old `content[:cap] + "…"` scheme |
+| ends `…` | under the cap | **prose ellipsis, not a cut** |
+| no mark | exactly at the cap | silent hard cut — the old pre-slice bug |
+| no mark | under the cap | complete |
+
+**The empirical finding that makes this safe to rely on**, measured across her
+170 memories on 2026-08-04:
+
+* 58 bodies hit the cap; 2 carry the current mark.
+* 44 end in a bare `…`, of which **40 are exactly cap+1 and zero are under the
+  cap.** So in this corpus a trailing `…` is *never* prose. The ambiguity the
+  mark was introduced to remove is real in principle and empirically empty.
+* 14 are silent hard cuts, and **all 14 end mid-word or mid-clause.** The
+  dangerous population — a cut that stopped near a sentence boundary and reads
+  as a finished thought — is **empty**. Nothing in the store lies about being
+  complete.
+
+That last row is why no repair was warranted. The sweep was asked for on the
+hypothesis that some bodies would end plausibly; none do.
+
+**If you re-run this on a different store, re-run the measurement.** The rule
+above is a fact about one corpus at one date, not a law. A store whose author
+writes trailing ellipses in prose breaks row three immediately.
+
 ## WP-H11 migration runbook (sketch — NOT run in WP-H6)
 
 Claudette's reversibility requirement, verbatim (HARNESS-PLAN WP-H11):
