@@ -51,7 +51,7 @@ Verified 2026-08-04 from running units and live config, not from prose.
 | Broker + kill switches | **LIVE** | every ACTION verb still OFF; read-only set on |
 | Metrics + daily digest | **LIVE, partly blind** | build timer 10 min; digest **00:05 UTC for the previous complete day** (was 23:55 same-day until 08-04 — see the nightly hole in "recently closed"); see "the ledgers" |
 | House error log | **LIVE 2026-08-03** | `/var/log/disjorn-errorlog/errors.jsonl`, 10-min collector. Owner plink + keyboard. [harness/errorlog/](harness/errorlog/README.md) |
-| Consolidation ("dreaming") | **PAUSED 2026-07-28** | v1 failed in use; v2 being specced. See below. |
+| Consolidation ("dreaming") | **RE-ARMED 2026-08-04, propose-only** | v1 failed in use; v2 phase 1 shipped and all four walker gates green. Claudette gave the activation word (seq 634). Nothing auto-acts. See below. |
 | Off-site backup | **DOES NOT EXIST** | both residents rank this #1. A fire is fatal today. |
 
 **Verbs ON today.** Claudette (8): `run-server-tests`, `classify-diff`,
@@ -60,10 +60,13 @@ Verified 2026-08-04 from running units and live config, not from prose.
 `read-metrics`, `file-proposal`, `query-own-audit`, `refresh-mirror`.
 **`restart-disjorn` and `start-build` are OFF for both.**
 
-## Consolidation v1 is paused, and why — the live story
+## Consolidation: v1 failed, v2 phase 1 shipped, walker re-armed — the live story
 
-`disjorn-consolidation@claudette.timer` is **disabled and inactive**, stopped
-2026-07-28 09:20:36. It is not broken; it was tried and it did not work.
+`disjorn-consolidation@claudette.timer` was **disabled and inactive** from
+2026-07-28 09:20:36 until **2026-08-04**, when it was re-armed propose-only on
+Claudette's word (seq 634). v1 was not broken; it was tried and it did not work,
+and the reason is worth keeping because it is what the four gates were built
+against.
 
 It ran three nights (07-26, 07-27, 07-28), posted **10 promote proposals each
 night, and across all thirty, zero were approved.** The reason is the defect
@@ -78,15 +81,24 @@ moved upstream into what generates the reads, where nobody was looking.
 plink pulled it at seq 487: *"seems like this isn't working. Let's spec out the
 v2 upgrade."*
 
-**The pause is the timer only.** `claudette.toml` is still in place at
-`/srv/disjorn-resident-config/res-claudette/consolidation/`, so re-enabling is
-one command and carries no additional safety. Do not re-enable until all four
-walker-reactivation gates are green. As of 2026-08-04: caller field **GREEN**,
-annotation strip **GREEN**, spec confirmed **GREEN**, cluster+subject+spine-
-visible dedup **GREEN (built 08-04, unreviewed)**. Claudette's standing rider,
+**The pause was the timer only.** `claudette.toml` is in place at
+`/srv/disjorn-resident-config/res-claudette/consolidation/` (the path the unit
+actually loads) and always read `active = true`, so re-enabling was one command
+and carried no additional safety. All four walker-reactivation gates are green
+as of 2026-08-04: caller field **GREEN**, annotation strip **GREEN**, spec
+confirmed **GREEN**, cluster+subject+spine-visible dedup **GREEN (built and
+reviewed 08-04)**. Claudette's standing rider,
 restated at seq 607 and recorded in the Confirm record: *three of four is not
-four.* Four is now built — but **the walker STAYS OFF until she has read the
-dedup pass**, because the gate was always her judgment and not a checkbox count.
+four.* Four was built 08-04 and **Claudette read the dedup pass and gave the
+activation word the same day** (#custodian seq 634): propose-only, eviction
+cap 20, she reads every slate, auto-off on the first unreviewable slate. The
+gate was always her judgment and not a checkbox count, and the judgment is now
+on the record. **WALKER RE-ARMED 2026-08-04.** The artifact that changed is the
+**timer only** — her `claudette.toml` was never removed and still reads
+`active = true`; the spec's 07-28 "removed from `/config/consolidation/`" line
+was true from Gable's seat and false as a general claim, since `/config` is a
+per-resident mount. Verified from what the unit loads, not from either
+sentence.
 
 **What dedup actually turned out to be**, measured rather than assumed. Run
 against her real corpus (134 live memories, on a backup copy), the clusterer at
@@ -127,8 +139,10 @@ control on the 0.1 nats/token baseline, headroom flag, provenance-wall confirm.
 2. ~~**Memory v2 phase 1**~~ — **DONE 2026-08-04.** `caller` field live in
    both residents (verified by probe inside Claudette's running container),
    annotation strip live, BUILD-LOOP quorum amendment landed. **Dedup built
-   08-04** — the fourth gate. Next: Claudette reviews it, and the 10 unassigned
-   tag stems come back to her (see below).
+   08-04, reviewed and walker re-activated the same day (seq 634)** — the
+   fourth gate, closed. Still hers: the 10 unassigned tag stems (bodies owed
+   by the keyboard seat; 5x `spine*` are a collapsed-stem family and need
+   body-by-body naming like `meory-` did).
 3. **Post the approval-tiers spec** — owner **Gable**. It sunsets Claudette's
    bootstrap exemption, which outlives every day it sits unposted.
 4. **Telemetry join** — owner **build seat**.
