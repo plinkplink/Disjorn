@@ -238,6 +238,8 @@ tests green**. Harness suites need a pytest that the runtime venvs do not carry
 
 | Question | Doc |
 |---|---|
+| **What happened while I was away?** | run `brief` — generated, never maintained |
+| **What the hell is BL-D7 / KB-D6 / WP-A1?** | run `brief what BL-D7` — 70 codes, auto-expanded |
 | **Which copy of this file is real?** | [TREE.md](TREE.md) |
 | What do I flip next, at the keyboard? | [harness/KEYBOARD-NEXT.md](harness/KEYBOARD-NEXT.md) |
 | What did we defer, and why? | [DEFERRED.md](DEFERRED.md) |
