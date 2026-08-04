@@ -122,6 +122,94 @@ class MemoryStore:
         logger.info(f"[Memory] forgot {memory_id}")
         return True
 
+    def amend_metadata(
+        self,
+        memory_id: str,
+        tags: Optional[list] = None,
+        salience: Optional[int] = None,
+        confidence: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Repair a memory's METADATA in place. Body untouched, id preserved,
+        no re-embedding. Returns the changed fields, {} if nothing moved, or
+        None if the id is unknown.
+
+        WHY THIS EXISTS (Claudette's proposal, #custodian seq 628, approved by
+        plink 08-04). The tag shredder cost 75 of 164 memories their tags, and
+        the only verb she had that resembled an edit was forget-with-supersede.
+        Using it for a LABEL repair would have cost, per memory: the body
+        retyped by hand (a fresh chance to corrupt exactly what we are trying
+        to protect), salience and confidence reset to defaults because
+        supersede carries neither, and a new id that invalidates every existing
+        reference — the worksheet, her own channel posts, any spine citation.
+        Seventy-five of those and the store becomes a monument to one write-path
+        bug.
+
+        THE LINE THIS VERB IS DRAWN ON, and the reason `content` is not a
+        parameter: *if you want to change what a memory SAYS, supersede is
+        correct and the chain should show it; if you want to change how you
+        FIND it, the body should not move.* A repair verb that could reach the
+        body would be a rewrite verb wearing a repair verb's name, and the
+        supersede chain would stop meaning "she changed her mind."
+
+        So there is no `content` argument, and the document is never passed to
+        chroma's update — not "we choose not to", but "the call cannot express
+        it."
+        """
+        if tags is None and salience is None and confidence is None:
+            return {}
+
+        # Refuse a bare string rather than coerce it. normalize_tags() COERCES
+        # (correctly — on the write path a model emitting "tags": "agenthood"
+        # should still get its memory saved). A repair verb is the opposite
+        # case: a bare string here means the caller does not understand the
+        # shape, and quietly saving one tag where six were meant would write a
+        # second wrong answer over the first. Her condition, seq 628: refuse,
+        # do not iterate. normalize_tags stays underneath as the backstop.
+        if isinstance(tags, str):
+            raise TypeError(
+                f"amend_metadata: tags must be a list, got str {tags!r}. "
+                "A bare string is how the shredder started — refusing rather "
+                "than guessing which tag you meant."
+            )
+
+        existing = self._collection.get(ids=[memory_id])
+        if not existing.get("ids"):
+            return None
+        meta = dict(existing["metadatas"][0])
+
+        changed: dict = {}
+        if tags is not None:
+            from house_memory.schema import normalize_tags
+
+            new_tags = normalize_tags(tags)
+            old_tags = json.loads(meta.get("tags_json", "[]"))
+            if new_tags != old_tags:
+                meta["tags_json"] = json.dumps(new_tags)
+                changed["tags"] = {"from": old_tags, "to": new_tags}
+        if salience is not None:
+            if not isinstance(salience, int) or isinstance(salience, bool) or not 1 <= salience <= 5:
+                raise ValueError(f"amend_metadata: salience must be int 1..5, got {salience!r}")
+            if salience != meta.get("salience"):
+                changed["salience"] = {"from": meta.get("salience"), "to": salience}
+                meta["salience"] = salience
+        if confidence is not None:
+            if confidence not in ("rumor", "confirmed"):
+                raise ValueError(
+                    f"amend_metadata: confidence must be 'rumor' or 'confirmed', got {confidence!r}"
+                )
+            if confidence != meta.get("confidence"):
+                changed["confidence"] = {"from": meta.get("confidence"), "to": confidence}
+                meta["confidence"] = confidence
+
+        if not changed:
+            return {}
+        # metadatas ONLY. No `documents=`, no `embeddings=` — the body and the
+        # vector are not this verb's business, and a future edit that adds them
+        # here is the bug this docstring exists to prevent.
+        self._collection.update(ids=[memory_id], metadatas=[meta])
+        logger.info(f"[Memory] amended {memory_id}: {changed}")
+        return changed
+
     # -- migration surface (WP-H11) ------------------------------------------
 
     def export_all(self) -> list[dict]:

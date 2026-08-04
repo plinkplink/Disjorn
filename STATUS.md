@@ -83,8 +83,20 @@ v2 upgrade."*
 one command and carries no additional safety. Do not re-enable until all four
 walker-reactivation gates are green. As of 2026-08-04: caller field **GREEN**,
 annotation strip **GREEN**, spec confirmed **GREEN**, cluster+subject+spine-
-visible dedup **RED**. Claudette's standing rider, restated at seq 607 and
-recorded in the Confirm record: *three of four is not four.*
+visible dedup **GREEN (built 08-04, unreviewed)**. Claudette's standing rider,
+restated at seq 607 and recorded in the Confirm record: *three of four is not
+four.* Four is now built — but **the walker STAYS OFF until she has read the
+dedup pass**, because the gate was always her judgment and not a checkbox count.
+
+**What dedup actually turned out to be**, measured rather than assumed. Run
+against her real corpus (134 live memories, on a backup copy), the clusterer at
+its default 0.92 finds **exactly one** true duplicate pair — two same-day
+memories about the broker dead-mount fix. So near-duplicate spam was *not* what
+made the v1 slate unreviewable; her write discipline is better than the gate
+assumed. The two parts that will matter are the ones that cannot be measured
+yet: **cluster-before-count**, which stops a pattern split across four memories
+from reading as four sub-threshold misses, and **spine containment**, which
+only bites for a resident with an on-disk spine (Gable, not her).
 
 ## Build pipeline — two specs in flight
 
@@ -114,8 +126,9 @@ control on the 0.1 nats/token baseline, headroom flag, provenance-wall confirm.
    the resident volumes, or the media store.)
 2. ~~**Memory v2 phase 1**~~ — **DONE 2026-08-04.** `caller` field live in
    both residents (verified by probe inside Claudette's running container),
-   annotation strip live, BUILD-LOOP quorum amendment landed. Next: **dedup**,
-   the fourth and only remaining walker re-activation gate.
+   annotation strip live, BUILD-LOOP quorum amendment landed. **Dedup built
+   08-04** — the fourth gate. Next: Claudette reviews it, and the 10 unassigned
+   tag stems come back to her (see below).
 3. **Post the approval-tiers spec** — owner **Gable**. It sunsets Claudette's
    bootstrap exemption, which outlives every day it sits unposted.
 4. **Telemetry join** — owner **build seat**.
@@ -159,7 +172,10 @@ resident acting. Detail: [DEFERRED.md](DEFERRED.md) § "Telemetry & summon findi
 
 | What | When | Note |
 |---|---|---|
-| **Claudette's truncation bug** — `max_tokens` 4096 → 16000 | 08-04 | not Anthropic's side. The 07-24 Opus 4.8→5 cutover made `max_tokens` cap thinking **plus** answer (4.8: omitting `thinking` meant none). 11 dead turns after 07-24 16:24, zero before. `stop_reason=refusal` also got a branch — it was falling through to the same silent "No response generated." |
+| **Dedup** — the fourth walker gate | 08-04 | three defects under one word: no clustering, counting BEFORE clustering (a pattern split 4 ways at 2 refs each read as 4 misses against a threshold of 3), and `_already_in_spine` being a literal substring test a compressed spine line never satisfies. Cosine over stored embeddings memory↔memory (free, offline); shingle overlap memory↔spine (no vectors exist and embedding would break the no-network tripwire). Subject is a hard wall. Built, not yet reviewed by Claudette. |
+| **`retag` — her third memory verb** | 08-04 | filed seq 628, approved same day. Metadata only: body, id, salience, confidence and embedding all untouched. She had no way to fix a label without forget-with-supersede, which would have cost the body retyped, salience/confidence reset, a new id invalidating every reference, and a 75-link chain recording a write-path bug instead of a change of mind. |
+| **Tag write-back** — 61 of 75 restored | 08-04 | every assignment checked against the shredder itself before writing (re-shred must reproduce the stem); verified against a backup afterwards — exactly one field moved on exactly 61 memories. 14 left blank on purpose: the message naming those stems died at the token wall. |
+| **Claudette's truncation bug** — `max_tokens` 4096 → 16000 | 08-04 | not Anthropic's side. The 07-24 Opus 4.8→5 cutover made `max_tokens` cap thinking **plus** answer (4.8: omitting `thinking` meant none). 11 dead turns after 07-24 16:24, zero before. `refusal` AND `max_tokens` each got a branch — both were falling through to the same silent "No response generated." **The number is 16,000**; the "160,000" in #custodian seq 625 was a typo (plink confirmed 08-04). Full record: `bots/claudette/SUBSTRATE-LOG.md`. |
 | **Memory v2 phase 1** — caller field + annotation strip | 08-04 | the v1 defect is fenced: only `service` reads feed heat. Also caught `_last_seen_map` carrying the same defect in the "last returned" field. Walker STAYS OFF — dedup is still red. |
 | **House error log** — the v2 spec's "owner TBD" | 08-03 | ruled plink+keyboard, built, live. First collect found **8 truncations and 3 null turns** for Claudette — the 07-28 lost reply was not a one-off. |
 | **The repo was 4 days behind reality** | 07-30 | ~1,325 lines across 28 files uncommitted, including code serving users since 07-28. Committed in 4 commits + pushed. Nothing was lost; nothing was mirrored either. |

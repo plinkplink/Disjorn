@@ -23,6 +23,13 @@ BROKER_CLI_ENV = "CONSOLIDATION_BROKER_CLI"
 
 DEFAULT_BROKER_CLI = "/usr/local/bin/broker"
 
+# Re-exported from the module that owns the reasoning, so there is one number
+# and not a second copy that drifts. See consolidation/dedup.py.
+from consolidation.dedup import (  # noqa: E402
+    DEFAULT_SIMILARITY as DEDUP_SIMILARITY,
+    DEFAULT_SPINE_CONTAINMENT as SPINE_CONTAINMENT,
+)
+
 
 @dataclass
 class ConsolidationConfig:
@@ -70,6 +77,19 @@ class ConsolidationConfig:
     # the day the counter lands cannot silently become the day the spine
     # reads as all-unreferenced. Unset = no removal proposals, ever.
     spine_reads_logged_since: Optional[str] = None
+    # Dedup, the fourth walker gate. Cosine over the episodic memories' STORED
+    # embeddings (free, offline) above which two memories are treated as one
+    # idea and share a single proposal. Tight on purpose: a false merge
+    # silently costs a distinct memory its shot at the spine and the reviewer
+    # cannot see what was swallowed, while a false split just leaves two
+    # proposals where one would do. Clustering never crosses a subject
+    # boundary regardless of this value — see consolidation/dedup.py.
+    dedup_similarity: float = DEDUP_SIMILARITY
+    # Word-shingle containment above which a spine entry is judged to already
+    # carry a pattern, so it is not re-proposed. Lexical rather than cosine
+    # because spine markdown has no stored vectors and embedding it would need
+    # the network, which NullEmbedder exists to make impossible.
+    spine_containment: float = SPINE_CONTAINMENT
     # Claudette's ruling (#custodian 2026-07-26): "slow-moving spine needs
     # time to go stale." Rent (evict/compress) is assessed over THIS trailing
     # window, while promotion heat stays on window_days — one dial per
@@ -166,6 +186,8 @@ def load_config(
         "max_evictions",
         "spine_reads_logged_since",
         "rent_window_days",
+        "dedup_similarity",
+        "spine_containment",
         "constraint_tags",
         "constraint_keywords",
     ):

@@ -224,3 +224,75 @@ def test_callers_override_measures_without_changing_promotion(tmp_path):
     assert log.reference_counts(30, now=now) == {}
     assert log.reference_counts(
         30, now=now, callers=frozenset({CALLER_SELF_QUERY})) == {"a": 1}
+
+
+# --- group counting: the dedup pooling primitive ----------------------------
+#
+# Lives here, next to reference_counts, because the heat-caller filter has now
+# been forgotten at three sites that each reimplemented this loop locally.
+
+
+def test_group_counts_one_event_once_however_many_members_it_returned(tmp_path):
+    """The inflation guard, and the reason summing members is wrong. Near-
+    duplicates are exactly the memories that come back TOGETHER: one recall
+    returning four paraphrases is ONE time the house went looking, not four."""
+    log = RetrievalLog(tmp_path / "r.jsonl", resident="claudette")
+    now = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+    for _ in range(3):
+        _line(log, now, ["a", "b", "c", "d"], CALLER_SERVICE)
+    assert log.reference_counts(30, now=now) == {"a": 3, "b": 3, "c": 3, "d": 3}
+    assert log.group_reference_counts({"g": ["a", "b", "c", "d"]}, 30, now=now) == {"g": 3}
+
+
+def test_group_counts_pool_across_members_reached_by_different_queries(tmp_path):
+    """And the reason max is wrong: a pattern found five different ways should
+    not read as warm as one found once."""
+    log = RetrievalLog(tmp_path / "r.jsonl", resident="claudette")
+    now = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+    _line(log, now, ["a"], CALLER_SERVICE)
+    _line(log, now, ["a"], CALLER_SERVICE)
+    _line(log, now, ["b"], CALLER_SERVICE)
+    _line(log, now, ["b"], CALLER_SERVICE)
+    assert log.group_reference_counts({"g": ["a", "b"]}, 30, now=now) == {"g": 4}
+
+
+def test_group_counts_respect_the_heat_caller_filter(tmp_path):
+    """The v1 defect, re-checked on the new path."""
+    log = RetrievalLog(tmp_path / "r.jsonl", resident="claudette")
+    now = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+    for _ in range(5):
+        _line(log, now, ["a"], CALLER_SELF_QUERY)
+    _line(log, now, ["a"], CALLER_SERVICE)
+    assert log.group_reference_counts({"g": ["a"]}, 30, now=now) == {"g": 1}
+
+
+def test_group_counts_respect_the_window(tmp_path):
+    log = RetrievalLog(tmp_path / "r.jsonl", resident="claudette")
+    now = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+    _line(log, now - timedelta(days=90), ["a"], CALLER_SERVICE)
+    _line(log, now, ["a"], CALLER_SERVICE)
+    assert log.group_reference_counts({"g": ["a"]}, 30, now=now) == {"g": 1}
+
+
+def test_groups_with_no_hits_report_zero_not_missing(tmp_path):
+    """A caller reading `counts[key]` must not have to know the difference
+    between 'never returned' and 'key absent'."""
+    log = RetrievalLog(tmp_path / "r.jsonl", resident="claudette")
+    now = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+    assert log.group_reference_counts({"g": ["nobody"]}, 30, now=now) == {"g": 0}
+
+
+def test_group_last_seen_takes_the_most_recent_member(tmp_path):
+    log = RetrievalLog(tmp_path / "r.jsonl", resident="claudette")
+    now = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+    _line(log, now - timedelta(days=10), ["a"], CALLER_SERVICE)
+    _line(log, now - timedelta(days=2), ["b"], CALLER_SERVICE)
+    seen = log.group_last_seen({"g": ["a", "b"]})
+    assert seen["g"].startswith((now - timedelta(days=2)).isoformat()[:10])
+
+
+def test_group_last_seen_ignores_non_heat_callers(tmp_path):
+    log = RetrievalLog(tmp_path / "r.jsonl", resident="claudette")
+    now = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+    _line(log, now, ["a"], CALLER_CONSOLIDATION)
+    assert log.group_last_seen({"g": ["a"]}) == {}

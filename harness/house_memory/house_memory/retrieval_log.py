@@ -228,6 +228,80 @@ class RetrievalLog:
                 counts[mid] = counts.get(mid, 0) + 1
         return counts
 
+    def group_reference_counts(
+        self,
+        groups: dict,
+        window_days: int,
+        now: Optional[datetime] = None,
+        callers: Optional[frozenset] = None,
+    ) -> dict[str, int]:
+        """Reference counts for GROUPS of memory ids — one count per retrieval
+        EVENT, not per member returned.
+
+        `groups` maps a group key to an iterable of memory ids. A record counts
+        once for a group if it returned ANY member of it.
+
+        WHY NOT SUM THE MEMBERS' COUNTS. Near-duplicates are exactly the
+        memories that come back together: one recall returns four paraphrases
+        of the same idea, and summing turns that single event into "referenced
+        4x". A dedup pass built on summed counts would manufacture the heat it
+        was written to measure, which is the v1 defect wearing a new hat.
+
+        WHY NOT TAKE THE MAX EITHER. Different queries reach different members,
+        and max throws that away — a pattern found five different ways looks
+        as warm as one found once. Distinct events is the honest middle: it
+        counts how many times the HOUSE went looking and found this idea.
+
+        This lives beside `reference_counts` on purpose. The caller filter has
+        now been forgotten at three separate call sites (`top_referenced`,
+        `_last_seen_map`, the digest window), and every one of them was a
+        second place that reimplemented this loop. There is one loop."""
+        heat = HEAT_CALLERS if callers is None else callers
+        now = now or datetime.now(timezone.utc)
+        cutoff = now - timedelta(days=window_days)
+        member_of: dict[str, list] = {}
+        for key, members in groups.items():
+            for mid in members:
+                member_of.setdefault(mid, []).append(key)
+        counts: dict[str, int] = {key: 0 for key in groups}
+        for rec in self.read():
+            if rec.caller not in heat:
+                continue
+            ts = _parse_ts(rec.ts)
+            if ts is None or ts < cutoff:
+                continue
+            hit = set()
+            for mid in rec.returned_ids:
+                hit.update(member_of.get(mid, ()))
+            for key in hit:
+                counts[key] += 1
+        return counts
+
+    def group_last_seen(
+        self,
+        groups: dict,
+        callers: Optional[frozenset] = None,
+    ) -> dict[str, str]:
+        """Most recent heat-bearing return for each group (any member).
+
+        Unwindowed on purpose, matching `_last_seen_map`: "never returned on
+        record" and "not returned in the window" are different sentences and a
+        reviewer needs to be able to tell them apart."""
+        heat = HEAT_CALLERS if callers is None else callers
+        member_of: dict[str, list] = {}
+        for key, members in groups.items():
+            for mid in members:
+                member_of.setdefault(mid, []).append(key)
+        out: dict[str, str] = {}
+        for rec in self.read():
+            if rec.caller not in heat or not rec.ts:
+                continue
+            for mid in rec.returned_ids:
+                for key in member_of.get(mid, ()):
+                    if key not in out or rec.ts > out[key]:
+                        out[key] = rec.ts
+        return out
+
     def caller_breakdown(
         self, window_days: int, now: Optional[datetime] = None
     ) -> dict[str, int]:

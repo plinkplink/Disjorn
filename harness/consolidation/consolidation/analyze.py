@@ -51,6 +51,11 @@ from house_memory import (
 )
 
 from consolidation.config import ConsolidationConfig
+from consolidation.dedup import (
+    DEFAULT_SPINE_CONTAINMENT,
+    already_in_spine,
+    cluster_records,
+)
 from consolidation.embedders import NullEmbedder
 from consolidation.model import (
     ConsolidationReport,
@@ -102,6 +107,9 @@ def _build(cfg, *, now, store, spine, log) -> ConsolidationReport:
             default_caller=CALLER_CONSOLIDATION,
         )
 
+    # Promotion no longer uses these — it pools counts per CLUSTER instead (see
+    # _promotion_proposals). They stay for the removal half, which is keyed on
+    # spine entry NAMES and has nothing to cluster.
     ref_counts = log.reference_counts(cfg.window_days, now=now)
     last_seen = _last_seen_map(log)
 
@@ -111,9 +119,7 @@ def _build(cfg, *, now, store, spine, log) -> ConsolidationReport:
     spine_size = len(spine_entries)
     spine_bodies = [e.body.lower() for e in spine_entries]
 
-    promotions = _promotion_proposals(
-        cfg, store, ref_counts, last_seen, spine_bodies
-    )
+    promotions = _promotion_proposals(cfg, store, log, now, spine_bodies)
     rent_inactive_reason = (
         _rent_inactive_reason(cfg, now) if spine_present else None
     )
@@ -231,19 +237,58 @@ def _open_spine(cfg: ConsolidationConfig) -> Optional[Spine]:
 # ── promotions: episodic -> spine ────────────────────────────────────────────
 
 def _promotion_proposals(
-    cfg, store, ref_counts, last_seen, spine_bodies
+    cfg, store, log, now, spine_bodies
 ) -> list[Proposal]:
+    """One proposal per IDEA, not one per copy of it.
+
+    The order here is the fix, not an implementation detail: cluster first,
+    THEN count. Counting first (what v1 did) tests every paraphrase against the
+    threshold on its own, so a pattern the house went looking for eight times
+    across four memories reads as four memories at 2 and is dropped whole. See
+    consolidation/dedup.py for the three defects this covers and why memory-to-
+    memory similarity is cosine while memory-to-spine is lexical.
+    """
+    records = [
+        r for r in store.export_all()
+        if not (r.get("metadata", {}) or {}).get("superseded_by")
+    ]  # superseded memories are retired, not promotion candidates
+    clusters = cluster_records(records, similarity=cfg.dedup_similarity)
+    groups = {c.key: c.members for c in clusters}
+
+    # Pooled over the cluster, counted once per retrieval EVENT. Both of these
+    # apply the heat-caller filter inside house_memory rather than here, which
+    # is the whole reason they live there — this house has now lost the filter
+    # at three separate sites that each reimplemented the loop locally.
+    ref_counts = log.group_reference_counts(groups, cfg.window_days, now=now)
+    last_seen = log.group_last_seen(groups)
+
+    by_id = {r["id"]: r for r in records}
     out: list[Proposal] = []
-    for record in store.export_all():
-        meta = record.get("metadata", {}) or {}
-        if meta.get("superseded_by"):
-            continue  # already retired; not a promotion candidate
-        mem = Memory.from_chroma(record["id"], record["content"], meta)
-        rc = ref_counts.get(mem.id, 0)
+    for cluster in clusters:
+        rc = ref_counts.get(cluster.key, 0)
         if rc < cfg.promote_min_references:
             continue
-        if _already_in_spine(mem.content, spine_bodies):
+        if _already_in_spine(cluster.content, spine_bodies, cfg.spine_containment):
             continue  # the pattern is already spine; don't re-propose
+        rep = by_id[cluster.representative]
+        mem = Memory.from_chroma(
+            rep["id"], rep["content"], rep.get("metadata", {}) or {}
+        )
+        if cluster.size > 1:
+            rationale = (
+                f"{cluster.size} near-identical episodic memories about "
+                f"{mem.subject or 'this subject'} say one thing, retrieved {rc}x "
+                f"across the window (>= promote threshold "
+                f"{cfg.promote_min_references}) — one pattern, one proposal. "
+                f"The count is retrieval EVENTS, not copies returned: near-"
+                f"duplicates come back together, and counting each copy would "
+                f"manufacture the heat this is measuring."
+            )
+        else:
+            rationale = (
+                f"episodic pattern retrieved {rc}x (>= promote threshold "
+                f"{cfg.promote_min_references}) — earning its way into the spine."
+            )
         out.append(
             Proposal(
                 kind=ProposalKind.PROMOTE,
@@ -254,16 +299,19 @@ def _promotion_proposals(
                 evidence=Evidence(
                     reference_count=rc,
                     window_days=cfg.window_days,
-                    last_referenced_at=last_seen.get(mem.id),
+                    last_referenced_at=last_seen.get(cluster.key),
+                    cluster_size=cluster.size,
                 ),
-                rationale=(
-                    f"episodic pattern retrieved {rc}x (>= promote threshold "
-                    f"{cfg.promote_min_references}) — earning its way into the spine."
-                ),
+                rationale=rationale,
+                # The copies this proposal stands in for. Shown to the reviewer:
+                # a merge they cannot see is a merge they cannot check.
+                members=cluster.others,
             )
         )
-    # strongest evidence first (also the order the soft-target bias keeps)
-    out.sort(key=lambda p: p.evidence.reference_count, reverse=True)
+    # strongest evidence first (also the order the soft-target bias keeps).
+    # Ties break on id so two equally-warm clusters do not swap places between
+    # runs and read as churn.
+    out.sort(key=lambda p: (-p.evidence.reference_count, p.target))
     if cfg.max_promotions is not None:
         out = out[: cfg.max_promotions]
     return out
@@ -457,11 +505,14 @@ def _apply_soft_target_bias(cfg, report, promotions, evictions, compressions):
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
-def _already_in_spine(content: str, spine_bodies: list[str]) -> bool:
-    needle = " ".join(content.split()).lower()
-    if not needle:
-        return False
-    return any(needle in body for body in spine_bodies)
+def _already_in_spine(content: str, spine_bodies: list[str],
+                      threshold: float = DEFAULT_SPINE_CONTAINMENT) -> bool:
+    """Thin seam over dedup.already_in_spine, kept so the call site reads the
+    same as it did. What changed is underneath: this used to ask whether the
+    memory's whole text was a literal SUBSTRING of a spine body, which a
+    compressed spine line essentially never satisfies — so promoted content was
+    re-proposed on every run forever."""
+    return already_in_spine(content, spine_bodies, threshold)
 
 
 def _is_constraint_shaped(entry: SpineEntry, cfg) -> bool:

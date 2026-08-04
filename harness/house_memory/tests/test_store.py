@@ -226,3 +226,88 @@ def test_unbroken_token_still_gets_cut_and_marked():
     out = clip_content("x" * 900, cap=100)
     assert len(out) <= 100
     assert out.endswith(TRUNCATION_MARK)
+
+
+# --- amend_metadata: the repair verb (Claudette, #custodian seq 628) --------
+#
+# The whole point is the LINE: metadata moves, the body never does. Most of
+# these tests exist to keep a future edit from quietly widening the verb.
+
+
+def test_amend_retags_without_touching_body_or_id(store):
+    mem, _ = store.remember(make_memory("the kernel entry", tags=["m", "e", "o"]))
+    changed = store.amend_metadata(mem.id, tags=["memory-design"])
+    assert changed["tags"] == {"from": ["m", "e", "o"], "to": ["memory-design"]}
+    got = store._collection.get(ids=[mem.id])
+    assert got["ids"] == [mem.id], "id must survive a retag"
+    assert got["documents"][0] == mem.content, "the body must not move"
+
+
+def test_amend_preserves_salience_and_confidence_it_was_not_asked_to_change(store):
+    """The exact loss supersede would have caused: her salience 4/5 and
+    `confirmed` coming back as defaults after a label repair."""
+    mem, _ = store.remember(make_memory("load-bearing", salience=5, confidence="rumor"))
+    store.amend_metadata(mem.id, tags=["memory-hygiene"])
+    meta = store._collection.get(ids=[mem.id])["metadatas"][0]
+    assert meta["salience"] == 5
+    assert meta["confidence"] == "rumor"
+
+
+def test_amend_refuses_a_bare_string_instead_of_iterating_it(store):
+    """Her condition, seq 628. normalize_tags COERCES on the write path, which
+    is right there; a repair verb must refuse, because a bare string means the
+    caller is confused and a quiet one-tag save writes a second wrong answer
+    over the first."""
+    mem, _ = store.remember(make_memory("x"))
+    import pytest
+
+    with pytest.raises(TypeError):
+        store.amend_metadata(mem.id, tags="agenthood")
+    meta = store._collection.get(ids=[mem.id])["metadatas"][0]
+    assert "agenthood" not in meta["tags_json"], "a refused call must not write"
+
+
+def test_amend_cannot_reach_content(store):
+    """Structural, not behavioural: there is no content parameter, so the
+    verb cannot express a body edit even by mistake."""
+    import inspect
+
+    params = inspect.signature(store.amend_metadata).parameters
+    assert "content" not in params
+    assert set(params) == {"memory_id", "tags", "salience", "confidence"}
+
+
+def test_amend_unknown_id_returns_none(store):
+    assert store.amend_metadata("no-such-id", tags=["a"]) is None
+
+
+def test_amend_noop_returns_empty_dict(store):
+    mem, _ = store.remember(make_memory("x", tags=["alpha"]))
+    assert store.amend_metadata(mem.id) == {}
+    assert store.amend_metadata(mem.id, tags=["alpha"]) == {}
+
+
+def test_amend_validates_salience_and_confidence(store):
+    import pytest
+
+    mem, _ = store.remember(make_memory("x"))
+    with pytest.raises(ValueError):
+        store.amend_metadata(mem.id, salience=9)
+    with pytest.raises(ValueError):
+        store.amend_metadata(mem.id, confidence="maybe")
+
+
+def test_amend_normalizes_tags_it_accepts(store):
+    mem, _ = store.remember(make_memory("x"))
+    changed = store.amend_metadata(mem.id, tags=["Memory Design", "MEMORY-DESIGN", "!!"])
+    assert changed["tags"]["to"] == ["memory-design"]
+
+
+def test_amended_memory_still_recalls_with_its_original_vector(store):
+    """No re-embedding: the memory stays findable by the same query it was
+    findable by before the repair."""
+    mem, _ = store.remember(make_memory("plink builds a NAS on debian"))
+    before = [m.id for m in store.recall("debian NAS build")]
+    store.amend_metadata(mem.id, tags=["nas"])
+    after = [m.id for m in store.recall("debian NAS build")]
+    assert before == after

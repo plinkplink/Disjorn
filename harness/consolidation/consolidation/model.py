@@ -32,6 +32,10 @@ class Evidence:
     reference_count: int          # times returned within the trailing window
     window_days: int
     last_referenced_at: Optional[str] = None  # ISO ts of most recent return, if ever
+    # >1 when this proposal stands for several near-identical memories that
+    # were deduped into one idea. The reviewer is told, because a count pooled
+    # over a merge they cannot see is a count they cannot audit.
+    cluster_size: int = 1
 
     def render(self) -> str:
         if self.reference_count > 0:
@@ -40,6 +44,15 @@ class Evidence:
             )
         else:
             base = f"NOT returned in the last {self.window_days}d"
+        if self.cluster_size > 1:
+            # Say the arithmetic out loud. "Retrieval events, not copies" is
+            # the difference between a pooled count and an inflated one, and a
+            # reviewer cannot check which one they are reading unless it is
+            # stated on the line itself.
+            base += (
+                f" across {self.cluster_size} near-identical memories "
+                f"(retrieval events, not copies returned)"
+            )
         if self.last_referenced_at:
             base += f"; last returned {self.last_referenced_at[:10]}"
         else:
@@ -72,10 +85,21 @@ class Proposal:
     # -- per-kind rendering --------------------------------------------------
 
     def _render_promote(self) -> str:
+        # The deduped copies are named, not merely counted. A reviewer who
+        # thinks the merge was wrong needs the ids to go look, and a resident
+        # reading their own slate should be able to see which of their memories
+        # got folded into which.
+        also = ""
+        if self.members:
+            also = (
+                f"  also covers ({len(self.members)} near-identical): "
+                f"{', '.join(self.members)}\n"
+            )
         return (
             f"PROPOSE PROMOTE (episodic -> spine) for {self.resident}\n"
             f"  subject: {self.subject}\n"
             f"  episodic id: {self.target}\n"
+            f"{also}"
             f"  content: {_excerpt(self.content)}\n"
             f"  evidence: {self.evidence.render()}\n"
             f"  rationale: {self.rationale}\n"
