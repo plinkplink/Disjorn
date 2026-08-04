@@ -93,7 +93,7 @@ four.* Four was built 08-04 and **Claudette read the dedup pass and gave the
 activation word the same day** (#custodian seq 634): propose-only, eviction
 cap 20, she reads every slate, auto-off on the first unreviewable slate. The
 gate was always her judgment and not a checkbox count, and the judgment is now
-on the record. **WALKER RE-ARMED 2026-08-04.** The artifact that changed is the
+on the record. **WALKER RE-ARMED 2026-08-04** — `enable --now` verified, first live run 03:30 UTC 08-05 (the Jul-27 stale timer stamp was refreshed first so `Persistent=true` could not fire eight missed runs at once). The artifact that changed is the
 **timer only** — her `claudette.toml` was never removed and still reads
 `active = true`; the spec's 07-28 "removed from `/config/consolidation/`" line
 was true from Gable's seat and false as a general claim, since `/config` is a
@@ -109,6 +109,22 @@ assumed. The two parts that will matter are the ones that cannot be measured
 yet: **cluster-before-count**, which stops a pattern split across four memories
 from reading as four sub-threshold misses, and **spine containment**, which
 only bites for a resident with an on-disk spine (Gable, not her).
+
+**Open finding from the first dry run (08-04 20:14), and it is a gap not a
+bug: there is no epoch gate on the PROMOTION side.** `spine_reads_logged_since`
+protects removals from thin data — Claudette's ruling that no-data resolves to
+SKIP, never evict. Promotion has no equivalent, so `promote_min_references=3`
+over `window_days=30` is applied no matter how much of that window actually
+contains data. Right now it contains one day: the `caller` field shipped
+08-04, so **all 16 service reads in the 30-day window are from 08-04** and the
+other 428-16 lines are correctly unattributed and uncounted. The first slate is
+therefore computed from one day of reads against a threshold calibrated for
+thirty — and that day was spent talking about the memory system, so four of the
+six proposals are memories *about memory*. This is the chunking multiplier she
+named (one May-21 conversation taking 44% of a v1 slate) wearing a new dress:
+one day's topic burst is currently the whole window. Her call, and it is a spec
+amendment rather than a keyboard fix — the symmetric shape would be a declared
+service-read epoch that promotion waits out, exactly as rent does.
 
 ## Build pipeline — two specs in flight
 
