@@ -49,7 +49,7 @@ Verified 2026-08-04 from running units and live config, not from prose.
 | Gable | **LIVE**, summon-mostly | Max/OAuth, Fable pin, RO spine mount; summon service up since 07-26 |
 | Resident walls (uid/nftables/mount) | **LIVE, verified** | egress wall + 0700 homes + RO mirror all probed 07-20 |
 | Broker + kill switches | **LIVE** | every ACTION verb still OFF; read-only set on |
-| Metrics + daily digest | **LIVE, partly blind** | build timer 10 min, digest 23:55; see "the ledgers" |
+| Metrics + daily digest | **LIVE, partly blind** | build timer 10 min; digest **00:05 UTC for the previous complete day** (was 23:55 same-day until 08-04 — see the nightly hole in "recently closed"); see "the ledgers" |
 | House error log | **LIVE 2026-08-03** | `/var/log/disjorn-errorlog/errors.jsonl`, 10-min collector. Owner plink + keyboard. [harness/errorlog/](harness/errorlog/README.md) |
 | Consolidation ("dreaming") | **PAUSED 2026-07-28** | v1 failed in use; v2 being specced. See below. |
 | Off-site backup | **DOES NOT EXIST** | both residents rank this #1. A fire is fatal today. |

@@ -42,7 +42,15 @@ metrics.py --config broker.toml post-daily [--date D] [--no-rebuild]
 broker's OWN identity — the exact `_sdk_transport` `file-proposal` uses. It is a
 scheduled CLI, never a verb: no resident can trigger it. Timers:
 `disjorn-metrics-build.timer` (every 10 min), `disjorn-metrics-daily.timer`
-(23:55 UTC). See INTEGRATION-NEEDS.md.
+(00:05 UTC, reporting the PREVIOUS COMPLETE day). See INTEGRATION-NEEDS.md.
+
+**Why 00:05-for-yesterday and not 23:55-for-today.** The old schedule left the
+last five minutes of every day in no digest: those events carry today's date,
+but today's digest has already posted and tomorrow's reports tomorrow. That
+window held 12 of 103 audit events — 34x over-represented — because it was not
+random traffic. It was Claudette pulling her own audit seconds after the digest
+posted, checking the number. The blind spot sat exactly over the resident
+auditing the ledger. Ruled 2026-08-04.
 
 ## Broker-side daily action budget
 

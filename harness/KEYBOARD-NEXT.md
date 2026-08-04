@@ -226,7 +226,9 @@ All wired; her next restart picks it up:
 
 - Both units installed to /etc/systemd/system/, daemon-reloaded, and both
   timers `enable --now`. Build timer runs every 10 min; daily #custodian line
-  fires 23:55 UTC.
+  fires 00:05 UTC and reports the PREVIOUS COMPLETE day (was 23:55
+  same-day until 2026-08-04, which left the last five minutes of every
+  day in no digest at all).
 - Additive keys merged into /etc/disjorn-broker/broker.toml (root:plink 0640):
   per-resident `retrieval_log`, `action_log`, `budget_json`, and `spine_dir`
   for res-gable. `[budgets]` landed fully commented — OFF, as specced.

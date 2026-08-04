@@ -13,7 +13,8 @@ keyboard 2026-07-26:
 
 - **§1 CLOSED** — `systemctl list-timers 'disjorn-metrics*'` shows
   `disjorn-metrics-build.timer` (every 10 min, last run minutes ago) and
-  `disjorn-metrics-daily.timer` (23:55) both active and waiting.
+  `disjorn-metrics-daily.timer` (00:05 UTC, previous complete day) both active
+  and waiting.
 - **§2 CLOSED** — the additive keys are merged into
   `/etc/disjorn-broker/broker.toml` (root:plink 0640): per-resident
   `retrieval_log`, `action_log`, `budget_json`, and `spine_dir` for both
@@ -46,7 +47,10 @@ Templates ship in `harness/metrics/`:
 - `disjorn-metrics-build.{service,timer}` — refresh `metrics.json` every
   10 min (what `read-metrics` serves).
 - `disjorn-metrics-daily.{service,timer}` — post the end-of-day #custodian
-  action-count line at 23:55 UTC.
+  action-count line at 00:05 UTC for the PREVIOUS COMPLETE day. The header
+  states its bounds and its timezone: the box runs EDT, so a UTC "day" is
+  20:00-20:00 local and the busiest hour in the audit log belongs to the local
+  evening before the date in the header.
 
 Install (root):
 
