@@ -182,6 +182,7 @@ tests green**. Harness suites need a pytest that the runtime venvs do not carry
 
 | Question | Doc |
 |---|---|
+| **Which copy of this file is real?** | [TREE.md](TREE.md) |
 | What do I flip next, at the keyboard? | [harness/KEYBOARD-NEXT.md](harness/KEYBOARD-NEXT.md) |
 | What did we defer, and why? | [DEFERRED.md](DEFERRED.md) |
 | What must pass before residents get hands? | [RED-TEAM-BACKLOG.md](RED-TEAM-BACKLOG.md) |

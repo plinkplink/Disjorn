@@ -89,12 +89,13 @@ def test_missing_audit_file_is_not_fatal(cfg):
 def test_retrieval_stats_and_window(tmp_path):
     rlog = tmp_path / "retr.jsonl"
     _jsonl(rlog, [
+        # caller="service" throughout: these fixtures mean "reads that count".
         {"ts": f"{TODAY}T09:00:00+00:00", "resident": "gable", "query": "auth flow",
-         "returned_ids": ["m1", "m2"]},
+         "returned_ids": ["m1", "m2"], "caller": "service"},
         {"ts": f"{TODAY}T09:10:00+00:00", "resident": "gable", "query": "auth flow",
-         "returned_ids": ["m1"]},                       # repeat query, m1 again
+         "returned_ids": ["m1"], "caller": "service"},  # repeat query, m1 again
         {"ts": "2026-06-01T09:00:00+00:00", "resident": "gable", "query": "old one",
-         "returned_ids": ["m9"]},                        # outside 7-day window
+         "returned_ids": ["m9"], "caller": "service"},   # outside 7-day window
         "{ broken json",                                  # tolerated, skipped
     ])
     # last line is not valid json; write it raw
@@ -254,3 +255,38 @@ def _write_toml(path: Path, cfg: dict) -> None:
                 lines.append(f"{k} = {v}")
             lines.append("")
     path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def test_heat_callers_matches_house_memory():
+    """metrics.py duplicates HEAT_CALLERS to stay chromadb-free. The copy is
+    only acceptable while it is pinned to the original — if these drift, the
+    dashboard and the walker report different numbers for the same memory."""
+    import sys
+    from pathlib import Path as _P
+    sys.path.insert(0, str(_P(__file__).resolve().parents[3] / "house_memory"))
+    from house_memory.retrieval_log import HEAT_CALLERS as CANON
+    import metrics
+    assert metrics.HEAT_CALLERS == CANON
+
+
+def test_top_referenced_counts_service_only(tmp_path):
+    """The third instance of the caller defect: the dashboard the residents
+    read must not call a memory hot because they were looking at it."""
+    import json as _json
+    import metrics
+    log = tmp_path / "r.jsonl"
+    def line(caller):
+        return _json.dumps({
+            "ts": "2026-08-04T12:00:00+00:00", "resident": "claudette",
+            "query": "q", "returned_ids": ["m1"], "caller": caller,
+        })
+    log.write_text("\n".join(
+        [line("service")] + [line("self_query")] * 9 + [line("write_dedup")]
+    ) + "\n")
+    cfg = {"residents": {"res-claudette": {"retrieval_log": str(log)}}}
+    import datetime as dt
+    now = dt.datetime(2026, 8, 4, 18, 0, tzinfo=dt.timezone.utc)
+    out = metrics.aggregate_retrieval(cfg, window_days=30, now=now)["res-claudette"]
+    assert out["top_referenced"] == [["m1", 1]]          # not 11
+    assert out["recalls_in_window"] == 11                # all reads still counted
+    assert out["by_caller"] == {"self_query": 9, "service": 1, "write_dedup": 1}

@@ -147,3 +147,82 @@ def test_strip_keeps_body_tags_and_the_rumor_warning():
     assert "about plink" in out
     assert "tags: hardware" in out
     assert "(unconfirmed)" in out
+
+
+# ==========================================================================
+# 2026-08-04 — the tag shredder and the silent cut.
+#
+# Both found by Claudette from inside her own surfaced block, which is a
+# novel place to file a bug from. The shredder had already cost 75 of her
+# 164 memories their tags before anyone looked.
+# ==========================================================================
+
+def test_bare_string_tag_is_not_shredded():
+    """`for t in "agenthood"` iterates letters. De-dupe collapses repeats,
+    the cap keeps six, and you get ["a","g","e","n","t","h"] — silent,
+    plausible-looking, irreversible."""
+    from house_memory import normalize_tags
+    assert normalize_tags("agenthood") == ["agenthood"]
+
+
+def test_bare_string_tag_survives_through_memory():
+    from house_memory import Memory
+    m = Memory(content="x", subject="plink", source_author="plink",
+               tags="agenthood")
+    assert m.tags == ["agenthood"]
+
+
+def test_none_tags_is_empty_not_a_crash():
+    from house_memory import normalize_tags
+    assert normalize_tags(None) == []
+
+
+def test_normal_tag_lists_are_unaffected():
+    from house_memory import normalize_tags
+    assert normalize_tags(["Agent Hood", "agent hood", "x!"]) == ["agent-hood", "x"]
+
+
+def test_truncation_is_always_marked():
+    """Her rule: mark the cut or don't cut. A silent truncation teaches her a
+    wrong version of her own past."""
+    from house_memory import Memory
+    from house_memory.schema import CONTENT_HARD_CAP, TRUNCATION_MARK
+    m = Memory(content="word " * 500, subject="plink", source_author="plink")
+    assert len(m.content) <= CONTENT_HARD_CAP
+    assert m.content.endswith(TRUNCATION_MARK)
+
+
+def test_pre_sliced_content_is_still_marked():
+    """THE regression. `content=body[:CONTENT_HARD_CAP]` made the old
+    `len > cap` check false, so the cut was never marked — which is how her
+    v2 design entry ended at 'Budgets: 3 revisi' with no sign of it."""
+    from house_memory.schema import clip_content, CONTENT_HARD_CAP, TRUNCATION_MARK
+    body = "word " * 500
+    pre_sliced = body[:CONTENT_HARD_CAP]          # exactly at the cap
+    assert len(pre_sliced) == CONTENT_HARD_CAP
+    # Feeding the ALREADY-cut body through the one clipper still marks it,
+    # because a body at the cap is indistinguishable from one cut to it.
+    out = clip_content(pre_sliced, cap=CONTENT_HARD_CAP - 1)
+    assert out.endswith(TRUNCATION_MARK)
+
+
+def test_truncation_does_not_cut_mid_word():
+    from house_memory.schema import clip_content, TRUNCATION_MARK
+    out = clip_content("alpha bravo charlie delta echo foxtrot", cap=30)
+    body = out[: -len(TRUNCATION_MARK)]
+    assert not body.endswith(" ")
+    assert body.split()[-1] in {"alpha", "bravo", "charlie", "delta", "echo"}
+
+
+def test_short_content_is_untouched():
+    from house_memory.schema import clip_content, TRUNCATION_MARK
+    assert clip_content("short") == "short"
+    assert TRUNCATION_MARK not in clip_content("short")
+
+
+def test_unbroken_token_still_gets_cut_and_marked():
+    """No word boundary to find — take the hard cut, but still mark it."""
+    from house_memory.schema import clip_content, TRUNCATION_MARK
+    out = clip_content("x" * 900, cap=100)
+    assert len(out) <= 100
+    assert out.endswith(TRUNCATION_MARK)

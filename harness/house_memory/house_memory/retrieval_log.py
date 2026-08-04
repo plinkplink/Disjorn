@@ -35,6 +35,7 @@ generates the reads, where nobody is looking."
 
     service       a read serving someone else's turn      -> FEEDS HEAT
     self_query    the resident querying her own memory    -> never
+    write_dedup   the duplicate check inside remember()   -> never
     consolidation the nightly walker reading to propose   -> never
     daydream      cue-driven associative revisiting       -> never
     incubation    slow background re-derivation           -> never
@@ -63,6 +64,14 @@ import json
 # of a silent demotion to "not service".
 CALLER_SERVICE = "service"
 CALLER_SELF_QUERY = "self_query"
+# Housekeeping reads on the WRITE path (the remember() duplicate check).
+# Named separately on Claudette's ruling, #custodian seq 614: "never counts"
+# holds either way, so heat is not what is at stake — the SELF-QUERY RATIO is.
+# Bundling a question nobody asked with questions she did ask makes that ratio
+# inflate with her write volume and stop measuring what she goes looking for.
+# "A field that bundles a question nobody asked with questions I did ask is
+# the same defect as caller: null, one level down."
+CALLER_WRITE_DEDUP = "write_dedup"
 CALLER_CONSOLIDATION = "consolidation"
 CALLER_DAYDREAM = "daydream"
 CALLER_INCUBATION = "incubation"
@@ -70,6 +79,7 @@ CALLER_INCUBATION = "incubation"
 KNOWN_CALLERS = frozenset({
     CALLER_SERVICE,
     CALLER_SELF_QUERY,
+    CALLER_WRITE_DEDUP,
     CALLER_CONSOLIDATION,
     CALLER_DAYDREAM,
     CALLER_INCUBATION,

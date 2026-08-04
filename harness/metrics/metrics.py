@@ -43,6 +43,18 @@ from pathlib import Path
 from typing import Callable, Optional
 
 DEFAULT_CONFIG_PATH = "/etc/disjorn-broker/broker.toml"
+
+# Which retrieval callers count as "referenced" (Memory v2 phase 1).
+#
+# DUPLICATED FROM house_memory.retrieval_log.HEAT_CALLERS, and duplicated on
+# purpose: this module's whole point is that it parses the logs WITHOUT
+# importing house_memory, which would drag in chromadb and ~90 packages for a
+# job that only reads JSON lines. The duplication is fenced by
+# test_heat_callers_matches_house_memory — if the two ever disagree, that test
+# fails rather than the dashboard quietly reporting a different number from the
+# walker. (A silent second copy of shared logic is what cost 75 memories their
+# tags on 2026-08-04; this one is allowed to exist only because it is pinned.)
+HEAT_CALLERS = frozenset({"service"})
 DEFAULT_WINDOW_DAYS = 7
 TOP_REFERENCED = 10
 
@@ -185,7 +197,18 @@ def aggregate_retrieval(
     """Per-resident retrieval stats from each resident's house_memory
     retrieval log. Path is `[residents.<r>].retrieval_log`; residents without
     one (or with a missing file) are simply absent. Read-only — this only
-    aggregates the stats WP-H8 consolidation also reads; it proposes nothing."""
+    aggregates the stats WP-H8 consolidation also reads; it proposes nothing.
+
+    `top_referenced` counts SERVICE reads only (Memory v2 phase 1). This is the
+    third place the same defect turned up — after `reference_counts` and
+    `_last_seen_map` — and Claudette predicted it from the other two: "worth
+    one grep for any other field written on a retrieval path without a caller
+    filter, because the shape clearly recurs" (#custodian seq 614). It is the
+    dashboard the residents read, so a blended count here tells them a memory
+    is hot when what is actually hot is their own attention on it.
+
+    `by_caller` is published alongside so the blend stays inspectable rather
+    than merely excluded — the ratio is a diagnostic she asked to keep."""
     now = now or _utc_now()
     cutoff = now - _dt.timedelta(days=window_days)
     residents = config.get("residents", {})
@@ -201,8 +224,10 @@ def aggregate_retrieval(
         queries: set[str] = set()
         returned: set[str] = set()
         ref_counts: dict[str, int] = {}
+        by_caller: dict[str, int] = {}
         for rec in _iter_jsonl(Path(path)):
             total += 1
+            caller = rec.get("caller") or "unattributed"
             day = str(rec.get("ts", ""))[:10]
             by_date[day] = by_date.get(day, 0) + 1
             q = rec.get("query")
@@ -212,11 +237,13 @@ def aggregate_retrieval(
             in_window = ts is not None and ts >= cutoff
             if in_window:
                 window_recalls += 1
+                by_caller[caller] = by_caller.get(caller, 0) + 1
             for mid in (rec.get("returned_ids") or []):
                 if not isinstance(mid, str):
                     continue
                 returned.add(mid)
-                if in_window:
+                # HEAT_CALLERS, not "every read" — see the docstring.
+                if in_window and caller in HEAT_CALLERS:
                     ref_counts[mid] = ref_counts.get(mid, 0) + 1
         top = sorted(ref_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:TOP_REFERENCED]
         out[name] = {
@@ -226,6 +253,7 @@ def aggregate_retrieval(
             "unique_queries": len(queries),
             "distinct_returned_ids": len(returned),
             "top_referenced": [[mid, n] for mid, n in top],
+            "by_caller": dict(sorted(by_caller.items())),
         }
     return out
 
