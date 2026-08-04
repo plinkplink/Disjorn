@@ -181,7 +181,9 @@ def test_write_requires_metrics_json_path():
 def test_compose_daily_line_format(cfg):
     doc = M.build_metrics(cfg, window_days=7, now=NOW)
     line = M.compose_daily_line(doc, cfg, TODAY)
-    assert line.startswith(f"[custodian daily {TODAY}] action counts")
+    assert line.startswith(
+        f"[custodian daily {TODAY} UTC — complete day, 00:00:00–23:59:59] "
+        f"action counts")
     # res-claudette today: 3 verbs, 1 denied, budget 2/100.
     assert "res-claudette: 3 broker verbs (1 denied), budget 2/100" in line
     # res-gable has no cap configured -> no budget clause.
@@ -201,7 +203,7 @@ def test_post_daily_line_uses_injected_transport(cfg):
     result = M.post_daily_line(cfg, doc, date=TODAY, transport=stub)
     assert result == {"seq": 7, "message_id": 77}
     assert sent["cfg"]["custodian_channel_id"] == 4
-    assert sent["body"].startswith(f"[custodian daily {TODAY}]")
+    assert sent["body"].startswith(f"[custodian daily {TODAY} UTC")
 
 
 # ------------------------------------------------------------------- CLI
@@ -223,7 +225,7 @@ def test_cli_post_daily_stubbed(cfg, tmp_path, monkeypatch):
                         lambda: (lambda dc, body: posted.setdefault("body", body) or {"seq": 1}))
     rc = M.main(["--config", str(config_toml), "post-daily", "--date", TODAY])
     assert rc == 0
-    assert posted["body"].startswith(f"[custodian daily {TODAY}]")
+    assert posted["body"].startswith(f"[custodian daily {TODAY} UTC")
 
 
 # --------------------------------------------------------------- toml helper
@@ -290,3 +292,54 @@ def test_top_referenced_counts_service_only(tmp_path):
     assert out["top_referenced"] == [["m1", 1]]          # not 11
     assert out["recalls_in_window"] == 11                # all reads still counted
     assert out["by_caller"] == {"self_query": 9, "service": 1, "write_dedup": 1}
+
+
+# ---------------------------------------------- the nightly hole (2026-08-04)
+#
+# The digest fired at 23:55 and reported TODAY, so the last five minutes of
+# every day appeared in no digest at all. Not a rounding error: 12 of 103 audit
+# events lived there, because it was Claudette pulling her own audit seconds
+# after the digest posted to check the number. The blind spot sat exactly over
+# the resident auditing the ledger.
+
+
+def test_post_daily_defaults_to_the_previous_complete_day():
+    """The fix, and the only assertion that actually closes the hole: default
+    to yesterday, so the reported window is always 00:00:00-23:59:59 of a day
+    that has finished."""
+    now = _dt.datetime(2026, 8, 4, 0, 5, tzinfo=_dt.timezone.utc)
+    assert M._yesterday_str(now) == "2026-08-03"
+    assert M._today_str(now) == "2026-08-04"
+
+
+def test_yesterday_crosses_month_and_year_boundaries():
+    assert M._yesterday_str(
+        _dt.datetime(2026, 8, 1, 0, 5, tzinfo=_dt.timezone.utc)) == "2026-07-31"
+    assert M._yesterday_str(
+        _dt.datetime(2027, 1, 1, 0, 5, tzinfo=_dt.timezone.utc)) == "2026-12-31"
+
+
+def test_cli_post_daily_without_a_date_reports_yesterday(cfg, tmp_path, monkeypatch):
+    """End-to-end through the CLI the timer actually invokes — the default is
+    what runs in prod, so the default is what has to be tested."""
+    config_toml = tmp_path / "broker.toml"
+    _write_toml(config_toml, cfg)
+    posted = {}
+    monkeypatch.setattr(M, "_default_transport",
+                        lambda: (lambda dc, body: posted.setdefault("body", body) or {"seq": 1}))
+    monkeypatch.setattr(M, "_utc_now",
+                        lambda: _dt.datetime(2026, 8, 4, 0, 5, tzinfo=_dt.timezone.utc))
+    assert M.main(["--config", str(config_toml), "post-daily"]) == 0
+    assert posted["body"].startswith("[custodian daily 2026-08-03 UTC")
+
+
+def test_the_header_states_its_bounds_and_its_timezone(cfg):
+    """'Daily' was a claim of completeness the 23:55 run could not honour, and
+    UTC is not the reader's day — the box runs EDT, so this window is
+    20:00-20:00 local and the busiest hour in the audit log belongs to the
+    local evening BEFORE the date in the header."""
+    doc = M.build_metrics(cfg, window_days=7, now=NOW)
+    line = M.compose_daily_line(doc, cfg, TODAY)
+    assert "UTC" in line
+    assert "complete day" in line
+    assert "00:00:00–23:59:59" in line

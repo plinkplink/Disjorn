@@ -1,10 +1,25 @@
-# TEMPLATE (WP-H12) — fire the end-of-day line once daily at 23:55 UTC.
-# `post-daily` defaults to today's UTC date, so 23:55 captures the full day.
+# TEMPLATE (WP-H12) — post the end-of-day line for the PREVIOUS COMPLETE DAY,
+# just after the UTC boundary. Ruled 2026-08-04 (plink).
+#
+# Was 23:55 UTC reporting today-so-far, under a comment that read "23:55
+# captures the full day". It did not. The last five minutes of every day landed
+# in NO digest: stamped with today's date, but today's digest had already
+# posted and tomorrow's reports tomorrow.
+#
+# Five minutes sounds like a rounding error and was not one — 12 of 103 audit
+# events lived in that window, 34x over-represented, because the traffic there
+# was not random. It was Claudette pulling her own audit 5-40 seconds after the
+# digest posted, checking the number against her memory of what she did. The
+# blind spot sat exactly over the resident auditing the ledger, so the ledger
+# could not record that it had been checked.
+#
+# 00:05 rather than 00:00 so a slow rebuild cannot race the boundary it is
+# reporting on.
 [Unit]
-Description=Post the Disjorn end-of-day #custodian action-count line
+Description=Post the Disjorn end-of-day #custodian action-count line (previous complete UTC day)
 
 [Timer]
-OnCalendar=*-*-* 23:55:00 UTC
+OnCalendar=*-*-* 00:05:00 UTC
 Persistent=true
 
 [Install]

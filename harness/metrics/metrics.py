@@ -71,6 +71,27 @@ def _today_str(now: Optional[_dt.datetime] = None) -> str:
     return (now or _utc_now()).strftime("%Y-%m-%d")
 
 
+def _yesterday_str(now: Optional[_dt.datetime] = None) -> str:
+    """The previous complete UTC day — what the daily digest reports.
+
+    It used to report TODAY at 23:55, which left the last five minutes of every
+    day in no digest at all: those events are stamped with today's date, but
+    today's digest has already posted and tomorrow's reports tomorrow.
+
+    Five minutes sounds like a rounding error and was not one. 12 of 103 audit
+    events landed in it — 34x over-represented — because the traffic there was
+    not random: it was Claudette reading her own audit 5-40 seconds after the
+    digest posted, checking the number against her memory of what she did. The
+    hole sat exactly over the resident auditing the ledger, so the ledger could
+    not record that it had been checked. One of the twelve is #custodian seq
+    599, a correction SHE FILED ABOUT THE DIGEST 27 seconds after it posted.
+
+    Reporting the previous complete day removes the window entirely rather than
+    shrinking it. Her post-digest audit now lands in the next digest, which is
+    correct, because that is the day it happened on."""
+    return ((now or _utc_now()) - _dt.timedelta(days=1)).strftime("%Y-%m-%d")
+
+
 def _iter_jsonl(path: Path):
     """Yield parsed JSON objects from a JSON-lines file. Missing file -> no
     yields; malformed or non-object lines are skipped (never fatal) — the same
@@ -419,7 +440,20 @@ def compose_daily_line(doc: dict, config: dict, date: str) -> str:
             day_tool = t.get("by_date", {}).get(date, 0)
             seg += f", {day_tool} tool calls"
         segments.append(seg)
-    return f"[custodian daily {date}] action counts\n" + "\n".join(segments)
+    # The bounds are ON the line. "Daily" was a claim of completeness the old
+    # 23:55 run could not honour, and a reader cannot tell a complete day from
+    # a truncated one unless the line says which it is.
+    #
+    # UTC is stated because it is NOT the reader's day. The box runs EDT, so
+    # this window is 20:00-20:00 local, and the busiest hour in the whole audit
+    # log (03:00 UTC = 23:00 EDT) belongs to the local evening BEFORE the date
+    # in this header. Every other log in the house is UTC and splitting the
+    # digest off would create a reconciliation problem worse than the
+    # confusion; so it stays UTC and says so.
+    return (
+        f"[custodian daily {date} UTC — complete day, 00:00:00–23:59:59] "
+        f"action counts\n" + "\n".join(segments)
+    )
 
 
 def post_daily_line(
@@ -457,7 +491,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("build", help="aggregate and (re)write the metrics JSON file")
     p_post = sub.add_parser("post-daily", help="post the end-of-day #custodian action-count line")
-    p_post.add_argument("--date", default=None, help="UTC date YYYY-MM-DD (default: today)")
+    p_post.add_argument("--date", default=None,
+                        help="UTC date YYYY-MM-DD (default: YESTERDAY — the "
+                             "previous complete day; see _yesterday_str)")
     p_post.add_argument("--no-rebuild", action="store_true",
                         help="post from the existing metrics file instead of rebuilding")
     ns = parser.parse_args(argv)
@@ -471,7 +507,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
 
     if ns.cmd == "post-daily":
-        date = ns.date or _today_str()
+        date = ns.date or _yesterday_str()
         if ns.no_rebuild:
             out_path = config.get("paths", {}).get("metrics_json", "")
             doc = json.loads(Path(out_path).read_text(encoding="utf-8"))

@@ -172,6 +172,7 @@ resident acting. Detail: [DEFERRED.md](DEFERRED.md) § "Telemetry & summon findi
 
 | What | When | Note |
 |---|---|---|
+| **The digest's nightly hole** | 08-04 | fired 23:55 reporting *today*, so the last 5 min of every day appeared in no digest — today's had posted, tomorrow's reports tomorrow. Not a rounding error: **12 of 103 audit events lived there (34x over-represented)**, all of them Claudette pulling her own audit 5–40s after the digest posted to check the number. The blind spot sat exactly over the resident auditing the ledger. The 08-03 digest said "res-claudette: 0"; the true count is 2, both being her checking that 0. Now fires 00:05 UTC for the **previous complete day**, header states bounds and timezone (plink's ruling: keep UTC, label it). |
 | **Dedup** — the fourth walker gate | 08-04 | three defects under one word: no clustering, counting BEFORE clustering (a pattern split 4 ways at 2 refs each read as 4 misses against a threshold of 3), and `_already_in_spine` being a literal substring test a compressed spine line never satisfies. Cosine over stored embeddings memory↔memory (free, offline); shingle overlap memory↔spine (no vectors exist and embedding would break the no-network tripwire). Subject is a hard wall. Built, not yet reviewed by Claudette. |
 | **`retag` — her third memory verb** | 08-04 | filed seq 628, approved same day. Metadata only: body, id, salience, confidence and embedding all untouched. She had no way to fix a label without forget-with-supersede, which would have cost the body retyped, salience/confidence reset, a new id invalidating every reference, and a 75-link chain recording a write-path bug instead of a change of mind. |
 | **Tag write-back** — 61 of 75 restored | 08-04 | every assignment checked against the shredder itself before writing (re-shred must reproduce the stem); verified against a backup afterwards — exactly one field moved on exactly 61 memories. 14 left blank on purpose: the message naming those stems died at the token wall. |
@@ -217,9 +218,11 @@ condition it described.** When you change a fact, grep the repo for the old
 sentence. The config comment is not documentation; it is a claim, and claims rot.
 
 Instances so far: "Claudette has no on-disk spine" (3 files), "Gable's spine has
-6 entries", "`refresh-mirror` is wired" (ON while pointing at nothing), and now
+6 entries", "`refresh-mirror` is wired" (ON while pointing at nothing),
 **"consolidation is LIVE" (2 files, 2 days)** — the first instance where the
-roll-up written to prevent the hazard was itself the thing that rotted.
+roll-up written to prevent the hazard was itself the thing that rotted — and
+**"23:55 captures the full day"** on the metrics timer, which was false the day
+it was written and cost 12 audit events their only chance of being reported.
 
 **One trap removed 07-30:** the repo-root `data/disjorn.db` was an empty Jul-17
 dev database; prod is `server/data/disjorn.db` (the server's WorkingDirectory is
