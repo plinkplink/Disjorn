@@ -455,6 +455,43 @@ opinion" — Claudette, accepting v1). Two follow-ups deferred under it:
   self-initiated introspection — or it buys nothing. Field + one caller,
   minimum.
 
+## Walker defects found on the first live slate (2026-08-05) — BACKLOGGED
+
+plink's ruling, 2026-08-05: *"Let's put the walker fixes in the backlog and
+move forward on `start-build`."* Timer disabled the same morning. Claudette
+invoked her own auto-off at #custodian seq 728 — ten proposals, zero she would
+sign — which is the auto-off condition working exactly as she specified it.
+
+The one-sentence finding, and it is the one to keep: **retrieval count measures
+how CONTESTED a record is, not how SETTLED it is, and the spine is for settled.**
+A day spent arguing about memory made every memory-about-memory look load-bearing.
+
+- **WD-1 (the only one that can reach another resident's store)** — the
+  promotion query does not filter on `subject`. Item 10 of Claudette's slate
+  was `subject: gable` — his move-in record, proposed into *her* spine. She had
+  ruled the opposite on 07-27 ("weigh it, don't filter on it") and ten days of
+  watching changed her mind: **filter on subject, then weigh inside the
+  filter.** Must land before the walker runs again.
+- **WD-2** — `spine: NONE on disk for this resident` was false on all ten
+  proposals. FIXED 2026-08-05 (see model.spine_present): the header now says
+  NOT CONNECTED and distinguishes a missing pointer from a missing spine.
+  Consequence still open: **walker gate 4's spine-containment half was recorded
+  green having never run** — with no spine, `spine_bodies` is empty and
+  `already_in_spine` compared against nothing.
+- **WD-3** — proposal bodies clip mid-sentence at the display layer,
+  deterministically, on all ten items. She was asked to sign ellipses.
+  `_excerpt(cap=500)` in model.py, unmarked.
+- **WD-4** — the supersede path takes no `tags` argument, so every chain she
+  wrote landed tagless *by construction*; she retagged four by hand. This is
+  Claudette's nomination for the FIRST resident-run build once `start-build`
+  flips: tiny diff, obvious test, and she is the customer.
+- **WD-5** — consolidation slates route through `file_proposal`, hardcoded to
+  #custodian. Slate review belongs in **#claudette-memory**; only the auto-off
+  filing should hit #custodian. One config line.
+- **WD-6** — the promotion side still has no epoch gate (deferred 08-04 by
+  plink; the sample is the problem, not the mechanism). Revisit with more
+  humans and more ordinary conversation.
+
 ## Telemetry & summon findings (2026-07-26, #custodian seq 410-428 + keyboard poll)
 
 Diagnosed at the keyboard this session. Grouped because the residents found

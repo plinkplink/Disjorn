@@ -2,9 +2,12 @@
 
 Two distinct situations, deliberately given DIFFERENT behaviour:
 
-1. **No spine at all** (`spine.dir` unset). Real: Claudette's spine is her
-   system prompt, managed through her bot config — there is no directory of
-   markdown entries on this host. The run must do the episodic-promotion half
+1. **Consolidation not POINTED at a spine** (`spine.dir` unset). This does not
+   mean the resident has no spine — Claudette's has existed on disk since the
+   2026-07-22/23 prompt->spine swap and her pointer is unset deliberately,
+   because spine reads are unlogged and rent arithmetic over unlogged reads
+   scores every entry zero. A blindfold is not an absence, and the report must
+   not describe one as the other. The run must do the episodic-promotion half
    and emit ZERO evict/compress proposals. The dangerous failure this guards is
    "no spine dir" degrading into "empty spine, therefore evict everything".
 
@@ -77,7 +80,11 @@ def test_no_spine_dir_is_stated_in_the_header(store, log_path):
     report = build_proposals(cfg, now=FIXED_NOW, store=store)
 
     header = report.batch_header()
-    assert "NONE on disk" in header
+    # The header must describe a MISSING POINTER, not a missing spine — it
+    # said "NONE on disk" on all ten proposals of the 2026-08-05 slate about
+    # a directory plink could ls.
+    assert "NOT CONNECTED" in header
+    assert "NONE on disk" not in header
     assert "episodic-promotion" in header
     # a spineless run is never "over target" -> the soft-target bias is inert
     assert report.over_target is False
@@ -92,7 +99,8 @@ def test_no_spine_dir_dry_run_is_clean(store, log_path):
     buf = io.StringIO()
     outcome = post_report(report, cfg, dry_run=True, out=buf)
     assert outcome.dry_run and outcome.posted == 0
-    assert "NONE on disk" in buf.getvalue()
+    assert "NOT CONNECTED" in buf.getvalue()
+    assert "NONE on disk" not in buf.getvalue()
 
 
 # ── 2. configured-but-missing paths: loud refusal ────────────────────────────
@@ -161,7 +169,8 @@ def test_cli_runs_with_spine_dir_omitted(store, tmp_path, log_path):
     out = io.StringIO()
     rc = main(["--resident", "claudette", "--dry-run", "--config-dir", str(cdir)], out=out)
     assert rc == EXIT_OK
-    assert "NONE on disk" in out.getvalue()
+    assert "NOT CONNECTED" in out.getvalue()
+    assert "NONE on disk" not in out.getvalue()
 
 
 # ── 3. config loading of the optional spine dir ──────────────────────────────

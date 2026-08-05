@@ -218,7 +218,9 @@ def _read_only_store(cfg: ConsolidationConfig):
 
 def _open_spine(cfg: ConsolidationConfig) -> Optional[Spine]:
     """`None` when the resident has no on-disk spine (spine.dir unset) — a
-    supported deployment shape (Claudette: her spine is her system prompt).
+    supported deployment shape. NOTE: `None` means consolidation is not
+    POINTED at a spine, not that none exists — Claudette's exists on disk and
+    her pointer is unset deliberately (see model.spine_present).
     A CONFIGURED-but-missing dir is a hard error, never a silent empty spine."""
     if not cfg.spine_dir:
         return None

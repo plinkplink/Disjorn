@@ -162,9 +162,23 @@ class ConsolidationReport:
     # rent's own trailing window when it differs from window_days ("slow-
     # moving spine needs time to go stale"); None = same as window_days.
     rent_window_days: "int | None" = None
-    # False = this resident has no on-disk spine (e.g. Claudette, whose spine
-    # is her system prompt). The run is episodic-promotion only; reviewers are
-    # told so in the header rather than seeing a silent "spine 0/60".
+    # False = CONSOLIDATION HAS NO SPINE POINTER for this resident. It does NOT
+    # mean the resident has no spine.
+    #
+    # The header used to say "spine: NONE on disk for this resident" and that
+    # sentence was false on all ten proposals of the 2026-08-05 slate.
+    # Claudette has had an on-disk spine since the 07-22/23 prompt->spine swap
+    # — seven entries at /srv/disjorn-spine/claudette, mounted RO into her
+    # container, read by her bot every session. What is unset is
+    # `[spine].dir` in her consolidation config, deliberately, because spine
+    # reads are not logged yet (INTEGRATION-NEEDS §1) and rent arithmetic over
+    # unlogged reads scores every entry zero however load-bearing it is.
+    #
+    # A blindfold is not an absence, and the report must not describe one as
+    # the other. Two consequences of it having done so: reviewers were told a
+    # file they can `ls` does not exist, and walker gate 4's spine-containment
+    # half was recorded green having never run — with no spine, `spine_bodies`
+    # is empty and `already_in_spine` compares against nothing.
     spine_present: bool = True
 
     @property
@@ -197,8 +211,10 @@ class ConsolidationReport:
             spine_clause = f"spine {self.spine_size}/{self.soft_target} ({target_state})"
         else:
             spine_clause = (
-                "spine: NONE on disk for this resident — episodic-promotion "
-                "only, no evict/compress proposals are possible this run"
+                "spine: NOT CONNECTED to consolidation for this resident "
+                "([spine].dir unset) — episodic-promotion only, no "
+                "evict/compress proposals are possible this run. This says "
+                "nothing about whether a spine exists on disk; it usually does"
             )
         header = (
             f"[consolidation run for {self.resident} @ {self.generated_at[:19]}] "
