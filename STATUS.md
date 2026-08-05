@@ -139,7 +139,8 @@ epoch that promotion waits out exactly as rent does.
 | Spec | Where | Status |
 |---|---|---|
 | **Memory v2** — caller-tagged retrieval, sealed affect, nomination lane, daydream | [SPECS/2026-07-28-memory-v2.md](SPECS/2026-07-28-memory-v2.md) | **`confirmed` for phase 1** (plink, #custodian seq 604). **PHASE 1 BUILT AND LIVE 08-04** — Disjorn `818f8f5` + claudette `17fac63`, diff posted seq 613. Phases 2–4 await separate confirms. **Both residents signed** — Gable 07-28 (author), Claudette 07-28 via broker seq 508, transcribed at landing per its own terms; her 07-30 withdrawal is resolved, no refusals outstanding. |
-| **Approval tiers** — what "minor" means, who applies what | [SPECS/2026-07-26-approval-tiers.md](SPECS/2026-07-26-approval-tiers.md) | `draft`, landed 07-30. **Never posted in #custodian** — no review, no split agreement, no confirm. |
+| **Credential routing & halt protocol** — chat on API keys, loops on Max, one halt artifact | [SPECS/2026-08-05-credential-routing-and-halt-protocol.md](SPECS/2026-08-05-credential-routing-and-halt-protocol.md) | `draft`, **all three lanes signed** (Claudette 696 w/ 2 amendments, plink 704, Gable 694/705). Awaits plink's confirm seq. Re-scopes KB-D6. |
+| **Approval tiers** — what "minor" means, who applies what | [SPECS/2026-07-26-approval-tiers.md](SPECS/2026-07-26-approval-tiers.md) | `draft`, landed 07-30, **posted 08-05 by Gable (seq 647)**. Claudette signed as review owner with 4 amendments (seq 649/650); 2 blocking, both wording. **`retag` ruled Tier 0 metadata + per-seat retag count in the nightly ledger** (plink, seq 708). Awaits plink's key: the Amendments/Objections subsection, the retag naming, and the dated Tier-M annotation ride in the same Tier 2 commit. |
 
 Memory v2 landed 08-01, was confirmed for phase 1 on 08-03 (#custodian seq
 604), and phase 1 shipped 08-04. **The landed file is the state of record**;
@@ -173,18 +174,28 @@ control on the 0.1 nats/token baseline, headroom flag, provenance-wall confirm.
 
 ## Waiting on plink — one word each
 
-| # | Question | Asked by | Since |
-|---|---|---|---|
-| 1 | **Bootstrap scope exemption** — grant, trim, or refuse? (worktree write, no merge authority, 60-day sunset) | Claudette, filed as a broker proposal | 07-26 |
-| 2 | **`restart-disjorn` asymmetry** — Claudette has it, Gable does not. Deliberate or leftover? Gable does not want the verb; he wants the ruling. | both | 07-26 |
-| 3 | **`daily_action_cap`** — the broker budget is commented out. Turning it on *starts denying verbs*, it is not cosmetic. Set 200/day or leave off? | build seat | 07-26 |
-| 4 | **Claudette's Max/OAuth cutover** — gated on the KB-D6 credential-exfiltration probe. Run the probe? | build seat | 07-23 |
+**All four cleared 2026-08-05.** Nothing is waiting on plink here. Rulings:
+
+| Question | Ruling | Seq |
+|---|---|---|
+| **Bootstrap scope exemption** | **REFUSED**, revisit later if needed. Record it accurately: *filed 2026-07-26 (seq 405), **never granted**, never exercised, refused 2026-08-05.* Keyboard-seat check confirmed both residents' suspicion — there is no grant seq anywhere in the channel, and plink never used the words "exemption" or "bootstrap" between the filing and the refusal. The house obeyed an authority nobody issued for ten days. Claudette (the filer) argued to refuse and audited her own 49 broker calls to show forward scope was always empty: no write tooling ever existed in her schema, so there is nothing to delabel. | 713 |
+| **`restart-disjorn` asymmetry** | **Both residents get it — flipped in ONE commit, AFTER `WP-A1` lands.** Keep the noun exact (Claudette, seq 701): this verb restarts the **platform**. Self-restart is still NO and this ruling does not touch it. `WP-A1` now has a customer. | 704 |
+| **`daily_action_cap`** | Keep it **high** — the counter is for legibility, not restraint. Still null, still blocked on seq-599 actor attribution: a per-resident cap today lets a housekeeping daemon eat a resident's allowance under their name (it spent 10 `file-proposal` calls in 585ms on 07-27) and then deny their own hands. | 683 |
+| **Claudette's Max/OAuth cutover** | **Route by seat**: chat on API keys, agent/build loops on Max. The gate **inverts** — the cutover waits on the **proxy**, not the KB-D6 probe, because a broker-held credential deletes KB-D6's premise instead of mitigating it. See the credential spec. | 681, 692, 704 |
+
+**Sunset wording, for the record.** The bootstrap exemption's sunset read
+"expires when the approval-tiers spec **lands**." It landed 07-30, which by the
+letter put Claudette five days past her own authority — nonsense, but the kind
+that becomes precedent. The correct condition was **"is confirmed (Confirm
+record non-empty, citing a seq)."** Moot now that the exemption is refused, kept
+here because the *shape* of the error recurs: a permission whose expiry
+condition has two readings has no expiry.
 
 ## Blocked, and on what
 
 | Item | Blocked on | Owner |
 |---|---|---|
-| `start-build` (residents can build) | red-team gate — open **HIGH**s are `BL-D7` (unbounded build stdout fills the disk), `H13-D7` (classifier label-shadowing), `KB-D6` (a resident can speak its own credential), `KB-D1` (why the model pin is overridden in prod). The 10-item WP-H13 activation pass is entirely unchecked. | plink + build seat |
+| `start-build` (residents can build) | red-team gate — open **HIGH**s are `BL-D7` (unbounded build stdout fills the disk), `H13-D7` (classifier label-shadowing), `KB-D6` (**RE-SCOPED 08-05** from "the dominant exfil path" to a probe verifying the proxy wall — a resident cannot speak what it does not hold), `KB-D1` (why the model pin is overridden in prod). The 10-item WP-H13 activation pass is entirely unchecked. **`H13-D7` and `KB-D1` are being downgraded in writing**: both guard *auto-apply*, and nothing auto-applies — BUILD-LOOP.md:292/470 have said "a human reads the diff" and "nothing lands itself" since July. | plink + build seat |
 | `WP-A1` — broker gets its own uid | nothing. **Approved 07-22 and never built.** Until it lands, every narrow sudoers rule in the repo is decorative because the broker runs as plink. | build seat |
 | Consolidation v2 build | plink's confirm on the spec, which waits on Claudette's re-signature, which waits on the logprobs question | plink → Claudette |
 | **WP-H7** (spine retrieval-on-demand) | unchanged and now folded into Memory v2 phase 1 — `Spine(retrieval_log=…)` exists in code, nothing in prod passes it. "WP-H7 partial", "consolidation §1 open", "Gable's retrieval is 0" and "the caller field" are **one missing wire described in four places.** | build seat |
