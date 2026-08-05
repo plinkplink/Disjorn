@@ -81,6 +81,16 @@ NETWORK="${RESIDENT_NETWORK:-pasta}"
 
 args=(
   run --rm
+  # --replace: if a container with this name survived the last stop, take the
+  # name anyway instead of refusing. Without it, a stop that timed out leaves a
+  # stale container and EVERY subsequent start fails with podman exit 125
+  # ("name is already in use") — systemd then sits in auto-restart while the
+  # OLD container keeps serving, so the resident stays up on stale code and the
+  # only symptom is that a freshly deployed change appears not to exist. That
+  # happened 2026-08-05 deploying her start_build tool: she reported the tool
+  # missing, and it was missing, because she was still running yesterday's
+  # image. --rm handles the clean path; this handles the dirty one.
+  --replace
   --name "$CONTAINER_NAME"
   --hostname "resident-$NAME"
   # keep-id: the calling res-* host uid appears INSIDE as uid 1000
