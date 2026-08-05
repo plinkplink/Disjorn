@@ -455,6 +455,35 @@ opinion" — Claudette, accepting v1). Two follow-ups deferred under it:
   self-initiated introspection — or it buys nothing. Field + one caller,
   minimum.
 
+## Build-loop risks logged 2026-08-05 (mitigate after Claudette's build test)
+
+plink's ruling: log these, work them out after the first resident build is
+through. None of them block the test.
+
+- **BR-1 — the keyboard seat can start a build that the audit attributes to the
+  resident.** `[start_build].resident` is a GLOBAL config value
+  (`brokerd.py:1192`), not derived from the caller, so whoever invokes
+  `start-build`, the build runs as that one configured identity. Demonstrated
+  the same day it was installed: BuildGable ran the verb from inside
+  Claudette's container to test that the confirm gate now passed, the gate
+  passed, and a real build launched under her uid — burning one of her two
+  daily slots for work she had not asked for. Stopped after ~18s; no branches,
+  no commits, no build log, nothing lost but the slot.
+  **This is seq 599 in the build path**: a ledger recording a name rather than
+  an actor. Fix is to derive the build identity from the SO_PEERCRED uid of the
+  caller instead of from config. **Required before a second resident gets the
+  verb**, because with one resident the identity happens to be right whenever
+  she is the caller, and with two it is wrong half the time.
+- **BR-2 — testing a gate can fire the thing behind it.** There is no dry-run
+  or permission-check mode on `start-build`, so "would this be allowed?" and
+  "do it" are the same call. Claudette asked for exactly this for destructive
+  verbs (#custodian seq 701, about `restart-disjorn`) before it bit anyone, and
+  it then bit on a different verb the same week. A broker-wide
+  `--check`/`--dry-run` that answers the authorization question and fires
+  nothing would close both.
+- **BR-3 — `daily_build_cap` is a placeholder that was never ruled.** See the
+  entry below; it is a decision waiting, not a setting.
+
 ## Walker defects found on the first live slate (2026-08-05) — BACKLOGGED
 
 plink's ruling, 2026-08-05: *"Let's put the walker fixes in the backlog and
