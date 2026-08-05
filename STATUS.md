@@ -58,7 +58,11 @@ Verified 2026-08-04 from running units and live config, not from prose.
 `read-prod-logs`, `read-own-log`, `read-metrics`, `file-proposal`,
 `query-own-audit`, `refresh-mirror`. Gable (5): `read-own-log`,
 `read-metrics`, `file-proposal`, `query-own-audit`, `refresh-mirror`.
-**`restart-disjorn` and `start-build` are OFF for both.**
+**`restart-disjorn` is OFF for both. `start-build` is ON for Claudette as of
+2026-08-05** (Gable's stays off — his hands are a later project). The gatehouse
+is mounted rw into her container at `/run/gatehouse/disjorn.git`; clone → branch
+→ commit → push round-trips, and plink reads the branch from
+`/var/lib/disjorn-broker/gatehouse/disjorn.git`.
 
 ## Consolidation: v1 failed, v2 phase 1 shipped, walker re-armed — the live story
 
@@ -195,7 +199,7 @@ condition has two readings has no expiry.
 
 | Item | Blocked on | Owner |
 |---|---|---|
-| `start-build` (residents can build) | red-team gate — open **HIGH**s are `BL-D7` (unbounded build stdout fills the disk), `H13-D7` (classifier label-shadowing), `KB-D6` (**RE-SCOPED 08-05** from "the dominant exfil path" to a probe verifying the proxy wall — a resident cannot speak what it does not hold), `KB-D1` (why the model pin is overridden in prod). The 10-item WP-H13 activation pass is entirely unchecked. **`H13-D7` and `KB-D1` are being downgraded in writing**: both guard *auto-apply*, and nothing auto-applies — BUILD-LOOP.md:292/470 have said "a human reads the diff" and "nothing lands itself" since July. | plink + build seat |
+| ~~`start-build`~~ **FLIPPED for Claudette 2026-08-05** | was: red-team gate — open **HIGH**s are `BL-D7` (unbounded build stdout fills the disk), `H13-D7` (classifier label-shadowing), `KB-D6` (**RE-SCOPED 08-05** from "the dominant exfil path" to a probe verifying the proxy wall — a resident cannot speak what it does not hold), `KB-D1` (why the model pin is overridden in prod). The 10-item WP-H13 activation pass is entirely unchecked. **`H13-D7` and `KB-D1` are being downgraded in writing**: both guard *auto-apply*, and nothing auto-applies — BUILD-LOOP.md:292/470 have said "a human reads the diff" and "nothing lands itself" since July. | plink + build seat |
 | `WP-A1` — broker gets its own uid | nothing. **Approved 07-22 and never built.** Until it lands, every narrow sudoers rule in the repo is decorative because the broker runs as plink. | build seat |
 | Consolidation v2 build | plink's confirm on the spec, which waits on Claudette's re-signature, which waits on the logprobs question | plink → Claudette |
 | **WP-H7** (spine retrieval-on-demand) | unchanged and now folded into Memory v2 phase 1 — `Spine(retrieval_log=…)` exists in code, nothing in prod passes it. "WP-H7 partial", "consolidation §1 open", "Gable's retrieval is 0" and "the caller field" are **one missing wire described in four places.** | build seat |

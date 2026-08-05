@@ -122,6 +122,27 @@ if [ -n "${RESIDENT_DISJORN_RO:-}" ]; then
   args+=( -v "$RESIDENT_DISJORN_RO:/opt/disjorn:ro" )
 fi
 
+# Optional READ-WRITE gatehouse mount at /run/gatehouse/disjorn.git — the
+# transport from MERGE-CONTRACT, and the only writable path out of a resident
+# container that reaches plink. The resident pushes a `loop/<slug>` branch into
+# this bare repo; plink fetches from it, reads the diff, and merges by hand.
+# Nothing here merges itself: a bare repo with no working tree cannot deploy
+# anything, which is exactly why the transport is a bare repo and not a
+# worktree.
+#
+# Opt-in per resident via RESIDENT_GATEHOUSE in the unit's Environment=, same
+# shape as RESIDENT_DISJORN_RO above. Deliberately NOT :ro — this is the one
+# mount whose whole purpose is that the resident can write to it.
+#
+# It is a BARE repo on purpose. `git push` into a non-bare repo's checked-out
+# branch is refused by default, and a worktree here would be a second writable
+# copy of the tree with all the ambiguity TREE.md exists to prevent.
+if [ -n "${RESIDENT_GATEHOUSE:-}" ]; then
+  [ -d "$RESIDENT_GATEHOUSE" ] || { echo "run-resident: RESIDENT_GATEHOUSE not a dir: $RESIDENT_GATEHOUSE" >&2; exit 1; }
+  [ -f "$RESIDENT_GATEHOUSE/HEAD" ] || { echo "run-resident: RESIDENT_GATEHOUSE is not a bare git repo (no HEAD): $RESIDENT_GATEHOUSE" >&2; exit 1; }
+  args+=( -v "$RESIDENT_GATEHOUSE:/run/gatehouse/disjorn.git" )
+fi
+
 # ── BEGIN spine mount block ──────────────────────────────────────────────
 # Byte-identical in run-resident.sh and run-build.sh; a test asserts that
 # (harness/cc/tests/test_run_wrappers.py::test_spine_block_is_identical).

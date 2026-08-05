@@ -88,7 +88,16 @@ record is DEFERRED.md; this file is the checklist view.
   server-authored replies bypass the request-model length cap.
 
 ### Successors — residue from the BL-D1/D2 fixes (file, then close)
-- [ ] **BL-D7 (HIGH — the top follow-up; BL-D2 traded RAM for DISK)** — build
+- [x] **BL-D7 (HIGH — the top follow-up; BL-D2 traded RAM for DISK)** — CLOSED
+  2026-08-05, and it had been fixed since 07-22 in an uninstalled file.
+  `harness/broker/disjorn-build-launch` applies exactly the remedy prescribed
+  below — `LimitFSIZE=512MiB` as a systemd property on the transient unit, so
+  RLIMIT_FSIZE is kernel-enforced and inherited by podman and the session
+  inside it; a build that floods stdout dies on SIGXFSZ instead of filling `/`.
+  Also `RuntimeMaxSec=4h`, `MemoryMax=8G`, `MemorySwapMax=0`, `LimitCORE=0`.
+  Installed to `/usr/local/lib/disjorn/` on 08-05 and verified reachable via
+  `sudo -n`. **The lesson is the delay, not the fix**: the top HIGH blocking
+  the build loop for two weeks was a file nobody had copied. Original text: build
   output is now bounded in the broker's memory but **unbounded on disk**. A
   runaway build can write for up to `timeout_sec` (3600s default) into
   `/var/log/disjorn-broker/build-logs` and fill `/`, taking the whole host with
