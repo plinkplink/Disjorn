@@ -147,10 +147,17 @@ fi
 # It is a BARE repo on purpose. `git push` into a non-bare repo's checked-out
 # branch is refused by default, and a worktree here would be a second writable
 # copy of the tree with all the ambiguity TREE.md exists to prevent.
+# RESIDENT_GATEHOUSE is the DIRECTORY of bare repos, not one repo. A resident's
+# work spans more than one — the supersede fix alone touches the Disjorn repo
+# and her adapter repo — and mounting a single .git means the second one is
+# simply absent with no hint as to why. Same reasoning as mounting the broker
+# socket's directory rather than the socket.
 if [ -n "${RESIDENT_GATEHOUSE:-}" ]; then
   [ -d "$RESIDENT_GATEHOUSE" ] || { echo "run-resident: RESIDENT_GATEHOUSE not a dir: $RESIDENT_GATEHOUSE" >&2; exit 1; }
-  [ -f "$RESIDENT_GATEHOUSE/HEAD" ] || { echo "run-resident: RESIDENT_GATEHOUSE is not a bare git repo (no HEAD): $RESIDENT_GATEHOUSE" >&2; exit 1; }
-  args+=( -v "$RESIDENT_GATEHOUSE:/run/gatehouse/disjorn.git" )
+  if ! compgen -G "$RESIDENT_GATEHOUSE/*.git" >/dev/null; then
+    echo "run-resident: RESIDENT_GATEHOUSE holds no *.git repos: $RESIDENT_GATEHOUSE" >&2; exit 1
+  fi
+  args+=( -v "$RESIDENT_GATEHOUSE:/run/gatehouse" )
 fi
 
 # ── BEGIN spine mount block ──────────────────────────────────────────────
