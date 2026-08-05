@@ -438,7 +438,9 @@ branch for you. To activate:
   section from the repo template — `command`, `resident`, `session_argv`, the
   `model` pin (no fallback — the verb refuses a blank pin), `specs_dir`
   (= `/srv/disjorn-ro/SPECS`, the refreshed RO mirror the confirm gate reads),
-  `timeout_sec`, `daily_build_cap` (ratified default 2). There is NO brokerd
+  `timeout_sec`, `daily_build_cap` (**10**, ruled by plink 2026-08-05; the
+  "ratified default 2" this line used to claim was never ratified — see
+  BUILD-LOOP.md). There is NO brokerd
   default for `specs_dir` or `model`, so these two are REQUIRED — the verb fails
   loud without them.
 - Sudoedit /etc/disjorn-broker/verbs.toml: add `"start-build" = false` to both

@@ -236,9 +236,12 @@ specs_dir = "/srv/disjorn-ro/SPECS"
 # — a build is a whole feature, not a chat turn. The reaper kills at the cap
 # and narrates a loud failure.
 timeout_sec = 3600
-# Per-day build budget (BUILD-LOOP.md ratified default: 2). CAPPED by default,
+# Per-day build budget. RULED 10 by plink 2026-08-05 (#custodian). Previously
+# 2 — a PROPOSAL that BUILD-LOOP.md flagged as "plink tunes at staging time"
+# and that hardened into "the ratified default" in two docs without anyone
+# ratifying it. CAPPED by default,
 # unlike the action budget above. Race-safe (count-with-reservation, H13-D4).
-daily_build_cap = 2
+daily_build_cap = 10
 # Optional per-resident override:
 # [start_build.per_resident.res-gable]
 # daily_build_cap = 2

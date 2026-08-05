@@ -481,8 +481,15 @@ through. None of them block the test.
   it then bit on a different verb the same week. A broker-wide
   `--check`/`--dry-run` that answers the authorization question and fires
   nothing would close both.
-- **BR-3 — `daily_build_cap` is a placeholder that was never ruled.** See the
-  entry below; it is a decision waiting, not a setting.
+- ~~**BR-3 — `daily_build_cap` is a placeholder that was never ruled.**~~
+  **CLOSED 2026-08-05: 10/day** (plink). BUILD-LOOP.md recorded 2 as a
+  *proposal* with "plink tunes at staging time"; staging time never got
+  scheduled, the placeholder shipped, and two other documents then quoted it as
+  "the ratified default". Nobody ratified it. Same species as the exemption
+  everyone obeyed and nobody granted — **a proposed number becomes a configured
+  number by nothing more than time passing.** Still open and now the more
+  meaningful meter: the token-cap-per-build half of that same question, since a
+  build that dies in 30s and one that thinks for an hour both cost "1".
 
 ## Walker defects found on the first live slate (2026-08-05) — BACKLOGGED
 

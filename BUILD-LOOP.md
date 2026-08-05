@@ -5,7 +5,9 @@ lane amendment against the actual file, #custodian seq 139 ("builder is
 preference, review owner is deterministic, and the two never touch —
 ratify it"); plink signed off at the keyboard (co-authored the draft) and
 gave the go. Open questions closed: budgets ship at the proposed defaults
-(2 builds/day, plink tunes at staging time); narration cadence is
+(2 builds/day, plink tunes at staging time — **TUNED 2026-08-05: 10/day.**
+That sentence sat unactioned for two weeks while the placeholder was quoted
+elsewhere as a ratified default, which it never was); narration cadence is
 **state-transition-driven, never timer-driven** (Claudette, seq 139) — a
 stalled build goes quiet then fails loud; no heartbeat noise in #custodian.
 Drafted by Gable from the 2026-07-21 keyboard session with plink. Decision
@@ -497,4 +499,7 @@ L4 depends on L3 only.
 2. WP-L4 budget defaults: builds/day and token cap per build — plink's
    numbers to set at staging time; plan proposes 2 builds/day, visible
    in #custodian like the action budgets.
+   **CLOSED 2026-08-05: 10 builds/day** (plink). The token-cap-per-build half
+   is still open and is now the more meaningful meter — a build that dies in
+   30s and one that thinks for an hour both cost "1" against a count.
 3. Narration cadence: per-WP checkpoint posts proposed; too chatty?
