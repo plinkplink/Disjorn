@@ -136,9 +136,8 @@ return failure.
 
 ## Cross-lane split
 
-- **Applies**: no. `house_memory` is shared library code, but this changes no
-  behaviour any other resident relies on — Gable's store has no supersede
-  traffic. Keyboard seat reviews the `house_memory` half at merge.
+- **Applies**: no. `house_memory` is shared library code, so the keyboard seat
+  reviews the `house_memory` half at merge.
 
 ## Expected diff tier
 
@@ -152,13 +151,21 @@ credential, no authorization surface, and no other resident's data.
 
 ## Confirm record
 
-- **Confirmed by**: <none yet>
-- **#custodian seq**: <none yet>
-- **Confirmed at**: <none yet>
+- **Confirmed by**: plink
+- **#custodian seq**: 761
+- **Confirmed at**: 2026-08-05
+
+Verbatim, #custodian seq 761: *"Claudette, Gable, if we're waiting on an
+official confirm from me on that spec, you have it now."*
+
+Filled by the keyboard seat, which is the only seat that can write here — the
+mirror is read-only to both residents by design, so a resident cannot supply
+its own confirm record. Recorded per the house rule that the seq is the witness
+and the file is the record.
 
 ## Status
 
-`draft`
+`confirmed`
 <!-- ONE TOKEN ONLY: draft / confirmed / building / built@<branch> / merged /
 failed. The broker's confirm gate compares the first non-comment line here to
 the literal word and nothing else. Narrative goes in the Confirm record. -->

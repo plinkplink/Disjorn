@@ -26,6 +26,9 @@ Usage:
     brief.py --mark           # move the watermark to now (do this when done)
     brief.py what BL-D7 KB-D6 # expand codes and exit
     brief.py glossary         # every code the house has defined
+    brief.py seq              # recent #custodian messages WITH seq numbers
+    brief.py seq --mine       # only plink's — "what seq was my nod?"
+    brief.py seq --grep tiers # find the seq of a message by its text
 """
 
 from __future__ import annotations
@@ -222,6 +225,47 @@ def channel_since(since_iso: str) -> list[dict]:
         return []
 
 
+def _actor_names() -> dict:
+    """{('user'|'bot', id): name} so the listing shows who said it, not a
+    numeric id. The seq is the thing being looked up; an unreadable author
+    column would just move the lookup problem somewhere else."""
+    names: dict = {}
+    if not DB.exists():
+        return names
+    try:
+        db = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+        for t, q in (("user", "SELECT id, username FROM users"),
+                     ("bot", "SELECT id, name FROM bots")):
+            for i, n in db.execute(q):
+                names[(t, i)] = n
+    except Exception:
+        pass
+    return names
+
+
+def recent_messages(limit: int, channel: int, mine: bool, grep) -> list[dict]:
+    """Newest-last, so the most recent seq is the last line on screen and does
+    not scroll away — this exists to be read right after posting."""
+    if not DB.exists():
+        return []
+    sql = ("SELECT seq, author_type, author_id, created_at, content FROM messages "
+           "WHERE channel_id=? AND deleted_at IS NULL")
+    args: list = [channel]
+    if mine:
+        sql += " AND author_type='user'"
+    if grep:
+        sql += " AND content LIKE ?"
+        args.append(f"%{grep}%")
+    sql += " ORDER BY seq DESC LIMIT ?"
+    args.append(limit)
+    try:
+        db = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+        db.row_factory = sqlite3.Row
+        return [dict(r) for r in reversed(db.execute(sql, args).fetchall())]
+    except Exception:
+        return []
+
+
 def errors_since(since_iso: str) -> list[dict]:
     if not ERRORLOG.exists():
         return []
@@ -313,8 +357,16 @@ def main() -> int:
 
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", nargs="?", choices=["brief", "what", "glossary"], default="brief")
+    ap.add_argument("cmd", nargs="?",
+                    choices=["brief", "what", "glossary", "seq"], default="brief")
     ap.add_argument("codes", nargs="*")
+    ap.add_argument("--mine", action="store_true",
+                    help="seq: only plink's own messages")
+    ap.add_argument("--grep", default=None,
+                    help="seq: only messages containing this text")
+    ap.add_argument("--limit", type=int, default=15, help="seq: how many (default 15)")
+    ap.add_argument("--channel", type=int, default=CUSTODIAN,
+                    help=f"seq: channel id (default {CUSTODIAN} = #custodian)")
     ap.add_argument("--since", default=None, help="window like 12h / 3d / 2w")
     ap.add_argument("--mark", action="store_true", help="move the watermark to now")
     ns = ap.parse_args()
@@ -328,6 +380,24 @@ def main() -> int:
         for line in expand([c.upper() for c in ns.codes], glossary, indent=" "):
             print(line)
         print()
+        return 0
+
+    if ns.cmd == "seq":
+        rows = recent_messages(ns.limit, ns.channel, ns.mine, ns.grep)
+        if not rows:
+            print("\nno messages matched\n")
+            return 0
+        names = _actor_names()
+        print()
+        for m in rows:
+            who = names.get((m["author_type"], m["author_id"]),
+                            f"{m['author_type']}{m['author_id']}")
+            when = (m["created_at"] or "")[11:16]
+            head = re.sub(r"[*`#>]", "", m["content"] or "").strip()
+            head = re.sub(r"\s+", " ", head)[:64]
+            print(f"  {_c('seq ' + str(m['seq']).rjust(4), BOLD)}  "
+                  f"{_c(when, DIM)}  {who:<13} {head}")
+        print(f"\n  {_c('newest last. paste the seq into the Confirm record.', DIM)}\n")
         return 0
 
     if ns.cmd == "glossary":
