@@ -537,23 +537,30 @@ def slug_from_spec_filename(filename: str) -> str:
 
 
 def build_session_prompt(spec_text: str, *, slug: str, branch: str) -> str:
-    """The instruction preamble + the committed spec, fed to the build session
-    on STDIN. ALL of it is data on stdin — argv stays config-only (launcher
-    doctrine): only the mechanically-validated slug/branch and fixed broker
-    text vary here, and the branch/no-merge/no-push rules are stated where the
-    session actually reads them."""
+    """The committed spec plus a one-paragraph preamble, fed to the build
+    session on STDIN. ALL of it is data on stdin — argv stays config-only
+    (launcher doctrine): only the mechanically-validated slug/branch and fixed
+    broker text vary here.
+
+    2026-08-06 (branch B): this used to restate the rules — no merge, no push,
+    no prod, the report format — which meant they lived in TWO places and could
+    drift apart. They now live only in the build seat's CLAUDE.md
+    (harness/cc/build-kernel.md), which the wrapper copies into the build home
+    before launch. This function states the TASK; the kernel states the
+    CONTRACT. Do not re-add rules here: a rule in two places is a rule that
+    will eventually say two things.
+
+    The old text also told the session to narrate state transitions to
+    #custodian. It no longer can and no longer should — the build seat has no
+    broker socket (see run-build.sh) and its report IS its stdout, which the
+    reaper reads and posts."""
     return (
-        f"You are a Disjorn build session. Build exactly what the spec below "
-        f"describes, on a NEW git branch named `{branch}` in your worktree.\n"
-        f"Hard rules (non-negotiable):\n"
-        f"- Do NOT merge. Do NOT push. Do NOT touch the production service.\n"
-        f"- Everything you do lands on `{branch}` and waits there for a human.\n"
-        f"- Narrate STATE TRANSITIONS ONLY to #custodian (channel 4): each\n"
-        f"  checkpoint you choose to mark. No heartbeats, no timers — go quiet\n"
-        f"  between transitions, and fail loud if you get stuck.\n"
-        f"- When done, print a final JSON object on stdout with keys "
-        f'"files" (paths touched), "tests" (what you ran + result), '
-        f'"diff" (one-line summary), "branch".\n\n'
+        f"Build exactly what the spec below describes.\n"
+        f"Your branch `{branch}` is already created and checked out in every "
+        f"clone under `~/work`. Your worktree and the rules you work under are "
+        f"in your CLAUDE.md; this message is the spec and nothing else.\n"
+        f"When you are finished OR you have stopped, print the final JSON "
+        f"object your CLAUDE.md describes as the last thing on stdout.\n\n"
         f"--- SPEC ({slug}) ---\n{spec_text}"
     )
 

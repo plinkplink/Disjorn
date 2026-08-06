@@ -41,25 +41,33 @@
 # The SPEC (the chat-derived design) is fed to the session on STDIN, never in
 # argv — the launcher.py doctrine: argv is config, chat is data.
 #
-# NO MERGE, NO PUSH, NO PROD: the build lands on its branch in the worktree and
-# waits for a human. The egress wall (WP-H2 host nftables on the res-* uid)
-# already blocks external git; this script adds no remote and grants no path to
-# production. Human merges; nothing lands itself.
+# NO MERGE, NO PROD: the build lands on its branch and waits for a human. The
+# egress wall (WP-H2 host nftables on the res-* uid) blocks external git. The
+# ONE writable path out is /run/gatehouse — bare repos with no working tree, so
+# a push there deploys nothing and merges nothing. Human merges; nothing lands
+# itself.
+#
+# BRANCH B (2026-08-06). This wrapper provisions a TOOL, not a resident. It has
+# no spine, no broker socket, no house_memory mount, and its own home and
+# config. See build-kernel.md for everything the session is told about itself.
+# The three deletions each have a rationale block below; read those before
+# adding any of them back.
 #
 # Overridable env (defaults are the production layout — mirror run-resident.sh):
 #   RESIDENT_IMAGE           image ref        (localhost/disjorn-resident:latest)
-#   RESIDENT_HOME_VOL        host home volume ($HOME/resident-home) — the git
-#                            worktree the build commits to; mounted RW.
-#   RESIDENT_CONFIG_DIR      host config dir  (/home/plink/resident-config/<name>)
-#   RESIDENT_BROKER_SOCKET   host socket path (/run/disjorn-broker/broker.sock)
-#   RESIDENT_HOUSE_MEMORY    host package dir (…/harness/house_memory)
+#   RESIDENT_HOME_VOL        host build home  ($HOME/build-home) — the BUILD
+#                            seat's own home, NOT the resident's. Holds ~/work
+#                            (the clones) and ~/.claude/CLAUDE.md (the task
+#                            kernel). Mounted RW.
+#   RESIDENT_CONFIG_DIR      host config dir  (/home/plink/build-config/<name>)
+#                            — the BUILD seat's own settings.json, separate
+#                            from the resident's.
+#   RESIDENT_BUILD_KERNEL    task kernel file (/usr/local/lib/disjorn/build-kernel.md)
+#                            copied to ~/.claude/CLAUDE.md before launch.
+#   RESIDENT_GATEHOUSE       bare repo dir    (/var/lib/disjorn-broker/gatehouse)
+#                            mounted RW at /run/gatehouse — clone source and
+#                            push target, and the only writable path out.
 #   RESIDENT_NETWORK         podman network   (pasta; real egress wall is WP-H2)
-#   RESIDENT_SPINE_HOST      host spine dir   (UNSET = no spine mount, today's
-#                            behaviour). The plink-owned mirror
-#                            /srv/disjorn-spine/<name>, mounted ro at
-#                            /opt/spine. A BUILD session assembles the same
-#                            kernel a summon does, so it needs the same wall.
-#                            See the spine mount block below.
 #   RESIDENT_PODMAN_EXTRA    extra podman-run flags (word-split; e.g. "-d")
 #   RESIDENT_REAP            1 (default) = a watchdog kills this wrapper's
 #                            container if the wrapper itself is killed, so a
@@ -96,15 +104,90 @@ IMAGE="${RESIDENT_IMAGE:-localhost/disjorn-resident:latest}"
 # Deterministic, and the single source of truth: --name below and the
 # container reaper block at the bottom must always mean the same container.
 CONTAINER_NAME="disjorn-build-$SLUG"
-HOME_VOL="${RESIDENT_HOME_VOL:-$HOME/resident-home}"
-CONFIG_DIR="${RESIDENT_CONFIG_DIR:-/home/plink/resident-config/$NAME}"
-BROKER_SOCK="${RESIDENT_BROKER_SOCKET:-/run/disjorn-broker/broker.sock}"
+# SEAT SPLIT AT THE FILESYSTEM (2026-08-06, "branch B"). The build seat used
+# to default to the RESIDENT's home volume and the RESIDENT's config dir —
+# same `$HOME/resident-home`, same `/srv/disjorn-resident-config/<name>` — so a
+# build session booted inside the resident's own house wearing the resident's
+# own settings. That is what produced the 2026-08-05 blocked build: the session
+# looked for the resident's assembled kernel, found the placeholder that says
+# "do not act on substantive tasks", and correctly refused.
+#
+# The build seat is a TOOL, not the resident. It gets its own home, its own
+# config, its own kernel (build-kernel.md, ~40 lines, no house rules), and no
+# spine at all. "Is the builder Claudette or a thing Claudette uses" is settled
+# here, in the mounts, not in a prompt: a tool that shares the resident's home
+# is still wearing her clothes.
+HOME_VOL="${RESIDENT_HOME_VOL:-$HOME/build-home}"
+CONFIG_DIR="${RESIDENT_CONFIG_DIR:-/home/plink/build-config/$NAME}"
 HOUSE_MEMORY="${RESIDENT_HOUSE_MEMORY:-/home/plink/Disjorn/Disjorn/harness/house_memory}"
 NETWORK="${RESIDENT_NETWORK:-pasta}"
+# The task kernel: the ONLY thing this session is told about who it is. Copied
+# into the build home below, because Claude Code reads ~/.claude/CLAUDE.md and
+# nothing else assembles one here — no bootstrap, no spine, no seat logic.
+BUILD_KERNEL="${RESIDENT_BUILD_KERNEL:-/usr/local/lib/disjorn/build-kernel.md}"
+# The bare repos the build clones from and pushes to. Bare on purpose: no
+# working tree means a push cannot deploy.
+GATEHOUSE="${RESIDENT_GATEHOUSE:-/var/lib/disjorn-broker/gatehouse}"
 
-[ -d "$HOME_VOL" ] || { echo "run-build: home volume missing: $HOME_VOL" >&2; exit 1; }
-[ -d "$CONFIG_DIR" ] || { echo "run-build: config dir missing: $CONFIG_DIR" >&2; exit 1; }
-[ -S "$BROKER_SOCK" ] || echo "run-build: WARNING broker socket absent: $BROKER_SOCK (broker calls will fail)" >&2
+[ -d "$HOME_VOL" ] || { echo "run-build: build home missing: $HOME_VOL" >&2; exit 1; }
+[ -d "$CONFIG_DIR" ] || { echo "run-build: build config dir missing: $CONFIG_DIR" >&2; exit 1; }
+[ -f "$BUILD_KERNEL" ] || { echo "run-build: build kernel missing: $BUILD_KERNEL" >&2; exit 1; }
+[ -d "$GATEHOUSE" ] || { echo "run-build: gatehouse missing: $GATEHOUSE" >&2; exit 1; }
+
+# ── BEGIN provisioning ───────────────────────────────────────────────────
+# THE WRAPPER BUILDS THE GROUND; THE BUILDER STANDS ON IT.
+#
+# Everything below runs on the HOST as res-<name> (systemd-run set the uid), so
+# it writes to the build home as its owner and needs no privilege at all. The
+# session that starts afterwards finds clones already made and a branch already
+# checked out, and spends none of its context on setup.
+#
+# This is deliberate division of labour, not convenience. Branch B says the
+# builder does ONE thing; a builder that provisions itself has two jobs and a
+# second way to fail. It also means a provisioning failure happens HERE — loud,
+# before the model is ever invoked — instead of forty seconds into a session
+# that then has to reason about whether its own ground is real.
+BRANCH="loop/$SLUG"
+WORK="$HOME_VOL/work"
+
+# The task kernel. Copied, not mounted: Claude Code reads $HOME/.claude/CLAUDE.md
+# and a bind mount there would fight the home volume.
+mkdir -p "$HOME_VOL/.claude" "$WORK"
+cp -f "$BUILD_KERNEL" "$HOME_VOL/.claude/CLAUDE.md"
+
+# One FRESH clone per gatehouse repo, every run. Not an optimisation target: a
+# local clone hardlinks its objects, so even the 80MB repo costs milliseconds
+# and almost no disk. Re-cloning deletes a whole class of failure — the stale
+# checkout that silently builds against yesterday's tree — and this week has
+# already spent two days on exactly that shape (an uninstalled fix, a stale
+# container serving old code). A build is a fresh attempt at a spec, never a
+# continuation of a previous one's leftovers.
+#
+# TWO PATHS FOR THE SAME DIRECTORY, and getting this wrong is the whole reason
+# the first push probe failed: we clone HERE, on the host, where the gatehouse
+# is $GATEHOUSE — but the session pushes from INSIDE, where the same bare repos
+# are bind-mounted at /run/gatehouse. So clone from the host path and then
+# rewrite origin to the container path. (Same class as the socket-inode bug:
+# whoever runs the command supplies THEIR view.)
+GATEHOUSE_IN_CONTAINER="/run/gatehouse"
+for _repo_path in "$GATEHOUSE"/*.git; do
+  _repo="$(basename "$_repo_path" .git)"
+  _dest="$WORK/$_repo"
+  rm -rf "$_dest"
+  git clone --quiet "$_repo_path" "$_dest" || {
+    echo "run-build: FAILED to clone $_repo_path -> $_dest" >&2; exit 1; }
+  git -C "$_dest" checkout --quiet -b "$BRANCH" || {
+    echo "run-build: FAILED to create $BRANCH in $_dest" >&2; exit 1; }
+  # Identity for the commits, local to the clone so the image needs no global
+  # gitconfig. The author is the SEAT, not the resident: a build is a tool run,
+  # and the audit should not read as though Claudette typed it.
+  git -C "$_dest" config user.name  "disjorn-build"
+  git -C "$_dest" config user.email "build@disjorn.local"
+  # Rewrite origin LAST, to the path the session will actually see.
+  git -C "$_dest" remote set-url origin "$GATEHOUSE_IN_CONTAINER/$_repo.git"
+done
+unset _repo_path _repo _dest
+# ── END provisioning ─────────────────────────────────────────────────────
 
 args=(
   run --rm
@@ -122,22 +205,30 @@ args=(
   # branch here. (run-resident.sh mounts the same volume; a summon just does
   # not commit. The rw-ness is the volume's, called out here for the record.)
   -v "$HOME_VOL:/home/resident"
-  # Mount the socket's DIRECTORY, not the socket file (a bind-mounted socket
-  # inode goes dead on broker restart — see run-resident.sh). BROKER_SOCKET
-  # tells the build session's broker CLI where to look.
-  -v "$(dirname "$BROKER_SOCK"):/run/disjorn-broker:ro"
-  -e "BROKER_SOCKET=/run/disjorn-broker/$(basename "$BROKER_SOCK")"
+  # NO BROKER SOCKET. Deliberate deletion, 2026-08-06. The build seat used to
+  # mount the broker's socket dir, which is how the 2026-08-05 session could
+  # see `broker start-build` from inside a build — a build that starts builds,
+  # nine slots deep, and (because [start_build].resident is global, BR-1) an
+  # audit trail that cannot tell you it was not the resident. A build needs no
+  # verb: its worktree is writable, its remote is the gatehouse, and its report
+  # is its stdout, which the broker reaper already reads and posts. Removing
+  # the mount kills the whole class rather than filtering it.
   -v "$CONFIG_DIR:/config:ro"
+  # The gatehouse, READ-WRITE: the one writable path out of this container.
+  # Bare repos, so a push deploys nothing and merges nothing.
+  -v "$GATEHOUSE:/run/gatehouse"
   # The spec is fed on stdin; podman drops stdin without -i (always, unlike the
   # opt-in in run-resident.sh — a build with no spec is meaningless).
   -i
 )
 
-if [ -d "$HOUSE_MEMORY" ]; then
-  args+=( -v "$HOUSE_MEMORY:/opt/house_memory:ro" )
-else
-  echo "run-build: WARNING house_memory absent: $HOUSE_MEMORY (skipping mount)" >&2
-fi
+# NO /opt/house_memory. Also a deliberate deletion. The deployed copy is a
+# read-only directory that is not a git repo, and mounting it is what led the
+# blocked session to conclude the half of its spec that mattered "had nowhere
+# to land". Under branch B the builder edits house_memory where it LIVES —
+# ~/work/disjorn/harness/house_memory — and installing it is a keyboard step
+# after merge, never the build's job.
+: "${HOUSE_MEMORY:=}"  # retained only so the launcher's --setenv stays harmless
 
 # The read-only repo mirror at /opt/disjorn. This was MISSING here while
 # run-resident.sh has had it since WP-H1 — run-build.sh only ever mentioned
@@ -156,65 +247,29 @@ if [ -n "${RESIDENT_DISJORN_RO:-}" ]; then
   args+=( -v "$RESIDENT_DISJORN_RO:/opt/disjorn:ro" )
 fi
 
-# ── BEGIN spine mount block ──────────────────────────────────────────────
-# Byte-identical in run-resident.sh and run-build.sh; a test asserts that
-# (harness/cc/tests/test_run_wrappers.py::test_spine_block_is_identical).
-# Edit one, paste into the other.
+# NO SPINE MOUNT. The whole block that lived here — /opt/spine, the
+# RESIDENT_SPINE_HOST opt-in, the writability refusal, and the bootstrap.py
+# seat-split it fed — is deleted for the build seat as of 2026-08-06.
 #
-# PROTECTION BY PLACEMENT for the resident's SPINE — the directory
-# house_memory/bootstrap.py assembles into ~/.claude/CLAUDE.md at the start
-# of EVERY session. The spine is the resident's kernel. AGENTHOOD.md rules
-# that a resident's own code and prompt are always Tier 2 (a human reviews
-# every change), and bootstrap.py's docstring assumes a spine edit arrives
-# "witnessed, merged".
+# It was never load-bearing here and it could not have worked: every entry in
+# Claudette's spine is `seats: [resident]`, so `assemble_for_seat("build")`
+# raises "no kernel entry visible to seat 'build'" against her real spine
+# today. Wiring the mount would have bought a loud bootstrap failure instead
+# of a silent placeholder — better, but still not a build.
 #
-# Neither holds if the spine the container loads sits in the resident's own
-# read-write home volume: the resident rewrites its kernel directly and the
-# next session loads it — no diff for the WP-H4 classifier to tier, no
-# #custodian post, no human. The classifier sees SUBMITTED diffs; it cannot
-# see a direct write. Only placement can.
+# The deeper reason is branch B: a spine is for something that persists and
+# stays accountable across time. A build session lives for one spec and ends.
+# Giving it a spine does not give it a self; it gives it the costume of one,
+# and the costume is what we watched fail — the blocked session spent its
+# reasoning deciding whether launching a detached build was its call to make.
+# It gets build-kernel.md instead: the task, the ground, and one rule about
+# stopping when the ground is not there.
 #
-# So: mount a plink-owned mirror READ-ONLY at /opt/spine, and have
-# RESIDENT_SPINE_DIR (read by bootstrap.py, set in the /config env file)
-# point there. Three independent walls, none trusting the others:
-#   1. host ownership — the mirror is plink:plink 0755/0644 and the res-*
-#      uid is neither owner nor group;
-#   2. the `:ro` bind — a write is EROFS even if (1) were wrong;
-#   3. the refusal below — we will not launch at all if the source is
-#      writable by the uid we are running as. That is the check that
-#      catches a cutover mis-pointed back at the home volume.
-#
-# Opt-in per resident, HOST-side, exactly like RESIDENT_DISJORN_RO: set
-# RESIDENT_SPINE_HOST in the unit's Environment=. UNSET adds no mount and
-# no flag — byte-for-byte today's podman invocation — so shipping this
-# cannot regress a live summon. Mounting alone still changes nothing about
-# which spine loads; the cutover is a separate deliberate line in the env
-# file (config-template/README.md § Spine placement).
-#
-# The source MUST be the res-readable mirror (/srv/disjorn-spine/<name>,
-# published by harness/keyboard/06-spine-mirror.sh after plink approves a
-# spine change), NEVER the canonical copy under /home/plink: that tree is
-# 0700 and rootless podman cannot mount it. Do not "fix" that by loosening
-# /home/plink/bots/<name>/spine — that directory is the authorization
-# surface itself. Copy outward; never open inward.
-if [ -n "${RESIDENT_SPINE_HOST:-}" ]; then
-  _spine_tag="$(basename "$0" .sh)"
-  [ -d "$RESIDENT_SPINE_HOST" ] || { echo "$_spine_tag: RESIDENT_SPINE_HOST not a dir: $RESIDENT_SPINE_HOST" >&2; exit 1; }
-  # Fail CLOSED, not quietly: if this uid can write the spine source, the
-  # read-only mount is theatre (the resident can edit the host path
-  # directly, outside the container, and the next session loads it). Refuse
-  # the launch and say exactly why. `-writable` is access(2) as the calling
-  # uid, so it accounts for ownership, group, and ACLs — not just mode bits.
-  _spine_writable="$(find "$RESIDENT_SPINE_HOST" -maxdepth 1 -writable -print -quit 2>/dev/null)"
-  if [ -n "$_spine_writable" ]; then
-    echo "$_spine_tag: REFUSING TO LAUNCH: spine source is WRITABLE by this uid ($(id -un)): $_spine_writable" >&2
-    echo "$_spine_tag: the spine is the kernel and must be resident-unwritable. Point RESIDENT_SPINE_HOST at the plink-owned mirror (/srv/disjorn-spine/<name>, see harness/keyboard/06-spine-mirror.sh) — do NOT loosen the canonical spine to make this pass." >&2
-    exit 1
-  fi
-  unset _spine_writable _spine_tag
-  args+=( -v "$RESIDENT_SPINE_HOST:/opt/spine:ro" )
-fi
-# ── END spine mount block ────────────────────────────────────────────────
+# The spine machinery is UNTOUCHED for the resident seat (run-resident.sh), and
+# that is where it belongs. Note for whoever next syncs the two wrappers: the
+# spine block is no longer byte-identical between them, ON PURPOSE. See
+# tests/test_run_wrappers.py, which asserts the divergence rather than the
+# match so this cannot be "fixed" back by a tidy-up.
 
 ENV_FILE="$CONFIG_DIR/env"
 

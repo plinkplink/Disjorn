@@ -104,15 +104,22 @@ TASKS_MAX = 1024
 # a res-* uid cannot traverse /home/plink (0700). These are the same three
 # deviations gable-summon.service already carries for run-resident.sh, for the
 # same reason — env belongs in the unit, not in the wrapper.
-SRV_CONFIG_ROOT = "/srv/disjorn-resident-config"
+# BRANCH B (2026-08-06): the build seat has its OWN config root and its OWN
+# home, separate from the resident's. Pointing these at the resident's is what
+# made a build session boot into the resident's house and find the "do not act"
+# placeholder. The build seat is a tool; it gets a tool's ground.
+SRV_CONFIG_ROOT = "/srv/disjorn-build-config"
+BUILD_HOME_NAME = "build-home"          # under the res-* user's own $HOME
+BUILD_KERNEL = "/usr/local/lib/disjorn/build-kernel.md"
+GATEHOUSE = "/var/lib/disjorn-broker/gatehouse"
 HOUSE_MEMORY = "/usr/local/lib/disjorn/house_memory"
 DISJORN_RO = "/srv/disjorn-ro"
-# DELIBERATELY NOT SET: RESIDENT_SPINE_HOST. It is opt-in per resident and
-# run-build.sh refuses to launch when it is set but the source directory is
-# absent (correctly — a mis-pointed spine mount is the one thing worth failing
-# closed over). When plink cuts the spine over for builds, add
-# f"--setenv=RESIDENT_SPINE_HOST=/srv/disjorn-spine/{resident}" below and make
-# sure harness/keyboard/06-spine-mirror.sh has published that resident's mirror.
+# DELIBERATELY NOT SET, AND NOT AN OVERSIGHT: RESIDENT_SPINE_HOST. A build
+# session gets no spine at all — see the "NO SPINE MOUNT" block in run-build.sh
+# for why, and do not add it back without reading that first. The previous note
+# here said to add it "when a resident's builds go live"; that day came, we
+# tried it, and the answer turned out to be that the build seat should never
+# have wanted one.
 
 # ------------------------------------------------------------- validation
 # The slug is the ONLY resident-influenced token that reaches this program, and
@@ -252,6 +259,9 @@ def build_run_argv(resident: str, slug: str, forwarded: "list", wrapper: str) ->
         # deviations gable-summon.service carries for run-resident.sh.
         f"--setenv=XDG_RUNTIME_DIR=/run/user/{pw.pw_uid}",
         f"--setenv=RESIDENT_CONFIG_DIR={SRV_CONFIG_ROOT}/{resident}",
+        f"--setenv=RESIDENT_HOME_VOL={pw.pw_dir}/{BUILD_HOME_NAME}",
+        f"--setenv=RESIDENT_BUILD_KERNEL={BUILD_KERNEL}",
+        f"--setenv=RESIDENT_GATEHOUSE={GATEHOUSE}",
         f"--setenv=RESIDENT_HOUSE_MEMORY={HOUSE_MEMORY}",
         f"--setenv=RESIDENT_DISJORN_RO={DISJORN_RO}",
         "--",

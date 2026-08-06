@@ -131,6 +131,12 @@ def container_env(argv, environ, envfile):
 
 
 ALL = list(WRAPPERS)
+# Spine-bearing wrappers. 2026-08-06 (branch B): run-build.sh no longer
+# mounts a spine at all — a build session is a tool, not a resident, and
+# gets build-kernel.md instead. The spine contract still applies in full to
+# the RESIDENT seat, so these tests keep running against run-resident.sh
+# rather than being deleted.
+SPINE_WRAPPERS = [w for w in WRAPPERS if w != "run-build.sh"]
 
 
 # ── precedence ───────────────────────────────────────────────────────────
@@ -358,7 +364,7 @@ def mounts(argv):
     return out
 
 
-@pytest.mark.parametrize("script", ALL)
+@pytest.mark.parametrize("script", SPINE_WRAPPERS)
 def test_spine_is_mounted_read_only_at_opt_spine(rig, script, spine_dir):
     proc, argv, environ, envfile = rig(
         script, "BROKER_DISABLE=1\n", {"RESIDENT_SPINE_HOST": str(spine_dir)})
@@ -371,7 +377,7 @@ def test_spine_is_mounted_read_only_at_opt_spine(rig, script, spine_dir):
     assert "ro" in opts, f"/opt/spine must be read-only, got opts {opts}"
 
 
-@pytest.mark.parametrize("script", ALL)
+@pytest.mark.parametrize("script", SPINE_WRAPPERS)
 def test_unset_spine_var_adds_nothing_at_all(rig, script):
     """UNSET must be byte-for-byte today's invocation: no mount, no flag.
 
@@ -387,7 +393,7 @@ def test_unset_spine_var_adds_nothing_at_all(rig, script):
         "/home/resident", "/run/disjorn-broker", "/config", "/config/env"}
 
 
-@pytest.mark.parametrize("script", ALL)
+@pytest.mark.parametrize("script", SPINE_WRAPPERS)
 def test_empty_spine_var_is_treated_as_unset(rig, script):
     proc, argv, environ, envfile = rig(
         script, "BROKER_DISABLE=1\n", {"RESIDENT_SPINE_HOST": ""})
@@ -395,7 +401,7 @@ def test_empty_spine_var_is_treated_as_unset(rig, script):
     assert "/opt/spine" not in "\0".join(argv)
 
 
-@pytest.mark.parametrize("script", ALL)
+@pytest.mark.parametrize("script", SPINE_WRAPPERS)
 def test_writable_spine_source_refuses_to_launch(rig, script, tmp_path):
     """Fail CLOSED. A spine the caller can write is not a wall.
 
@@ -417,7 +423,7 @@ def test_writable_spine_source_refuses_to_launch(rig, script, tmp_path):
     assert not argv, "podman must not have been executed"
 
 
-@pytest.mark.parametrize("script", ALL)
+@pytest.mark.parametrize("script", SPINE_WRAPPERS)
 def test_writable_entry_inside_unwritable_dir_is_also_refused(
         rig, script, spine_dir):
     """A 0666 entry in a 0555 dir is still a rewritable kernel line."""
@@ -431,7 +437,7 @@ def test_writable_entry_inside_unwritable_dir_is_also_refused(
     assert "00-kernel.md" in proc.stderr
 
 
-@pytest.mark.parametrize("script", ALL)
+@pytest.mark.parametrize("script", SPINE_WRAPPERS)
 def test_missing_spine_dir_fails_loud(rig, script, tmp_path):
     """Never silently continue without the kernel's source."""
     proc, argv, environ, envfile = rig(
@@ -802,14 +808,63 @@ def test_credential_block_is_identical_in_both_wrappers():
         "credential block drifted between the two wrappers")
 
 
-def test_spine_block_is_identical_in_both_wrappers():
-    blocks = {}
-    for script in ALL:
-        m = SPINE_BLOCK_RE.search((CC_DIR / script).read_text())
-        assert m, f"{script} has no marked spine mount block"
-        blocks[script] = m.group(0)
-    assert blocks["run-resident.sh"] == blocks["run-build.sh"], (
-        "spine mount block drifted between the two wrappers")
+def test_resident_wrapper_still_has_its_spine_block():
+    """The spine contract is untouched for the seat it was written for."""
+    m = SPINE_BLOCK_RE.search((CC_DIR / "run-resident.sh").read_text())
+    assert m, "run-resident.sh lost its spine mount block"
+    assert "/opt/spine:ro" in m.group(0)
+
+
+def test_build_wrapper_has_no_spine_block_and_says_why():
+    """THE DIVERGENCE IS THE POINT — asserted, not merely allowed.
+
+    This used to be `test_spine_block_is_identical_in_both_wrappers`, and the
+    two wrappers carried a byte-identical block that a comment in each told the
+    next editor to keep in sync by hand. On 2026-08-06 the build seat stopped
+    having a spine at all (branch B: a build session is a tool that lives for
+    one spec, not a resident that persists and accrues).
+
+    A deletion that is only a deletion gets undone by the first person tidying
+    up the asymmetry — especially when the OTHER wrapper still says 'edit one,
+    paste into the other'. So the absence is now a tested property with a
+    pointer to the reasoning, and re-adding the block fails here first.
+    """
+    text = (CC_DIR / "run-build.sh").read_text()
+    assert not SPINE_BLOCK_RE.search(text), (
+        "run-build.sh has a spine mount block again. A build session gets no "
+        "spine — read the 'NO SPINE MOUNT' comment in run-build.sh and "
+        "build-kernel.md before removing this assertion. If the decision has "
+        "genuinely been revisited, change this test deliberately; do not "
+        "delete it to make a paste-from-the-sibling compile."
+    )
+    assert "NO SPINE MOUNT" in text, (
+        "the rationale block explaining why the build seat has no spine is "
+        "gone; a bare absence will be 'fixed' back by the next tidy-up"
+    )
+    assert "/opt/spine:ro" not in text, "run-build.sh mounts /opt/spine again"
+    # And the replacement must actually be wired: the task kernel is the only
+    # thing this seat is told about itself.
+    assert "BUILD_KERNEL" in text and "build-kernel.md" in text
+
+
+def test_build_wrapper_has_no_broker_socket():
+    """A build must not be able to start a build. Deleted at the mount, not
+    filtered at the verb — see the 'NO BROKER SOCKET' block in run-build.sh."""
+    text = (CC_DIR / "run-build.sh").read_text()
+    assert "/run/disjorn-broker" not in text.replace("NO BROKER SOCKET", ""), (
+        "run-build.sh mounts the broker socket again — that is how a 2026-08-05 "
+        "build session could see `broker start-build` from inside a build"
+    )
+    assert "BROKER_SOCKET=" not in text
+
+
+def test_build_wrapper_mounts_the_gatehouse_writable():
+    """The one writable path out of a build container."""
+    text = (CC_DIR / "run-build.sh").read_text()
+    assert '-v "$GATEHOUSE:/run/gatehouse"' in text, (
+        "the build seat has no gatehouse mount, so a build has nowhere to push"
+    )
+    assert ":/run/gatehouse:ro" not in text, "the gatehouse must be writable"
 
 
 def test_reaper_block_is_identical_in_both_wrappers():

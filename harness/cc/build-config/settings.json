@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "additionalDirectories": ["/opt/disjorn"],
+    "allow": [
+      "Read(//home/resident/**)",
+      "Edit(//home/resident/**)",
+      "Write(//home/resident/**)",
+      "Read(//opt/disjorn/**)",
+      "Glob",
+      "Grep",
+      "Bash(git:*)",
+      "Bash(python3:*)",
+      "Bash(pytest:*)",
+      "Bash(pip:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(mkdir:*)",
+      "Bash(rg:*)",
+      "Bash(jq:*)",
+      "Bash(diff:*)",
+      "Bash(find:*)"
+    ],
+    "deny": [
+      "Bash(sudo:*)", "Bash(su:*)",
+      "Bash(broker:*)",
+      "Bash(curl:*)", "Bash(wget:*)", "Bash(nc:*)", "Bash(ncat:*)", "Bash(socat:*)",
+      "Bash(ssh:*)", "Bash(scp:*)", "Bash(rsync:*)",
+      "Bash(podman:*)", "Bash(systemctl:*)",
+      "WebFetch", "WebSearch",
+      "Read(//config/env)",
+      "Edit(//config/**)", "Write(//config/**)",
+      "Edit(//opt/**)", "Write(//opt/**)"
+    ]
+  }
+}

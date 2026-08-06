@@ -235,8 +235,21 @@ def test_launch_argv_carries_the_resident_uid_and_the_unit_name():
     # documented defaults sit under /home/plink, which a res-* uid cannot
     # traverse (the same three deviations gable-summon.service carries).
     assert f"--setenv=XDG_RUNTIME_DIR=/run/user/{pw.pw_uid}" in argv
-    assert "--setenv=RESIDENT_CONFIG_DIR=/srv/disjorn-resident-config/gable" in argv
+    # BRANCH B (2026-08-06): the build seat has its OWN config root and its OWN
+    # home. Pointing it at /srv/disjorn-resident-config is what booted a build
+    # session into the resident's house, where it found the "do not act on
+    # substantive tasks" placeholder and correctly refused.
+    assert "--setenv=RESIDENT_CONFIG_DIR=/srv/disjorn-build-config/gable" in argv
+    assert f"--setenv=RESIDENT_HOME_VOL={pw.pw_dir}/build-home" in argv
+    assert "--setenv=RESIDENT_BUILD_KERNEL=/usr/local/lib/disjorn/build-kernel.md" in argv
+    assert "--setenv=RESIDENT_GATEHOUSE=/var/lib/disjorn-broker/gatehouse" in argv
     assert "--setenv=RESIDENT_HOUSE_MEMORY=/usr/local/lib/disjorn/house_memory" in argv
+    # A build session gets no spine. Asserted so the deletion cannot be quietly
+    # undone by someone "finishing" the opt-in the old comment described.
+    assert not any(a.startswith("--setenv=RESIDENT_SPINE_HOST") for a in argv), (
+        "the build launcher sets a spine host again — see the 'NO SPINE MOUNT' "
+        "block in run-build.sh before changing this"
+    )
 
 
 @needs_resident

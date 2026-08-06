@@ -394,7 +394,13 @@ def test_start_build_template_section_parses():
     assert sb["model"] == "claude-opus-4-8"          # WP-L5 pin, no fallback
     assert sb["session_argv"][-1] == "build-session"  # argv0 for the "$@" pin
     assert sb["specs_dir"].endswith("/SPECS")
-    assert sb["daily_build_cap"] == 2                  # ratified default
+    # 10, set by plink 2026-08-05. NOT a "ratified default" — the 2 this line
+    # used to assert was a PROPOSAL that BUILD-LOOP.md twice recorded as
+    # "plink tunes at staging time", and which two later documents quoted as
+    # ratified. The word laundered itself one copy at a time. Whatever this
+    # number is, it is a config value someone chose, and this assertion only
+    # pins the template to the deployed default.
+    assert sb["daily_build_cap"] == 10
 
 
 # ======================================================================

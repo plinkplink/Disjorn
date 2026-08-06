@@ -161,9 +161,13 @@ if [ -n "${RESIDENT_GATEHOUSE:-}" ]; then
 fi
 
 # ── BEGIN spine mount block ──────────────────────────────────────────────
-# Byte-identical in run-resident.sh and run-build.sh; a test asserts that
-# (harness/cc/tests/test_run_wrappers.py::test_spine_block_is_identical).
-# Edit one, paste into the other.
+# RESIDENT SEAT ONLY as of 2026-08-06. This block used to be byte-identical in
+# run-build.sh and a test asserted the match; branch B removed the build seat's
+# spine entirely (a build session is a tool that lives for one spec, not a
+# resident that persists and accrues — see the "NO SPINE MOUNT" comment there
+# and harness/cc/build-kernel.md). Do NOT paste this into run-build.sh: the
+# absence is now itself asserted, by
+# test_run_wrappers.py::test_build_wrapper_has_no_spine_block_and_says_why.
 #
 # PROTECTION BY PLACEMENT for the resident's SPINE — the directory
 # house_memory/bootstrap.py assembles into ~/.claude/CLAUDE.md at the start

@@ -92,6 +92,36 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
+# TEST RUNNER. Found missing by the first working build session (2026-08-06
+# smoke): it wrote the module and the test the spec asked for, then correctly
+# refused to report a pass because pytest was not installed — and equally
+# correctly refused to `pip install` its way to a green result, on the grounds
+# that a test passing because the builder changed the environment is not
+# evidence. Rule 4 of the build kernel ("write the tests the spec asks for and
+# run them") was unsatisfiable by ANY spec in this repo until this line.
+#
+# --break-system-packages: Debian marks the system python EXTERNALLY-MANAGED
+# (PEP 668). A venv would be tidier, but it would have to be created and
+# activated by every caller, and the build seat's whole design is that the
+# session finds its ground already built. This image is a disposable sandbox,
+# not a host.
+#
+# The runtime deps come with it. `house_memory/__init__.py` imports the chroma
+# stack at package import time, so EVERY test under harness/house_memory/tests
+# dies during collection without them — including tests that never touch a
+# store. (This is the same wart that made bootstrap.py document a "direct-file
+# invocation on purpose" workaround; worth deepening one day, but not by a
+# build session and not today.)
+#
+# THESE PINS MUST MATCH harness/house_memory/pyproject.toml. That file is the
+# source of truth and this is a copy, which is exactly the drift shape that has
+# cost this project a week — so tests/test_image_deps.py parses both and fails
+# if they disagree, rather than trusting anyone to remember.
+RUN pip install --no-cache-dir --break-system-packages \
+        pytest \
+        chromadb==1.5.8 \
+        voyageai==0.3.7
+
 # Claude Code CLI, pinned. No API key exists at build time.
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
     && npm cache clean --force
