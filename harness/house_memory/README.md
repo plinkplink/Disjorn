@@ -72,9 +72,14 @@ id=uuid4, created_at=now`. Normalizes subject/tags and hard-caps content
 - `remember(memory) -> (Memory, first_seen_subject: bool)`
 - `recall(query, subject=None, limit=5) -> list[Memory]` — subject filter
   normalized; superseded entries dropped; logged to `retrieval_log` if set.
-- `forget(memory_id, supersede_with=None) -> bool` — with `supersede_with`,
-  inserts the replacement and links old → new (reversible forgetting);
-  without, hard-deletes.
+- `forget(memory_id, supersede_with=None, tags=None, salience=None,
+  confidence=None) -> bool` — with `supersede_with`, inserts the replacement
+  and links old → new (reversible forgetting); without, hard-deletes. The
+  replacement **inherits** the superseded memory's `tags`, `salience` and
+  `confidence`; passing one here overrides it. `None` means inherit, `[]` means
+  deliberately clear, a bare-string `tags` raises `TypeError`. Resolved values
+  are written back onto `supersede_with` in place. A supersede whose target id
+  does not exist writes **nothing** and returns `False`.
 - `export_all() -> list[dict]` — every record incl. superseded ones, shape
   `{"id", "content", "embedding", "metadata"}`, embeddings verbatim, sorted
   by id (so two exports compare with `==`).

@@ -19,6 +19,11 @@ first_seen_subject); recall normalizes the subject filter, drops superseded
 memories after the raw query, and logs raw vs returned ids; forget with
 `supersede_with` inserts the replacement and links old -> new instead of
 deleting.
+
+Diverging from the reference deliberately (2026-08-05): a superseded memory's
+tags, salience and confidence are INHERITED by its replacement unless the
+caller names them, and a supersede whose target does not exist writes nothing.
+Both in forget() — see its docstring.
 """
 
 import json
@@ -105,21 +110,106 @@ class MemoryStore:
         logger.info(f"[Memory] recalled {len(out)} for query: {query[:60]}")
         return out
 
-    def forget(self, memory_id: str, supersede_with: Optional[Memory] = None) -> bool:
+    def forget(
+        self,
+        memory_id: str,
+        supersede_with: Optional[Memory] = None,
+        tags: Optional[list] = None,
+        salience: Optional[int] = None,
+        confidence: Optional[str] = None,
+    ) -> bool:
         """If supersede_with provided, insert new memory and link old -> new.
-        Otherwise hard-delete."""
-        if supersede_with:
-            self.remember(supersede_with)  # discard first_seen flag
-            existing = self._collection.get(ids=[memory_id])
-            if existing["ids"]:
-                meta = existing["metadatas"][0]
-                meta["superseded_by"] = supersede_with.id
-                self._collection.update(ids=[memory_id], metadatas=[meta])
-                logger.info(f"[Memory] superseded {memory_id} -> {supersede_with.id}")
-                return True
+        Otherwise hard-delete.
+
+        THE REPLACEMENT INHERITS `tags`, `salience` AND `confidence` from the
+        memory it supersedes unless the caller names them here. Superseding is
+        the verb for "I changed my mind about what this SAYS" — it says nothing
+        about how the memory is found or how sure she is, so it must not
+        silently change those. It used to: the replacement was built from
+        scratch and carried only content and subject, so every superseded
+        memory landed with no tags, salience 3 and `confirmed`, by construction.
+        Claudette hit it four times on the night of 2026-08-04 and retagged
+        each by hand; she had named the cost on 08-05 (#custodian seq 628)
+        before `retag` existed — "that is real data destroyed to fix a label."
+        Worse than a missing convenience, because a supersede chain is the
+        record of how a belief evolved: the older an idea was, the more times
+        it had been reconsidered, and the less findable its current version
+        became.
+
+        `None` IS THE "NOT GIVEN" SENTINEL and every check below is `is None`,
+        never truthiness. `tags=None` means inherit; `tags=[]` means the caller
+        is deliberately CLEARING them. `if tags:` collapses those two and
+        reintroduces the bug for anyone trying to clear tags on purpose.
+
+        The three arguments are the only channel for this metadata: whatever
+        `supersede_with` happens to carry in those fields is overwritten here
+        (inherited value or override), and the resolved values are written back
+        onto the object IN PLACE so a caller can read what it ended up with —
+        that is how the tool receipt reports which fields carried over.
+
+        Inheritance lives HERE and nowhere else, so any future caller gets it
+        without re-implementing it. Duplicating `normalize_tags` across two
+        modules is what cost 75 memories their tags.
+
+        THE READ COMES FIRST, which also closes the orphan write: the old code
+        called `remember()` before checking the target existed, so superseding
+        a nonexistent id stored a new memory and returned False — the caller
+        saw "not found" while an orphan with no predecessor sat in the store.
+        A supersede that reports failure must leave nothing behind.
+        """
+        if supersede_with is None:
+            self._collection.delete(ids=[memory_id])
+            logger.info(f"[Memory] forgot {memory_id}")
+            return True
+
+        # Validate BEFORE the write, so a refused call leaves no trace. Same
+        # line as amend_metadata: normalize_tags() coerces a bare string on the
+        # write path (correctly — a model emitting `"tags": "agenthood"` should
+        # still get its memory saved), but naming tags on a supersede is a
+        # deliberate metadata statement, and quietly saving one tag where six
+        # were meant writes a wrong answer she has no way to notice.
+        if isinstance(tags, str):
+            raise TypeError(
+                f"forget: tags must be a list, got str {tags!r}. A bare string "
+                "is how the shredder started — refusing rather than guessing "
+                "which tag you meant. Nothing was written."
+            )
+        if salience is not None and (
+            not isinstance(salience, int) or isinstance(salience, bool) or not 1 <= salience <= 5
+        ):
+            raise ValueError(f"forget: salience must be int 1..5, got {salience!r}")
+        if confidence is not None and confidence not in ("rumor", "confirmed"):
+            raise ValueError(
+                f"forget: confidence must be 'rumor' or 'confirmed', got {confidence!r}"
+            )
+
+        # Read first: the old record is both the source of the inherited
+        # metadata and the proof that there is anything to supersede.
+        existing = self._collection.get(ids=[memory_id])
+        if not existing.get("ids"):
+            logger.info(f"[Memory] supersede target {memory_id} not found — nothing written")
             return False
-        self._collection.delete(ids=[memory_id])
-        logger.info(f"[Memory] forgot {memory_id}")
+        meta = dict(existing["metadatas"][0])
+
+        from house_memory.schema import normalize_tags
+
+        if tags is None:
+            try:
+                tags = json.loads(meta.get("tags_json", "[]"))
+            except Exception:
+                tags = []
+        supersede_with.tags = normalize_tags(tags)
+        supersede_with.salience = (
+            salience if salience is not None else meta.get("salience", 3)
+        )
+        supersede_with.confidence = (
+            confidence if confidence is not None else meta.get("confidence", "confirmed")
+        )
+
+        self.remember(supersede_with)  # discard first_seen flag
+        meta["superseded_by"] = supersede_with.id
+        self._collection.update(ids=[memory_id], metadatas=[meta])
+        logger.info(f"[Memory] superseded {memory_id} -> {supersede_with.id}")
         return True
 
     def amend_metadata(
