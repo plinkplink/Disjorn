@@ -1,6 +1,8 @@
 """MemoryStore: roundtrip, supersede, subject filtering, export/import,
 instance isolation. Tmp dirs + StubEmbedder only."""
 
+import json
+
 from house_memory import MemoryStore, RetrievalLog, StubEmbedder
 from house_memory_testlib import make_memory
 
@@ -311,3 +313,136 @@ def test_amended_memory_still_recalls_with_its_original_vector(store):
     store.amend_metadata(mem.id, tags=["nas"])
     after = [m.id for m in store.recall("debian NAS build")]
     assert before == after
+
+
+# ==========================================================================
+# 2026-08-05 — supersede preserves tags, salience and confidence.
+#
+# The replacement used to be built from content + subject only, so every
+# supersede reset the other three to dataclass defaults BY CONSTRUCTION.
+# Claudette hit it four times on the night of 08-04 and retagged each by hand.
+# The chain is the record of how a belief evolved, so the bug got worse the
+# more times an idea had been reconsidered.
+# ==========================================================================
+
+
+def _meta(store, memory_id):
+    return store._collection.get(ids=[memory_id])["metadatas"][0]
+
+
+def test_supersede_inherits_tags_salience_and_confidence(store):
+    """Acceptance 1. No metadata arguments — the replacement carries the
+    original's, instead of landing as [] / 3 / confirmed."""
+    old, _ = store.remember(make_memory(
+        "plink lives in oslo", tags=["location", "plink-facts"],
+        salience=5, confidence="rumor",
+    ))
+    new = make_memory("plink lives in bergen now")
+    assert store.forget(old.id, supersede_with=new) is True
+
+    meta = _meta(store, new.id)
+    assert json.loads(meta["tags_json"]) == ["location", "plink-facts"]
+    assert meta["salience"] == 5
+    assert meta["confidence"] == "rumor"
+
+
+def test_supersede_overrides_only_what_it_is_given(store):
+    """Acceptance 2. Each supplied field wins; the unsupplied ones still
+    inherit — the same rule amend_metadata follows."""
+    old, _ = store.remember(make_memory(
+        "the walker is on", tags=["consolidation"], salience=5, confidence="rumor",
+    ))
+    new = make_memory("the walker is off")
+    assert store.forget(old.id, supersede_with=new,
+                        confidence="confirmed") is True
+
+    meta = _meta(store, new.id)
+    assert meta["confidence"] == "confirmed", "the override applies"
+    assert json.loads(meta["tags_json"]) == ["consolidation"], "tags still inherit"
+    assert meta["salience"] == 5, "salience still inherits"
+
+    # ...and the other direction: tags overridden, confidence inherited.
+    newer = make_memory("the walker is off and staying off")
+    assert store.forget(new.id, supersede_with=newer,
+                        tags=["Consolidation", "walker"], salience=4) is True
+    meta = _meta(store, newer.id)
+    assert json.loads(meta["tags_json"]) == ["consolidation", "walker"], \
+        "an override still routes through normalize_tags"
+    assert meta["salience"] == 4
+    assert meta["confidence"] == "confirmed"
+
+
+def test_supersede_with_empty_tag_list_clears_them(store):
+    """Acceptance 3. `tags=[]` is a deliberate clear, NOT an inherit. This is
+    the case a truthiness check silently collapses back into the bug."""
+    old, _ = store.remember(make_memory("a tagged fact", tags=["alpha", "beta"]))
+    new = make_memory("a fact that wants no tags")
+    assert store.forget(old.id, supersede_with=new, tags=[]) is True
+    assert json.loads(_meta(store, new.id)["tags_json"]) == []
+
+
+def test_supersede_refuses_a_bare_string_and_writes_nothing(store):
+    """Acceptance 4. Naming tags on a supersede is a deliberate metadata
+    statement, so a bare string is refused rather than coerced — and the
+    refusal has to land before anything is written, or the refused call still
+    costs her a stray memory."""
+    import pytest
+
+    old, _ = store.remember(make_memory("plink lives in oslo", tags=["location"]))
+    before = store.count()
+    new = make_memory("plink lives in bergen")
+    # `match=` because a bare `pytest.raises(TypeError)` here is also satisfied
+    # by "unexpected keyword argument 'tags'" — this test passed against the
+    # UNFIXED store for that reason, which is a test that cannot fail usefully.
+    with pytest.raises(TypeError, match="must be a list"):
+        store.forget(old.id, supersede_with=new, tags="agenthood")
+
+    assert store.count() == before, "a refused call must not write the replacement"
+    assert store._collection.get(ids=[new.id])["ids"] == []
+    assert "superseded_by" not in _meta(store, old.id), "the old memory is untouched"
+
+
+def test_supersede_of_missing_id_writes_nothing(store):
+    """Acceptance 5, the orphan write. The old code called remember() BEFORE
+    checking the target existed, so this stored a new memory and reported
+    failure: "Memory not found." while an orphan with no predecessor sat in
+    the store."""
+    store.remember(make_memory("an unrelated fact"))
+    before = store.count()
+    new = make_memory("a replacement for nothing")
+    assert store.forget("no-such-id", supersede_with=new) is False
+    assert store.count() == before, "a failed supersede must leave no orphan"
+    assert store._collection.get(ids=[new.id])["ids"] == []
+
+
+def test_supersede_chain_semantics_are_unchanged(store):
+    """Acceptance 6. Inheritance is the only thing that moved: the old memory
+    still survives, still gets flagged, and is still excluded from recall."""
+    old, _ = store.remember(make_memory(
+        "plink lives in oslo", tags=["location"], salience=4,
+    ))
+    new = make_memory("plink lives in bergen now")
+    assert store.forget(old.id, supersede_with=new) is True
+
+    old_meta = _meta(store, old.id)
+    assert store._collection.get(ids=[old.id])["ids"] == [old.id], "old memory survives"
+    assert old_meta["superseded_by"] == new.id
+    assert json.loads(old_meta["tags_json"]) == ["location"], \
+        "the superseded record's own metadata is not rewritten"
+    ids = [m.id for m in store.recall("where does plink live", limit=10)]
+    assert new.id in ids
+    assert old.id not in ids
+
+
+def test_supersede_resolves_metadata_onto_the_replacement_in_place(store):
+    """The receipt depends on this: house_memory writes the values it resolved
+    back onto the Memory it was handed, so the tool layer reports what was
+    actually stored rather than re-deriving it and drifting."""
+    old, _ = store.remember(make_memory(
+        "old body", tags=["alpha"], salience=2, confidence="rumor",
+    ))
+    new = make_memory("new body")
+    store.forget(old.id, supersede_with=new, salience=5)
+    assert new.tags == ["alpha"]
+    assert new.salience == 5
+    assert new.confidence == "rumor"
