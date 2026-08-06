@@ -626,6 +626,12 @@
   color: var(--text-0);
 }
 
+/* seq chip: reads as a label, not an icon */
+.msg-actions button.msg-seq {
+  font-family: var(--font-mono);
+  color: var(--text-2);
+}
+
 .msg-actions button.danger:hover {
   background: var(--danger);
   color: var(--text-on-accent);
