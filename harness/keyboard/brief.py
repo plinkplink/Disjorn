@@ -72,6 +72,105 @@ def _c(s, code):
 
 # ── glossary ────────────────────────────────────────────────────────────────
 
+# ── review: what is waiting for plink's eyes, in plain words ────────────────
+#
+# WHY THIS EXISTS. On 2026-08-06 the keyboard told plink his build was "on
+# loop/2026-08-05-supersede-preserves-tags in the gatehouse" and he answered,
+# correctly: "I do not know where /loop/ is or what the 'gatehouse' is." That is
+# the same complaint that produced this whole tool the day before — an agent
+# naming a location as though it were common knowledge — repeated by the agent
+# that had just built the fix for it.
+#
+# So: never make him look anything up. This command finds the finished builds,
+# says in a sentence what a gatehouse and a loop branch are, shows the diff, and
+# prints the exact two commands for taking it or dropping it.
+GATEHOUSE = Path("/var/lib/disjorn-broker/gatehouse")
+BUILD_BRANCH_PREFIX = "loop/"
+
+
+def _git(repo: Path, *args: str) -> str:
+    """Read-only git against a bare repo. sudo because the gatehouse is owned by
+    the resident uid that pushes into it — plink can read it, just not as
+    himself without help."""
+    cp = subprocess.run(["sudo", "git", "--git-dir", str(repo), *args],
+                        capture_output=True, text=True)
+    return cp.stdout if cp.returncode == 0 else ""
+
+
+def _default_branch(repo: Path) -> str:
+    head = _git(repo, "symbolic-ref", "--quiet", "--short", "HEAD").strip()
+    return head or "main"
+
+
+def _pending_builds() -> list:
+    """(repo_path, repo_name, base, branch) for every loop/ branch on disk."""
+    out = []
+    for repo in sorted(GATEHOUSE.glob("*.git")):
+        base = _default_branch(repo)
+        for line in _git(repo, "for-each-ref", "--format=%(refname:short)",
+                         f"refs/heads/{BUILD_BRANCH_PREFIX}*").splitlines():
+            branch = line.strip()
+            if branch:
+                out.append((repo, repo.name[:-4], base, branch))
+    return out
+
+
+def cmd_review(slug: "str | None" = None, *, full: bool = False) -> int:
+    builds = _pending_builds()
+    if slug:
+        builds = [b for b in builds if b[3].endswith(slug)]
+    print()
+    if not builds:
+        print("  Nothing is waiting for you. No finished builds on the shelf.")
+        print()
+        return 0
+
+    print("  WHAT YOU ARE LOOKING AT")
+    print("  A resident's build session wrote code and put it on a shelf. It")
+    print("  could not merge it, deploy it, or touch anything running — the")
+    print("  shelf is the only place it can write. Nothing here is live.")
+    print()
+    print(f"  The shelf ('the gatehouse') is {GATEHOUSE} on this machine:")
+    print("  copies of the repos with no working files, so a push cannot")
+    print("  install anything. One shelf per repo.")
+    print()
+    print("  Each finished build is a branch named loop/<the spec's filename>.")
+    print("  'loop/' just marks 'a build session made this'.")
+    print()
+
+    by_slug: dict = {}
+    for repo, name, base, branch in builds:
+        by_slug.setdefault(branch[len(BUILD_BRANCH_PREFIX):], []).append(
+            (repo, name, base, branch))
+
+    for build_slug, parts in sorted(by_slug.items()):
+        print(f"  ── {build_slug} " + "─" * max(0, 58 - len(build_slug)))
+        for repo, name, base, branch in parts:
+            log = _git(repo, "log", "--oneline", f"{base}..{branch}").strip()
+            stat = _git(repo, "diff", "--stat", f"{base}..{branch}").rstrip()
+            print(f"     repo: {name}   (on top of '{base}')")
+            for ln in log.splitlines():
+                print(f"       commit  {ln}")
+            for ln in stat.splitlines():
+                print(f"       {ln}")
+            print()
+            if full:
+                print(_git(repo, "diff", f"{base}..{branch}"))
+        print("     TO READ THE WHOLE DIFF:")
+        print(f"       brief review {build_slug} --full")
+        print("     TO KEEP IT (merges into the real repo, still not deployed):")
+        for repo, name, base, branch in parts:
+            src = ("/home/plink/Disjorn/Disjorn" if name == "disjorn"
+                   else "/home/plink/bots/claudette")
+            print(f"       git -C {src} fetch {repo} {branch}:{branch} "
+                  f"&& git -C {src} merge {branch}")
+        print("     TO THROW IT AWAY:")
+        for repo, name, base, branch in parts:
+            print(f"       sudo git --git-dir {repo} branch -D {branch}")
+        print()
+    return 0
+
+
 def build_glossary() -> dict:
     """{code: {gloss, file, line, open, rank}} from the markdown the house
     already writes. Parsed rather than curated, so a new backlog item is
@@ -358,7 +457,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("cmd", nargs="?",
-                    choices=["brief", "what", "glossary", "seq"], default="brief")
+                    choices=["brief", "what", "glossary", "seq", "review"],
+                    default="brief")
     ap.add_argument("codes", nargs="*")
     ap.add_argument("--mine", action="store_true",
                     help="seq: only plink's own messages")
@@ -369,9 +469,14 @@ def main() -> int:
                     help=f"seq: channel id (default {CUSTODIAN} = #custodian)")
     ap.add_argument("--since", default=None, help="window like 12h / 3d / 2w")
     ap.add_argument("--mark", action="store_true", help="move the watermark to now")
+    ap.add_argument("--full", action="store_true",
+                    help="review: print the whole diff, not just the summary")
     ns = ap.parse_args()
 
     glossary = build_glossary()
+
+    if ns.cmd == "review":
+        return cmd_review(ns.codes[0] if ns.codes else None, full=ns.full)
 
     if ns.cmd == "what":
         if not ns.codes:

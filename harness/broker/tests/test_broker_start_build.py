@@ -13,6 +13,7 @@ harness; the exec is either the real build stub or an injected fake.
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
@@ -533,6 +534,57 @@ def test_report_is_parsed_from_the_last_line_of_a_truncated_tail():
         "…truncated garbage without a newline\n"
         '{"files": ["a.py"], "tests": "3 passed", "diff": "+9 -1"}')
     assert report == {"files": "a.py", "tests": "3 passed", "diff": "+9 -1"}
+
+
+def test_report_is_found_inside_a_fenced_block_in_the_cc_envelope():
+    """THE REGRESSION THIS PINS. The first successful resident build
+    (2026-08-06) posted `files: n/a | tests: n/a | diff: n/a` to #custodian
+    while its branch carried 246 changed lines and 111 passing tests. The build
+    worked; the report of it was empty — a record saying nothing happened when
+    something did, which is the failure shape this house keeps paying for.
+
+    Cause: `claude -p --output-format json` emits ONE envelope whose `result` is
+    the assistant's final text, and that text is prose with the report in a
+    ```json fence. json.loads on it raised, and the parser fell through to the
+    n/a defaults — so the better the session's write-up, the more reliably its
+    report was thrown away."""
+    envelope = json.dumps({
+        "type": "result",
+        "subtype": "success",
+        "result": (
+            "Done. Both halves built and pushed.\n\n"
+            "```json\n"
+            '{"status": "done",\n'
+            ' "files": "store.py, tools.py",\n'
+            ' "tests": "111 passed",\n'
+            ' "diff": "inherit tags on supersede",\n'
+            ' "branch": "loop/2026-08-05-supersede-preserves-tags"}\n'
+            "```"
+        ),
+    })
+    report = _parse_build_report(envelope)
+    assert report == {
+        "files": "store.py, tools.py",
+        "tests": "111 passed",
+        "diff": "inherit tags on supersede",
+    }
+
+
+def test_the_last_fence_wins_when_the_reply_quotes_an_earlier_one():
+    """A session that quotes the spec (which may itself contain a fenced
+    example) must still report ITS OWN closing object."""
+    envelope = json.dumps({"type": "result", "result": (
+        "The spec asked for:\n\n```json\n{\"files\": \"EXAMPLE\"}\n```\n\n"
+        "Here is what I actually did:\n\n"
+        "```json\n{\"files\": \"real.py\", \"tests\": \"2 passed\", "
+        "\"diff\": \"real change\"}\n```")})
+    assert _parse_build_report(envelope)["files"] == "real.py"
+
+
+def test_unparseable_output_still_degrades_to_na_rather_than_inventing():
+    assert _parse_build_report("the model said something conversational") == {
+        "files": "n/a", "tests": "n/a",
+        "diff": "the model said something conversational"}
 
 
 # --------------------- BL-D3: never-started builds must not consume a slot

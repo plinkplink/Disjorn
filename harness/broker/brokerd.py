@@ -565,6 +565,68 @@ def build_session_prompt(spec_text: str, *, slug: str, branch: str) -> str:
     )
 
 
+_FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.S)
+
+
+def _json_object_from_text(text: str) -> "dict | None":
+    """Pull a JSON object out of a chunk of model prose.
+
+    THE BUG THIS FIXES (2026-08-06). The first successful resident build posted
+    `files: n/a | tests: n/a | diff: n/a` to #custodian while its branch carried
+    246 changed lines and 111 passing tests. The build was fine; the REPORT of
+    it was empty, which is this house's worst failure shape — a record that says
+    nothing happened when something did.
+
+    Why: the session runs under `claude -p --output-format json`, so stdout is
+    ONE envelope object whose `result` is the assistant's final text. That text
+    is prose with the report in a ```json fence, exactly as any model writes it.
+    The old code called `json.loads` on that string, got a JSONDecodeError, and
+    fell through to the n/a defaults — so the nicer the session's write-up, the
+    more certainly its report was discarded.
+
+    Three attempts, cheapest first: the whole string, a fenced block, then the
+    last balanced {...} span. Returns None rather than guessing.
+    """
+    text = (text or "").strip()
+    if not text:
+        return None
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            return data
+    except json.JSONDecodeError:
+        pass
+    # Fenced blocks: take the LAST one — the report is the closing artifact,
+    # and a spec quoted earlier in the reply may itself contain a fence.
+    fences = _FENCED_JSON_RE.findall(text)
+    for block in reversed(fences):
+        try:
+            data = json.loads(block)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            return data
+    # Last resort: scan backwards for a balanced brace span.
+    for start in range(len(text) - 1, -1, -1):
+        if text[start] != "{":
+            continue
+        depth = 0
+        for end in range(start, len(text)):
+            if text[end] == "{":
+                depth += 1
+            elif text[end] == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        data = json.loads(text[start:end + 1])
+                    except json.JSONDecodeError:
+                        break
+                    if isinstance(data, dict) and data:
+                        return data
+                    break
+    return None
+
+
 def _parse_build_report(stdout: str) -> dict:
     """Best-effort structured report from the build session's stdout for the
     'done' line. The session is asked to end with a JSON object
@@ -602,10 +664,7 @@ def _parse_build_report(stdout: str) -> dict:
                 inner = v
                 break
             if isinstance(v, str):
-                try:
-                    parsed = json.loads(v)
-                except json.JSONDecodeError:
-                    continue
+                parsed = _json_object_from_text(v)
                 if isinstance(parsed, dict):
                     inner = parsed
                     break
