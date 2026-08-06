@@ -68,6 +68,13 @@ function fullTime(iso: string): string {
   return new Date(iso).toLocaleString();
 }
 
+/** Timestamp tooltip for a message row: "8/6/2026, 6:45:12 PM · seq 812".
+    Kept out of fullTime, which also serves edited_at, where a seq means
+    nothing. */
+function fullTimeWithSeq(iso: string, seq: number): string {
+  return `${fullTime(iso)} · seq ${seq}`;
+}
+
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -298,6 +305,13 @@ function MessageRow({
       onClick={onRowTap}
     >
       <div className="msg-actions" aria-label="Message actions">
+        <button
+          className="msg-seq"
+          title="Copy sequence number"
+          onClick={() => void navigator.clipboard.writeText(String(message.seq))}
+        >
+          #{message.seq}
+        </button>
         <button title="Reply" onClick={() => onReply(message)}>
           ↩
         </button>
@@ -328,7 +342,12 @@ function MessageRow({
           {withHeader ? (
             <AuthorAvatar message={message} />
           ) : (
-            <span className="msg-hover-time">{shortTime(message.created_at)}</span>
+            <span
+              className="msg-hover-time"
+              title={fullTimeWithSeq(message.created_at, message.seq)}
+            >
+              {shortTime(message.created_at)}
+            </span>
           )}
         </div>
         <div className="msg-body">
@@ -340,7 +359,7 @@ function MessageRow({
               )}
               <time
                 className="msg-time"
-                title={fullTime(message.created_at)}
+                title={fullTimeWithSeq(message.created_at, message.seq)}
                 dateTime={message.created_at}
               >
                 {shortTime(message.created_at)}
