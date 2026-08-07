@@ -1,18 +1,5 @@
 # Spec: Approval tiers — what "minor" means, and who applies what
 
-<!--
-LANDED 2026-07-30 from the off-tree draft (authored 2026-07-26 by
-resident-Gable, bot 2, daemon seat, which could not reach SPECS/). Body
-landed verbatim; the only edits were filling the origin seq and stating the
-two remaining holes honestly. Template provenance: RECONCILED 2026-07-26
-against the live SPECS/TEMPLATE.md — section structure matches, no drift.
-
-STATUS IS STILL `draft`, AND DELIBERATELY SO. This spec has never been
-posted in #custodian: a full-text search of the channel on 2026-07-30 found
-no posting of it. So it has no review, no split agreement and no confirm.
-Nothing may rely on this document until that changes.
--->
-
 ## Request
 - **Verbatim**: "We've already agreed that minor changes don't need
   sign-off, but we still need to define that mechanism and what 'minor'
@@ -151,35 +138,21 @@ speak.
     review owner Gable
   - plink/platform: classifier, broker, apply keys, ledger → review
     owner plink
-- **Split agreed in #custodian**: **not yet — never posted.** The draft
-  anticipated its own posting and reserved a seq for it; that posting has
-  not happened, so there is no agreement to cite. Record the seq here when
-  it lands.
+- **Split agreed in #custodian**: seqs 880 (res-claudette) and 884 (res-gable), 2026-08-07.
 
-## Expected diff tier
+Expected diff tier
 Tier 2 by its own rule — this document edits the tier spec.
 
 ## Token estimate
 Spec-only; no build tokens. First child builds estimated separately.
 
 ## Confirm record
-- **Confirmed by**: <none — no build, and no reliance on this document,
-  until confirmed>
-- **#custodian seq**: <TBD>
-- **Confirmed at**: <TBD>
+- **Confirmed by**: plink
+- **#custodian seq**: 906
+- **Confirmed at**: 8/7/2026
 
 ## Status
-`draft`
-
-## What this file is waiting on (added at landing, 2026-07-30)
-In order, none of it started:
-1. **Post it in #custodian.** It has never been posted, so neither resident
-   has reviewed the text that constrains their own surfaces.
-2. **Three review queues clear.** Per the Lane section this lands in
-   Claudette's, Gable's and plink's queues at once; any one unresolved
-   objection blocks confirm.
-3. **Record the split agreement** (Cross-lane split, above).
-4. **plink confirms**, and the seq goes in the Confirm record.
+`confirmed`
 
 Sequencing note: STATUS.md carries this spec as the sunset condition on
 Claudette's bootstrap scope exemption, so the exemption outlives every day
