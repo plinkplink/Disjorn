@@ -454,6 +454,17 @@ opinion" — Claudette, accepting v1). Two follow-ups deferred under it:
   at least ONE real call-site distinction — conversation-driven recall vs.
   self-initiated introspection — or it buys nothing. Field + one caller,
   minimum.
+  **SATISFIED BY: seq 604** (memory-v2 phase 1, confirmed 2026-08-04) — the
+  binding condition only, not the parent item above it. The `by_caller` field
+  landed there WITH real call-site distinction, which is the half the
+  engineering note said the naive version would miss: verified live from
+  metrics 2026-08-07, four distinct values (service 102, write_dedup 52,
+  unattributed 23, self_query 15). The `tool_actions` counter build
+  (2026-08-07-adapter-instrumentation-and-failure-labels) is therefore pure
+  counter wiring with no coupled retrieval work, and this condition does not
+  re-arm on the next reader. **Still open:** the exclusion logic and the
+  promotion filter — the parent item — which is what `by_caller` was landed
+  early to make possible.
 
 ## Build-loop risks logged 2026-08-05 (mitigate after Claudette's build test)
 
