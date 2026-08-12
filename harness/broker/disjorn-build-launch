@@ -114,12 +114,36 @@ BUILD_KERNEL = "/usr/local/lib/disjorn/build-kernel.md"
 GATEHOUSE = "/var/lib/disjorn-broker/gatehouse"
 HOUSE_MEMORY = "/usr/local/lib/disjorn/house_memory"
 DISJORN_RO = "/srv/disjorn-ro"
-# DELIBERATELY NOT SET, AND NOT AN OVERSIGHT: RESIDENT_SPINE_HOST. A build
-# session gets no spine at all — see the "NO SPINE MOUNT" block in run-build.sh
-# for why, and do not add it back without reading that first. The previous note
-# here said to add it "when a resident's builds go live"; that day came, we
-# tried it, and the answer turned out to be that the build seat should never
-# have wanted one.
+# THE SPINE MIRROR ROOT. run-build.sh mounts <root>/<resident> read-only at
+# /opt/spine and REFUSES TO LAUNCH if that directory is writable by the uid it
+# runs as, so this must name the plink-owned mirror published by
+# harness/keyboard/06-spine-mirror.sh — never the canonical spine under
+# /home/plink (0700, un-mountable) and never a path inside a resident volume.
+#
+# SET AS OF 2026-08-12, reversing the 08-06 note that stood here. That note
+# said a build session gets no spine at all; it was written from a trial
+# against Claudette's spine, every entry of which declares `seats: [resident]`,
+# and generalised into a claim about the seat. Gable's spine has declared a
+# build seat since SPECS/2026-07-22-gable-spine-ro-cutover-seat-split.md,
+# applied and verified live 07-23 (resident 7 entries, build 5, stamped
+# `(seat: build)`). Restored by SPECS/2026-08-08-gable-build-lane-provisioning.md,
+# confirmed by plink at #custodian seq 1008.
+#
+# THIS LINE IS THE MOUNT, NOT THE CUTOVER. Which kernel a build session
+# actually loads is RESIDENT_SPINE_DIR in the build seat's /config env file
+# plus the bootstrap call in [start_build].session_argv — both plink's,
+# deliberate, and taken together or not at all. See
+# harness/cc/BUILD-SEAT-CONTRACT.md § Kernel.
+#
+# PER-RESIDENT BY PRESENCE, and that is load-bearing rather than lazy. Only
+# Gable has a published mirror; run-build.sh refuses to launch when
+# RESIDENT_SPINE_HOST names a directory that is not there, so setting this
+# unconditionally would break every build for a resident whose mirror has not
+# been published — and the provisioning spec that adds this says Claudette's
+# lane is untouched. So: mirror present => set it and mount; mirror absent =>
+# say so on stderr (which lands in the broker's build spool) and set nothing,
+# which is byte-for-byte the invocation these builds run today.
+SPINE_MIRROR_ROOT = "/srv/disjorn-spine"
 
 # ------------------------------------------------------------- validation
 # The slug is the ONLY resident-influenced token that reaches this program, and
@@ -198,6 +222,25 @@ def check_forwarded(args: "list") -> "list":
     return list(args)
 
 
+def spine_host(resident: str, root: str) -> "str | None":
+    """The published spine mirror for this resident, or None if there isn't one.
+
+    `resident` has already been through RESIDENT_RE, so it cannot be a path
+    segment, a flag or an escape. We only report presence here: whether the
+    directory is resident-UNWRITABLE is checked by run-build.sh as the uid that
+    will actually run, which is the only uid the answer is true or false for
+    (this program is root, and root can write anything)."""
+    path = os.path.join(root, resident)
+    if os.path.isdir(path):
+        return path
+    sys.stderr.write(
+        f"disjorn-build-launch: NOTE no spine mirror at {path} — launching with "
+        f"no /opt/spine mount (unchanged behaviour). Publish one with "
+        f"harness/keyboard/06-spine-mirror.sh {resident} if this seat should "
+        f"have it.\n")
+    return None
+
+
 def check_wrapper(path: str) -> None:
     """The launch wrapper must be a root-owned regular file that no one else can
     write. If plink could rewrite it, `sudo <helper>` would become `sudo
@@ -217,13 +260,15 @@ def check_wrapper(path: str) -> None:
 
 # ------------------------------------------------------------------ the modes
 
-def build_run_argv(resident: str, slug: str, forwarded: "list", wrapper: str) -> "list":
+def build_run_argv(resident: str, slug: str, forwarded: "list", wrapper: str,
+                   spine_root: str = SPINE_MIRROR_ROOT) -> "list":
     account, pw, group = check_resident(resident)
     slug = check_slug(slug)
     forwarded = check_forwarded(forwarded)
     unit = f"{UNIT_PREFIX}{slug}"
     if not UNIT_RE.match(unit + ".service"):     # unreachable; asserted anyway
         die(f"refusing to create unit {unit!r}")
+    spine = spine_host(resident, spine_root)
     return [
         SYSTEMD_RUN,
         # Deterministic and greppable, and a second launch of the same spec
@@ -264,6 +309,10 @@ def build_run_argv(resident: str, slug: str, forwarded: "list", wrapper: str) ->
         f"--setenv=RESIDENT_GATEHOUSE={GATEHOUSE}",
         f"--setenv=RESIDENT_HOUSE_MEMORY={HOUSE_MEMORY}",
         f"--setenv=RESIDENT_DISJORN_RO={DISJORN_RO}",
+        # The read-only spine mirror — present only when one is published for
+        # this resident (see SPINE_MIRROR_ROOT). Absent is the old invocation,
+        # exactly.
+        *([f"--setenv=RESIDENT_SPINE_HOST={spine}"] if spine else []),
         "--",
         wrapper, resident, slug, *forwarded,
     ]
@@ -280,10 +329,16 @@ def main(argv: "list") -> int:
     # It is UNREACHABLE through the privileged path: sudo's env_reset (Debian
     # default) drops DISJORN_* before this process starts, so the sudoers rule
     # can only ever reach the exec'ing branch. It still runs every check.
+    # The two DISJORN_BUILD_LAUNCH_* path overrides below are dry-run-only for
+    # that same reason — they let a test point at a scratch tree without giving
+    # any caller a second code path.
     dry = os.environ.get("DISJORN_BUILD_LAUNCH_DRY_RUN") == "1"
     wrapper = WRAPPER
+    spine_root = SPINE_MIRROR_ROOT
     if dry and os.environ.get("DISJORN_BUILD_LAUNCH_WRAPPER"):
         wrapper = os.environ["DISJORN_BUILD_LAUNCH_WRAPPER"]
+    if dry and os.environ.get("DISJORN_BUILD_LAUNCH_SPINE_ROOT"):
+        spine_root = os.environ["DISJORN_BUILD_LAUNCH_SPINE_ROOT"]
 
     if len(argv) < 4:
         die("usage: disjorn-build-launch run|stop <resident> <slug> [args...]")
@@ -291,7 +346,7 @@ def main(argv: "list") -> int:
 
     if mode == "run":
         check_wrapper(wrapper)
-        out = build_run_argv(resident, slug, argv[4:], wrapper)
+        out = build_run_argv(resident, slug, argv[4:], wrapper, spine_root)
     elif mode == "stop":
         if len(argv) > 4:
             die("stop takes exactly <resident> <slug>")

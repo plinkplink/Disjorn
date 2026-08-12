@@ -31,6 +31,9 @@ derivative that syncs one way, or a resident's own volume you cannot write.
 | consolidation | `harness/consolidation/…` | `/usr/local/lib/disjorn/consolidation` | copy (walker is OFF anyway) |
 | Claudette's code | `/home/plink/bots/claudette` (branch `disjorn-port`) | her volume clone | `./claudette-update.sh` |
 | Gable's spine | `/home/plink/bots/fable/spine` | `/srv/disjorn-spine/gable` → `/opt/spine` `:ro` | publish; next summon picks it up |
+| Container wrappers | `harness/cc/run-{resident,build}.sh` | **`/usr/local/lib/disjorn/run-*.sh`** | `sudo install -m 0755`; res-\* cannot read `/home/plink` |
+| Build launch helper | `harness/broker/disjorn-build-launch` | **`/usr/local/lib/disjorn/disjorn-build-launch`** | `sudo install -m 0755 -o root -g root` (it refuses to run if not root-owned) |
+| Build-seat kernel | `harness/cc/build-kernel.md` | **`/usr/local/lib/disjorn/build-kernel.md`** | `sudo install`; copied into the build home per run |
 | Broker / verbs | repo templates | `/etc/disjorn-broker/*` | sudoedit; verbs.toml is re-read per request |
 | Metrics, errorlog | `harness/…` | **the repo** (unit ExecStart points at it) | nothing — next timer tick |
 
@@ -39,6 +42,13 @@ derivative that syncs one way, or a resident's own volume you cannot write.
 **host** venv. Her **container** mounts `/usr/local/lib/disjorn/house_memory`
 at `/opt/house_memory`. Same library, two paths, and only one of them is what
 runs. Verified 2026-08-04 by `podman inspect`; asserted wrongly before that.
+
+**The four rows above it are the same trap in the build lane**, and it has
+fired there too: `run-build.sh` had never been deployed while
+`[start_build].command` already pointed at it. `sudo bash
+harness/keyboard/09-build-lane-preflight.sh <resident>` diffs every one of them
+against the repo copy before a build runs, which is cheaper than reading a
+build failure that is really a deploy fact.
 
 ## Whose filesystem is a path on?
 

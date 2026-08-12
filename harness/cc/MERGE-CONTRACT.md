@@ -62,6 +62,24 @@ Alternative (rejected for v1): broker reads the resident worktree via a
 group-readable export dir — weakens the 0700 promise; and per-resident
 HTTP git — more moving parts than a bind mount for zero extra safety.
 
+### Push `main` back to the gatehouse after every merge
+
+**Added 2026-08-12 from a live failure on 08-07.** The gatehouse is not only the
+outbound transport — it is the **base**. `run-build.sh` clones every `*.git` in
+the gatehouse fresh per run, so gatehouse `main` is the commit every build
+branches from. Merge a branch into the canonical repo and stop there, and the
+next build starts from the tree as it was before your merge: a conflict at merge
+time if you are lucky, a quiet revert of the merge you just made if you are not.
+
+So the cycle has four steps, not three: **fetch → review → merge → push `main`
+back to the gatehouse.** The fourth is not bookkeeping.
+
+`harness/keyboard/09-build-lane-preflight.sh` §3 compares gatehouse `main`
+against canonical `main` and fails when they diverge. The full build-seat
+picture, including how a gatehouse repo has to be created for two uids to share
+it, is `harness/cc/BUILD-SEAT-CONTRACT.md`; creation itself is
+`harness/keyboard/08-gatehouse-repo.sh`.
+
 ## Verb spec: `merge-tier1`
 
 - args (all required unless noted):

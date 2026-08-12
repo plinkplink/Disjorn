@@ -58,7 +58,8 @@ needs_resident = pytest.mark.skipif(
     reason="needs the res-gable account (harness/keyboard/01-users.sh)")
 
 
-def run_helper(*args: str, wrapper: str | None = None) -> subprocess.CompletedProcess:
+def run_helper(*args: str, wrapper: str | None = None,
+               spine_root: str | None = None) -> subprocess.CompletedProcess:
     """Invoke the helper in DRY-RUN: every validation runs, nothing execs, and
     the systemd-run argv it WOULD have exec'd comes back as JSON on stdout.
 
@@ -69,12 +70,15 @@ def run_helper(*args: str, wrapper: str | None = None) -> subprocess.CompletedPr
     env = dict(os.environ, DISJORN_BUILD_LAUNCH_DRY_RUN="1")
     if wrapper is not None:
         env["DISJORN_BUILD_LAUNCH_WRAPPER"] = wrapper
+    if spine_root is not None:
+        env["DISJORN_BUILD_LAUNCH_SPINE_ROOT"] = spine_root
     return subprocess.run([sys.executable, str(HELPER), *args],
                           capture_output=True, text=True, env=env, timeout=30)
 
 
-def helper_argv(*args: str, wrapper: str = "/usr/bin/true") -> list[str]:
-    cp = run_helper(*args, wrapper=wrapper)
+def helper_argv(*args: str, wrapper: str = "/usr/bin/true",
+                spine_root: str | None = None) -> list[str]:
+    cp = run_helper(*args, wrapper=wrapper, spine_root=spine_root)
     assert cp.returncode == 0, cp.stderr
     return json.loads(cp.stdout)
 
@@ -244,12 +248,78 @@ def test_launch_argv_carries_the_resident_uid_and_the_unit_name():
     assert "--setenv=RESIDENT_BUILD_KERNEL=/usr/local/lib/disjorn/build-kernel.md" in argv
     assert "--setenv=RESIDENT_GATEHOUSE=/var/lib/disjorn-broker/gatehouse" in argv
     assert "--setenv=RESIDENT_HOUSE_MEMORY=/usr/local/lib/disjorn/house_memory" in argv
-    # A build session gets no spine. Asserted so the deletion cannot be quietly
-    # undone by someone "finishing" the opt-in the old comment described.
-    assert not any(a.startswith("--setenv=RESIDENT_SPINE_HOST") for a in argv), (
-        "the build launcher sets a spine host again — see the 'NO SPINE MOUNT' "
-        "block in run-build.sh before changing this"
-    )
+    # The spine host is PRESENCE-CONDITIONAL — see the pair of tests below.
+    # Production has no /srv/disjorn-spine/gable inside a test container, so
+    # this run is the absent case and must carry no spine setenv.
+
+
+# ── the spine mirror (restored 2026-08-12) ────────────────────────────────
+#
+# SPECS/2026-08-08-gable-build-lane-provisioning.md, architecture note 2:
+# "set RESIDENT_SPINE_HOST in disjorn-build-launch (the --setenv line its own
+# comment names) and publish Gable's spine mirror at /srv/disjorn-spine/gable".
+#
+# The 08-06 note that stood in the helper said a build session gets no spine at
+# all. It was written from a trial against Claudette's spine — every entry
+# `seats: [resident]` — and generalised into a claim about the seat. Gable's
+# spine has declared a build seat since the 07-22 seat-split, applied and
+# verified live 07-23 (resident 7 entries, build 5, stamped `(seat: build)`).
+#
+# It is set BY PRESENCE, and that is the load-bearing part: only a resident
+# with a published mirror gets one. Setting it unconditionally would make every
+# build fail for a resident whose mirror does not exist, because run-build.sh
+# refuses to launch on a RESIDENT_SPINE_HOST that is not a directory — and the
+# spec that adds this says the other lane is untouched.
+
+
+@needs_resident
+def test_spine_host_is_set_when_a_mirror_is_published(tmp_path):
+    (tmp_path / "gable").mkdir()
+    argv = helper_argv("run", "gable", GOOD_SLUG, spine_root=str(tmp_path))
+    assert f"--setenv=RESIDENT_SPINE_HOST={tmp_path}/gable" in argv
+
+
+@needs_resident
+def test_no_spine_host_when_no_mirror_is_published(tmp_path):
+    """The ship-it-closed half. No mirror => no setenv => no mount => exactly
+    the invocation this lane runs today. A resident whose mirror was never
+    published must not have their builds start failing."""
+    cp = run_helper("run", "gable", GOOD_SLUG, wrapper="/usr/bin/true",
+                    spine_root=str(tmp_path))
+    assert cp.returncode == 0, cp.stderr
+    argv = json.loads(cp.stdout)
+    assert not any(a.startswith("--setenv=RESIDENT_SPINE_HOST") for a in argv)
+    # Absent, but never silent: the note lands in the broker's build spool.
+    assert "no spine mirror at" in cp.stderr
+    assert "06-spine-mirror.sh gable" in cp.stderr
+
+
+@needs_resident
+def test_spine_host_is_per_resident_and_never_a_shared_root(tmp_path):
+    """One mirror per resident. A shared root would hand one resident's kernel
+    to another seat, which is the wall 06-spine-mirror.sh exists to build."""
+    for name in ("gable", "claudette"):
+        (tmp_path / name).mkdir()
+    for name in ("gable", "claudette"):
+        if not _account_exists(f"res-{name}"):
+            continue
+        argv = helper_argv("run", name, GOOD_SLUG, spine_root=str(tmp_path))
+        assert f"--setenv=RESIDENT_SPINE_HOST={tmp_path}/{name}" in argv
+
+
+def test_the_helper_points_at_the_plink_owned_mirror_root():
+    """NEVER the canonical spine under /home/plink (0700, un-mountable by
+    rootless podman) and never a path inside a resident volume. Copy outward;
+    do not open inward."""
+    text = HELPER.read_text()
+    assert 'SPINE_MIRROR_ROOT = "/srv/disjorn-spine"' in text
+    # And the setenv is built from that constant, never from a literal — a
+    # second spelling of this path is a second thing to get wrong.
+    assert "--setenv=RESIDENT_SPINE_HOST={spine}" in text
+    for line in text.splitlines():
+        if line.lstrip().startswith("#") or '"""' in line:
+            continue
+        assert "/home/plink/bots" not in line, line
 
 
 @needs_resident

@@ -161,13 +161,31 @@ if [ -n "${RESIDENT_GATEHOUSE:-}" ]; then
 fi
 
 # ── BEGIN spine mount block ──────────────────────────────────────────────
-# RESIDENT SEAT ONLY as of 2026-08-06. This block used to be byte-identical in
-# run-build.sh and a test asserted the match; branch B removed the build seat's
-# spine entirely (a build session is a tool that lives for one spec, not a
-# resident that persists and accrues — see the "NO SPINE MOUNT" comment there
-# and harness/cc/build-kernel.md). Do NOT paste this into run-build.sh: the
-# absence is now itself asserted, by
-# test_run_wrappers.py::test_build_wrapper_has_no_spine_block_and_says_why.
+# Byte-identical in run-resident.sh and run-build.sh; a test asserts that
+# (harness/cc/tests/test_run_wrappers.py::test_spine_block_is_identical_in_both_wrappers).
+# Edit one, paste into the other.
+#
+# BOTH SEATS AGAIN as of 2026-08-12, and the history matters because this block
+# has already been deleted once. Branch B (2026-08-06) took it out of
+# run-build.sh on two grounds: that a build session is a tool rather than a
+# resident, and that `assemble_for_seat("build")` raised "no kernel entry
+# visible to seat 'build'" against the spine it was tried on. The second ground
+# was an observation about CLAUDETTE's spine, every entry of which is
+# `seats: [resident]`, generalised into a claim about the seat.
+#
+# GABLE's spine has carried an explicit build seat since the seat-split
+# (SPECS/2026-07-22-gable-spine-ro-cutover-seat-split.md), applied and verified
+# live 07-23: resident 7 entries, build 5, stamped `(seat: build)`. His ruling
+# as review owner is that baking the operational set for a detached build is
+# "correct, not a compromise" — a build has no retrieval loop, so an
+# operational entry that is not baked never arrives at all, and "the build seat
+# does load-bearing work with walls it's never read."
+#
+# The mount is restored for both seats by
+# SPECS/2026-08-08-gable-build-lane-provisioning.md (confirmed by plink,
+# #custodian seq 1008). Branch B's OTHER two deletions from run-build.sh — the
+# broker socket and house_memory — STAND; only the spine came back. See
+# harness/cc/BUILD-SEAT-CONTRACT.md before touching any of the three.
 #
 # PROTECTION BY PLACEMENT for the resident's SPINE — the directory
 # house_memory/bootstrap.py assembles into ~/.claude/CLAUDE.md at the start
@@ -199,6 +217,17 @@ fi
 # which spine loads; the cutover is a separate deliberate line in the env
 # file (config-template/README.md § Spine placement).
 #
+# MOUNTING IS NOT THE CUTOVER, and for the BUILD seat that has a second edge.
+# The build seat's kernel today is the file run-build.sh COPIES to
+# ~/.claude/CLAUDE.md (build-kernel.md), and nothing in [start_build].session_argv
+# runs bootstrap.py — so a mounted spine sits there unread until plink both
+# sets RESIDENT_SPINE_DIR=/opt/spine in the build seat's /config env file AND
+# adds the bootstrap call to session_argv. Those two move together, because
+# bootstrap.py WRITES ~/.claude/CLAUDE.md and would otherwise overwrite the
+# copied task kernel with no one having chosen that. Both are plink's
+# deliberate step, not this wrapper's: harness/cc/BUILD-SEAT-CONTRACT.md
+# § Kernel carries the ordering.
+#
 # The source MUST be the res-readable mirror (/srv/disjorn-spine/<name>,
 # published by harness/keyboard/06-spine-mirror.sh after plink approves a
 # spine change), NEVER the canonical copy under /home/plink: that tree is
@@ -226,9 +255,17 @@ fi
 
 ENV_FILE="$CONFIG_DIR/env"
 
+# THE ROUTING LINE (see the credential block's own § ROUTING BY SEAT). This is
+# the CHAT seat: per the credential-routing spec, conversational seats run on
+# metered per-seat API keys, so the API-key path here is the routing table's
+# own answer rather than a failover. Deliberately OUTSIDE the byte-identical
+# block below — it is the one credential decision that differs by seat, and it
+# differs because of which wrapper launched, never because of /config.
+_seat_metered_fallback=allow
+
 # ── BEGIN credential block ───────────────────────────────────────────────
 # Byte-identical in run-resident.sh and run-build.sh; a test asserts that
-# (harness/cc/tests/test_run_wrappers.py::test_credential_block_is_identical).
+# (harness/cc/tests/test_run_wrappers.py::test_credential_block_is_identical_in_both_wrappers).
 # Edit one, paste into the other.
 #
 # WHICH CREDENTIAL. Two are accepted, from the env file and NOWHERE else
@@ -237,10 +274,32 @@ ENV_FILE="$CONFIG_DIR/env"
 #   CLAUDE_CODE_OAUTH_TOKEN  a long-lived OAuth token minted by
 #                            `claude setup-token`; bills plink's Claude Max
 #                            SUBSCRIPTION. Preferred.
-#   ANTHROPIC_API_KEY        a metered API key. Fallback.
+#   ANTHROPIC_API_KEY        a metered API key. Fallback — but only for a seat
+#                            allowed to spend it; see § ROUTING BY SEAT below.
 # If both are present the OAuth token wins and the API key is NOT passed —
 # "exactly one credential in the container" is the invariant. If neither is
 # present we warn loudly and pass none: fail loud, never fail over silently.
+#
+# ROUTING BY SEAT (SPECS/2026-08-05-credential-routing-and-halt-protocol.md §1
+# and §3; SPECS/2026-08-08-gable-build-lane-provisioning.md, architecture note
+# 3). The routing table is the seat split: conversational seats run on metered
+# per-seat API keys, build/agent loops run on plink's Max account. So the
+# API-key fallback is NOT universal. Each wrapper sets `_seat_metered_fallback`
+# immediately above this block — `allow` for the chat seat, `refuse` for the
+# build seat — and a refusing seat that finds ONLY an API key does not launch.
+#
+# It refuses rather than warning-and-continuing because the halt protocol says
+# so in as many words: no silent key-fallback. A loop that quietly fails over
+# from Max to the metered key has converted "your account said not now" into
+# "spend your API money instead", which is precisely the decision plink
+# reserved for himself (seqs 683/697: "I need to look at the account before
+# restarting any work that ate the whole budget"). The full fix is the
+# broker-side injecting proxy in that spec, where neither credential is inside
+# any container at all; until it lands this refusal holds the same line at the
+# one place a build can spend.
+#
+# The one line that differs by seat lives OUTSIDE this block on purpose, so the
+# block stays byte-identical and cannot drift between the two wrappers.
 #
 # HOW IT IS PASSED (and why not the obvious way).
 #   * The value NEVER appears in argv. `podman --env VAR=value` would put a
@@ -296,6 +355,10 @@ if [ -f "$ENV_FILE" ]; then
       echo "$_tag: WARNING $ENV_FILE sets BOTH CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY; using CLAUDE_CODE_OAUTH_TOKEN (Max subscription), NOT passing ANTHROPIC_API_KEY into the container" >&2
     fi
   elif [ -n "$_apikey_value" ]; then
+    if [ "${_seat_metered_fallback:-allow}" = "refuse" ]; then
+      echo "$_tag: REFUSING TO LAUNCH: $ENV_FILE offers ANTHROPIC_API_KEY only, and this seat routes to the Max account — it must never silently spend the metered key. Put a CLAUDE_CODE_OAUTH_TOKEN (\`claude setup-token\`) in $ENV_FILE, or change the route deliberately at the keyboard. No silent key-fallback: SPECS/2026-08-05-credential-routing-and-halt-protocol.md §3." >&2
+      exit 1
+    fi
     _cred_name="ANTHROPIC_API_KEY"
     _cred_value="$_apikey_value"
   fi

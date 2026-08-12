@@ -48,10 +48,18 @@
 # itself.
 #
 # BRANCH B (2026-08-06). This wrapper provisions a TOOL, not a resident. It has
-# no spine, no broker socket, no house_memory mount, and its own home and
-# config. See build-kernel.md for everything the session is told about itself.
-# The three deletions each have a rationale block below; read those before
-# adding any of them back.
+# no broker socket, no house_memory mount, and its own home and config. See
+# build-kernel.md for everything the session is told about itself. Both
+# remaining deletions have a rationale block below; read those before adding
+# either back.
+#
+# BRANCH B'S THIRD DELETION IS REVERSED (2026-08-12): the spine mount is back,
+# for both seats, per SPECS/2026-08-08-gable-build-lane-provisioning.md
+# (confirmed by plink, #custodian seq 1008). The reasoning it was removed on
+# held for Claudette's spine and not for Gable's, which has declared a build
+# seat since the 07-22 seat-split. Mounting is still not the cutover — see the
+# spine mount block. The full contract for this seat, all five surfaces, is
+# harness/cc/BUILD-SEAT-CONTRACT.md.
 #
 # Overridable env (defaults are the production layout — mirror run-resident.sh):
 #   RESIDENT_IMAGE           image ref        (localhost/disjorn-resident:latest)
@@ -68,6 +76,11 @@
 #                            mounted RW at /run/gatehouse — clone source and
 #                            push target, and the only writable path out.
 #   RESIDENT_NETWORK         podman network   (pasta; real egress wall is WP-H2)
+#   RESIDENT_SPINE_HOST      host spine dir   (UNSET = no spine mount). Set by
+#                            disjorn-build-launch to the plink-owned mirror
+#                            /srv/disjorn-spine/<name>; mounted ro at
+#                            /opt/spine. See the spine mount block below —
+#                            mounting is NOT the cutover.
 #   RESIDENT_PODMAN_EXTRA    extra podman-run flags (word-split; e.g. "-d")
 #   RESIDENT_REAP            1 (default) = a watchdog kills this wrapper's
 #                            container if the wrapper itself is killed, so a
@@ -76,14 +89,14 @@
 #                            Not armed for detached runs. See the container
 #                            reaper block near the bottom.
 #
-# SECRETS: same contract as run-resident.sh — the session credential comes
-# from $RESIDENT_CONFIG_DIR/env and nowhere else. Either
-# CLAUDE_CODE_OAUTH_TOKEN (Claude Max subscription, minted by
-# `claude setup-token`; preferred) or ANTHROPIC_API_KEY (metered; fallback).
-# Exactly one reaches the container, never via argv. See the credential block
-# below and config-template/README.md. A build is a LONG session: on the OAuth
-# path it spends subscription rate-limit budget rather than metered credit,
-# which is the point of the cutover.
+# SECRETS: same mechanism as run-resident.sh — the session credential comes
+# from $RESIDENT_CONFIG_DIR/env and nowhere else, never via argv. But NOT the
+# same routing. The build seat is Max-only: CLAUDE_CODE_OAUTH_TOKEN (minted by
+# `claude setup-token`) and nothing else. If the env file offers only
+# ANTHROPIC_API_KEY this wrapper REFUSES TO LAUNCH rather than billing the
+# metered key — the credential-routing spec's "no silent key-fallback",
+# enforced at the one place a build can spend. See the credential block below,
+# config-template/README.md, and BUILD-SEAT-CONTRACT.md § Credentials.
 #
 # WALL-CLOCK CAP: enforced by the broker reaper (start_build.timeout_sec,
 # suggest 3600s), which kills the session and narrates a loud failure at the
@@ -113,17 +126,28 @@ CONTAINER_NAME="disjorn-build-$SLUG"
 # "do not act on substantive tasks", and correctly refused.
 #
 # The build seat is a TOOL, not the resident. It gets its own home, its own
-# config, its own kernel (build-kernel.md, ~40 lines, no house rules), and no
-# spine at all. "Is the builder Claudette or a thing Claudette uses" is settled
-# here, in the mounts, not in a prompt: a tool that shares the resident's home
-# is still wearing her clothes.
+# config, and its own kernel (build-kernel.md, ~40 lines, no house rules).
+# "Is the builder Claudette or a thing Claudette uses" is settled here, in the
+# mounts, not in a prompt: a tool that shares the resident's home is still
+# wearing her clothes. The 08-12 spine restoration does not touch that — the
+# spine arrives read-only, seat-filtered to the operational set, and it is the
+# resident's SPINE, not the resident's HOME.
 HOME_VOL="${RESIDENT_HOME_VOL:-$HOME/build-home}"
 CONFIG_DIR="${RESIDENT_CONFIG_DIR:-/home/plink/build-config/$NAME}"
 HOUSE_MEMORY="${RESIDENT_HOUSE_MEMORY:-/home/plink/Disjorn/Disjorn/harness/house_memory}"
 NETWORK="${RESIDENT_NETWORK:-pasta}"
-# The task kernel: the ONLY thing this session is told about who it is. Copied
-# into the build home below, because Claude Code reads ~/.claude/CLAUDE.md and
-# nothing else assembles one here — no bootstrap, no spine, no seat logic.
+# The task kernel: what this session is told about who it is. Copied into the
+# build home below, because Claude Code reads ~/.claude/CLAUDE.md and nothing
+# in [start_build].session_argv assembles one — the build argv execs claude
+# directly, with no bootstrap.py call in front of it (compare
+# residency/summon.toml.template, which has one).
+#
+# STILL TRUE AFTER THE 08-12 SPINE RESTORATION, and this is the seam to watch:
+# mounting /opt/spine does not make anything read it. The spine becomes the
+# build seat's kernel only when plink sets RESIDENT_SPINE_DIR=/opt/spine in the
+# build /config env file AND puts the bootstrap call in session_argv — at which
+# point bootstrap.py OVERWRITES this copied file. One or the other is the
+# kernel; never both. BUILD-SEAT-CONTRACT.md § Kernel carries the ordering.
 BUILD_KERNEL="${RESIDENT_BUILD_KERNEL:-/usr/local/lib/disjorn/build-kernel.md}"
 # The bare repos the build clones from and pushes to. Bare on purpose: no
 # working tree means a push cannot deploy.
@@ -247,35 +271,113 @@ if [ -n "${RESIDENT_DISJORN_RO:-}" ]; then
   args+=( -v "$RESIDENT_DISJORN_RO:/opt/disjorn:ro" )
 fi
 
-# NO SPINE MOUNT. The whole block that lived here — /opt/spine, the
-# RESIDENT_SPINE_HOST opt-in, the writability refusal, and the bootstrap.py
-# seat-split it fed — is deleted for the build seat as of 2026-08-06.
+# ── BEGIN spine mount block ──────────────────────────────────────────────
+# Byte-identical in run-resident.sh and run-build.sh; a test asserts that
+# (harness/cc/tests/test_run_wrappers.py::test_spine_block_is_identical_in_both_wrappers).
+# Edit one, paste into the other.
 #
-# It was never load-bearing here and it could not have worked: every entry in
-# Claudette's spine is `seats: [resident]`, so `assemble_for_seat("build")`
-# raises "no kernel entry visible to seat 'build'" against her real spine
-# today. Wiring the mount would have bought a loud bootstrap failure instead
-# of a silent placeholder — better, but still not a build.
+# BOTH SEATS AGAIN as of 2026-08-12, and the history matters because this block
+# has already been deleted once. Branch B (2026-08-06) took it out of
+# run-build.sh on two grounds: that a build session is a tool rather than a
+# resident, and that `assemble_for_seat("build")` raised "no kernel entry
+# visible to seat 'build'" against the spine it was tried on. The second ground
+# was an observation about CLAUDETTE's spine, every entry of which is
+# `seats: [resident]`, generalised into a claim about the seat.
 #
-# The deeper reason is branch B: a spine is for something that persists and
-# stays accountable across time. A build session lives for one spec and ends.
-# Giving it a spine does not give it a self; it gives it the costume of one,
-# and the costume is what we watched fail — the blocked session spent its
-# reasoning deciding whether launching a detached build was its call to make.
-# It gets build-kernel.md instead: the task, the ground, and one rule about
-# stopping when the ground is not there.
+# GABLE's spine has carried an explicit build seat since the seat-split
+# (SPECS/2026-07-22-gable-spine-ro-cutover-seat-split.md), applied and verified
+# live 07-23: resident 7 entries, build 5, stamped `(seat: build)`. His ruling
+# as review owner is that baking the operational set for a detached build is
+# "correct, not a compromise" — a build has no retrieval loop, so an
+# operational entry that is not baked never arrives at all, and "the build seat
+# does load-bearing work with walls it's never read."
 #
-# The spine machinery is UNTOUCHED for the resident seat (run-resident.sh), and
-# that is where it belongs. Note for whoever next syncs the two wrappers: the
-# spine block is no longer byte-identical between them, ON PURPOSE. See
-# tests/test_run_wrappers.py, which asserts the divergence rather than the
-# match so this cannot be "fixed" back by a tidy-up.
+# The mount is restored for both seats by
+# SPECS/2026-08-08-gable-build-lane-provisioning.md (confirmed by plink,
+# #custodian seq 1008). Branch B's OTHER two deletions from run-build.sh — the
+# broker socket and house_memory — STAND; only the spine came back. See
+# harness/cc/BUILD-SEAT-CONTRACT.md before touching any of the three.
+#
+# PROTECTION BY PLACEMENT for the resident's SPINE — the directory
+# house_memory/bootstrap.py assembles into ~/.claude/CLAUDE.md at the start
+# of EVERY session. The spine is the resident's kernel. AGENTHOOD.md rules
+# that a resident's own code and prompt are always Tier 2 (a human reviews
+# every change), and bootstrap.py's docstring assumes a spine edit arrives
+# "witnessed, merged".
+#
+# Neither holds if the spine the container loads sits in the resident's own
+# read-write home volume: the resident rewrites its kernel directly and the
+# next session loads it — no diff for the WP-H4 classifier to tier, no
+# #custodian post, no human. The classifier sees SUBMITTED diffs; it cannot
+# see a direct write. Only placement can.
+#
+# So: mount a plink-owned mirror READ-ONLY at /opt/spine, and have
+# RESIDENT_SPINE_DIR (read by bootstrap.py, set in the /config env file)
+# point there. Three independent walls, none trusting the others:
+#   1. host ownership — the mirror is plink:plink 0755/0644 and the res-*
+#      uid is neither owner nor group;
+#   2. the `:ro` bind — a write is EROFS even if (1) were wrong;
+#   3. the refusal below — we will not launch at all if the source is
+#      writable by the uid we are running as. That is the check that
+#      catches a cutover mis-pointed back at the home volume.
+#
+# Opt-in per resident, HOST-side, exactly like RESIDENT_DISJORN_RO: set
+# RESIDENT_SPINE_HOST in the unit's Environment=. UNSET adds no mount and
+# no flag — byte-for-byte today's podman invocation — so shipping this
+# cannot regress a live summon. Mounting alone still changes nothing about
+# which spine loads; the cutover is a separate deliberate line in the env
+# file (config-template/README.md § Spine placement).
+#
+# MOUNTING IS NOT THE CUTOVER, and for the BUILD seat that has a second edge.
+# The build seat's kernel today is the file run-build.sh COPIES to
+# ~/.claude/CLAUDE.md (build-kernel.md), and nothing in [start_build].session_argv
+# runs bootstrap.py — so a mounted spine sits there unread until plink both
+# sets RESIDENT_SPINE_DIR=/opt/spine in the build seat's /config env file AND
+# adds the bootstrap call to session_argv. Those two move together, because
+# bootstrap.py WRITES ~/.claude/CLAUDE.md and would otherwise overwrite the
+# copied task kernel with no one having chosen that. Both are plink's
+# deliberate step, not this wrapper's: harness/cc/BUILD-SEAT-CONTRACT.md
+# § Kernel carries the ordering.
+#
+# The source MUST be the res-readable mirror (/srv/disjorn-spine/<name>,
+# published by harness/keyboard/06-spine-mirror.sh after plink approves a
+# spine change), NEVER the canonical copy under /home/plink: that tree is
+# 0700 and rootless podman cannot mount it. Do not "fix" that by loosening
+# /home/plink/bots/<name>/spine — that directory is the authorization
+# surface itself. Copy outward; never open inward.
+if [ -n "${RESIDENT_SPINE_HOST:-}" ]; then
+  _spine_tag="$(basename "$0" .sh)"
+  [ -d "$RESIDENT_SPINE_HOST" ] || { echo "$_spine_tag: RESIDENT_SPINE_HOST not a dir: $RESIDENT_SPINE_HOST" >&2; exit 1; }
+  # Fail CLOSED, not quietly: if this uid can write the spine source, the
+  # read-only mount is theatre (the resident can edit the host path
+  # directly, outside the container, and the next session loads it). Refuse
+  # the launch and say exactly why. `-writable` is access(2) as the calling
+  # uid, so it accounts for ownership, group, and ACLs — not just mode bits.
+  _spine_writable="$(find "$RESIDENT_SPINE_HOST" -maxdepth 1 -writable -print -quit 2>/dev/null)"
+  if [ -n "$_spine_writable" ]; then
+    echo "$_spine_tag: REFUSING TO LAUNCH: spine source is WRITABLE by this uid ($(id -un)): $_spine_writable" >&2
+    echo "$_spine_tag: the spine is the kernel and must be resident-unwritable. Point RESIDENT_SPINE_HOST at the plink-owned mirror (/srv/disjorn-spine/<name>, see harness/keyboard/06-spine-mirror.sh) — do NOT loosen the canonical spine to make this pass." >&2
+    exit 1
+  fi
+  unset _spine_writable _spine_tag
+  args+=( -v "$RESIDENT_SPINE_HOST:/opt/spine:ro" )
+fi
+# ── END spine mount block ────────────────────────────────────────────────
 
 ENV_FILE="$CONFIG_DIR/env"
 
+# THE ROUTING LINE (see the credential block's own § ROUTING BY SEAT). This is
+# the BUILD seat: per the credential-routing spec, build and agent loops run on
+# plink's Max account, so there is NO metered fallback here. A build that finds
+# only an API key does not quietly bill it — it refuses to launch. Deliberately
+# OUTSIDE the byte-identical block below — it is the one credential decision
+# that differs by seat, and it differs because of which wrapper launched, never
+# because of /config.
+_seat_metered_fallback=refuse
+
 # ── BEGIN credential block ───────────────────────────────────────────────
 # Byte-identical in run-resident.sh and run-build.sh; a test asserts that
-# (harness/cc/tests/test_run_wrappers.py::test_credential_block_is_identical).
+# (harness/cc/tests/test_run_wrappers.py::test_credential_block_is_identical_in_both_wrappers).
 # Edit one, paste into the other.
 #
 # WHICH CREDENTIAL. Two are accepted, from the env file and NOWHERE else
@@ -284,10 +386,32 @@ ENV_FILE="$CONFIG_DIR/env"
 #   CLAUDE_CODE_OAUTH_TOKEN  a long-lived OAuth token minted by
 #                            `claude setup-token`; bills plink's Claude Max
 #                            SUBSCRIPTION. Preferred.
-#   ANTHROPIC_API_KEY        a metered API key. Fallback.
+#   ANTHROPIC_API_KEY        a metered API key. Fallback — but only for a seat
+#                            allowed to spend it; see § ROUTING BY SEAT below.
 # If both are present the OAuth token wins and the API key is NOT passed —
 # "exactly one credential in the container" is the invariant. If neither is
 # present we warn loudly and pass none: fail loud, never fail over silently.
+#
+# ROUTING BY SEAT (SPECS/2026-08-05-credential-routing-and-halt-protocol.md §1
+# and §3; SPECS/2026-08-08-gable-build-lane-provisioning.md, architecture note
+# 3). The routing table is the seat split: conversational seats run on metered
+# per-seat API keys, build/agent loops run on plink's Max account. So the
+# API-key fallback is NOT universal. Each wrapper sets `_seat_metered_fallback`
+# immediately above this block — `allow` for the chat seat, `refuse` for the
+# build seat — and a refusing seat that finds ONLY an API key does not launch.
+#
+# It refuses rather than warning-and-continuing because the halt protocol says
+# so in as many words: no silent key-fallback. A loop that quietly fails over
+# from Max to the metered key has converted "your account said not now" into
+# "spend your API money instead", which is precisely the decision plink
+# reserved for himself (seqs 683/697: "I need to look at the account before
+# restarting any work that ate the whole budget"). The full fix is the
+# broker-side injecting proxy in that spec, where neither credential is inside
+# any container at all; until it lands this refusal holds the same line at the
+# one place a build can spend.
+#
+# The one line that differs by seat lives OUTSIDE this block on purpose, so the
+# block stays byte-identical and cannot drift between the two wrappers.
 #
 # HOW IT IS PASSED (and why not the obvious way).
 #   * The value NEVER appears in argv. `podman --env VAR=value` would put a
@@ -343,6 +467,10 @@ if [ -f "$ENV_FILE" ]; then
       echo "$_tag: WARNING $ENV_FILE sets BOTH CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY; using CLAUDE_CODE_OAUTH_TOKEN (Max subscription), NOT passing ANTHROPIC_API_KEY into the container" >&2
     fi
   elif [ -n "$_apikey_value" ]; then
+    if [ "${_seat_metered_fallback:-allow}" = "refuse" ]; then
+      echo "$_tag: REFUSING TO LAUNCH: $ENV_FILE offers ANTHROPIC_API_KEY only, and this seat routes to the Max account — it must never silently spend the metered key. Put a CLAUDE_CODE_OAUTH_TOKEN (\`claude setup-token\`) in $ENV_FILE, or change the route deliberately at the keyboard. No silent key-fallback: SPECS/2026-08-05-credential-routing-and-halt-protocol.md §3." >&2
+      exit 1
+    fi
     _cred_name="ANTHROPIC_API_KEY"
     _cred_value="$_apikey_value"
   fi
@@ -392,8 +520,14 @@ unset _cred_value _oauth_value _apikey_value
 # retrieval loop, so an un-baked operational entry would simply be absent.
 # Passed AFTER the credential block so the wrapper's seat wins over any
 # /config env-file value: the seat is a property of WHICH wrapper launched.
-# Deliberately NOT inside a byte-identical block — the one line that MUST
-# differ from run-resident.sh.
+# Deliberately NOT inside a byte-identical block — one of the two lines that
+# MUST differ from run-resident.sh (the other is _seat_metered_fallback).
+#
+# It is passed unconditionally and always has been, INCLUDING while the spine
+# was deleted from this seat: RESIDENT_SEAT is the seat's name, not a claim
+# that a spine is loaded. It only does anything when bootstrap.py runs, which
+# [start_build].session_argv does not currently call — see the BUILD_KERNEL
+# note near the top and BUILD-SEAT-CONTRACT.md § Kernel.
 args+=( -e "RESIDENT_SEAT=build" )
 
 if [ -n "${RESIDENT_PODMAN_EXTRA:-}" ]; then

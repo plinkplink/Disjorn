@@ -123,6 +123,45 @@ All verbs are per-resident toggleable in `verbs.toml` and default OFF.
   spec's `## Status` must be `confirmed` AND the `## Confirm record` must be
   filled — a real `Confirmed by` (not the `<...>` placeholder) and an integer
   `#custodian seq`. No confirm record → refuse, fail-loud (`bad-args`).
+
+  **THE LITERAL TEMPLATE.** The gate is a regex over markdown, so the shape is
+  the gate. This is the exact text — two `##` headings, the `- **Field**:`
+  bullet form, the bold markers included:
+
+  ```markdown
+  ## Confirm record
+  - **Confirmed by**: plink
+  - **#custodian seq**: 1008
+  - **Confirmed at**: 2026-08-12
+
+  ## Status
+  confirmed
+  ```
+
+  What the parser actually does with it, so a near-miss is recognisable as one:
+  - It scans for a line that is exactly `## Confirm record` (case-insensitive)
+    and reads until the next `## ` heading. A record under a `###` subheading,
+    or trailing after a horizontal rule inside another section, is not found.
+  - `Confirmed by` and `#custodian seq` must be `- **Name**: value` bullets. The
+    bold markers are part of the pattern; `- Confirmed by: plink` does not match
+    and reads as an EMPTY record.
+  - A value that is blank, `-`, `_`, or still angle-bracketed (`<username>`) is
+    **None** — mechanically identical to having no record at all. A spec that
+    looks confirmed at a glance because the template's placeholder is still in
+    the box is refused, which is the point.
+  - `seq` takes the first run of digits in the value, so `seq 1008` and `#1008`
+    both work; a seq with no digits at all (`n/a`, `at the keyboard`) is None
+    and the build is refused. A build that was confirmed off-channel needs the
+    witness recorded some other way before it can run through this verb.
+  - `## Status` takes the first non-blank, non-HTML-comment line after the
+    heading, strips backticks, lowercases it. `` `confirmed` `` with a trailing
+    `<!-- … -->` comment is fine; `confirmed for phase 1` is not the token
+    `confirmed` and is refused.
+  - `Confirmed at` is **not read by the gate**. It is for the humans; the seq is
+    the witness.
+
+  Both headings are required and both are checked — a `confirmed` status with an
+  empty record is refused, and a filled record under a `draft` status is refused.
 - **What makes the confirm gate real: `specs_dir` must be resident-unwritable**
   (BL-D1). The record is a presence check on *text*; it is only trustworthy
   because the text lives in the plink-gated read-only mirror
