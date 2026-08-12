@@ -186,6 +186,49 @@ point it at `/srv/disjorn-ro/SPECS` and refresh the mirror first — an
 un-refreshed mirror has no `SPECS/` directory and the assertion will stop the
 broker. Verify the config passes before restarting, not after.
 
+### 8. Gable's build lane — host-side steps (2026-08-12)
+
+From `SPECS/2026-08-08-gable-build-lane-provisioning.md` (confirmed by plink,
+#custodian seq 1008). The repo-side half is merged with that spec's branch;
+these are the keyboard steps, and **the order matters**. Full reasoning for
+every one of them: `harness/cc/BUILD-SEAT-CONTRACT.md` § Provisioning a lane.
+
+```
+# 1. deploy the code this branch changes (run-resident.sh is a LIVE change to
+#    the summon path — the shared credential block moved. Watch one summon.)
+sudo install -m 0755 harness/cc/run-build.sh             /usr/local/lib/disjorn/run-build.sh
+sudo install -m 0755 harness/cc/run-resident.sh          /usr/local/lib/disjorn/run-resident.sh
+sudo install -m 0755 harness/broker/disjorn-build-launch /usr/local/lib/disjorn/disjorn-build-launch
+sudo install -m 0755 harness/cc/build-kernel.md          /usr/local/lib/disjorn/build-kernel.md
+
+# 2. push main back to the gatehouse — the merge you just did IS the event
+git -C /home/plink/Disjorn/Disjorn push /var/lib/disjorn-broker/gatehouse/disjorn.git main
+
+# 3. the lane's gatehouse repo, full recipe at creation, verified from the seat
+sudo bash harness/keyboard/08-gatehouse-repo.sh create gable gable
+
+# 4. the spine mirror (the MOUNT — not the cutover; see the contract § Kernel)
+sudo bash harness/keyboard/06-spine-mirror.sh gable
+
+# 5. pre-flight, and read every line
+sudo bash harness/keyboard/09-build-lane-preflight.sh gable
+
+# 6. only then: sudoedit /etc/disjorn-broker/verbs.toml -> "start-build" = true
+```
+
+Also needed before step 5 passes: `/srv/disjorn-build-config/gable/` with
+`settings.json` (template `harness/cc/build-config/settings.json`) and `env`
+holding a **`CLAUDE_CODE_OAUTH_TOKEN`**, mode 0600; and
+`/home/res-gable/build-home/` owned by `res-gable`. The build seat is Max-only
+as of this build — an `ANTHROPIC_API_KEY` alone makes `run-build.sh` refuse to
+launch rather than spend metered credit.
+
+**Read `BUILD-SEAT-CONTRACT.md` § Verbs before step 6.** `[start_build].resident`
+is one global config value, so with a second resident holding the verb, a build
+started by one runs and audits as the other. That is BR-1, and DEFERRED.md calls
+it *required before a second resident gets the verb*. The pre-flight reports the
+condition; the ruling is yours.
+
 ---
 
 # KEYBOARD-NEXT — plink's sitting after the H8/H9/H12 wave (2026-07-20)

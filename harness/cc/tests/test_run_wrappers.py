@@ -54,6 +54,43 @@ exit 0
 """
 
 
+def build_seat_ground(tmp_path):
+    """The two paths run-build.sh checks before it does anything else: the task
+    kernel it copies, and a gatehouse holding at least one bare repo it clones.
+
+    Without these the build wrapper exits at line 130-odd with 'build kernel
+    missing: /usr/local/lib/disjorn/…', i.e. against the PRODUCTION default —
+    so every run-build.sh test silently measured whether the host happened to
+    have a deploy, instead of measuring the wrapper. Pointing them at tmp_path
+    makes the suite hermetic and the assertions real.
+    """
+    kernel = tmp_path / "build-kernel.md"
+    kernel.write_text("# Build session\n\nYou are a build tool.\n")
+    gatehouse = tmp_path / "gatehouse"
+    gatehouse.mkdir()
+    repo = gatehouse / "disjorn.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(repo)],
+                   check=True, capture_output=True)
+    # One commit, so the clone the wrapper makes has a base to branch from —
+    # the same shape a real gatehouse repo has.
+    env = dict(os.environ, GIT_DIR=str(repo))
+    blob = subprocess.run(["git", "hash-object", "-w", "--stdin"], input="x\n",
+                          text=True, capture_output=True, check=True,
+                          env=env).stdout.strip()
+    idx = dict(env, GIT_INDEX_FILE=str(tmp_path / "idx"))
+    subprocess.run(["git", "update-index", "--add", "--cacheinfo",
+                    f"100644,{blob},f"], check=True, capture_output=True, env=idx)
+    tree = subprocess.run(["git", "write-tree"], capture_output=True, text=True,
+                          check=True, env=idx).stdout.strip()
+    commit = subprocess.run(
+        ["git", "commit-tree", tree, "-m", "base"], capture_output=True, text=True,
+        check=True, env=dict(env, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+                             GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")).stdout.strip()
+    subprocess.run(["git", "update-ref", "refs/heads/main", commit],
+                   check=True, capture_output=True, env=env)
+    return {"RESIDENT_BUILD_KERNEL": str(kernel), "RESIDENT_GATEHOUSE": str(gatehouse)}
+
+
 @pytest.fixture()
 def rig(tmp_path):
     """Scratch mounts + a fake podman on PATH. Returns a run() helper."""
@@ -67,6 +104,7 @@ def rig(tmp_path):
     podman = bindir / "podman"
     podman.write_text(FAKE_PODMAN)
     podman.chmod(0o755)
+    build_ground = build_seat_ground(tmp_path)
 
     def run(script: str, env_file_text: str | None, extra_env: dict | None = None):
         env_file = config / "env"
@@ -87,6 +125,11 @@ def rig(tmp_path):
             RESIDENT_HOUSE_MEMORY=str(tmp_path / "no-house-memory"),
             RESIDENT_NETWORK="none",
         )
+        # Build-seat ground only for the build wrapper: run-resident.sh mounts
+        # the gatehouse when RESIDENT_GATEHOUSE is set, and its mount-set
+        # assertions are about the summon path as it actually runs.
+        if script == "run-build.sh":
+            env.update(build_ground)
         # Poison our own environment: the wrappers must ignore it entirely
         # and take the credential from the env file only.
         env["ANTHROPIC_API_KEY"] = "sk-ant-INHERITED-MUST-NOT-BE-USED"
@@ -131,12 +174,22 @@ def container_env(argv, environ, envfile):
 
 
 ALL = list(WRAPPERS)
-# Spine-bearing wrappers. 2026-08-06 (branch B): run-build.sh no longer
-# mounts a spine at all — a build session is a tool, not a resident, and
-# gets build-kernel.md instead. The spine contract still applies in full to
-# the RESIDENT seat, so these tests keep running against run-resident.sh
-# rather than being deleted.
-SPINE_WRAPPERS = [w for w in WRAPPERS if w != "run-build.sh"]
+# Spine-bearing wrappers: BOTH, again, as of 2026-08-12
+# (SPECS/2026-08-08-gable-build-lane-provisioning.md, confirmed #custodian seq
+# 1008). Between 08-06 and 08-12 this was run-resident.sh only — branch B
+# removed the build seat's spine on a trial against Claudette's spine, whose
+# entries all declare `seats: [resident]`, generalised into a claim about the
+# seat. Gable's spine has declared a build seat since the 07-22 seat-split.
+# The mount is back for both; the CUTOVER (RESIDENT_SPINE_DIR + a bootstrap
+# call in session_argv) is still separate and still plink's.
+SPINE_WRAPPERS = list(WRAPPERS)
+
+# Which seat may spend the metered key. The credential-routing spec's table:
+# conversational seats on per-seat API keys, build/agent loops on Max. A build
+# that finds only an API key refuses to launch rather than billing it.
+METERED_FALLBACK = {"run-resident.sh": "allow", "run-build.sh": "refuse"}
+APIKEY_SEATS = [s for s, v in METERED_FALLBACK.items() if v == "allow"]
+MAX_ONLY_SEATS = [s for s, v in METERED_FALLBACK.items() if v == "refuse"]
 
 
 # ── precedence ───────────────────────────────────────────────────────────
@@ -152,14 +205,68 @@ def test_oauth_only(rig, script):
     assert "auth: CLAUDE_CODE_OAUTH_TOKEN" in proc.stderr
 
 
-@pytest.mark.parametrize("script", ALL)
-def test_apikey_only(rig, script):
+@pytest.mark.parametrize("script", APIKEY_SEATS)
+def test_apikey_only_is_the_chat_seat_s_own_route(rig, script):
+    """For a conversational seat the API key is not a failover — it IS the
+    routing table's answer (metered, per-seat, hard cap, fast rotation)."""
     proc, argv, environ, envfile = rig(script, f"ANTHROPIC_API_KEY={FAKE_APIKEY}\n")
     assert proc.returncode == 0, proc.stderr
     cenv = container_env(argv, environ, envfile)
     assert cenv["ANTHROPIC_API_KEY"] == FAKE_APIKEY
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in cenv
     assert "auth: ANTHROPIC_API_KEY" in proc.stderr
+
+
+@pytest.mark.parametrize("script", MAX_ONLY_SEATS)
+def test_apikey_only_refuses_to_launch_a_max_only_seat(rig, script):
+    """THE POINT OF THE SEAT SPLIT, enforced where a build can spend.
+
+    Build and agent loops run on plink's Max account. A loop that quietly fails
+    over to the metered key has converted "your account said not now" into
+    "spend your API money instead", which is the decision plink reserved for
+    himself (#custodian 683/697). The halt protocol's words: no silent
+    key-fallback. So the wrapper refuses, loudly, and podman never runs.
+    """
+    proc, argv, environ, envfile = rig(script, f"ANTHROPIC_API_KEY={FAKE_APIKEY}\n")
+    assert proc.returncode != 0, "a Max-only seat must not launch on a metered key"
+    assert not argv, "podman must not have been executed"
+    assert "REFUSING TO LAUNCH" in proc.stderr
+    # It must name the fix and the ruling, not just say no.
+    assert "claude setup-token" in proc.stderr
+    assert "no silent key-fallback" in proc.stderr.lower()
+    assert FAKE_APIKEY not in proc.stderr and FAKE_APIKEY not in proc.stdout
+
+
+@pytest.mark.parametrize("script", MAX_ONLY_SEATS)
+def test_a_max_only_seat_still_launches_on_the_oauth_token(rig, script):
+    """The refusal is about WHICH credential, never about having one."""
+    proc, argv, environ, envfile = rig(script, f"CLAUDE_CODE_OAUTH_TOKEN={FAKE_OAUTH}\n")
+    assert proc.returncode == 0, proc.stderr
+    cenv = container_env(argv, environ, envfile)
+    assert cenv["CLAUDE_CODE_OAUTH_TOKEN"] == FAKE_OAUTH
+
+
+@pytest.mark.parametrize("script", MAX_ONLY_SEATS)
+def test_a_max_only_seat_with_both_credentials_launches_on_oauth(rig, script):
+    """Both present is not the refusal case: OAuth wins and the API key is
+    filtered out, so nothing metered can be spent. Refusing here would break a
+    seat whose env file is merely untidy."""
+    proc, argv, environ, envfile = rig(
+        script, f"ANTHROPIC_API_KEY={FAKE_APIKEY}\nCLAUDE_CODE_OAUTH_TOKEN={FAKE_OAUTH}\n")
+    assert proc.returncode == 0, proc.stderr
+    cenv = container_env(argv, environ, envfile)
+    assert cenv["CLAUDE_CODE_OAUTH_TOKEN"] == FAKE_OAUTH
+    assert "ANTHROPIC_API_KEY" not in cenv
+
+
+def test_the_two_wrappers_declare_different_metered_fallbacks():
+    """The seat's credential route is ONE line, outside the byte-identical
+    credential block, set by which wrapper launched — never by /config."""
+    for script, expected in METERED_FALLBACK.items():
+        text = (CC_DIR / script).read_text()
+        assert f"_seat_metered_fallback={expected}" in text, script
+        other = "refuse" if expected == "allow" else "allow"
+        assert f"_seat_metered_fallback={other}" not in text, script
 
 
 @pytest.mark.parametrize("script", ALL)
@@ -238,19 +345,27 @@ def test_leading_whitespace_and_comments_in_env_file(rig, script):
 
 # ── leak checks ──────────────────────────────────────────────────────────
 
-@pytest.mark.parametrize("script", ALL)
-@pytest.mark.parametrize("text,file_text", [
-    (FAKE_OAUTH, f"CLAUDE_CODE_OAUTH_TOKEN={FAKE_OAUTH}\n"),
-    (FAKE_APIKEY, f"ANTHROPIC_API_KEY={FAKE_APIKEY}\n"),
-])
-def test_credential_never_appears_in_podman_argv(rig, script, text, file_text):
-    """`ps` / /proc/*/cmdline must not show it. Name-only --env is why."""
-    proc, argv, environ, envfile = rig(script, file_text)
+def _assert_name_only_env(argv, environ, name, text):
     assert text not in "\0".join(argv)
-    name = file_text.split("=", 1)[0]
     # name-only form: `--env NAME`, never `--env NAME=value`
     assert argv[argv.index("--env") + 1] == name
     assert environ[name] == text
+
+
+@pytest.mark.parametrize("script", ALL)
+def test_oauth_never_appears_in_podman_argv(rig, script):
+    """`ps` / /proc/*/cmdline must not show it. Name-only --env is why."""
+    proc, argv, environ, envfile = rig(
+        script, f"CLAUDE_CODE_OAUTH_TOKEN={FAKE_OAUTH}\n")
+    _assert_name_only_env(argv, environ, "CLAUDE_CODE_OAUTH_TOKEN", FAKE_OAUTH)
+
+
+@pytest.mark.parametrize("script", APIKEY_SEATS)
+def test_apikey_never_appears_in_podman_argv(rig, script):
+    """Same guarantee for the metered key — on the seats that may carry one.
+    A Max-only seat never gets this far; it refuses (see the routing tests)."""
+    proc, argv, environ, envfile = rig(script, f"ANTHROPIC_API_KEY={FAKE_APIKEY}\n")
+    _assert_name_only_env(argv, environ, "ANTHROPIC_API_KEY", FAKE_APIKEY)
 
 
 @pytest.mark.parametrize("script", ALL)
@@ -377,20 +492,30 @@ def test_spine_is_mounted_read_only_at_opt_spine(rig, script, spine_dir):
     assert "ro" in opts, f"/opt/spine must be read-only, got opts {opts}"
 
 
+# The mount set each wrapper produces with no spine asked for. Per-wrapper
+# because the two seats deliberately differ: the resident seat has the broker
+# socket and no gatehouse, the build seat has the gatehouse and NO SOCKET.
+UNSET_SPINE_MOUNTS = {
+    "run-resident.sh": {"/home/resident", "/run/disjorn-broker", "/config", "/config/env"},
+    "run-build.sh": {"/home/resident", "/config", "/run/gatehouse", "/config/env"},
+}
+
+
 @pytest.mark.parametrize("script", SPINE_WRAPPERS)
 def test_unset_spine_var_adds_nothing_at_all(rig, script):
     """UNSET must be byte-for-byte today's invocation: no mount, no flag.
 
-    This is the ship-it-closed guarantee. Both residents are live on the
-    unset path right now; anything appearing here is a live regression.
+    This is the ship-it-closed guarantee, and it is what makes the launcher's
+    presence check safe: a resident with no published mirror gets no
+    RESIDENT_SPINE_HOST, and therefore exactly the invocation running today.
+    Anything appearing here is a live regression.
     """
     proc, argv, environ, envfile = rig(script, "BROKER_DISABLE=1\n")
     assert proc.returncode == 0, proc.stderr
     assert not any("/opt/spine" in a for a in argv), f"spine in argv: {argv}"
     # The whole mount set, not just the absence of /opt/spine: nothing new
     # may appear on the unset path at all.
-    assert {m[1] for m in mounts(argv)} == {
-        "/home/resident", "/run/disjorn-broker", "/config", "/config/env"}
+    assert {m[1] for m in mounts(argv)} == UNSET_SPINE_MOUNTS[script]
 
 
 @pytest.mark.parametrize("script", SPINE_WRAPPERS)
@@ -530,6 +655,7 @@ def reap_rig(tmp_path):
     podman = bindir / "podman"
     podman.write_text(FAKE_PODMAN_REAP)
     podman.chmod(0o755)
+    build_ground = build_seat_ground(tmp_path)
 
     procs = []
 
@@ -545,6 +671,8 @@ def reap_rig(tmp_path):
             RESIDENT_HOUSE_MEMORY=str(tmp_path / "no-house-memory"),
             RESIDENT_NETWORK="none",
         )
+        if script == "run-build.sh":
+            env.update(build_ground)
         env.update(extra_env or {})
         p = subprocess.Popen(
             ["bash", str(CC_DIR / script)] + WRAPPERS[script],
@@ -662,6 +790,8 @@ def test_reaper_does_not_mask_the_exit_status(tmp_path, script, code):
         RESIDENT_HOME_VOL=str(home_vol), RESIDENT_CONFIG_DIR=str(config),
         RESIDENT_BROKER_SOCKET=str(tmp_path / "broker.sock"),
         RESIDENT_HOUSE_MEMORY=str(tmp_path / "nohm"), RESIDENT_NETWORK="none")
+    if script == "run-build.sh":
+        env.update(build_seat_ground(tmp_path))
     proc = subprocess.run(["bash", str(CC_DIR / script)] + WRAPPERS[script],
                           capture_output=True, text=True, env=env)
     assert proc.returncode == code
@@ -808,43 +938,58 @@ def test_credential_block_is_identical_in_both_wrappers():
         "credential block drifted between the two wrappers")
 
 
-def test_resident_wrapper_still_has_its_spine_block():
-    """The spine contract is untouched for the seat it was written for."""
-    m = SPINE_BLOCK_RE.search((CC_DIR / "run-resident.sh").read_text())
-    assert m, "run-resident.sh lost its spine mount block"
-    assert "/opt/spine:ro" in m.group(0)
+def test_spine_block_is_identical_in_both_wrappers():
+    """Both seats, one block — restored 2026-08-12.
 
+    THE HISTORY IS THE ASSERTION. Until 2026-08-06 this test existed in exactly
+    this form. Branch B then deleted the build seat's spine and replaced this
+    with `test_build_wrapper_has_no_spine_block_and_says_why`, whose docstring
+    said: "If the decision has genuinely been revisited, change this test
+    deliberately; do not delete it to make a paste-from-the-sibling compile."
 
-def test_build_wrapper_has_no_spine_block_and_says_why():
-    """THE DIVERGENCE IS THE POINT — asserted, not merely allowed.
+    It was revisited, deliberately, by
+    SPECS/2026-08-08-gable-build-lane-provisioning.md (confirmed by plink,
+    #custodian seq 1008), which sets RESIDENT_SPINE_HOST in the build launcher
+    and publishes Gable's mirror. The 08-06 reasoning was measured against
+    Claudette's spine — every entry `seats: [resident]` — and generalised into
+    a claim about the seat; Gable's spine has declared a build seat since the
+    07-22 seat-split, applied and verified live 07-23.
 
-    This used to be `test_spine_block_is_identical_in_both_wrappers`, and the
-    two wrappers carried a byte-identical block that a comment in each told the
-    next editor to keep in sync by hand. On 2026-08-06 the build seat stopped
-    having a spine at all (branch B: a build session is a tool that lives for
-    one spec, not a resident that persists and accrues).
-
-    A deletion that is only a deletion gets undone by the first person tidying
-    up the asymmetry — especially when the OTHER wrapper still says 'edit one,
-    paste into the other'. So the absence is now a tested property with a
-    pointer to the reasoning, and re-adding the block fails here first.
+    Whoever revisits it NEXT: the same rule applies in the same words. Change
+    this test on purpose, with a spec behind it, or leave it alone.
     """
+    blocks = {}
+    for script in ALL:
+        m = SPINE_BLOCK_RE.search((CC_DIR / script).read_text())
+        assert m, f"{script} has no marked spine mount block"
+        blocks[script] = m.group(0)
+        assert "/opt/spine:ro" in m.group(0)
+    assert blocks["run-resident.sh"] == blocks["run-build.sh"], (
+        "spine mount block drifted between the two wrappers")
+
+
+def test_the_build_seat_s_other_two_deletions_still_stand():
+    """Branch B deleted THREE things from the build wrapper: the spine, the
+    broker socket, and house_memory. Only the spine came back. Pinned together
+    so restoring one is never read as licence to restore the rest."""
     text = (CC_DIR / "run-build.sh").read_text()
-    assert not SPINE_BLOCK_RE.search(text), (
-        "run-build.sh has a spine mount block again. A build session gets no "
-        "spine — read the 'NO SPINE MOUNT' comment in run-build.sh and "
-        "build-kernel.md before removing this assertion. If the decision has "
-        "genuinely been revisited, change this test deliberately; do not "
-        "delete it to make a paste-from-the-sibling compile."
-    )
-    assert "NO SPINE MOUNT" in text, (
-        "the rationale block explaining why the build seat has no spine is "
-        "gone; a bare absence will be 'fixed' back by the next tidy-up"
-    )
-    assert "/opt/spine:ro" not in text, "run-build.sh mounts /opt/spine again"
-    # And the replacement must actually be wired: the task kernel is the only
-    # thing this seat is told about itself.
+    assert "NO BROKER SOCKET" in text
+    assert "NO /opt/house_memory" in text
+    # And the task kernel is still wired: mounting a spine is not the cutover,
+    # so build-kernel.md is still what this seat reads.
     assert "BUILD_KERNEL" in text and "build-kernel.md" in text
+
+
+def test_mounting_a_spine_does_not_make_the_build_seat_read_one():
+    """The distinction the whole § Kernel section turns on: the mount is
+    provisioned, the cutover is not. Nothing in this wrapper may quietly stop
+    copying the task kernel just because /opt/spine appeared."""
+    text = (CC_DIR / "run-build.sh").read_text()
+    assert 'cp -f "$BUILD_KERNEL" "$HOME_VOL/.claude/CLAUDE.md"' in text
+    code = [ln for ln in text.splitlines() if not ln.lstrip().startswith("#")]
+    assert not any("RESIDENT_SPINE_DIR" in ln for ln in code), (
+        "the cutover line lives in the /config env file, not in the wrapper — "
+        "see test_spine_mount_does_not_set_resident_spine_dir")
 
 
 def test_build_wrapper_has_no_broker_socket():
