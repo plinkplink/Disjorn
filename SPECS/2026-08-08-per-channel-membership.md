@@ -16,8 +16,14 @@ Channels gain a visibility mode. A private channel's content is unreadable to no
 5. NO SILENT GOD-VIEW: plink owns the box, the DB and the logs, so he can always look — but the app must not ship a quiet in-product read button for admins, or "private" is a lie to everyone else. If break-glass in-app reads ever exist they are audited and visible, never silent.
 6. ENFORCE AT THE READ PATH, NOT ONLY AT FANOUT: history fetch, seq fetch, and platform search must each filter by membership. Search is the likeliest leak and gets its own test.
 
-## Open question for the reviewer (cheap, mine to default if unanswered)
-- Who may invite: any member (default proposed) vs. channel owner only.
+**RULED** by plink, 8/12/2026: only the channel owner (creator) may invite.
+
+Implementation consequence, not in the original draft: `channels` has no owner
+column (`migrations/005_text_channels.sql`: id, type, name, created_at). This
+spec therefore adds `channels.created_by INTEGER REFERENCES users(id)`, with a
+backfill setting existing text channels to the first admin. Owner-only invite
+applies to `type='text'` only; `main_feed` and DM channels have no creator and
+are unaffected.
 
 ## Lane -> Review owner (DETERMINISTIC)
 - Lane: server tree (accounts/channels). Not Gable's host-build surface, no overlap with the build-lane spec. Review owner: Gable, with plink's sign-off required as the Tier 2 human gate.
