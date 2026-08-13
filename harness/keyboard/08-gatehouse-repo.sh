@@ -44,9 +44,17 @@
 #                                do not become executable.
 #   core.sharedRepository=group  git's own half. git writes objects and refs
 #                                 0444/0644 unless told the repo is shared; with
-#                                `group` it chmods what it writes to be
-#                                group-writable and setgids directories it
-#                                creates itself.
+#                                `group` it adds group access to what it writes
+#                                and setgids directories it creates itself. Note
+#                                what it does NOT do: a loose object stays 0444.
+#                                It is named by its own content, so nothing may
+#                                ever rewrite it — group READ is the whole
+#                                promise, and asking for more fails a healthy
+#                                repo forever. See the objects sweep in verify.
+#   default branch = main        the lanes push main. `git init` with no -b
+#                                leaves HEAD → refs/heads/master, which is not
+#                                an error anywhere until the first clone comes
+#                                out on a branch nobody pushes.
 #   safe.directory (see below)   git's ownership check, which this layout trips
 #                                by design.
 # The mode bits and the git config are BOTH required and neither implies the
@@ -154,8 +162,10 @@ do_create() {
   else
     # --shared=group makes git apply its half from the first byte, so even the
     # directories `git init` creates for itself are right before anything else
-    # runs. This is the "at creation" in "not repaired after".
-    git init --bare --shared=group "$REPO" >/dev/null
+    # runs. This is the "at creation" in "not repaired after". -b main is the
+    # same argument about a different birth defect: HEAD is written once, by
+    # `git init`, and the default is master.
+    git init --bare --shared=group -b main "$REPO" >/dev/null
     say "created bare repo $REPO"
   fi
 
@@ -223,13 +233,50 @@ do_verify() {
     ok "every directory is setgid"
   fi
 
+  # GROUP-WRITE, ON THE MUTABLE PATHS ONLY. HEAD, config, refs/, packed-refs
+  # and info/ are rewritten in place by whichever uid pushes next, so each of
+  # them must be writable by the group. objects/ is pruned out of this sweep on
+  # purpose: git writes a loose object 0444 and core.sharedRepository=group
+  # leaves it 0444, because an object is named by its own content and nothing
+  # may ever rewrite it. Sweeping objects/ for group-write therefore FAILED a
+  # perfectly healthy repo, every time, forever — and a check that is always
+  # red is a check nobody reads, which is worse than no check. Objects get
+  # their own sweep, for what git actually promises, immediately below.
   local nogw
-  nogw="$(find "$REPO" ! -perm -020 -print 2>/dev/null || true)"
+  nogw="$(find "$REPO" -path "$REPO/objects" -prune -o ! -perm -020 -print 2>/dev/null || true)"
   if [ -n "$nogw" ]; then
-    bad "paths that are NOT group-writable:"
+    bad "mutable paths that are NOT group-writable (refs, config, HEAD, info):"
     printf '%s\n' "$nogw" | list
   else
-    ok "every path is group-writable"
+    ok "every mutable path is group-writable (objects checked separately)"
+  fi
+
+  # THE OBJECTS SWEEP — what git does promise, asserted where it lives.
+  #   files:       group-READ. The broker fetches out of this repo, so it must
+  #                be able to read every object a resident wrote. 0444 is the
+  #                expected mode; 0400 is the failure, and it is silent until
+  #                someone else's fetch.
+  #   directories: setgid AND group-write, both. The fan-out directory is where
+  #                the NEXT object gets written and whose group it inherits, so
+  #                these two are about the objects that do not exist yet.
+  if [ ! -d "$REPO/objects" ]; then
+    bad "$REPO/objects does not exist — this is not a git object store"
+  else
+    local noor nodw
+    noor="$(find "$REPO/objects" -type f ! -perm -040 -printf '%p (mode %m)\n' 2>/dev/null || true)"
+    if [ -n "$noor" ]; then
+      bad "objects that are NOT group-readable — the broker cannot fetch what it cannot read:"
+      printf '%s\n' "$noor" | list
+    else
+      ok "every object file is group-readable (0444 is correct and expected)"
+    fi
+    nodw="$(find "$REPO/objects" -type d ! -perm -2020 -printf '%p (mode %m)\n' 2>/dev/null || true)"
+    if [ -n "$nodw" ]; then
+      bad "object directories that are not BOTH setgid and group-writable — the next object written into them lands wrong:"
+      printf '%s\n' "$nodw" | list
+    else
+      ok "every object directory is setgid and group-writable"
+    fi
   fi
 
   local shared
@@ -239,6 +286,19 @@ do_verify() {
     "")      bad "core.sharedRepository is UNSET — git will write 0644 objects and the next uid loses" ;;
     *)       bad "core.sharedRepository=$shared, expected group" ;;
   esac
+
+  # HEAD. `git init` with no -b writes refs/heads/master once, at birth, and
+  # nothing complains afterwards: pushing main into the repo works, the ref
+  # exists, and the only symptom is that a clone lands on a branch nobody
+  # pushes. It was found by hand and fixed by a hand-run one-liner, and a
+  # one-liner somebody has to remember is not a check. Reading it is free.
+  local head
+  head="$(git -C "$REPO" symbolic-ref HEAD 2>/dev/null || true)"
+  if [ "$head" = "refs/heads/main" ]; then
+    ok "HEAD is refs/heads/main"
+  else
+    bad "HEAD is ${head:-UNREADABLE}, not refs/heads/main — the lanes push main, so a clone of this repo comes out on a branch nobody pushes. Fix: git -C $REPO symbolic-ref HEAD refs/heads/main"
+  fi
 
   if git config --system --get-all safe.directory 2>/dev/null | grep -qxF "$REPO"; then
     ok "safe.directory names this repo in /etc/gitconfig"
@@ -258,6 +318,14 @@ do_verify() {
   # object (core.sharedRepository decides its mode), and both are then checked
   # from outside. The object is dangling and is removed again; nothing else in
   # the repo is touched, and no ref moves.
+  #
+  # WHAT THE PROBE ASKS OF THE OBJECT, and what it must not. Write capability
+  # is already proven — hash-object succeeded, as res-<name>, into this repo.
+  # What remains unproven is what the OTHER uid can do with what was written,
+  # and that is two things: the group it landed in, and whether that group can
+  # read it. Mode 444 is the correct answer and the expected one; demanding
+  # group-write here asked git for a promise it does not make and turned every
+  # healthy probe red.
   local r acct sha objpath objgroup objmode
   for r in ${RESIDENTS+"${RESIDENTS[@]}"}; do
     acct="res-$r"
@@ -290,10 +358,10 @@ do_verify() {
     objmode="$(stat -c %a "$objpath")"
     if [ "$objgroup" != "$GATEHOUSE_GROUP" ]; then
       bad "the object $acct wrote landed in group $objgroup, not $GATEHOUSE_GROUP — setgid is not holding for NEW files, the failure that only ever shows up on someone else's fetch"
-    elif [ "$(stat -c %A "$objpath" | cut -c6)" != "w" ]; then
-      bad "the object $acct wrote is not group-writable (mode $objmode) — core.sharedRepository is not being honoured"
+    elif [ "$(stat -c %A "$objpath" | cut -c5)" != "r" ]; then
+      bad "the object $acct wrote is not group-READABLE (mode $objmode) — core.sharedRepository is not being honoured, and the broker's next fetch is the one that finds out"
     else
-      ok "$acct wrote a real object: group=$objgroup mode=$objmode (verified from the seat, not reported)"
+      ok "$acct wrote a real object the group can read: group=$objgroup mode=$objmode (verified from the seat, not reported)"
     fi
     rm -f "$objpath"
     rmdir "$REPO/objects/${sha:0:2}" 2>/dev/null || true
