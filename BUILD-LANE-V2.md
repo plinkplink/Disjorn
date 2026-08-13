@@ -10,6 +10,14 @@ starts where that spec ends.
 House rules apply to this file: decision records append here as they happen;
 one owner per open item; nothing is DONE until verified live.
 
+**Revision 2 (2026-08-13, same day) — witness round 1 incorporated.** Both
+residents adopted the roadmap (Gable seq 1193/1196, Claudette seq
+1189/1192/1195/1198) with amendments; every accepted amendment is integrated
+below at its stage and credited by seq. The revision record at the end of
+this file lists them and the one ruling still owed. Ship order changed:
+**2a (streams) now precedes Stage 1** — stage numbers are kept so channel
+references stay valid; the dependency graph is the authority.
+
 ---
 
 ## Why a v2, in one paragraph
@@ -125,13 +133,26 @@ not here.)
   handler lands). Existing per-actor rate limit (10/60s) applies for free.
 - Handler: guard `author_type == "user"` (residents typing `/build` get the
   polite system-bot refusal, and the existing summon anti-loop precedent at
-  `detector.py:49-50` is the design's prior art); then hand the broker a
-  build request: prompt = the message remainder verbatim, requester = the
-  authenticated user, authorization = the message id/seq.
+  `detector.py:49-50` is the design's prior art); then hand the broker
+  **only the message seq** — nothing else.
+- **The broker trusts nothing the server asserts** (Claudette, seq 1192;
+  Gable, seq 1193/1196 — adopted as the entrance's defining property).
+  Given a seq, the broker itself reads that message from the canonical
+  store (read-only, same one-layer shape as `refresh-mirror`'s fixed argv),
+  re-checks `author_type == "user"` on what it read, re-checks the author
+  against a **plink-owned human-principals list in broker config** (one
+  TOML list, outside the server's reach — so a server bug or compromise
+  can at most point at a message a real human actually posted), derives
+  the prompt from the text it read, and **snapshots author + seq + text
+  hash into the build's ledger entry** (Claudette seq 1189, plink seq
+  1190) — the authorization record is a measurement, not a pointer at
+  mutable state. This is MERGE-CONTRACT's own property, one layer down:
+  the internet-facing component requests; the fail-closed component
+  verifies.
 - Broker: `_verb_start_build` (`brokerd.py:1697`) grows a second entrance —
   same budget reservation, same slug claim, same detached spawn, same
   reaper — but the spec-file read/parse/confirm-gate block is replaced by
-  the server-attested request. The server connects over the same unix
+  the seq-derivation above. The server connects over the same unix
   socket; SO_PEERCRED attests the server's uid; one new `[uids]` entry names
   it as the principal `server`, whose *only* verb is this entrance.
   `assert_specs_dir_resident_unwritable` and the file path stay for the
@@ -154,18 +175,36 @@ service.
 **Acceptance:** one trivial `/build` (doc typo) goes message → branch →
 merge-ritual-ready with zero keyboard steps between typing and review.
 
----## Stage 2 — eyes for everyone
+---
+
+## Stage 2 — eyes for everyone
 
 Two halves: the build becomes watchable, and review becomes conversational.
 
-**2a. Builds stream into the channel.** The launcher already parses
-stream-json incrementally (`launcher.py:331-359`, `_pump` at `:525`); the
-wrapper already captures session stdout for the reaper. The delta: a relay
-that posts build progress to a thread under the `build started` banner —
-tool-use lines compressed to one-liners (`Edit harness/…/brokerd.py`,
-`Bash: pytest — 51 passed`), throttled (the 16000-char cap and the house's
+**2a. Builds stream into the channel — and 2a SHIPS BEFORE STAGE 1**
+(Claudette seq 1192, seconded by Gable seq 1196, accepted). Streaming adds
+no authorization surface, no principal, no broker entrance — pure
+observability, revertible by turning a relay off. Cheap-to-launch before
+eyes would produce more unwatched builds diagnosed by archaeology; eyes
+first means Stage 1 lands into a house that can see, and every later
+stage's falsifiable prediction is witnessable live. The draft's own "why"
+paragraph is the argument; the ordering now follows it.
+
+The mechanics: the launcher already parses stream-json incrementally
+(`residency/launcher.py:331-359`, `_pump` at `:525`); the wrapper already
+captures session stdout for the reaper. The delta: a relay that posts build
+progress to a thread under the `build started` banner — tool-use lines
+compressed to one-liners (`Edit harness/…/brokerd.py`, `Bash: pytest — 51
+passed`), throttled (the 16000-char cap and the house's
 state-transition-not-timer rule both apply; batch every N actions or M
 seconds, whichever first). The reaper stops being the only witness.
+
+Two clauses (Gable seq 1193/1196, accepted): the relay **describes, never
+quotes raw** — build output can carry exactly the strings the channel
+classifier triggers on, and the standing backfill-poisoning rule
+(DEFERRED.md) applies to machine relays same as residents. And wherever
+`/build` is typed, the banner and stream land in (or mirror to)
+#custodian — actions stay public even when the trigger came from bed.
 
 What this buys, concretely, is the thing the house keeps paying for in
 evenings: **the failure is visible the moment it happens, to everyone, in
@@ -178,17 +217,44 @@ capability cliff for *watching*, because the watching comes to her.
 unbuilt) already designs merge-tier1 with the right shape: server-side
 classify at decision time, deterministic gates. v2 narrows it: the merge
 verb is **human-only** — a `/merge <slug>` slash command under the same
-authenticated-user guard as `/build`. On receipt the server (which owns the
-canonical repo view) runs the classifier on `main...loop/<slug>`, posts the
-tier + diffstat + the file list as a reply, and:
+authenticated-user guard (and broker-side derivation) as `/build`.
 
-- Tier 0/1 and clean: merges `--no-ff`, pushes back to the gatehouse,
-  reports the merge sha. (The mechanics are `platform_deploy.sh:9-23`,
-  executed by the machine instead of read aloud to a human.)
+**PRECONDITION — the canonical-repo ruling (Gable seq 1193/1196, Claudette
+seq 1198: the one piece of genuinely hidden work in this document, and
+they're right).** Today prod runs FROM plink's working clone
+(DEPLOY-CHEATSHEET: "runs FROM the repo"); canonical `main` lives there;
+merging there IS staging; the gatehouse is upstream of a human ritual. A
+machine that merges cannot inherit that topology silently. The ruling this
+document recommends, plink's to confirm: **gatehouse `disjorn.git` becomes
+canonical at 2b.** The merge path operates on it directly; the running
+checkout becomes a deploy artifact the merge path fast-forwards
+mechanically (ff-only — a diverged prod checkout fails loudly, exactly
+`refresh-mirror`'s rule); plink's clone becomes what it already is for
+every other seat — a dev clone that pushes and pulls. The alternative
+(machine hands inside `/home/plink`) is rejected: it's the stale-base
+hazard `09-build-lane-preflight` warns about, aimed at prod. This ruling
+supersedes the earlier "no stage rewrites a layout" claim — Rev 1
+overclaimed, and the citation that failed (see revision record) failed at
+exactly this seam.
+
+On receipt the server hands the broker the seq; the broker (as in Stage 1)
+verifies the human, then **runs the gates itself** — classifier on
+`main...loop/<slug>`, tests, ff-check — never accepting a caller-supplied
+gate result: a passed-in `tests: true` is a claim, and claims aren't
+measurements (Claudette seq 1192). It posts tier + diffstat + file list as
+a reply, and:
+
+- Tier 0/1 and clean: merges `--no-ff`, pushes back, reports the merge sha.
+  (The mechanics are `deploy/platform_deploy.sh:9-23` — committed to the
+  tree in this revision; see revision record — executed by the machine
+  instead of read aloud to a human.)
 - Tier 2 or any gate unhappy: refuses with the reason, and the diff review
   happens where it always did — except plink can now do it from a phone,
   because the diff is *in the channel*, not on a filesystem only one person
-  can see.
+  can see. **Tier 2 keeps no verb, and there is no override flag**
+  (Claudette seq 1192, adopted verbatim as a non-goal): the exact moment a
+  machine first holds the merge mechanics is the moment someone invents
+  `--force` for convenience, and this document pre-refuses it.
 
 Residents comment, argue, quote lines — that's the review. plink's `/merge`
 is the signature. The Confirm record's job (who, when, on what evidence) is
@@ -214,12 +280,25 @@ script doesn't do; resident code runs from copies in `/usr/local/lib` +
 different states reconciled by a human memory. Close the gap:
 
 - `/merge` success on a diff touching `server/` triggers the restart ritual
-  (`DEPLOY-CHEATSHEET.md:20-27`) mechanically: restart `disjorn`, health
-  check (`GET /` + a WS handshake within Ns), and on failure **revert the
-  merge and restart again** — main returns to the last live-good state,
-  loudly. The `restart-disjorn` broker verb already exists (`brokerd.py:
-  1117`, OFF for residents); it stays OFF for residents — the *server's
-  merge path* gains the restart, not any resident.
+  (`DEPLOY-CHEATSHEET.md:20-27`) mechanically — **executed by the broker,
+  never by the server** (Claudette seq 1192, the bootstrap hole: the driver
+  of a restart cannot live inside the unit it restarts, or the merge that
+  breaks the server is precisely the one where nothing is alive to revert
+  it. The broker is outside the unit, already owns `restart-disjorn`
+  (`brokerd.py:1117`), already fails closed; the server is requester only —
+  the same shape as Stage 1's entrance). The sequence: post a "going down"
+  line to #custodian *before* the restart (every restart drops every
+  connected human and bot — say so first), restart `disjorn`, then the
+  health check — which is the cheatsheet's **code-currency fingerprint,
+  not a liveness probe** (Claudette seq 1198: `POST /auth/login {}`
+  422-shape discriminates current code from stale; `GET /` passes on a
+  server that came back wrong; "process-up is not code-current" is the
+  cheatsheet's own rule 2). On failure: **`git revert`** — a new commit,
+  never reset, never force-push; the gatehouse's no-force rule binds the
+  machine same as every seat (Gable seq 1193/1196) — then restart again,
+  loudly. `main` returns to last live-good state by moving forward.
+  `restart-disjorn` stays OFF for residents (the 08-05 ruling holds); the
+  restart fires under a human's `/merge` signature.
 - Diffs touching harness/deployed-copy surfaces (`run-*.sh`, kernels,
   broker) post their install commands as a checklist reply instead —
   deploy-split honesty first, automation when trust is earned. STATUS.md
@@ -247,7 +326,13 @@ Everything above, opened to the residents — the Buzz-shaped end state:
   is whatever that file says today, which this document deliberately does
   not assert; Stage 1's human-attestation rule applies to the *slash* path,
   the broker path stays the residents' door), now with streamed threads so
-  their builds are watchable too.
+  their builds are watchable too. **Named plainly, not smuggled** (Gable
+  seq 1196): a standing `start-build` grant converts BL-D1's *per-build
+  human authorization* into a *standing budgeted grant* per seat. This
+  document endorses that conversion as itself — it is exactly the loosening
+  plink asked for, and budgets + streams + the merge gate are what make it
+  safe. Chat-is-data survives untouched: the grant lives in `verbs.toml`,
+  plink-owned, outside any resident's reach.
 - **Residents review each other.** Classify previews, line comments, the
   argument in-channel — already their habit (see 1171/1173/1175 for the
   house's best review work to date, done *about* an incident instead of
@@ -284,18 +369,24 @@ wall or the summon anti-loop.
 ## Sequencing and dependencies
 
 ```
-Stage 0 (in flight)  ──►  Stage 1 (/build)  ──►  Stage 2a (streams)
-                                                  Stage 2b (/merge) ──► Stage 3 (deploy)
-                                                                          Stage 4 (peers)
+Stage 0 (in flight)  ──►  Stage 2a (streams)  ──►  Stage 1 (/build)
+                                                    Stage 2b (/merge) ──► Stage 3 (deploy)
+                                                    [2b PRECONDITION:        Stage 4 (peers)
+                                                     canonical-repo ruling]
 ```
+
+(2a before 1: witness round 1, accepted — see Stage 2a. Stage numbers kept
+so channel references stay valid; this graph is the authority.)
 
 Each stage ships alone, proves itself on real builds, and is individually
 revertible (a slash command unregisters; a relay turns off; the deploy hook
-is one config flag). No stage rewrites a layout, migrates a repo, or touches
-a resident's container walls. The 08-recipe convergence question (blocked in
-Stage 0's spec) dissolves after Stage 0: with no in-container pushes,
-ownership is a host-side bookkeeping matter the `create` script can settle
-whenever convenient.
+is one config flag). No stage touches a resident's container walls. One
+layout change exists and is stated where it lives, not here in fine print:
+the Stage 2b canonical-repo ruling (Rev 1 claimed "no stage rewrites a
+layout"; the witness round falsified that — see revision record). The
+08-recipe convergence question (blocked in Stage 0's spec) dissolves after
+Stage 0: with no in-container pushes, ownership is a host-side bookkeeping
+matter the `create` script can settle whenever convenient.
 
 ## The objections this document expects, answered once
 
@@ -315,15 +406,56 @@ whenever convenient.
   to an inert branch. The blast radius before `/merge` is a branch name.
   That was v1's own argument for the gatehouse, and it's still right.
 
-## Open questions for the witness round
+## Open questions — answered in witness round 1
 
-1. Stage 1 slug derivation from free text — broker-side, and does the house
-   want a `/build` arg for naming the branch explicitly?
-2. Stage 2a throttle constants (N actions / M seconds) — pick from the
-   first streamed build's data, not from taste.
-3. Stage 2b: does `/merge` require the build's streamed thread to exist
-   (i.e., are pre-v2 builds mergeable through it), or is the ritual the
-   fallback for those?
-4. Stage 3 checklist-vs-automate line for harness surfaces — where exactly?
-5. Which stage, if any, does the house want red-teamed in the isolated
-   venue before flip? (v1 precedent says: the merge path.)
+1. Slug derivation: broker-side, **with** an explicit branch-name arg
+   (`/build name:<slug> …`) — Gable seq 1196, accepted.
+2. 2a throttle constants: from the first streamed build's data, not taste —
+   agreed all around.
+3. Pre-v2 builds merge through the ritual; don't retrofit — Gable seq 1196.
+4. Checklist (not automation) for ALL harness surfaces until one full clean
+   cycle, then revisit — Gable seq 1196.
+5. Red-team scope: the Stage 2b merge path **plus** the Stage 1 `server`
+   principal entrance — one attack surface, the server's word reaching the
+   broker (Gable seq 1193; Claudette's 1192 amendment narrows what that
+   word can carry to a seq). H13-D3 stays a precondition per the standing
+   clear-the-track ruling. Isolated venue, per DEFERRED's
+   backfill-poisoning rule.
+
+## The one ruling still owed
+
+**Canonical-repo topology (Stage 2b precondition), plink's call:** promote
+gatehouse `disjorn.git` to canonical with prod tracking it mechanically
+(this document's recommendation), or keep plink's clone canonical and give
+the machine hands in it (rejected above, but the rejection is an argument,
+not a ruling). Nothing before Stage 2b is blocked on it; 2b's spec cannot
+be drafted without it.
+
+## Revision record
+
+**Rev 2, 2026-08-13 — witness round 1.** Both residents adopted (Gable
+"adopt it," seq 1193/1196; Claudette "better than I braced for," 1192).
+Amendments integrated: broker-derives-from-seq + snapshot-hash ledger
+(Claudette 1189/1192, plink 1190) + human-principals list (Gable
+1193/1196) → Stage 1; 2a-before-1 ordering (Claudette 1192, Gable 1196);
+sanitize/describe-never-quote + mirror-to-custodian (Gable 1193) → 2a;
+canonical-repo precondition named (Gable 1196, Claudette 1198), gates
+run-not-passed + no-Tier-2-override (Claudette 1192) → 2b; broker-executes
+restart (bootstrap hole, Claudette 1192), fingerprint health check
+(Claudette 1198), git-revert-only + going-down line (Gable 1196, Claudette
+1192) → Stage 3; standing-grant invariant named (Gable 1196) → Stage 4.
+
+Owned correction: Rev 1 cited `platform_deploy.sh:9-23` as existing
+mechanics; both residents found no such file in the tree (Gable 1196,
+Claudette 1198). The script was real — and **untracked in plink's clone**,
+visible to exactly one seat: the keyboard. A citation true at the keyboard
+and false everywhere else is this document's own thesis, demonstrated
+against it. Fixed by committing the script (this revision), which also
+lands the one-script merge ritual Gable owed (his seq 1001). Rev 1's "no
+stage rewrites a layout" was falsified by the same seam and is corrected at
+Stage 2b and in the sequencing section.
+
+Not adopted into v2 (right ideas, wrong file): Claudette's
+bank-carries-seq memory-hygiene rule (1198) — residency surface, not build
+lane; her multi-owner-objects and seam-test items were already reclassified
+to docs by her own 1186.
