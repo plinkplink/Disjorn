@@ -237,9 +237,11 @@ seq 1198: the one piece of genuinely hidden work in this document, and
 they're right).** Today prod runs FROM plink's working clone
 (DEPLOY-CHEATSHEET: "runs FROM the repo"); canonical `main` lives there;
 merging there IS staging; the gatehouse is upstream of a human ritual. A
-machine that merges cannot inherit that topology silently. The ruling this
-document recommends, plink's to confirm: **gatehouse `disjorn.git` becomes
-canonical at 2b.** The merge path operates on it directly; the running
+machine that merges cannot inherit that topology silently.
+
+> **RULED 2026-08-13 (plink, in session with the keyboard): "gatehouse
+> becomes production, plink's files are another mirror."** Gatehouse
+> `disjorn.git` is canonical at 2b. The merge path operates on it directly; the running
 checkout becomes a deploy artifact the merge path fast-forwards
 mechanically (ff-only — a diverged prod checkout fails loudly, exactly
 `refresh-mirror`'s rule); plink's clone becomes what it already is for
@@ -440,14 +442,33 @@ matter the `create` script can settle whenever convenient.
    clear-the-track ruling. Isolated venue, per DEFERRED's
    backfill-poisoning rule.
 
-## The one ruling still owed
+## Decision record 2026-08-13 — canonical-repo topology RULED
 
-**Canonical-repo topology (Stage 2b precondition), plink's call:** promote
-gatehouse `disjorn.git` to canonical with prod tracking it mechanically
-(this document's recommendation), or keep plink's clone canonical and give
-the machine hands in it (rejected above, but the rejection is an argument,
-not a ruling). Nothing before Stage 2b is blocked on it; 2b's spec cannot
-be drafted without it.
+**plink: "Ruling: gatehouse becomes production, plink's files are another
+mirror. If everything shits the bed, we can always sudo into production
+for emergency surgery if needed."** Unpacked into its consequences:
+
+- **Canonical `main` = gatehouse `disjorn.git`.** Every change — plink's
+  included — reaches reality by being pushed there and merged through the
+  gate. Nobody's working files are special; "it works on my clone" stops
+  being a state anyone can confuse with production.
+- **The running checkout is a deploy artifact.** The server still runs
+  from a checkout on disk, but that checkout only ever fast-forwards from
+  gatehouse `main` (ff-only; divergence fails loudly). Where it physically
+  lives — staying at today's path vs. moving to a neutral one like
+  `/srv` — is a 2b spec detail, decided there (rootless-podman 0700 and
+  unit `WorkingDirectory` constraints apply).
+- **plink's clone = dev clone**, same standing as every other seat's.
+- **The escape hatch is on the record**: sudo surgery on production
+  remains available and legitimate in an emergency — with the standing
+  house rule that a hand-flip is a change to reality (STATUS.md rule 5)
+  and gets posted after the fact.
+- **Noted for the future, not built now** (plink, same ruling): when other
+  humans or other servers arrive, filesystem-permission git auth becomes
+  the bottleneck — the escalation path is a smart-HTTP forge with
+  application-level tokens, which this topology makes easy to adopt later
+  (the canonical repo is already a bare repo behind a policy layer).
+  Deliberately out of v2's scope.
 
 ## Revision record
 
@@ -477,6 +498,13 @@ Not adopted into v2 (right ideas, wrong file): Claudette's
 bank-carries-seq memory-hygiene rule (1198) — residency surface, not build
 lane; her multi-owner-objects and seam-test items were already reclassified
 to docs by her own 1186.
+
+**Rev 2.2, 2026-08-13 — the canonical-repo ruling landed** (plink, at the
+keyboard): gatehouse is production, plink's clone is another mirror, sudo
+is the documented emergency hatch. The "one ruling still owed" section
+became the decision record; 2b is now fully speccable. Claudette had
+signed rev 2.1 with no deltas (seq 1202) before this ruling; Gable's pass
+on rev ≥2 is the remaining review.
 
 **Rev 2.1, 2026-08-13 — Claudette's rev-2 delta (seq 1200), all three
 adopted.** The privacy rule (broker reads through the filter, never under
