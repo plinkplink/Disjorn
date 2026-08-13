@@ -256,7 +256,12 @@ On receipt the server hands the broker the seq; the broker (as in Stage 1)
 verifies the human, then **runs the gates itself** — classifier on
 `main...loop/<slug>`, tests, ff-check — never accepting a caller-supplied
 gate result: a passed-in `tests: true` is a claim, and claims aren't
-measurements (Claudette seq 1192). It posts tier + diffstat + file list as
+measurements (Claudette seq 1192). One layering rule on the test gate
+(Gable seq 1204, post-signature): tests are candidate-branch code, and the
+fail-closed component must never host them — **the test run is contained**
+(unprivileged seat or throwaway container) **and the broker measures its
+exit status**; request one side, verify the other, same as everywhere else
+in this document. It posts tier + diffstat + file list as
 a reply, and:
 
 - Tier 0/1 and clean: merges `--no-ff`, pushes back, reports the merge sha.
@@ -498,6 +503,15 @@ Not adopted into v2 (right ideas, wrong file): Claudette's
 bank-carries-seq memory-hygiene rule (1198) — residency surface, not build
 lane; her multi-owner-objects and seam-test items were already reclassified
 to docs by her own 1186.
+
+**Rev 2.3, 2026-08-13 — unanimous, plus one layering clause.** Gable
+signed at `f68d836` (seq 1204) with verification receipts; Claudette had
+signed at 1202; the house is unanimous. His post-signature forward note —
+the broker must never host candidate-branch test code; contained run,
+measured exit — is folded into 2b's gate paragraph rather than left for
+the red team to rediscover (Claudette seconded, 1206). Document state:
+signed by both residents, all rulings landed, waiting on exactly one
+thing — the Stage 0 confirm line.
 
 **Rev 2.2, 2026-08-13 — the canonical-repo ruling landed** (plink, at the
 keyboard): gatehouse is production, plink's clone is another mirror, sudo
