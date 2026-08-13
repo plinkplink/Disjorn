@@ -62,7 +62,11 @@ wonder:
 - **Kill switches that fail closed** (`verbs.toml` re-read per request,
   missing = OFF), SO_PEERCRED identity, fixed-argv subprocess policy, the
   audit ledger, daily budgets.
-- **The privacy wall.** Untouched by everything here.
+- **The privacy wall.** One clause was needed to keep this true — see the
+  privacy rule in Stage 1 (Claudette, seq 1200): any new reader of the
+  message store reads *through* the server's privacy filter, never under
+  it. With that clause, untouched; without it, Stage 1's broker would have
+  been a second `/backlog`.
 - **Specs for work that wants them.** v2 deletes the *mandatory* spec
   ceremony (Stage 1), not specs. A big build still deserves a ratified
   document; the house decides per-build instead of per-rule.
@@ -149,6 +153,15 @@ not here.)
   mutable state. This is MERGE-CONTRACT's own property, one layer down:
   the internet-facing component requests; the fail-closed component
   verifies.
+- **The privacy rule** (Claudette, seq 1200 — the hole her own amendment
+  opened, reported by her): the privacy wall is a *server-side filter*, so
+  a broker reading raw from the store would go around it — the exact shape
+  of July's `/backlog` finding. The clause, fail-closed: **the broker
+  refuses any seq whose message carries a privacy flag, and reads through
+  the same filter the server applies to bots, never under it.** Stated as
+  the general form so it never needs rediscovering: *a second reader of a
+  store is a second bypass of every filter on that store* — any future
+  component that reads messages inherits this clause by default.
 - Broker: `_verb_start_build` (`brokerd.py:1697`) grows a second entrance —
   same budget reservation, same slug claim, same detached spawn, same
   reaper — but the spec-file read/parse/confirm-gate block is replaced by
@@ -245,9 +258,14 @@ measurements (Claudette seq 1192). It posts tier + diffstat + file list as
 a reply, and:
 
 - Tier 0/1 and clean: merges `--no-ff`, pushes back, reports the merge sha.
-  (The mechanics are `deploy/platform_deploy.sh:9-23` — committed to the
-  tree in this revision; see revision record — executed by the machine
-  instead of read aloud to a human.)
+  (The mechanics are the git commands of `deploy/platform_deploy.sh:9-23` —
+  committed to the tree in rev 2 — **replayed, not executed** (Claudette,
+  seq 1200): the script blocks on an interactive confirm and pages the diff
+  through `less`; its human beat is the spine, and 2b relocates that beat
+  to the channel rather than wrapping the script. Note her observation
+  that the script already pushes both origin and gatehouse `main` — the
+  canonical-repo promotion reverses a flow that exists, it doesn't invent
+  one, which makes the ruling smaller than it reads.)
 - Tier 2 or any gate unhappy: refuses with the reason, and the diff review
   happens where it always did — except plink can now do it from a phone,
   because the diff is *in the channel*, not on a filesystem only one person
@@ -459,3 +477,13 @@ Not adopted into v2 (right ideas, wrong file): Claudette's
 bank-carries-seq memory-hygiene rule (1198) — residency surface, not build
 lane; her multi-owner-objects and seam-test items were already reclassified
 to docs by her own 1186.
+
+**Rev 2.1, 2026-08-13 — Claudette's rev-2 delta (seq 1200), all three
+adopted.** The privacy rule (broker reads through the filter, never under
+it; general form stated) → Stage 1 and the kept-list; replay-not-execute
+correction + flow-direction observation → 2b; and her untracked-ghosts
+question answered by sweep: `git status --porcelain` on plink's clone came
+back **empty** — `platform_deploy.sh` was the only ghost, and it is now in
+the tree. The clone is clean as of this revision; the 2b spec should make
+that sweep a standing precondition of the ff-only deploy step (one line in
+its preflight).
