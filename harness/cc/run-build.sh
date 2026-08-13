@@ -42,10 +42,21 @@
 # argv — the launcher.py doctrine: argv is config, chat is data.
 #
 # NO MERGE, NO PROD: the build lands on its branch and waits for a human. The
-# egress wall (WP-H2 host nftables on the res-* uid) blocks external git. The
-# ONE writable path out is /run/gatehouse — bare repos with no working tree, so
-# a push there deploys nothing and merges nothing. Human merges; nothing lands
-# itself.
+# egress wall (WP-H2 host nftables on the res-* uid) blocks external git. As of
+# 2026-08-13 there is NO writable path out of the container at all: the
+# gatehouse mount is gone and the product leaves by the POST-EXIT HARVEST at
+# the bottom of this file, which runs here on the host. Human merges; nothing
+# lands itself.
+#
+# WHY THE HARVEST EXISTS (the 08-13 finding, SPECS/2026-08-13-build-publish-path.md,
+# confirmed #custodian seq 1211). `podman --userns keep-id` does NOT map
+# supplementary groups, so the host's `gatehouse` group does not exist inside
+# the container: an in-container `git push` into the mounted gatehouse worked
+# only by uid-ownership accident, and the objects it wrote carried whatever
+# group the accident produced. Out here the wrapper already runs as res-<name>,
+# where the gatehouse group and the /etc/gitconfig `safe.directory` exemptions
+# actually apply. So the push moved to the one place it was ever well-defined,
+# and the container lost the mount that made the accident possible.
 #
 # BRANCH B (2026-08-06). This wrapper provisions a TOOL, not a resident. It has
 # no broker socket, no house_memory mount, and its own home and config. See
@@ -73,8 +84,10 @@
 #   RESIDENT_BUILD_KERNEL    task kernel file (/usr/local/lib/disjorn/build-kernel.md)
 #                            copied to ~/.claude/CLAUDE.md before launch.
 #   RESIDENT_GATEHOUSE       bare repo dir    (/var/lib/disjorn-broker/gatehouse)
-#                            mounted RW at /run/gatehouse — clone source and
-#                            push target, and the only writable path out.
+#                            NOT mounted (2026-08-13). Read HERE, on the host:
+#                            the provisioning loop clones out of it and the
+#                            post-exit harvest publishes back into it. The
+#                            container never sees it.
 #   RESIDENT_NETWORK         podman network   (pasta; real egress wall is WP-H2)
 #   RESIDENT_SPINE_HOST      host spine dir   (UNSET = no spine mount). Set by
 #                            disjorn-build-launch to the plink-owned mirror
@@ -82,12 +95,14 @@
 #                            /opt/spine. See the spine mount block below —
 #                            mounting is NOT the cutover.
 #   RESIDENT_PODMAN_EXTRA    extra podman-run flags (word-split; e.g. "-d")
-#   RESIDENT_REAP            1 (default) = a watchdog kills this wrapper's
-#                            container if the wrapper itself is killed, so a
-#                            refused/timed-out session cannot keep running.
-#                            0 disables it (debugging only; warns loudly).
-#                            Not armed for detached runs. See the container
-#                            reaper block near the bottom.
+#   RESIDENT_REAP            1 (default) = a watchdog sibling AND a signal trap
+#                            kill this wrapper's container if the wrapper
+#                            itself dies, so a refused/timed-out session cannot
+#                            keep running — and, since 2026-08-13, cannot keep
+#                            WRITING into ~/work while the next launch deletes
+#                            it. 0 disables both (debugging only; warns
+#                            loudly). Not armed for detached runs. See the
+#                            container reaper block near the bottom.
 #
 # SECRETS: same mechanism as run-resident.sh — the session credential comes
 # from $RESIDENT_CONFIG_DIR/env and nowhere else, never via argv. But NOT the
@@ -187,16 +202,81 @@ cp -f "$BUILD_KERNEL" "$HOME_VOL/.claude/CLAUDE.md"
 # container serving old code). A build is a fresh attempt at a spec, never a
 # continuation of a previous one's leftovers.
 #
-# TWO PATHS FOR THE SAME DIRECTORY, and getting this wrong is the whole reason
-# the first push probe failed: we clone HERE, on the host, where the gatehouse
-# is $GATEHOUSE — but the session pushes from INSIDE, where the same bare repos
-# are bind-mounted at /run/gatehouse. So clone from the host path and then
-# rewrite origin to the container path. (Same class as the socket-inode bug:
-# whoever runs the command supplies THEIR view.)
-GATEHOUSE_IN_CONTAINER="/run/gatehouse"
-for _repo_path in "$GATEHOUSE"/*.git; do
-  _repo="$(basename "$_repo_path" .git)"
+# THE ENTITLED SET, not "every *.git in the gatehouse" (Claudette's argument,
+# 08-12/13; SPECS/2026-08-13-build-publish-path.md architecture note 1a). A
+# build gets the disjorn tree and its OWN repo, and nothing else. The old glob
+# handed every seat a writable clone of every other seat's repo — a widening
+# that arrived by directory listing rather than by decision, and that grows
+# silently every time the keyboard creates a lane. Foreign repos in the
+# gatehouse are simply not cloned; a MISSING entitled repo is a loud failure
+# before podman is ever invoked, because a build that quietly proceeds with
+# half its ground is a build whose report cannot be trusted.
+ENTITLED=( disjorn )
+[ "$NAME" = "disjorn" ] || ENTITLED+=( "$NAME" )
+# Clone-point sha per entitled repo, SAME INDEX as ENTITLED. Held in this
+# process's memory and NOT in a file, deliberately: everything under $HOME_VOL
+# is the container's rw home, so a base recorded there is a base the measured
+# party can edit. Keeping it here is only possible because the launch tail no
+# longer `exec`s — the wrapper outlives the container now, so it can remember
+# what it cloned. This is the sha the harvest means by "beyond the clone point".
+BASE_SHA=()
+
+for _repo in "${ENTITLED[@]}"; do
+  _repo_path="$GATEHOUSE/$_repo.git"
   _dest="$WORK/$_repo"
+  [ -d "$_repo_path" ] || {
+    echo "run-build: REFUSING TO LAUNCH: entitled repo missing from the gatehouse: $_repo_path" >&2
+    echo "run-build: the entitled set for resident '$NAME' is: ${ENTITLED[*]}. Create it at the keyboard with 'harness/keyboard/08-gatehouse-repo.sh create $_repo $NAME' (the recipe applies ownership, setgid and safe.directory together, from the first byte)." >&2
+    exit 1; }
+
+  # ── QUARANTINE CLAUSE (1175, spec architecture note 1d) ────────────────
+  # A FAILED HARVEST MAKES THE WORKSPACE CLONE UNDELETABLE. The `rm -rf`
+  # below is correct for a clone whose work already reached the gatehouse and
+  # catastrophic for one whose work did not: the 2026-08-13 rescue existed
+  # only because a human posted a warning in-channel and nobody launched in
+  # the meantime, and a human remembering is not a design.
+  #
+  # "Unharvested" is measured against the GATEHOUSE, not against a marker
+  # file: for every loop/* branch in the existing clone, ask the gatehouse
+  # repo whether it holds that branch head as a commit object. Present means
+  # the harvest landed (or the branch never moved off the clone point, which
+  # is the zero-commit build's leftover and is genuinely disposable); absent
+  # means work exists here and nowhere else. Asking about the SHA rather than
+  # about `refs/heads/<branch>` is what keeps a zero-commit leftover from
+  # being quarantined forever — a branch that was never pushed because it had
+  # nothing to push is not lost work, and a quarantine pile full of empty
+  # clones is a pile nobody reads.
+  #
+  # Preserve and PROCEED (the spec offered "or refuse to launch"): the build
+  # that is being launched now is a different spec's build and blocking it on
+  # a previous spec's rescue punishes the wrong session. The QUARANTINED line
+  # goes to STDOUT, not stderr, because stdout is what the broker reaper reads
+  # and posts — the surfacing is the point.
+  if [ -d "$_dest/.git" ]; then
+    _q_branches=""
+    while IFS= read -r _wbranch; do
+      [ -n "$_wbranch" ] || continue
+      _whead="$(git -C "$_dest" rev-parse --verify -q "refs/heads/$_wbranch" 2>/dev/null)" || continue
+      [ -n "$_whead" ] || continue
+      if git -C "$_repo_path" cat-file -e "$_whead^{commit}" 2>/dev/null; then
+        continue   # the gatehouse holds it: harvested, safe to delete
+      fi
+      _q_branches="${_q_branches:+$_q_branches }$_wbranch"
+    done < <(git -C "$_dest" for-each-ref --format='%(refname:short)' 'refs/heads/loop/*' 2>/dev/null)
+
+    if [ -n "$_q_branches" ]; then
+      _q_slug="${_q_branches%% *}"; _q_slug="${_q_slug#loop/}"
+      mkdir -p "$HOME_VOL/quarantine"
+      _q_path="$HOME_VOL/quarantine/$_repo-$_q_slug-$(date +%s)"
+      mv "$_dest" "$_q_path" || {
+        echo "run-build: REFUSING TO LAUNCH: could not quarantine $_dest -> $_q_path; it holds unharvested commits on: $_q_branches" >&2
+        exit 1; }
+      echo "QUARANTINED $_repo $_q_path"
+      echo "run-build: $_dest held unharvested commits on: $_q_branches — moved to $_q_path rather than deleted. Nothing else will touch it; recover or discard it at the keyboard." >&2
+    fi
+    unset _q_branches _q_slug _q_path _wbranch _whead
+  fi
+
   rm -rf "$_dest"
   git clone --quiet "$_repo_path" "$_dest" || {
     echo "run-build: FAILED to clone $_repo_path -> $_dest" >&2; exit 1; }
@@ -207,8 +287,21 @@ for _repo_path in "$GATEHOUSE"/*.git; do
   # and the audit should not read as though Claudette typed it.
   git -C "$_dest" config user.name  "disjorn-build"
   git -C "$_dest" config user.email "build@disjorn.local"
-  # Rewrite origin LAST, to the path the session will actually see.
-  git -C "$_dest" remote set-url origin "$GATEHOUSE_IN_CONTAINER/$_repo.git"
+  # ORIGIN IS REMOVED, NOT REPOINTED (1175). Until 2026-08-13 this line
+  # rewrote origin to /run/gatehouse, the container's view of the mount. The
+  # mount is gone, so any origin at all is a trap: an in-container `git push
+  # origin` against a path that looks real fails somewhere down in git's
+  # transport with a message about a missing directory, and the session then
+  # reasons about whether the gatehouse is broken. With no remote it fails at
+  # the first hop, in one line, saying exactly the true thing — "'origin' does
+  # not appear to be a git repository" — and build-kernel.md no longer asks
+  # for a push at all. A missing remote is a better error than a real-looking
+  # path.
+  git -C "$_dest" remote remove origin
+  # Empty on an unborn HEAD (a gatehouse repo created but never pushed to).
+  # The harvest treats an empty base as "everything on the branch is new",
+  # which is exactly right for a repo whose first commit is this build's.
+  BASE_SHA+=( "$(git -C "$_dest" rev-parse --verify -q HEAD || true)" )
 done
 unset _repo_path _repo _dest
 # ── END provisioning ─────────────────────────────────────────────────────
@@ -238,9 +331,22 @@ args=(
   # is its stdout, which the broker reaper already reads and posts. Removing
   # the mount kills the whole class rather than filtering it.
   -v "$CONFIG_DIR:/config:ro"
-  # The gatehouse, READ-WRITE: the one writable path out of this container.
-  # Bare repos, so a push deploys nothing and merges nothing.
-  -v "$GATEHOUSE:/run/gatehouse"
+  # NO GATEHOUSE. The third deliberate deletion, 2026-08-13
+  # (SPECS/2026-08-13-build-publish-path.md, architecture note 1b). This used
+  # to be the "one writable path out": $GATEHOUSE mounted rw at /run/gatehouse,
+  # with the session pushing into it. It cannot be that, because `--userns
+  # keep-id` does not map supplementary groups — the `gatehouse` group does not
+  # exist in here, so every in-container push wrote objects whose group was
+  # whatever uid-ownership happened to produce, and the whole layout the
+  # keyboard recipe builds (setgid, g+rwX, core.sharedRepository=group) was
+  # being enforced against a container that could not see it.
+  #
+  # With this gone, NO writable path out of the container remains. /home/resident
+  # is the seat's own home, /config is ro, /opt/* are ro. The product leaves by
+  # the post-exit harvest at the bottom of this file, which runs out on the host
+  # as res-<name> where the group and the safe.directory exemptions are real.
+  # Do not add this mount back to "make pushing work": pushing working here was
+  # the accident, not the mechanism.
   # The spec is fed on stdin; podman drops stdin without -i (always, unlike the
   # opt-in in run-resident.sh — a build with no spec is meaningless).
   -i
@@ -536,9 +642,16 @@ if [ -n "${RESIDENT_PODMAN_EXTRA:-}" ]; then
 fi
 
 # ── BEGIN container reaper block ─────────────────────────────────────────
-# Byte-identical in run-resident.sh and run-build.sh; a test asserts that
-# (harness/cc/tests/test_run_wrappers.py::test_reaper_block_is_identical).
-# Edit one, paste into the other.
+# NO LONGER BYTE-IDENTICAL WITH run-resident.sh, as of 2026-08-13. It was,
+# until this seat stopped `exec`ing podman: run-resident.sh still hands its
+# process to podman and needs the watchdog alone, while this wrapper must
+# OUTLIVE its container to run the harvest and therefore needs the watchdog
+# AND a trap. The divergence is a contract, not drift — the test that used to
+# assert byte-equality now asserts each wrapper's own form
+# (harness/cc/tests/test_run_wrappers.py::test_reaper_blocks_diverge_by_contract).
+# Keep the two mechanisms named below in sync in SUBSTANCE (reap by cid,
+# `rm -f -t 0 --ignore`, never by name); do not paste this block back over
+# run-resident.sh's.
 #
 # THE GAP THIS CLOSES. The container is NOT this process's child. Rootless
 # `podman run` hands it to conmon, which is reparented away, so killing the
@@ -560,18 +673,36 @@ fi
 # window is near-zero, but a mid-session refusal can have tool calls already
 # in flight and more still to come.
 #
-# WHY NOT A SIGNAL TRAP. Both supervisors use Python's `proc.kill()`, which
-# is SIGKILL, and no trap runs on SIGKILL — a trap-based reaper would look
-# closed without being closed. It would also cost us `exec podman`, and that
-# exec is load-bearing: same PID, same stdin, same exit status, no extra
-# shell between the supervisor and the container.
+# WHY NOT A SIGNAL TRAP *ALONE*. Both supervisors use Python's `proc.kill()`,
+# which is SIGKILL, and no trap runs on SIGKILL — a trap-based reaper would
+# look closed without being closed. That is why the watchdog exists and why it
+# is still the primary mechanism here.
 #
-# WHAT WORKS. A watchdog sibling, started before the exec, that waits for
-# THIS pid to disappear and then takes the container down. `$$` survives
-# `exec`, so it watches the podman client itself, and it survives the
-# wrapper's death because a single-pid kill does not touch it. It covers
-# every exit path — SIGKILL, SIGTERM, SIGINT, crash, and normal completion
-# (where the container is already gone and the reap is a no-op).
+# WHAT WORKS FOR SIGKILL. A watchdog sibling that waits for THIS pid to
+# disappear and then takes the container down. It survives the wrapper's death
+# because a single-pid kill does not touch it, and it covers every exit path —
+# SIGKILL, SIGTERM, SIGINT, crash, and normal completion (where the container
+# is already gone and the reap is a no-op).
+#
+# AND WHY A TRAP AS WELL, from 2026-08-13 ([1175], spec architecture note 1c).
+# The launch tail no longer `exec`s: this wrapper stays alive as podman's
+# PARENT so it can harvest after the container exits. That is a new hazard, not
+# just a new shape. A parent killed by SIGTERM/SIGINT used to take podman with
+# it because podman WAS the process; now podman is a child that outlives it,
+# and a container still running while the NEXT launch `rm -rf`s ~/work/<repo>
+# underneath it is the exact interleaving the quarantine clause is trying to
+# stop from ever mattering. So: the trap reaps on EXIT/INT/TERM — promptly,
+# with the podman client killed too — and the watchdog still covers the SIGKILL
+# the trap cannot see. Two mechanisms for two different signals, not two
+# mechanisms for one job; both are idempotent (`--ignore`), so a double reap is
+# a no-op rather than a disagreement.
+#
+# The trap is also why podman is launched with `&` + `wait` rather than as a
+# plain foreground command: bash DEFERS a trap until the current foreground
+# command finishes, so a SIGTERM arriving mid-build would sit unhandled for the
+# rest of the session. `wait` is interruptible; the trap fires at once. Stdin
+# is preserved explicitly (`<&0`) because bash otherwise redirects an async
+# command's stdin from /dev/null — and stdin is the spec.
 #
 # IT REAPS BY CONTAINER ID, NOT BY NAME, and that distinction is the whole
 # correctness of this block. Container names are per-resident and REUSED
@@ -604,13 +735,18 @@ fi
 # Escape hatch for debugging a container that dies too fast to inspect:
 # RESIDENT_REAP=0 (warns loudly).
 _reap_tag="$(basename "$0" .sh)"
-_reap_detached=0
+# DETACHED is read again by the launch tail (a detached run keeps `exec
+# podman`: no trap, no harvest, the caller owns the container). One variable,
+# computed once — the reaper and the tail must never disagree about whether
+# this run is detached.
+DETACHED=0
 for _w in ${RESIDENT_PODMAN_EXTRA:-}; do
-  case "$_w" in -d|--detach|--detach=true) _reap_detached=1 ;; esac
+  case "$_w" in -d|--detach|--detach=true) DETACHED=1 ;; esac
 done
+_reap_cid=""
 if [ "${RESIDENT_REAP:-1}" = "0" ]; then
-  echo "$_reap_tag: WARNING RESIDENT_REAP=0 — container $CONTAINER_NAME will OUTLIVE this wrapper if the wrapper is killed; a refused or timed-out session keeps running inside it" >&2
-elif [ "$_reap_detached" = "1" ]; then
+  echo "$_reap_tag: WARNING RESIDENT_REAP=0 — container $CONTAINER_NAME will OUTLIVE this wrapper if the wrapper is killed; a refused or timed-out session keeps running inside it, writing into $WORK while the next launch deletes it" >&2
+elif [ "$DETACHED" = "1" ]; then
   : # detached by request: the caller owns the container's lifetime
 else
   # A private DIRECTORY, not `mktemp -u`: podman refuses to start if the
@@ -630,8 +766,29 @@ else
     fi
     rm -rf "$_reap_ciddir"
   ) >/dev/null 2>&1 </dev/null &
+
+  # The trap's half. Same cid, same flags, same idempotence — it just gets
+  # there first on the signals a trap can actually see. Output is discarded so
+  # a reap message can never land in the middle of the machine-readable
+  # PUBLISHED/NO-COMMITS lines the broker reaper parses; `|| true` because a
+  # trap that fails under `set -e` would replace a real exit status with its
+  # own. _podman_pid is empty until the tail starts podman.
+  _build_reap() {
+    if [ -n "${_podman_pid:-}" ]; then
+      kill "$_podman_pid" 2>/dev/null || true
+    fi
+    if [ -n "$_reap_cid" ] && [ -s "$_reap_cid" ]; then
+      podman rm -f -t 0 --ignore "$(cat "$_reap_cid")" >/dev/null 2>&1 || true
+    fi
+    return 0
+  }
+  # EXIT covers the ordinary path and every `exit` below; INT/TERM re-exit with
+  # the conventional 128+signal so the broker still sees "killed", not "clean".
+  trap '_build_reap' EXIT
+  trap '_build_reap; exit 130' INT
+  trap '_build_reap; exit 143' TERM
 fi
-unset _reap_tag _reap_detached _w
+unset _reap_tag _w
 # ── END container reaper block ───────────────────────────────────────────
 
 args+=( "$IMAGE" )
@@ -642,4 +799,116 @@ args+=( "$IMAGE" )
 [ "$#" -gt 0 ] && args+=( "$@" )
 
 
-exec podman "${args[@]}"
+# ── BEGIN launch + post-exit harvest ─────────────────────────────────────
+# DETACHED KEEPS THE OLD SHAPE. `RESIDENT_PODMAN_EXTRA=-d` means "start the
+# container and return"; there is nothing to wait for and nothing to harvest
+# yet, so exec and be done. Harvesting here would measure a container that has
+# not written a line, and the trap would kill what it just started.
+if [ "$DETACHED" = "1" ]; then
+  exec podman "${args[@]}"
+fi
+
+# FOREGROUND, NOT exec (2026-08-13). The exec was load-bearing for years — same
+# PID, same stdin, same exit status, no extra shell — and giving it up costs
+# something real, so it was given up for something real: with the gatehouse
+# unmounted, THIS is the only process that can publish the build's work, and it
+# has to still be alive when the container stops. `&` + `wait` rather than a
+# plain foreground command so the reaper block's trap is not deferred; `<&0` so
+# the spec on stdin survives the async redirect bash would otherwise apply.
+podman "${args[@]}" <&0 &
+_podman_pid=$!
+_container_rc=0
+wait "$_podman_pid" || _container_rc=$?
+_podman_pid=""
+
+# HARVEST ONLY AFTER A CLEAN EXIT. A nonzero container is a build that failed,
+# refused, or crashed; whatever sits on its branch is not a product and does not
+# get published under a line that says it is. The clones are LEFT WHERE THEY
+# ARE — the quarantine clause above is what protects them at the next launch,
+# and it protects them by measuring the gatehouse rather than by trusting this
+# path to have written a marker.
+if [ "$_container_rc" -ne 0 ]; then
+  echo "HARVEST-SKIPPED container exited $_container_rc"
+  echo "run-build: container exited $_container_rc — not publishing. The workspace clones under $WORK are left in place; the next launch will quarantine any that hold unharvested commits." >&2
+  exit "$_container_rc"
+fi
+
+# THE HARVEST. One line per entitled repo, always, on stdout — this is the ONLY
+# thing the broker reaper's done-banner is built from (spec architecture note
+# 3: no separate verification path, because the harvest IS the verification and
+# two mechanisms can disagree). Three outcomes and no fourth:
+#
+#   PUBLISHED <repo>.git <sha>   the gatehouse was rev-parsed AFTER the push
+#                                and holds exactly the sha we measured here.
+#   NO-COMMITS <repo>.git        the branch never moved past the clone point.
+#                                The honest line for a zero-commit build; the
+#                                banner it produces says so instead of "on the
+#                                branch for review" about a phantom branch.
+#   PUBLISH-FAILED <repo>.git …  the git error, verbatim, flattened to one line.
+#
+# ABSENCE of all three is also a signal, and the one that matters most: a
+# wrapper killed at start_build.timeout_sec dies before this loop, so the
+# reaper sees no lines and declares FAILED. Silence is never read as success.
+#
+# NO FORCE, EVER. Not --force, not --force-with-lease, not +refs/. A
+# non-fast-forward here means the gatehouse branch moved under us — someone
+# else's rescue push, or a re-run of the same slug — and the only correct
+# response is to print git's own refusal and fail. The wrapper is not entitled
+# to decide whose commits lose.
+_publish_failed=0
+for _i in "${!ENTITLED[@]}"; do
+  _repo="${ENTITLED[$_i]}"
+  _base="${BASE_SHA[$_i]}"
+  _dest="$WORK/$_repo"
+  _bare="$GATEHOUSE/$_repo.git"
+
+  _head="$(git -C "$_dest" rev-parse --verify -q "refs/heads/$BRANCH" 2>/dev/null || true)"
+  if [ -z "$_head" ]; then
+    # The session deleted or renamed the branch we made for it. Nothing to
+    # publish and nothing to invent.
+    echo "NO-COMMITS $_repo.git"
+    continue
+  fi
+  # "Beyond the clone point", counted rather than compared: a session that
+  # rebased or reset still gets an honest answer, and an empty base (unborn
+  # HEAD at clone time) means every commit on the branch is new.
+  if [ -n "$_base" ]; then
+    _new="$(git -C "$_dest" rev-list --count "$_base..$BRANCH" 2>/dev/null || echo 0)"
+  else
+    _new="$(git -C "$_dest" rev-list --count "$BRANCH" 2>/dev/null || echo 0)"
+  fi
+  if [ "$_new" -eq 0 ]; then
+    echo "NO-COMMITS $_repo.git"
+    continue
+  fi
+
+  # Push the SHA we just measured, not `HEAD`: the line we are about to print
+  # names a sha, and pushing a symbolic ref would let the thing published and
+  # the thing reported drift apart between the two commands.
+  _err="$(git -C "$_dest" push "$_bare" "$_head:refs/heads/$BRANCH" 2>&1)" || {
+    echo "PUBLISH-FAILED $_repo.git $(printf '%s' "$_err" | tr '\n\r\t' '   ' | tr -s ' ')"
+    _publish_failed=1
+    continue
+  }
+  # MEASURE IN THE GATEHOUSE, not in the clone. `git push` exiting 0 is a claim
+  # about a transport; the banner is a claim about what a human will find when
+  # they fetch. Only the second one is worth printing.
+  _landed="$(git -C "$_bare" rev-parse --verify -q "refs/heads/$BRANCH" 2>/dev/null || true)"
+  if [ "$_landed" = "$_head" ]; then
+    echo "PUBLISHED $_repo.git $_head"
+  else
+    echo "PUBLISH-FAILED $_repo.git push reported success but $_bare refs/heads/$BRANCH is '${_landed:-absent}', not $_head"
+    _publish_failed=1
+  fi
+done
+unset _i _repo _base _dest _bare _head _new _err _landed
+
+# The wrapper's own status. Zero only when the container was clean AND every
+# entitled repo produced a PUBLISHED or a NO-COMMITS line: a build whose work
+# did not reach the gatehouse is a failed build, whatever the session said
+# about itself in its JSON.
+if [ "$_publish_failed" -ne 0 ]; then
+  exit 1
+fi
+exit 0
+# ── END launch + post-exit harvest ───────────────────────────────────────

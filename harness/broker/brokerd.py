@@ -141,6 +141,50 @@ BUILD_ACTIVE_STATES = frozenset(
 BUILD_SIDECAR_SUFFIX = ".build.json"
 BUILD_SIDECAR_SCHEMA = 1
 
+# ---------------------------------------------------------------- publish lines
+# SPECS/2026-08-13-build-publish-path.md item 3. The build session no longer
+# pushes anything: after the container exits, run-build.sh harvests HOST-side
+# (as res-<name>, where the gatehouse group actually exists) and prints one
+# machine-readable line per entitled repo. Those lines are the ONLY evidence the
+# reaper has, and the only evidence it is allowed to have — the harvest IS the
+# verification, and the reaper measures nothing itself (one mechanism; two can
+# disagree).
+#
+# Shapes, all anchored at line start because they arrive INTERLEAVED with
+# session output in the same spool file and a lookalike mid-sentence must never
+# be read as a measurement:
+#   PUBLISHED <repo>.git <sha>            branch verified by rev-parse IN the
+#                                         gatehouse after a plain (no-force) push
+#   PUBLISH-FAILED <repo>.git <git error> push or verification failed, verbatim
+#   NO-COMMITS <repo>.git                 honest zero-work line
+#   QUARANTINED <repo> <path>             provisioning moved an unharvested
+#                                         previous clone aside (printed BEFORE
+#                                         the session runs)
+# ABSENCE of all of them on a unit that exited 0 is itself the failure signal —
+# a timeout-killed wrapper skips the harvest by design and prints nothing.
+_PUBLISH_REPO_RE = r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}"
+_PUBLISH_LINE_RES = (
+    ("published", re.compile(
+        rf"^PUBLISHED[ \t]+({_PUBLISH_REPO_RE}\.git)[ \t]+([0-9a-fA-F]{{7,64}})"
+        r"[ \t]*$")),
+    ("failed", re.compile(
+        rf"^PUBLISH-FAILED[ \t]+({_PUBLISH_REPO_RE}\.git)[ \t]+(\S.*)$")),
+    ("no_commits", re.compile(
+        rf"^NO-COMMITS[ \t]+({_PUBLISH_REPO_RE}\.git)[ \t]*$")),
+    # The quarantine line names the repo WITHOUT .git (it is a workspace clone,
+    # not a bare repo) and carries a path we only ever echo, never open.
+    ("quarantined", re.compile(
+        rf"^QUARANTINED[ \t]+({_PUBLISH_REPO_RE})[ \t]+(\S.*)$")),
+)
+# Bounds on what reaches the banner. The banner is posted to #custodian through
+# the same un-truncated path file-proposal uses, and every field below is
+# wrapper/git text: cap the COUNT (a stuck loop cannot flood the channel) and
+# the LENGTH of each free-form field. Two entitled repos is the real number; 8
+# leaves headroom without letting a banner become a log dump.
+MAX_PUBLISH_LINES = 8
+MAX_PUBLISH_ERR_CHARS = 200
+MAX_QUARANTINE_PATH_CHARS = 160
+
 
 def build_unit_name(slug: str) -> str:
     """`2026-07-21-gif-picker` -> `disjorn-build-2026-07-21-gif-picker.service`.
@@ -637,7 +681,13 @@ def _parse_build_report(stdout: str) -> dict:
     BL-D2: the input is now the bounded TAIL of the build's stdout file, not
     the whole stream, so it may begin mid-line. Hence the second attempt on the
     last non-blank line — the report is the last thing printed, and a truncated
-    head must not cost us the report."""
+    head must not cost us the report.
+
+    2026-08-13: the report is no longer the last thing on stdout — the wrapper's
+    harvest prints after the container exits. Callers pass the tail through
+    _strip_publish_lines first, so "the last non-blank line" still means the
+    SESSION's last line. This report is enrichment now; the publish lines decide
+    whether a build is done."""
     text = stdout.strip()
     files = tests = diff = "n/a"
     data: Any = None
@@ -682,6 +732,85 @@ def _parse_build_report(stdout: str) -> dict:
     return {"files": files, "tests": tests, "diff": diff}
 
 
+def _match_publish_line(line: str) -> "tuple[str, tuple[str, ...]] | None":
+    """One line of wrapper stdout -> (kind, fields), or None if it is not a
+    publish-protocol line. Anchored at the line START and strict about shape, so
+    a session that WRITES about `PUBLISHED foo.git deadbeef` in its prose (or a
+    log line that embeds one) can never be read as a measurement."""
+    for kind, rx in _PUBLISH_LINE_RES:
+        m = rx.match(line)
+        if m:
+            return kind, m.groups()
+    return None
+
+
+def _parse_publish_lines(out: str) -> dict:
+    """The wrapper's harvest report, extracted from a build's stdout.
+
+    Returns {published: [(repo, sha)], failed: [(repo, error)],
+             no_commits: [repo], quarantined: [(repo, path)]} — measurements
+    only, in the order printed. THE REAPER MEASURES NOTHING ITSELF: everything
+    the banner says about what left the container is one of these lines, because
+    the harvest is the verification and a second verification path could only
+    ever disagree with it (SPECS/2026-08-13-build-publish-path.md item 3).
+
+    Deliberately total and quiet: unparseable input yields empty lists, which
+    the caller must read as FAILED (absent lines = failure), never as success.
+    Duplicates collapse — the reaper feeds this the log's HEAD and TAIL, which
+    can overlap on a small file, and one repo published twice is a wrapper bug
+    not two publications. Every list is capped (MAX_PUBLISH_LINES) and every
+    free-form field truncated: this text goes to #custodian unbounded otherwise.
+    """
+    found: dict = {"published": [], "failed": [], "no_commits": [],
+                   "quarantined": []}
+    for raw in (out or "").splitlines():
+        hit = _match_publish_line(raw.rstrip("\r"))
+        if hit is None:
+            continue
+        kind, groups = hit
+        if kind == "published":
+            entry: Any = (groups[0], groups[1].lower())
+        elif kind == "failed":
+            entry = (groups[0], groups[1].strip()[:MAX_PUBLISH_ERR_CHARS])
+        elif kind == "no_commits":
+            entry = groups[0]
+        else:
+            entry = (groups[0], groups[1].strip()[:MAX_QUARANTINE_PATH_CHARS])
+        bucket = found[kind]
+        if entry in bucket or len(bucket) >= MAX_PUBLISH_LINES:
+            continue
+        bucket.append(entry)
+    return found
+
+
+def _strip_publish_lines(out: str) -> str:
+    """The same stdout with the wrapper's protocol lines removed — what the
+    SESSION printed, which is what _parse_build_report must see. The harvest
+    prints after the container exits, so its lines land AFTER the session's
+    final JSON report; feeding them to the report parser (which reads the last
+    non-blank line) would throw the report away on every successful build."""
+    return "\n".join(ln for ln in (out or "").splitlines()
+                     if _match_publish_line(ln.rstrip("\r")) is None)
+
+
+def _publish_reported(publish: dict) -> bool:
+    """Did the harvest report a VERDICT for any repo? Quarantine lines
+    deliberately do not count: provisioning prints them before the session even
+    starts, so a quarantine line plus silence still means the harvest never
+    ran."""
+    return any(publish.get(k) for k in ("published", "failed", "no_commits"))
+
+
+def _quarantine_suffix(quarantined) -> str:
+    """Quarantine notices, one line each, appended to WHATEVER banner results.
+    A quarantined clone is work that was preserved instead of deleted (the
+    08-13 rescue that only happened because a human posted a warning); it is
+    never allowed to be the silent part of a message."""
+    return "".join(
+        f"\nquarantined: {repo} -> {path} — unharvested work from an earlier "
+        f"run, preserved not deleted" for repo, path in quarantined)
+
+
 def format_build_started(*, slug: str, branch: str, confirmed_by: str,
                          seq: int, eta_sec: int) -> str:
     """The 'started' state-transition line. Names the spec, the branch, who
@@ -695,22 +824,102 @@ def format_build_started(*, slug: str, branch: str, confirmed_by: str,
 
 
 def format_build_done(*, slug: str, branch: str, files: str, tests: str,
-                      diff: str, tier: str = "pending") -> str:
-    """The 'done' state-transition line: files touched, tests run/result, a
-    one-line diff summary, the branch, and the advisory tier. Tier is 'pending'
-    by default — the reaper does not invoke classify-diff (a separate verb,
-    ships OFF); a human runs it on the branch. Nothing merged, ever."""
-    return (f"build done | {slug} -> {branch} | tier {tier} | "
-            f"files: {files} | tests: {tests} | diff: {diff} | "
-            f"on the branch for review — nothing merged")
+                      diff: str, tier: str = "pending", published=(),
+                      no_commits=(), quarantined=()) -> str:
+    """The 'done' state-transition line. Its LOAD-BEARING field is now what the
+    wrapper measured — `published: <repo>.git <sha>` per entitled repo, or the
+    honest 'no commits' line when the build produced none. files/tests/diff are
+    the session's own report and stay as ENRICHMENT: publish lines decide truth,
+    the report decorates. Tier is 'pending' by default — the reaper does not
+    invoke classify-diff (a separate verb, ships OFF) and, per the 08-13 spec,
+    runs no verification of its own at all. Nothing merged, ever.
+
+    'on the branch for review' without a measured sha is deliberately
+    unprintable from here: with no PUBLISHED line the caller never reaches this
+    formatter (see format_build_outcome)."""
+    if published:
+        outcome = "published: " + ", ".join(f"{repo} {sha}"
+                                            for repo, sha in published)
+        closing = "in the gatehouse for review — nothing merged"
+    elif no_commits:
+        outcome = ("no commits produced — nothing published, no branch exists ("
+                   + ", ".join(no_commits) + ")")
+        closing = "nothing to review — nothing merged"
+    else:                       # unreachable via format_build_outcome
+        outcome = "published: none reported"
+        closing = "nothing to review — nothing merged"
+    return (f"build done | {slug} -> {branch} | tier {tier} | {outcome} | "
+            f"files: {files} | tests: {tests} | diff: {diff} | {closing}"
+            + _quarantine_suffix(quarantined))
 
 
-def format_build_failed(*, slug: str, branch: str, reason: str) -> str:
+def format_build_failed(*, slug: str, branch: str, reason: str, published=(),
+                        no_commits=(), quarantined=()) -> str:
     """The 'failed' state-transition line — LOUD. A stalled build goes quiet
-    then lands here (never a heartbeat); the branch keeps whatever exists and a
-    human is told to look."""
-    return (f"BUILD FAILED | {slug} -> {branch} | {reason} | "
-            f"the branch holds what there is — a human should look")
+    then lands here (never a heartbeat) and a human is told to look.
+
+    It also states WHERE THE WORK IS, from the harvest lines and nothing else: a
+    failed build that published something must say so, and one that published
+    nothing must not imply a branch that does not exist (the phantom-branch
+    claim the 08-13 spec exists to retire)."""
+    if published:
+        where = ("published anyway: "
+                 + ", ".join(f"{repo} {sha}" for repo, sha in published))
+    elif no_commits:
+        where = "nothing published — no commits, no branch exists"
+    else:
+        where = "nothing published — no branch to review"
+    return (f"BUILD FAILED | {slug} -> {branch} | {reason} | {where} | "
+            f"a human should look" + _quarantine_suffix(quarantined))
+
+
+# The fail-closed clause. A wrapper that is killed at the cap skips its harvest
+# BY DESIGN and prints nothing, and a wrapper that predates the publish contract
+# also prints nothing: silence is indistinguishable between them and must never
+# be read as success. This is the one banner the reaper prints from an ABSENCE.
+NO_HARVEST_REASON = (
+    "the wrapper printed no publish lines — the harvest never reported "
+    "(killed at the cap, or a wrapper predating the publish contract): "
+    "outcome unknown, nothing was published")
+
+
+def format_build_outcome(*, slug: str, branch: str, publish: dict,
+                         report: "dict | None" = None,
+                         unit_reason: "str | None" = None) -> str:
+    """THE decision: done or failed, from the wrapper's harvest lines. One
+    implementation, called by both reapers (the live one and the adopted one) —
+    two copies of this ladder would eventually narrate two different truths
+    about the same build.
+
+    In order, and the order is the contract:
+      1. the unit itself failed (`unit_reason`) -> FAILED, carrying whatever the
+         harvest still managed to report (a container can die clean and the
+         push still be rejected);
+      2. ANY PUBLISH-FAILED line -> FAILED with the verbatim git error(s);
+      3. at least one PUBLISHED line -> done, naming repo + sha;
+      4. only NO-COMMITS lines -> done, honestly: no commits, no branch;
+      5. nothing at all -> FAILED (NO_HARVEST_REASON). Never assume success
+         from silence."""
+    report = report or {"files": "n/a", "tests": "n/a", "diff": "n/a"}
+    published = publish.get("published", [])
+    quarantined = publish.get("quarantined", [])
+    no_commits = publish.get("no_commits", [])
+    failed = publish.get("failed", [])
+    common = {"published": published, "no_commits": no_commits,
+              "quarantined": quarantined}
+    if unit_reason is not None:
+        return format_build_failed(slug=slug, branch=branch, reason=unit_reason,
+                                   **common)
+    if failed:
+        errors = "; ".join(f"{repo}: {err}" for repo, err in failed)
+        return format_build_failed(slug=slug, branch=branch,
+                                   reason=f"publish failed: {errors}", **common)
+    if published or no_commits:
+        return format_build_done(slug=slug, branch=branch, files=report["files"],
+                                 tests=report["tests"], diff=report["diff"],
+                                 tier="pending", **common)
+    return format_build_failed(slug=slug, branch=branch,
+                               reason=NO_HARVEST_REASON, **common)
 
 
 # --------------------------------------------------------------------------
@@ -1373,6 +1582,35 @@ class Broker:
             return ""
         return data.decode("utf-8", "replace")
 
+    @staticmethod
+    def _read_build_head(path: str, limit: int = MAX_BUILD_LOG_TAIL) -> str:
+        """The FIRST `limit` bytes, truncated at the last complete line.
+
+        Only the quarantine notices need this: provisioning prints QUARANTINED
+        before the session runs, so on a chatty build those lines are tens of
+        megabytes above the tail the reaper reads — and a quarantined clone that
+        nobody is told about is the exact failure the quarantine clause exists to
+        prevent. Bounded the same way as the tail (one `limit` per file, so the
+        reaper's ceiling is 2x MAX_BUILD_LOG_TAIL per build), and the trailing
+        partial line is dropped so a half-written sha can never be quoted as a
+        measurement."""
+        try:
+            with open(path, "rb") as fh:
+                data = fh.read(limit + 1)
+        except OSError:
+            return ""
+        if len(data) <= limit:
+            return data.decode("utf-8", "replace")
+        text = data[:limit].decode("utf-8", "replace")
+        return text[:text.rfind("\n") + 1]
+
+    def _harvest_report(self, out_path: str, out_tail: str) -> dict:
+        """The wrapper's publish lines for one build: parsed from the log's head
+        AND tail, because the two ends carry different halves of the protocol
+        (quarantine at provisioning time, verdicts after the container exits)."""
+        return _parse_publish_lines(self._read_build_head(out_path) + "\n"
+                                    + out_tail)
+
     # ------------------------------------------- transient-unit lifecycle (L4)
 
     def _start_build_argv(self, key: str, default: list[str]) -> list[str]:
@@ -1496,7 +1734,14 @@ class Broker:
         stderr and exit status (that is what --pipe means), so everything below
         reads the same — but killing it no longer kills the BUILD, which lives
         in a transient unit outside this broker's cgroup. So the timeout path
-        stops the UNIT first and only then reaps the local process."""
+        stops the UNIT first and only then reaps the local process.
+
+        2026-08-13 (publish path): the terminal banner is derived from the
+        wrapper's PUBLISHED / PUBLISH-FAILED / NO-COMMITS / QUARANTINED lines in
+        that spool, through format_build_outcome. The reaper runs NO
+        verification of its own — no rev-parse, no git, no second look at the
+        gatehouse. The harvest is the verification; a second mechanism could
+        only ever disagree with it."""
         slug, branch = meta["slug"], meta["branch"]
         try:
             try:
@@ -1508,30 +1753,45 @@ class Broker:
                     proc.communicate()
                 except Exception:  # noqa: BLE001 — already reaping
                     pass
-                self._narrate(format_build_failed(
+                # A killed wrapper never harvests (by design), so there are no
+                # verdict lines to find — but provisioning's QUARANTINE notices
+                # are already in the log, and this is exactly the run whose work
+                # is sitting in a quarantine directory. Route through the same
+                # decision so they are appended here too.
+                self._narrate(format_build_outcome(
                     slug=slug, branch=branch,
-                    reason=f"timed out after {timeout}s — killed"
-                           + ("" if stopped else " (unit stop reported a problem;"
-                                                 " check systemctl status "
-                                                 f"{build_unit_name(slug)})")))
+                    publish=self._harvest_report(
+                        out_path, self._read_build_tail(out_path)),
+                    unit_reason=f"timed out after {timeout}s — killed"
+                                + ("" if stopped else
+                                   " (unit stop reported a problem; check "
+                                   f"systemctl status {build_unit_name(slug)})")))
                 return
             except Exception as exc:  # noqa: BLE001 — broken pipe etc. = a failure
-                self._narrate(format_build_failed(
-                    slug=slug, branch=branch, reason=f"build error: {exc!r}"))
+                self._narrate(format_build_outcome(
+                    slug=slug, branch=branch,
+                    publish=self._harvest_report(
+                        out_path, self._read_build_tail(out_path)),
+                    unit_reason=f"build error: {exc!r}"))
                 return
 
             out_s = self._read_build_tail(out_path)
             err_s = self._read_build_tail(err_path)
+            # The wrapper's harvest lines are the evidence; the session's JSON
+            # report is stripped out of their way and demoted to enrichment
+            # (08-13 spec item 3). A nonzero exit is still a failure, but it no
+            # longer decides ALONE: the harvest may have published before the
+            # wrapper exited nonzero, and that must be named too.
+            publish = self._harvest_report(out_path, out_s)
+            session_out = _strip_publish_lines(out_s)
+            report = _parse_build_report(session_out)
             rc = getattr(proc, "returncode", None)
+            unit_reason = None
             if rc is not None and rc != 0:
-                self._narrate(format_build_failed(
-                    slug=slug, branch=branch,
-                    reason=f"exit {rc}: {(err_s or out_s).strip()[:400]}"))
-                return
-            report = _parse_build_report(out_s)
-            self._narrate(format_build_done(
-                slug=slug, branch=branch, files=report["files"],
-                tests=report["tests"], diff=report["diff"], tier="pending"))
+                unit_reason = f"exit {rc}: {(err_s or session_out).strip()[:400]}"
+            self._narrate(format_build_outcome(
+                slug=slug, branch=branch, publish=publish, report=report,
+                unit_reason=unit_reason))
         finally:
             self._unlink_build_logs(out_path, err_path)
             self._remove_build_sidecar(slug)
@@ -1651,10 +1911,14 @@ class Broker:
                     break
                 if deadline and time.time() > deadline:
                     self._stop_build_unit(slug)
-                    self._narrate(format_build_failed(
+                    out_path = str(rec.get("out_path") or "")
+                    self._narrate(format_build_outcome(
                         slug=slug, branch=rec.get("branch", f"loop/{slug}"),
-                        reason=f"timed out after {rec.get('timeout_sec')}s "
-                               "— killed (build re-adopted after a broker restart)"))
+                        publish=self._harvest_report(
+                            out_path, self._read_build_tail(out_path)),
+                        unit_reason=f"timed out after {rec.get('timeout_sec')}s "
+                                    "— killed (build re-adopted after a broker "
+                                    "restart)"))
                     break
                 time.sleep(self.BUILD_POLL_SEC)
             else:
@@ -1670,29 +1934,39 @@ class Broker:
         """The done/failed line for a build this process did not launch.
 
         There is no exit status to read: `--collect` unloads the unit when it
-        ends, and systemd cannot tell us about a unit it has forgotten. So the
-        REPORT is the evidence — the build session's final JSON on stdout. If it
-        is there the build finished its work and we say done; if it is not we
-        say so plainly rather than guessing, because a build that vanished
-        mid-flight and a build that failed are the same thing to a reviewer:
-        look at the branch."""
+        ends, and systemd cannot tell us about a unit it has forgotten. The
+        EVIDENCE is therefore the same evidence the live reaper uses — the
+        wrapper's publish lines in the spool (08-13 spec item 3). It used to be
+        the session's JSON report, which said what the session BELIEVED it had
+        done; the harvest lines say what actually reached the gatehouse, and
+        both reapers must derive the same banner from them or this process's
+        restart would change a build's story.
+
+        A build that left no publish lines is still narrated loudly rather than
+        guessed at: vanished mid-flight and failed are the same thing to a
+        reviewer, and neither one published anything."""
         slug = rec["slug"]
         branch = rec.get("branch", f"loop/{slug}")
-        out_s = self._read_build_tail(str(rec.get("out_path") or ""))
+        out_path = str(rec.get("out_path") or "")
+        out_s = self._read_build_tail(out_path)
         err_s = self._read_build_tail(str(rec.get("err_path") or ""))
-        report = _parse_build_report(out_s)
-        if state == "failed" or report["files"] == "n/a":
-            reason = (err_s or out_s).strip()[:400]
-            self._narrate(format_build_failed(
-                slug=slug, branch=branch,
-                reason=("re-adopted after a broker restart and left no report "
-                        f"on stdout (unit state {state}) — outcome unknown, "
-                        "check the branch"
-                        + (f": {reason}" if reason else ""))))
-            return
-        self._narrate(format_build_done(
-            slug=slug, branch=branch, files=report["files"],
-            tests=report["tests"], diff=report["diff"], tier="pending"))
+        publish = self._harvest_report(out_path, out_s)
+        session_out = _strip_publish_lines(out_s)
+        report = _parse_build_report(session_out)
+        note = (err_s or session_out).strip()[:400]
+        unit_reason = None
+        if state == "failed":
+            unit_reason = (f"re-adopted after a broker restart; the unit ended in "
+                           f"state {state} — outcome unknown"
+                           + (f": {note}" if note else ""))
+        elif not _publish_reported(publish):
+            unit_reason = ("re-adopted after a broker restart and the wrapper "
+                           f"printed no publish lines (unit state {state}) — "
+                           "the harvest never reported: outcome unknown, nothing "
+                           "was published" + (f": {note}" if note else ""))
+        self._narrate(format_build_outcome(
+            slug=slug, branch=branch, publish=publish, report=report,
+            unit_reason=unit_reason))
 
     def _verb_start_build(self, resident: str, args: dict) -> tuple[dict, str]:
         """Launch a DETACHED build of a CONFIRMED spec to `loop/<slug>` (WP-L4).

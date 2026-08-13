@@ -37,10 +37,17 @@ Everything the seat can see or touch, and nothing else. Set by
 | `/config/env` | `/dev/null` | ro | The credential file, masked from inside. Hygiene, not a wall — see § 3. |
 | `/opt/disjorn` | `/srv/disjorn-ro` | ro | The committed repo mirror. The container-side prefix `[residents.<r>.path_map]` maps, so a build can `classify-diff` its own work. |
 | `/opt/spine` | `/srv/disjorn-spine/<name>` | ro | The spine mirror, **when one is published** — see § 2. |
-| `/run/gatehouse` | `/var/lib/disjorn-broker/gatehouse` | **rw** | The one writable path out. Bare repos; see § 5. |
 
 **Absent on purpose, and each absence is a tested property:**
 
+- **No gatehouse.** Removed 2026-08-13
+  (`SPECS/2026-08-13-build-publish-path.md`). `/run/gatehouse` used to be here,
+  **rw**, described as "the one writable path out". It could not be: `--userns
+  keep-id` does not map supplementary groups, so the `gatehouse` group does not
+  exist inside the container and an in-container push worked only by
+  uid-ownership accident. **There is now no writable path out of the container
+  at all** — the product leaves via the wrapper's post-exit harvest, on the
+  host, as `res-<name>`. See § 5.
 - **No broker socket.** See § 4.
 - **No `/opt/house_memory`.** The deployed copy is a read-only non-repo, and
   mounting it is what led a blocked session to conclude that half of its spec
@@ -197,9 +204,10 @@ rather than at a filter:
 - Removing the mount kills the whole class rather than filtering a list, which
   is this house's preferred shape: walls are physical.
 
-A build does not need verbs. Its worktree is writable, its remote is the
-gatehouse, and its report is its stdout — which the broker's reaper already
-reads and posts.
+A build does not need verbs. Its worktree is writable, its report is its stdout
+— which the broker's reaper already reads and posts — and since 2026-08-13 it
+has no remote at all: publishing is the wrapper's job, out on the host, after
+the session ends (§ 5).
 
 **BR-1 is the precondition for any widening, and BR-1 is open.** `verbs.toml`
 switches are per **resident uid**, and the socket presents that uid in
@@ -225,16 +233,65 @@ hold the verb, so the ruling gets made with the fact in front of it.
 **One way out: a `loop/<slug>` branch in a bare gatehouse repo. A human reads
 the diff and merges.**
 
+**No writable path out; the product leaves via the wrapper's post-exit
+harvest.** Rewritten 2026-08-13 from `SPECS/2026-08-13-build-publish-path.md`
+(confirmed by plink, #custodian seq 1211). The session no longer pushes and no
+longer has a remote; `run-build.sh` publishes for it, on the host, after the
+container exits.
+
 - The branch name is `loop/<slug>`, and the slug keeps its `YYYY-MM-DD-` prefix,
   so **branch name == spec basename, 1:1** (BL-D4). Any `loop/…` branch traces
   back to exactly one spec with no lookup.
 - The gatehouse holds **bare** repos: no working tree, so a push deploys nothing
   and merges nothing. That is the wall, not the group bits.
-- `run-build.sh` clones **every** `*.git` in the gatehouse, fresh, per run, and
-  rewrites each `origin` to the container-side path. Fresh every time on
-  purpose: a stale checkout that silently builds against yesterday's tree is a
-  failure class this house has already spent days on.
-- The build pushes with `git push origin HEAD` and stops. Nothing lands itself.
+- `run-build.sh` clones the **entitled set only** — `disjorn.git` plus
+  `<name>.git` — fresh, per run, and **removes `origin` from each clone**. A
+  missing entitled repo is a loud refusal before podman runs; a foreign repo in
+  the gatehouse is simply not cloned. Fresh every time on purpose: a stale
+  checkout that silently builds against yesterday's tree is a failure class this
+  house has already spent days on. `origin` is removed rather than repointed
+  because with the mount gone, a remote aimed at a path the container cannot see
+  is a trap — "no such remote" is a better error than a real-looking path.
+- **The session commits and stops.** Its contract ends at "commit to
+  `loop/<slug>` in `~/work/<repo>`".
+- **The wrapper harvests after a clean container exit**, per entitled repo:
+  compare the branch head against the recorded clone point, push it into
+  `$GATEHOUSE/<repo>.git` with **no force of any kind**, then `rev-parse` *in
+  the gatehouse* and print exactly one machine-readable line on stdout:
+
+  | Line | Meaning |
+  |---|---|
+  | `PUBLISHED <repo>.git <sha>` | measured in the gatehouse after the push |
+  | `NO-COMMITS <repo>.git` | the branch never moved past the clone point |
+  | `PUBLISH-FAILED <repo>.git <git error>` | verbatim, flattened to one line |
+
+  A non-fast-forward is **refused loudly, never forced** — it means the
+  gatehouse branch moved under us, and the wrapper is not entitled to decide
+  whose commits lose.
+
+- **The done-banner is derived from those lines and nothing else.** No separate
+  verification path: the harvest *is* the verification, because one mechanism
+  cannot disagree with itself. A nonzero container exit prints
+  `HARVEST-SKIPPED` and publishes nothing. A wrapper killed at
+  `start_build.timeout_sec` dies before the harvest, so **absence of the lines
+  is the FAILED signal** — silence is never read as success.
+- **Killing the wrapper kills the container.** The wrapper is podman's parent
+  now (the `exec` is gone, so it can outlive the container and harvest), so a
+  killed parent could otherwise leave a container writing into `~/work` while
+  the next launch deletes it. A trap covers EXIT/INT/TERM and the watchdog
+  sibling covers SIGKILL, which no trap can see.
+- **Quarantine, not deletion.** Provisioning refuses to `rm -rf` a workspace
+  clone holding `loop/*` commits the gatehouse does not have: it moves it to
+  `$HOME_VOL/quarantine/<repo>-<slug>-<epoch>`, prints `QUARANTINED <repo>
+  <path>` on stdout, and provisions fresh alongside. The 2026-08-13 rescue
+  existed only because a human posted a warning in-channel and nobody launched;
+  a human remembering is not a design.
+
+**Multi-owner objects are by design here**, now that seats publish host-side
+into repos they do not own: `disjorn.git/objects` will hold `res-gable` and
+`res-claudette` files side by side. That is fine precisely because the 08-12
+verify fix asserts group-**read** on objects, not group-write. Written down so
+nobody reads mixed owners as drift in three weeks and `chown`s it.
 
 ### The repo recipe, applied at creation
 
@@ -278,9 +335,12 @@ out you forgot.
 - **No branch-namespace enforcement.** `MERGE-CONTRACT.md` specifies a
   pre-receive hook keeping residents out of `main` and out of each other's
   namespaces. It is **not built.** Until it is, "a resident cannot move gatehouse
-  main" is a fact about nobody having tried, not a wall. This is not new — the
-  gatehouse has been mounted rw into Claudette's container since 2026-08-05 —
-  but it is worth naming in the file that describes the exit.
+  main" is a fact about nobody having tried, not a wall. The 08-13 harvest
+  narrows this without closing it: the gatehouse is no longer reachable from
+  inside the container at all, so the only thing that pushes is this wrapper,
+  which pushes exactly `refs/heads/loop/<slug>` and never forces. The res-*
+  **uid** still has host-side write access to the whole gatehouse, so the hook
+  is still the wall and is still missing.
 - **No merge verb for Tier 2, ever.** The human gate is out-of-band by design.
 
 ---

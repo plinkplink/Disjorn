@@ -21,7 +21,13 @@ from pathlib import Path
 
 import pytest
 
-from broker_testlib import PY, FakeBuildProc, BrokerHarness
+from broker_testlib import (
+    PY,
+    STUB_SHA,
+    BrokerHarness,
+    FakeBuildProc,
+    build_out,
+)
 from brokerd import (
     MAX_BUILD_LOG_TAIL,
     Broker,
@@ -138,9 +144,13 @@ def test_start_build_launches_confirmed_spec(harness):
     assert any(b.startswith("build started | 2026-07-21-gif-picker "
                             "-> loop/2026-07-21-gif-picker")
                and "confirmed by plink (#custodian seq 139)" in b for b in bodies)
+    # DELIBERATE CONTRACT CHANGE (2026-08-13 publish path): the done line's
+    # load-bearing field is the wrapper's measurement, not boilerplate — it
+    # names the repo and the sha that are actually in the gatehouse.
     assert any(b.startswith("build done | 2026-07-21-gif-picker "
                             "-> loop/2026-07-21-gif-picker")
-               and "tier pending" in b and "nothing merged" in b for b in bodies)
+               and "tier pending" in b and "nothing merged" in b
+               and f"published: disjorn.git {STUB_SHA}" in b for b in bodies)
     # the build actually ran and read the spec on stdin.
     (rec,) = harness.build_records()
     assert "--model" in rec["argv"] and "claude-opus-4-8" in rec["argv"]
@@ -250,7 +260,7 @@ def test_start_build_outlives_the_request(harness):
     blocking fake proc gates communicate(); the call returns started=True
     before we release it."""
     harness.set_verbs(**{"start-build": True})
-    proc = FakeBuildProc(out=b'{"files": [], "tests": "n/a", "diff": ""}',
+    proc = FakeBuildProc(out=build_out('{"files": [], "tests": "n/a", "diff": ""}'),
                          block=True)
     spawn = harness.use_fake_build(proc_factory=lambda: proc)
     harness.write_spec("2026-07-21-slow.md")
@@ -334,12 +344,16 @@ def test_narration_formatter_shapes():
     assert "no merge, no push" in started
 
     done = format_build_done(slug="x", branch="loop/x", files="a.py, b.py",
-                             tests="12 passed", diff="+40 -2")
+                             tests="12 passed", diff="+40 -2",
+                             published=[("disjorn.git", "abc1234")])
     assert "tier pending" in done and "files: a.py, b.py" in done
+    assert "published: disjorn.git abc1234" in done
     assert "nothing merged" in done
 
     failed = format_build_failed(slug="x", branch="loop/x", reason="exit 1: boom")
     assert failed.startswith("BUILD FAILED | x -> loop/x | exit 1: boom")
+    # ...and a failed build never implies a branch that does not exist.
+    assert "nothing published" in failed and "a human should look" in failed
 
 
 def test_spec_parsers():
@@ -447,6 +461,11 @@ def test_build_output_is_bounded_and_never_buffered_in_the_broker(harness):
     done = [b for b in bodies if b.startswith("build done")]
     assert done, bodies
     assert "files: big.py" in done[0] and "tests: 1 passed" in done[0]
+    assert f"published: disjorn.git {STUB_SHA}" in done[0]
+    # The quarantine notice was printed by PROVISIONING, 8MB above the tail:
+    # it only reaches the banner because the reaper reads the log's head too.
+    assert "quarantined: disjorn -> /home/res-gable/work/quarantine/disjorn-0813" \
+        in done[0]
     # the whole narration stays small — nothing resident-influenced is echoed
     # into a privileged path unbounded.
     assert len(done[0]) < 2000
@@ -498,8 +517,7 @@ def test_broker_does_not_hold_the_build_output_handles(harness):
 @pytest.mark.parametrize("factory,expect", [
     (lambda: FakeBuildProc(out=b"", err=b"boom", rc=1), "BUILD FAILED"),
     (lambda: FakeBuildProc(raise_timeout=True), "BUILD FAILED"),
-    (lambda: FakeBuildProc(out=b'{"files": [], "tests": "ok", "diff": ""}'),
-     "build done"),
+    (lambda: FakeBuildProc(out=build_out()), "build done"),
 ])
 def test_build_logs_are_cleaned_up_on_every_exit_path(harness, factory, expect):
     """done, failed AND timed-out all delete both temp files."""

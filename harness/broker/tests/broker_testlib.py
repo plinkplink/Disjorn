@@ -129,36 +129,68 @@ JOURNAL_STUB = textwrap.dedent("""\
         print(f"2026-07-19T00:00:{i:02d} disjorn line {i}")
 """)
 
-BUILD_STUB = textwrap.dedent("""\
+# 2026-08-13 publish path (SPECS/2026-08-13-build-publish-path.md item 3): the
+# session commits and never pushes; run-build.sh harvests HOST-side after the
+# container exits and prints one machine-readable line per entitled repo. THOSE
+# LINES are what the reaper derives its banner from — the session's JSON report
+# is enrichment now, not evidence. So every stub standing in for a SUCCESSFUL
+# build has to print one, and a stub that prints only a report is a build whose
+# harvest never reported (which the broker fails closed, on purpose — several
+# tests exercise exactly that).
+STUB_SHA = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
+STUB_PUBLISHED = f"PUBLISHED disjorn.git {STUB_SHA}"
+STUB_REPORT = json.dumps({"files": ["server/app/x.py"], "tests": "12 passed",
+                          "diff": "+40 -2", "branch": "loop/stub"})
+
+
+def build_out(report: str = '{"files": [], "tests": "ok", "diff": ""}',
+              *, publish: str = STUB_PUBLISHED) -> bytes:
+    """Canned build stdout: the wrapper's harvest line(s) after the session's
+    report, in the order production prints them (the harvest runs once the
+    container has exited). Pass publish="" for a build whose harvest never
+    reported."""
+    lines = [report] + ([publish] if publish else [])
+    return ("\n".join(lines) + "\n").encode()
+
+
+BUILD_STUB = textwrap.dedent(f"""\
     #!/usr/bin/env python3
     # Stub build session (stands in for run-build.sh + the headless CC build):
     # record the argv (after the record-file arg) AND the spec read from stdin,
-    # then print a JSON report like a real build session would, exit 0.
+    # print a JSON report like a real build session would, then print the
+    # wrapper's post-exit harvest line, exit 0.
     import json, sys
     record = sys.argv[1]
     payload = sys.stdin.read()
     with open(record, "a") as fh:
-        fh.write(json.dumps({"argv": sys.argv[2:], "stdin": payload}) + "\\n")
-    print(json.dumps({"files": ["server/app/x.py"], "tests": "12 passed",
-                      "diff": "+40 -2", "branch": "loop/stub"}))
+        fh.write(json.dumps({{"argv": sys.argv[2:], "stdin": payload}}) + "\\n")
+    print({STUB_REPORT!r})
+    print({STUB_PUBLISHED!r})
 """)
 
-FLOOD_BUILD_STUB = textwrap.dedent("""\
+FLOOD_BUILD_STUB = textwrap.dedent(f"""\
     #!/usr/bin/env python3
     # BL-D2: a build session that FLOODS stdout (and stderr) before printing
     # its report — the shape that used to balloon the privileged broker's RSS
     # when output was piped. argv[1] = record file, argv[2] = MB to emit.
+    #
+    # It also prints a QUARANTINED line FIRST (provisioning, before the session
+    # runs) and its harvest lines LAST, which is the real ordering — and the
+    # reason the reaper reads the log's head as well as its tail: with 8MB in
+    # between, a tail-only reaper would never see the quarantine notice.
     import json, sys
     record = sys.argv[1]
     megabytes = int(sys.argv[2])
     payload = sys.stdin.read()
     with open(record, "a") as fh:
-        fh.write(json.dumps({"argv": sys.argv[3:], "stdin": payload}) + "\\n")
+        fh.write(json.dumps({{"argv": sys.argv[3:], "stdin": payload}}) + "\\n")
+    print("QUARANTINED disjorn /home/res-gable/work/quarantine/disjorn-0813")
     chunk = "x" * 1024
     for _ in range(megabytes * 1024):
         sys.stdout.write(chunk + "\\n")
     sys.stderr.write("noise\\n" * 1000)
-    print(json.dumps({"files": ["big.py"], "tests": "1 passed", "diff": "+1 -0"}))
+    print(json.dumps({{"files": ["big.py"], "tests": "1 passed", "diff": "+1 -0"}}))
+    print({STUB_PUBLISHED!r})
 """)
 
 # A minimal spec matching TEMPLATE.md's parseable structure. Callers override
@@ -410,11 +442,13 @@ class BrokerHarness:
     def use_fake_build(self, proc_factory=None) -> FakeBuildSpawn:
         """Swap in an injectable _build_spawn (mock the exec) and return it for
         inspection. Default factory yields a clean, immediately-returning proc
-        with a valid JSON report."""
+        with a valid JSON report AND the wrapper's PUBLISHED line — a build with
+        no publish line is a FAILED build now, so the default has to carry one
+        or every test that just wants a successful build gets a failure."""
         if proc_factory is None:
             def proc_factory():
-                return FakeBuildProc(
-                    out=b'{"files": ["a.py"], "tests": "ok", "diff": "+1 -0"}')
+                return FakeBuildProc(out=build_out(
+                    '{"files": ["a.py"], "tests": "ok", "diff": "+1 -0"}'))
         spawn = FakeBuildSpawn(proc_factory)
         self.broker._build_spawn = spawn
         return spawn
