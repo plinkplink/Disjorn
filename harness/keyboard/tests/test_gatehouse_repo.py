@@ -18,6 +18,14 @@ REFUSE rather than proceed when they cannot be done properly.
 
 GIT_CONFIG_SYSTEM redirects `git config --system` to a scratch file (git
 2.32+), so the safe.directory half is exercised without writing /etc/gitconfig.
+
+WHAT GIT PROMISES ABOUT A LOOSE OBJECT, since two checks got it wrong for a
+week: 0444. Not 0664. core.sharedRepository=group adds group READ to what git
+writes and stops there, because an object file is named by its own content and
+nothing may ever rewrite it. Asserting group-write on objects/ failed a healthy
+repo forever, and the caveat lived in chat memory instead of in the check —
+which is why `test_a_repo_with_real_objects_passes_verification` below writes
+REAL objects with git rather than checking an empty repo, where the bug hides.
 """
 
 from __future__ import annotations
@@ -86,7 +94,7 @@ def make_repo(gh: Path, run, name="gable"):
     """Create the repo the way `create` would, minus the two root-only steps
     (groupadd, chown), so the rest of the recipe can be checked for real."""
     repo = gh / f"{name}.git"
-    subprocess.run(["git", "init", "--bare", "--shared=group", str(repo)],
+    subprocess.run(["git", "init", "--bare", "--shared=group", "-b", "main", str(repo)],
                    check=True, capture_output=True)
     proc = run("verify", name)
     return repo, proc
@@ -109,7 +117,7 @@ def test_verify_passes_once_the_full_recipe_is_applied(gatehouse):
     then pass every check."""
     gh, run = gatehouse
     repo = gh / "gable.git"
-    subprocess.run(["git", "init", "--bare", "--shared=group", str(repo)],
+    subprocess.run(["git", "init", "--bare", "--shared=group", "-b", "main", str(repo)],
                    check=True, capture_output=True)
     subprocess.run(["chmod", "-R", "g+rwX", str(repo)], check=True)
     subprocess.run(["find", str(repo), "-type", "d", "-exec", "chmod", "g+s", "{}", "+"],
@@ -130,7 +138,7 @@ def test_every_directory_is_setgid_and_group_writable(gatehouse):
     exist yet — the one that cannot be retrofitted onto tomorrow's objects."""
     gh, run = gatehouse
     repo = gh / "gable.git"
-    subprocess.run(["git", "init", "--bare", "--shared=group", str(repo)],
+    subprocess.run(["git", "init", "--bare", "--shared=group", "-b", "main", str(repo)],
                    check=True, capture_output=True)
     subprocess.run(["chmod", "-R", "g+rwX", str(repo)], check=True)
     subprocess.run(["find", str(repo), "-type", "d", "-exec", "chmod", "g+s", "{}", "+"],
@@ -147,7 +155,7 @@ def test_every_directory_is_setgid_and_group_writable(gatehouse):
 
 def _full_recipe(gh: Path, name="gable"):
     repo = gh / f"{name}.git"
-    subprocess.run(["git", "init", "--bare", "--shared=group", str(repo)],
+    subprocess.run(["git", "init", "--bare", "--shared=group", "-b", "main", str(repo)],
                    check=True, capture_output=True)
     subprocess.run(["chmod", "-R", "g+rwX", str(repo)], check=True)
     subprocess.run(["find", str(repo), "-type", "d", "-exec", "chmod", "g+s", "{}", "+"],
@@ -182,6 +190,8 @@ def test_core_shared_repository_unset_fails_verification(gatehouse):
 
 
 def test_a_non_group_writable_file_fails_verification(gatehouse):
+    """A MUTABLE path — config is rewritten in place, so the group must be able
+    to write it. This is the half of the old sweep that was always right."""
     gh, run = gatehouse
     repo = _full_recipe(gh)
     victim = repo / "config"
@@ -189,6 +199,121 @@ def test_a_non_group_writable_file_fails_verification(gatehouse):
     proc = run("verify", "gable")
     assert proc.returncode != 0
     assert "NOT group-writable" in proc.stderr
+
+
+# ── the objects sweep: group READ, which is what git actually promises ───
+
+def _write_objects(repo: Path, n=3):
+    """Write n real loose objects the way a push would — with git, so their
+    modes are git's and not the test's."""
+    shas = []
+    for i in range(n):
+        sha = subprocess.run(["git", "-C", str(repo), "hash-object", "-w", "--stdin"],
+                             input=f"object {i}\n", text=True, check=True,
+                             capture_output=True).stdout.strip()
+        shas.append(sha)
+    return [repo / "objects" / s[:2] / s[2:] for s in shas]
+
+
+def test_git_writes_loose_objects_0444_under_shared_group(gatehouse):
+    """The premise of the fix, pinned against git itself rather than asserted.
+    If a future git starts writing 0664 here, this test says so before the two
+    checks below start passing for the wrong reason."""
+    gh, run = gatehouse
+    repo = _full_recipe(gh)
+    for obj in _write_objects(repo, 1):
+        mode = obj.stat().st_mode & 0o777
+        assert not mode & stat.S_IWGRP, f"expected a read-only object, got {mode:o}"
+        assert mode & stat.S_IRGRP, f"expected group-readable, got {mode:o}"
+
+
+def test_a_repo_with_real_objects_passes_verification(gatehouse):
+    """THE ACCEPTANCE TEST. A healthy gatehouse repo that has been pushed into
+    must verify clean. It could not before: every loose object is 0444, the
+    global sweep demanded group-write on everything, and so a repo with any
+    history at all FAILED forever while being entirely correct."""
+    gh, run = gatehouse
+    repo = _full_recipe(gh)
+    _write_objects(repo)
+    proc = run("verify", "gable")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "FAIL" not in proc.stderr, proc.stderr
+    assert "VERIFIED" in proc.stdout
+
+
+def test_an_object_that_is_not_group_readable_fails_verification(gatehouse):
+    """The failure that IS real for an object: the group cannot read it, so the
+    broker's next fetch dies on one file it has read a hundred times."""
+    gh, run = gatehouse
+    repo = _full_recipe(gh)
+    victim = _write_objects(repo, 1)[0]
+    victim.chmod(0o400)
+    proc = run("verify", "gable")
+    assert proc.returncode != 0
+    assert "NOT group-readable" in proc.stderr
+    assert victim.name in proc.stderr, "the failing object must be named"
+
+
+def test_an_object_directory_without_group_write_fails_verification(gatehouse):
+    """A fan-out directory is where the NEXT object gets written. Group-write
+    there is about the objects that do not exist yet, so it stays asserted even
+    though the objects inside it are read-only."""
+    gh, run = gatehouse
+    repo = _full_recipe(gh)
+    obj = _write_objects(repo, 1)[0]
+    fanout = obj.parent
+    fanout.chmod(0o2755)
+    proc = run("verify", "gable")
+    assert proc.returncode != 0
+    assert "setgid and group-writable" in proc.stderr
+    assert fanout.name in proc.stderr
+
+
+def test_objects_are_not_swept_for_group_write(gatehouse):
+    """Stated as its own test because it is the exact regression: a 0444 object
+    must not appear in the mutable-path sweep's output under any wording."""
+    gh, run = gatehouse
+    repo = _full_recipe(gh)
+    objs = _write_objects(repo)
+    proc = run("verify", "gable")
+    out = proc.stdout + proc.stderr
+    for obj in objs:
+        assert obj.name not in out, f"object {obj} was flagged: {out}"
+
+
+# ── HEAD, which git writes once and never mentions again ─────────────────
+
+def test_head_pointing_at_master_fails_verification(gatehouse):
+    """The birth defect: `git init --bare` with no -b leaves HEAD →
+    refs/heads/master while every lane pushes main. Nothing complains — the
+    push works, the ref exists — until a clone comes out on a branch nobody
+    pushes."""
+    gh, run = gatehouse
+    repo = _full_recipe(gh)
+    subprocess.run(["git", "-C", str(repo), "symbolic-ref", "HEAD", "refs/heads/master"],
+                   check=True, capture_output=True)
+    proc = run("verify", "gable")
+    assert proc.returncode != 0
+    assert "refs/heads/master, not refs/heads/main" in proc.stderr
+    assert "symbolic-ref HEAD refs/heads/main" in proc.stderr, "the fix must be printed"
+
+
+def test_head_on_main_passes(gatehouse):
+    gh, run = gatehouse
+    _full_recipe(gh)
+    proc = run("verify", "gable")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "HEAD is refs/heads/main" in proc.stdout
+
+
+def test_create_inits_the_repo_on_main():
+    """`create` needs root, so the birth of the repo cannot be exercised here
+    (see the module docstring: a faked privileged path is worse than none). The
+    one line that decides HEAD forever is therefore pinned in the source — it
+    runs exactly once per repo, and re-running `create` will NOT repair it,
+    because create does not touch refs."""
+    src = SCRIPT.read_text()
+    assert "git init --bare --shared=group -b main" in src
 
 
 def test_missing_safe_directory_fails_and_says_why(gatehouse):
@@ -241,6 +366,17 @@ def test_naming_a_resident_without_root_fails_rather_than_skipping(gatehouse):
     assert proc.returncode != 0
     assert "NOT ROOT" in proc.stderr
     assert "seat probe did not run" in proc.stderr
+
+
+def test_the_seat_probe_asks_for_group_read_not_group_write():
+    """The probe runs only as root, so what it ASSERTS is pinned in the source
+    instead. hash-object succeeding already proves res-<name> can write; the
+    object it leaves behind is 0444, and demanding group-write of it made every
+    healthy probe report a failure that was not there."""
+    src = SCRIPT.read_text()
+    assert "not group-READABLE" in src
+    assert "is not group-writable (mode" not in src, \
+        "the probe must not demand group-write of an object git writes 0444"
 
 
 def test_verify_with_no_resident_warns_that_no_seat_was_asked(gatehouse):
