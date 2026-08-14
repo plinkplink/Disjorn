@@ -505,13 +505,17 @@ _seat_metered_fallback=refuse
 # "exactly one credential in the container" is the invariant. If neither is
 # present we warn loudly and pass none: fail loud, never fail over silently.
 #
-# ROUTING BY SEAT (SPECS/2026-08-05-credential-routing-and-halt-protocol.md §1
-# and §3; SPECS/2026-08-08-gable-build-lane-provisioning.md, architecture note
-# 3). The routing table is the seat split: conversational seats run on metered
-# per-seat API keys, build/agent loops run on plink's Max account. So the
-# API-key fallback is NOT universal. Each wrapper sets `_seat_metered_fallback`
-# immediately above this block — `allow` for the chat seat, `refuse` for the
-# build seat — and a refusing seat that finds ONLY an API key does not launch.
+# ROUTING (SPECS/2026-08-05-credential-routing-and-halt-protocol.md §1 as
+# AMENDED 2026-08-14; SPECS/2026-08-08-gable-build-lane-provisioning.md,
+# architecture note 3). Every seat of every resident runs on plink's Max
+# account — the original seat split (chat on metered API keys, builds on Max)
+# was reversed by plink on 2026-08-14 after the console showed ~$40/day of
+# metered chat spend. Both wrappers therefore set `_seat_metered_fallback`
+# to `refuse` immediately above this block, and a refusing seat that finds
+# ONLY an API key does not launch. The knob itself outlives the reversal on
+# purpose: it is the one line to flip if a seat is ever deliberately routed
+# back to metered billing, and the refusal machinery below is identical
+# either way.
 #
 # It refuses rather than warning-and-continuing because the halt protocol says
 # so in as many words: no silent key-fallback. A loop that quietly fails over
@@ -580,9 +584,21 @@ if [ -f "$ENV_FILE" ]; then
       echo "$_tag: WARNING $ENV_FILE sets BOTH CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY; using CLAUDE_CODE_OAUTH_TOKEN (Max subscription), NOT passing ANTHROPIC_API_KEY into the container" >&2
     fi
   elif [ -n "$_apikey_value" ]; then
-    if [ "${_seat_metered_fallback:-allow}" = "refuse" ]; then
-      echo "$_tag: REFUSING TO LAUNCH: $ENV_FILE offers ANTHROPIC_API_KEY only, and this seat routes to the Max account — it must never silently spend the metered key. Put a CLAUDE_CODE_OAUTH_TOKEN (\`claude setup-token\`) in $ENV_FILE, or change the route deliberately at the keyboard. No silent key-fallback: SPECS/2026-08-05-credential-routing-and-halt-protocol.md §3." >&2
+    # RESIDENT_METERED_OK=1 is the "change the route deliberately at the
+    # keyboard" the refusal below names — until 2026-08-14 that sentence meant
+    # editing this file, which is not a route change, it is a code change
+    # nobody makes at 2am. The override is HOST-side env (a unit's Environment=
+    # or a keyboard invocation), never /config: the env FILE is mounted into
+    # the container, and a knob the resident's uid can read must not be the
+    # thing that re-opens metered spending. Loud on every use — a silent
+    # override is the silent fallback with extra steps.
+    if [ "${_seat_metered_fallback:-allow}" = "refuse" ] \
+        && [ "${RESIDENT_METERED_OK:-0}" != "1" ]; then
+      echo "$_tag: REFUSING TO LAUNCH: $ENV_FILE offers ANTHROPIC_API_KEY only, and this seat routes to the Max account — it must never silently spend the metered key. Put a CLAUDE_CODE_OAUTH_TOKEN (\`claude setup-token\`) in $ENV_FILE, or launch with RESIDENT_METERED_OK=1 to spend the key deliberately. No silent key-fallback: SPECS/2026-08-05-credential-routing-and-halt-protocol.md §3." >&2
       exit 1
+    fi
+    if [ "${_seat_metered_fallback:-allow}" = "refuse" ]; then
+      echo "$_tag: METERED OVERRIDE: RESIDENT_METERED_OK=1 — spending ANTHROPIC_API_KEY on a Max-routed seat, by deliberate keyboard choice" >&2
     fi
     _cred_name="ANTHROPIC_API_KEY"
     _cred_value="$_apikey_value"

@@ -1,4 +1,24 @@
-# Spec: Credential routing & halt protocol — chat seats on API keys, agent loops on Max
+# Spec: Credential routing & halt protocol — all seats on the Max account
+
+> **AMENDED 2026-08-14 (plink): the routing table is reversed.** As written on
+> 08-05 this spec put chat seats on metered API keys and build loops on the Max
+> account, and chose that split *for failover isolation* — §1's own words were
+> that a Max limit would halt the loop "and leave chat seats untouched, because
+> they never shared a credential." plink then read the actual meter: Claudette's
+> chat seat was spending ~$40/day on read-heavy days. **Every seat of every
+> resident now runs on the Max account.** Matters of the account and its cost
+> are plink's alone to decide (standing rule, reaffirmed in chat 2026-08-14).
+>
+> What the reversal deliberately gives up: the isolation. A Max rate limit is
+> now a total outage — both residents, both seats at once — not a build pause.
+> Two consequences are already enforced in code: **no seat may spend the
+> metered key** (`_seat_metered_fallback=refuse` in BOTH wrappers, so an
+> expired token fails loud instead of quietly re-billing the key), and the
+> deliberate exception is `RESIDENT_METERED_OK=1` at launch — host-side env,
+> never /config, loud on every use. §3's halt protocol is therefore no longer
+> a nicety but the difference between a diagnosable outage and an evening.
+> §1 below is kept as written for the record of what was reversed and why it
+> was originally chosen.
 
 Drafted by Gable (#custodian seq 694), amended by Claudette (seq 696), delta
 v2→v3 by Gable (seq 705), committed by the keyboard seat with the seqs filled.

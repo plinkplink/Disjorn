@@ -208,10 +208,14 @@ ALL = list(WRAPPERS)
 # call in session_argv) is still separate and still plink's.
 SPINE_WRAPPERS = list(WRAPPERS)
 
-# Which seat may spend the metered key. The credential-routing spec's table:
-# conversational seats on per-seat API keys, build/agent loops on Max. A build
-# that finds only an API key refuses to launch rather than billing it.
-METERED_FALLBACK = {"run-resident.sh": "allow", "run-build.sh": "refuse"}
+# Which seat may spend the metered key: NONE, since 2026-08-14. The original
+# seat split (chat on per-seat API keys, builds on Max) was reversed by plink
+# after the console showed ~$40/day of metered chat spend — every seat now runs
+# on the Max account, and a seat that finds only an API key refuses to launch
+# rather than billing it. The dict shape survives the reversal on purpose: it
+# is the map of the `_seat_metered_fallback` knob in each wrapper, and the day
+# a seat is deliberately routed back to metered, this is the one line to flip.
+METERED_FALLBACK = {"run-resident.sh": "refuse", "run-build.sh": "refuse"}
 APIKEY_SEATS = [s for s, v in METERED_FALLBACK.items() if v == "allow"]
 MAX_ONLY_SEATS = [s for s, v in METERED_FALLBACK.items() if v == "refuse"]
 
@@ -229,16 +233,21 @@ def test_oauth_only(rig, script):
     assert "auth: CLAUDE_CODE_OAUTH_TOKEN" in proc.stderr
 
 
-@pytest.mark.parametrize("script", APIKEY_SEATS)
-def test_apikey_only_is_the_chat_seat_s_own_route(rig, script):
-    """For a conversational seat the API key is not a failover — it IS the
-    routing table's answer (metered, per-seat, hard cap, fast rotation)."""
-    proc, argv, environ, envfile = rig(script, f"ANTHROPIC_API_KEY={FAKE_APIKEY}\n")
-    assert proc.returncode == 0, proc.stderr
-    cenv = container_env(argv, environ, envfile)
-    assert cenv["ANTHROPIC_API_KEY"] == FAKE_APIKEY
-    assert "CLAUDE_CODE_OAUTH_TOKEN" not in cenv
-    assert "auth: ANTHROPIC_API_KEY" in proc.stderr
+def test_no_seat_may_spend_the_metered_key():
+    """The 2026-08-14 reversal, asserted as a property of the TABLE so it can
+    never regress by one wrapper quietly drifting: every seat refuses the
+    metered key. (This replaces test_apikey_only_is_the_chat_seat_s_own_route,
+    which asserted the pre-reversal doctrine — chat's API-key path used to BE
+    the routing table's answer, and now it is the exact surprise the reversal
+    exists to prevent.) The empty list is the point: were APIKEY_SEATS ever
+    non-empty again, the parametrized tests below would silently resurrect,
+    which is correct — but it must be a decision, made here, not drift."""
+    assert APIKEY_SEATS == [], (
+        f"{APIKEY_SEATS} may spend the metered key — if that is deliberate, "
+        "plink has re-reversed the 2026-08-14 credential ruling; update this "
+        "test and the wrappers' routing comments together"
+    )
+    assert MAX_ONLY_SEATS == list(WRAPPERS)
 
 
 @pytest.mark.parametrize("script", MAX_ONLY_SEATS)
@@ -384,11 +393,16 @@ def test_oauth_never_appears_in_podman_argv(rig, script):
     _assert_name_only_env(argv, environ, "CLAUDE_CODE_OAUTH_TOKEN", FAKE_OAUTH)
 
 
-@pytest.mark.parametrize("script", APIKEY_SEATS)
+@pytest.mark.parametrize("script", ALL)
 def test_apikey_never_appears_in_podman_argv(rig, script):
-    """Same guarantee for the metered key — on the seats that may carry one.
-    A Max-only seat never gets this far; it refuses (see the routing tests)."""
-    proc, argv, environ, envfile = rig(script, f"ANTHROPIC_API_KEY={FAKE_APIKEY}\n")
+    """Same guarantee for the metered key. No seat routes to it since the
+    2026-08-14 reversal, so this reaches the launch via RESIDENT_METERED_OK=1 —
+    the deliberate keyboard override — because the hygiene must hold on the
+    override path too: the day someone DOES flip a seat back, the key must not
+    be waiting in /proc/*/cmdline."""
+    proc, argv, environ, envfile = rig(
+        script, f"ANTHROPIC_API_KEY={FAKE_APIKEY}\n",
+        {"RESIDENT_METERED_OK": "1"})
     _assert_name_only_env(argv, environ, "ANTHROPIC_API_KEY", FAKE_APIKEY)
 
 

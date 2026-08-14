@@ -299,8 +299,12 @@ own disposition stops it. Concretely:
 - Cut over one resident first (gable, the newer one), watch a few summons
   and one build, then do the other.
 - Rotate on any suspicion, and on a schedule regardless.
-- Keep the metered API key as the fallback path — the wrappers still
-  accept it, so backing out is: edit the env file, restart the unit.
+- The metered API key is NOT a fallback path any more (reversal of
+  2026-08-14, recorded in the credential-routing spec's amendment): both
+  wrappers refuse a key-only env file rather than quietly billing it.
+  Backing out is still cheap, but it is now explicit — relaunch with
+  `RESIDENT_METERED_OK=1` (host-side env, warns on every use), or put the
+  key back AND flip `_seat_metered_fallback` in the wrapper, deliberately.
 - If any of that reads as too much risk for the saving, the honest answer
   is to stay on `ANTHROPIC_API_KEY` and cap spend at the Console. Nothing
   in the harness needs the subscription; this is a cost decision, and it is

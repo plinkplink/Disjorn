@@ -140,13 +140,16 @@ rather than checking that the assembler agrees with the assembler.
 
 ## 3. Credentials
 
-**Routing is by seat, and the build seat is Max-only.**
+**Every seat is Max-only** — build and chat alike, both residents.
 
-Per `SPECS/2026-08-05-credential-routing-and-halt-protocol.md` §1: conversational
-seats run on metered per-seat API keys; build and agent loops run on plink's Max
-account. The seat split *is* the routing table, and it is also the failover
-isolation — a Max limit halts the loop and leaves the chat seats untouched,
-because they never shared a credential.
+Per `SPECS/2026-08-05-credential-routing-and-halt-protocol.md` as **amended
+2026-08-14**: the original seat split (chat on metered API keys, builds on Max)
+was reversed by plink after the console showed ~$40/day of metered chat spend.
+The price of the reversal, named in the amendment: the split was also the
+failover isolation, so a Max rate limit is now a total outage rather than a
+build pause — which is why the halt protocol (§3 there) is load-bearing.
+`RESIDENT_METERED_OK=1` at launch (host-side env, loud on every use) is the
+one deliberate way to spend the metered key.
 
 Mechanically, in the wrappers:
 
