@@ -45,6 +45,14 @@ BRANCH = f"loop/{SLUG}"
 # on a branch in ~/work/<repo> — with none of the container.
 FAKE_PODMAN = r"""#!/usr/bin/env bash
 set -u
+# The wrapper calls podman twice since 2026-08-14: a dependency preflight
+# probe, then the launch. Only the launch is named, so that is the tell. A
+# probe that fell through to the body below would write run-started before the
+# reaper's trap is armed, and every kill-timing test would race it.
+_probe=1
+[ "${1:-}" = run ] || _probe=0
+for a in "$@"; do [ "$a" = "--name" ] && _probe=0; done
+[ "$_probe" = 1 ] && exit 0
 if [ "${1:-}" = "rm" ]; then
   printf '%s\n' "$*" >> "$DUMP_DIR/reaped"
   exit 0
@@ -60,6 +68,14 @@ exit "${FAKE_BUILD_RC:-0}"
 # The same fake, but it lingers like a real container so a kill can be timed.
 FAKE_PODMAN_SLOW = r"""#!/usr/bin/env bash
 set -u
+# The wrapper calls podman twice since 2026-08-14: a dependency preflight
+# probe, then the launch. Only the launch is named, so that is the tell. A
+# probe that fell through to the body below would write run-started before the
+# reaper's trap is armed, and every kill-timing test would race it.
+_probe=1
+[ "${1:-}" = run ] || _probe=0
+for a in "$@"; do [ "$a" = "--name" ] && _probe=0; done
+[ "$_probe" = 1 ] && exit 0
 if [ "${1:-}" = "rm" ]; then
   printf '%s\n' "$*" >> "$DUMP_DIR/reaped"
   exit 0

@@ -312,6 +312,7 @@ done
 unset _repo_path _repo _dest
 # ── END provisioning ─────────────────────────────────────────────────────
 
+
 args=(
   run --rm
   # Per-build container name so concurrent builds never collide; the slug is
@@ -646,6 +647,83 @@ if [ -n "${RESIDENT_PODMAN_EXTRA:-}" ]; then
   # shellcheck disable=SC2206  # deliberate word-splitting of extra flags
   args+=( ${RESIDENT_PODMAN_EXTRA} )
 fi
+
+# ── BEGIN dependency preflight ───────────────────────────────────────────
+# REFUSE BEFORE SPAWN IF THE SEAT CANNOT RUN A TEST.
+#
+# Proposed by Gable on 2026-08-12 (#custodian seq 1044) and not built until
+# 2026-08-14, which cost a third build its test run. The disease, three times:
+#   08-06  no pytest in the image at all
+#   08-12  same, one layer wider — a zero-diff build
+#   08-14  no aiosqlite; 22 tests written, 0 executed, held at review
+# Every one of those sessions behaved correctly. It wrote the tests, found no
+# runner, refused to pip-install its way to a green result, and said so. The
+# cost each time was a slot, an hour, and a diff a human had to hold at arm's
+# length — for a condition knowable in under a second, before anything started.
+#
+# WHY THIS IS NOT THE SAME CHECK AS tests/test_image_deps.py. That test reads
+# the REPO and asserts the Containerfile installs what pyproject and
+# requirements.txt declare. It cannot see the image that is about to run. This
+# sees only the running image and cannot see the repo. The gap between them —
+# a correct Containerfile committed and the image never rebuilt — is exactly
+# the shape of every "committed versus deployed" failure this project has paid
+# for, including 08-14's, where the fix was one commit old and the seat still
+# lacked the module.
+#
+# A CANARY, NOT A MANIFEST, and it says so out loud rather than implying
+# completeness it does not have: one sentinel import per stack a spec might
+# touch. The drift test guards the list; this guards the image.
+PREFLIGHT_IMPORTS="${RESIDENT_PREFLIGHT_IMPORTS:-pytest aiosqlite fastapi httpx argon2 chromadb voyageai}"
+# EX_CONFIG (78). The broker refunds the build slot on exactly this code — a
+# seat that was never fit is a build that never started, so it must not cost an
+# attempt. Any other nonzero exit still burns the slot: that is a build that ran
+# and failed.
+PREFLIGHT_EXIT=78
+if [ "${RESIDENT_PREFLIGHT:-1}" = "1" ]; then
+  # `import importlib.util` — NOT a bare `import importlib`. The submodule is
+  # not auto-bound, so the bare form raises AttributeError at find_spec and the
+  # probe dies instead of answering. It did exactly that on first run, and the
+  # old fail-open swallowed it: a crashed probe read as "nothing missing" and
+  # the build launched. A check that cannot fail loudly is not a check, which
+  # is the whole disease this thing was built to treat.
+  _pf_py='import importlib.util, sys
+missing=[m for m in sys.argv[1:] if importlib.util.find_spec(m) is None]
+print(" ".join(missing))
+sys.exit(1 if missing else 0)'
+  # Same image, same uid, same userns as the real run — a preflight in a
+  # different context would be testing something other than the seat.
+  # `if` and not a bare assignment: under `set -e` an assignment whose command
+  # substitution exits non-zero kills the script THERE, so `_pf_rc=$?` on the
+  # next line never runs and the refusal never prints. That is exactly what it
+  # did on first run — the wrapper died with the probe's exit 1, silently, and
+  # the informative message I had written was unreachable code.
+  if _pf_missing="$(podman run --rm --userns "keep-id:uid=1000,gid=1000" \
+      "$IMAGE" python3 -c "$_pf_py" $PREFLIGHT_IMPORTS 2>/dev/null)"; then
+    _pf_rc=0
+  else
+    _pf_rc=$?
+  fi
+  # THREE OUTCOMES, and the third is the one that used to be invisible:
+  #   0  every module imported            -> launch
+  #   1  the probe ran and named the gaps -> refuse, listing them
+  #   *  the probe itself could not run   -> refuse, saying so
+  # Treating anything-but-1 as success is how a broken probe becomes a silent
+  # pass. If the seat cannot even be interrogated, that is not a green light.
+  if [ "$_pf_rc" -eq 1 ]; then
+    echo "PREFLIGHT-FAILED: the build image cannot import:${_pf_missing}" >&2
+    echo "run-build: refusing to start — a session in this seat would write tests it cannot run." >&2
+    echo "run-build: image=$IMAGE. Fix: rebuild it with harness/keyboard/07-resident-image.sh, then retry." >&2
+    echo "run-build: no build slot has been spent." >&2
+    exit "$PREFLIGHT_EXIT"
+  elif [ "$_pf_rc" -ne 0 ]; then
+    echo "PREFLIGHT-FAILED: the dependency probe could not run in $IMAGE (exit $_pf_rc)." >&2
+    echo "run-build: refusing rather than assuming the seat is fit — an uninterrogable seat is not a passing one." >&2
+    echo "run-build: no build slot has been spent." >&2
+    exit "$PREFLIGHT_EXIT"
+  fi
+  unset _pf_py _pf_missing _pf_rc
+fi
+# ── END dependency preflight ─────────────────────────────────────────────
 
 # ── BEGIN container reaper block ─────────────────────────────────────────
 # NO LONGER BYTE-IDENTICAL WITH run-resident.sh, as of 2026-08-13. It was,

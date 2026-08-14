@@ -853,6 +853,26 @@ def format_build_done(*, slug: str, branch: str, files: str, tests: str,
             + _quarantine_suffix(quarantined))
 
 
+# The wrapper's exit code for "this seat cannot run a test; nothing started".
+# Shared constant rather than a literal 78 in two files — the wrapper and this
+# reader must always mean the same thing by it, and a silent disagreement would
+# turn a refund into a burned slot.
+PREFLIGHT_REFUSED_EXIT = 78
+
+
+def format_build_refused(*, slug: str, branch: str, reason: str) -> str:
+    """A build that never started, because its seat could not have run the
+    tests the spec asks for.
+
+    Deliberately NOT worded as a failure. Nothing was built and nothing was
+    lost; the honest reading is that the house caught its own unfitness before
+    spending anything, which is the outcome the preflight exists to produce.
+    The banner says the slot was refunded so nobody has to go and check."""
+    detail = " ".join(reason.split())[:400]
+    return (f"build refused | {slug} -> {branch} | nothing ran, no slot spent | "
+            f"{detail or 'the build seat failed its dependency preflight'}")
+
+
 def format_build_failed(*, slug: str, branch: str, reason: str, published=(),
                         no_commits=(), quarantined=()) -> str:
     """The 'failed' state-transition line — LOUD. A stalled build goes quiet
@@ -1786,6 +1806,27 @@ class Broker:
             session_out = _strip_publish_lines(out_s)
             report = _parse_build_report(session_out)
             rc = getattr(proc, "returncode", None)
+
+            # PREFLIGHT REFUSAL (exit 78, EX_CONFIG). The wrapper checked the
+            # image before starting anything and found it unable to import a
+            # stack the repo's tests need. Nothing ran: no container, no clone
+            # touched by a session, no commits, no harvest.
+            #
+            # So refund the slot. BL-D3's rule is that a build which never
+            # started must not cost an attempt, and this is the purest case of
+            # it — the seat was unfit before the session existed. A build that
+            # ran and then failed still burns its slot; that distinction is the
+            # whole reason this is keyed to one specific exit code rather than
+            # to "nonzero".
+            if rc == PREFLIGHT_REFUSED_EXIT:
+                resident = meta.get("resident")
+                if resident:
+                    self._release_build(resident, slug)
+                self._narrate(format_build_refused(
+                    slug=slug, branch=branch,
+                    reason=(err_s or session_out).strip()[:400]))
+                return
+
             unit_reason = None
             if rc is not None and rc != 0:
                 unit_reason = f"exit {rc}: {(err_s or session_out).strip()[:400]}"

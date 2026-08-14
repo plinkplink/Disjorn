@@ -321,6 +321,78 @@ def test_start_build_failed_narration_is_loud(harness):
     assert not any("build done" in b for b in bodies)
 
 
+# ---------------------------------------------- preflight refusal (seq 1044)
+
+def test_preflight_refusal_refunds_the_slot_and_says_nothing_ran(harness):
+    """Exit 78 means the wrapper checked the image and refused BEFORE starting
+    anything: no container, no session, no commits.
+
+    So it must not cost a build slot. BL-D3's rule is that a build which never
+    started does not burn an attempt, and this is the purest case of it — the
+    seat was unfit before the session existed. Proposed by Gable on 2026-08-12
+    (#custodian seq 1044) after the third build in a row wrote tests it could
+    not run; built 2026-08-14."""
+    harness.set_verbs(**{"start-build": True})
+    proc = FakeBuildProc(
+        out=b"",
+        err=b"PREFLIGHT-FAILED: the build image cannot import: aiosqlite\n"
+            b"run-build: no build slot has been spent.\n",
+        rc=78)
+    harness.use_fake_build(proc_factory=lambda: proc)
+    harness.write_spec("2026-07-21-unfit.md")
+
+    before = harness.broker._builds.get("res-test", (None, 0))[1]
+    assert harness.call("start-build", {"spec": "2026-07-21-unfit.md"})["ok"] is True
+    harness.broker.join_builds()
+
+    after = harness.broker._builds.get("res-test", (None, 0))[1]
+    assert after == before, (
+        f"a refused build burned a slot ({before} -> {after}); the whole point "
+        f"of refusing before spawn is that it costs nothing"
+    )
+
+    bodies = [p["body"] for p in harness.proposals]
+    refused = [b for b in bodies if b.startswith("build refused")]
+    assert refused, f"no refusal banner; got {bodies!r}"
+    assert "no slot spent" in refused[0]
+    assert "aiosqlite" in refused[0], "the banner must name what was missing"
+    # It is not a failure and must not read as one: nothing was built and
+    # nothing was lost.
+    assert not any("BUILD FAILED" in b for b in bodies)
+    assert not any("build done" in b for b in bodies)
+
+
+def test_a_build_that_actually_ran_and_failed_still_burns_its_slot(harness):
+    """The counterweight. Only exit 78 refunds; any other nonzero exit is a
+    build that ran, spent time and credit, and must count."""
+    harness.set_verbs(**{"start-build": True})
+    proc = FakeBuildProc(out=b"", err=b"boom", rc=1)
+    harness.use_fake_build(proc_factory=lambda: proc)
+    harness.write_spec("2026-07-21-ranfail.md")
+
+    before = harness.broker._builds.get("res-test", (None, 0))[1]
+    assert harness.call("start-build", {"spec": "2026-07-21-ranfail.md"})["ok"] is True
+    harness.broker.join_builds()
+    after = harness.broker._builds.get("res-test", (None, 0))[1]
+    assert after == before + 1, "a build that ran must keep its slot spent"
+
+
+def test_the_refusal_frees_the_slug_so_a_retry_is_allowed(harness):
+    """BL-D4 claims the slug for the duration. A refused build must release it,
+    or the fix-and-retry loop is blocked by the very refusal telling you to
+    rebuild the image."""
+    harness.set_verbs(**{"start-build": True})
+    harness.use_fake_build(
+        proc_factory=lambda: FakeBuildProc(out=b"", err=b"PREFLIGHT-FAILED: x", rc=78))
+    harness.write_spec("2026-07-21-retry.md")
+    assert harness.call("start-build", {"spec": "2026-07-21-retry.md"})["ok"] is True
+    harness.broker.join_builds()
+    assert "2026-07-21-retry" not in harness.broker._active_builds
+    # and the second attempt is accepted rather than refused as in-flight
+    assert harness.call("start-build", {"spec": "2026-07-21-retry.md"})["ok"] is True
+    harness.broker.join_builds()
+
+
 def test_start_build_timeout_narration(harness):
     harness.set_verbs(**{"start-build": True})
     proc = FakeBuildProc(raise_timeout=True)

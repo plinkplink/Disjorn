@@ -42,6 +42,15 @@ FAKE_PODMAN = r"""#!/usr/bin/env bash
 # Fake podman for harness/cc/tests/test_run_wrappers.py. Dumps what the real
 # podman would have been given, then exits 0 without running anything.
 set -u
+# The wrappers call podman TWICE now: once for the dependency preflight probe
+# (2026-08-14) and once to launch. Only the launch carries --name, so that is
+# how a fake tells them apart. Without this guard the probe overwrites the argv
+# dump and every "podman must not have been executed" assertion reads the
+# probe instead of the launch.
+_probe=1
+[ "${1:-}" = run ] || _probe=0          # `podman rm` etc. is not a probe
+for a in "$@"; do [ "$a" = "--name" ] && _probe=0; done   # a launch is named
+[ "$_probe" = 1 ] && exit 0
 printf '%s\0' "$@" > "$DUMP_DIR/argv"
 env -0 > "$DUMP_DIR/environ"
 : > "$DUMP_DIR/envfile"
@@ -639,6 +648,15 @@ FAKE_PODMAN_REAP = r"""#!/usr/bin/env bash
 # container that keeps running (or returns at once when detached); `rm`
 # records what the watchdog asked to be removed.
 set -u
+# The wrappers call podman TWICE now: once for the dependency preflight probe
+# (2026-08-14) and once to launch. Only the launch carries --name, so that is
+# how a fake tells them apart. Without this guard the probe overwrites the argv
+# dump and every "podman must not have been executed" assertion reads the
+# probe instead of the launch.
+_probe=1
+[ "${1:-}" = run ] || _probe=0          # `podman rm` etc. is not a probe
+for a in "$@"; do [ "$a" = "--name" ] && _probe=0; done   # a launch is named
+[ "$_probe" = 1 ] && exit 0
 if [ "${1:-}" = "run" ]; then
   for a in "$@"; do
     case "$a" in -d|--detach|--detach=true) : > "$DUMP_DIR/detached"; exit 0 ;; esac
@@ -798,7 +816,14 @@ def test_reaper_does_not_mask_the_exit_status(tmp_path, script, code):
         d.mkdir()
     (config / "env").write_text("BROKER_DISABLE=1\n")
     podman = bindir / "podman"
-    podman.write_text(f'#!/usr/bin/env bash\n[ "$1" = rm ] && exit 0\nexit {code}\n')
+    podman.write_text(
+        '#!/usr/bin/env bash\n'
+        '[ "$1" = rm ] && exit 0\n'
+        # a probe (no --name) must not be given the launch's exit code
+        '_p=1; [ "${1:-}" = run ] || _p=0\n'
+        'for a in "$@"; do [ "$a" = "--name" ] && _p=0; done\n'
+        '[ "$_p" = 1 ] && exit 0\n'
+        f'exit {code}\n')
     podman.chmod(0o755)
     env = dict(os.environ)
     env.update(
@@ -1120,3 +1145,125 @@ def test_no_real_looking_credential_is_committed():
         text = (CC_DIR / script).read_text()
         for m in re.findall(r"sk-ant-[A-Za-z0-9_-]+", text):
             assert "..." in m or "PLACEHOLDER" in m or len(m) < 24, m
+
+
+# ── dependency preflight (Gable, #custodian seq 1044; built 2026-08-14) ──────
+#
+# A seat that cannot import the repo's test stack must refuse BEFORE anything
+# starts, and must not cost a build slot. Three builds paid for the absence of
+# this check — 08-06, 08-12, 08-14 — each one writing tests it could not run.
+
+# A podman stand-in that reports specific modules missing, so the preflight's
+# refusal can be tested without an image. Echoes on the FIRST call (the
+# preflight probe) and stays quiet afterwards, mimicking a real image that
+# lacks a module but runs fine otherwise.
+FAKE_PODMAN_MISSING = r"""#!/usr/bin/env bash
+set -u
+_probe=1
+[ "${1:-}" = run ] || _probe=0
+for a in "$@"; do [ "$a" = "--name" ] && _probe=0; done
+if [ "$_probe" = 1 ]; then
+  echo " aiosqlite fastapi"     # what the image could not import
+  exit 1
+fi
+printf '%s\0' "$@" > "$DUMP_DIR/argv"
+exit 0
+"""
+
+
+def _with_podman(rig_tmp: Path, body: str) -> None:
+    p = rig_tmp / "bin" / "podman"
+    p.write_text(body)
+    p.chmod(0o755)
+
+
+def test_preflight_refuses_when_the_image_cannot_import_the_test_stack(rig, tmp_path):
+    _with_podman(tmp_path, FAKE_PODMAN_MISSING)
+    proc, argv, environ, envfile = rig("run-build.sh", f"CLAUDE_CODE_OAUTH_TOKEN={FAKE_OAUTH}\n")
+    assert proc.returncode == 78, (
+        "a seat that cannot run tests must refuse with EX_CONFIG, which is the "
+        "code the broker refunds on"
+    )
+    assert "PREFLIGHT-FAILED" in proc.stderr
+    assert "aiosqlite" in proc.stderr and "fastapi" in proc.stderr, (
+        "the refusal must name what is missing — 'preflight failed' with no "
+        "list is the kind of message that costs a keyboard session"
+    )
+    assert "no build slot has been spent" in proc.stderr
+    assert "07-resident-image.sh" in proc.stderr, "say how to fix it"
+
+
+def test_preflight_passes_and_the_build_starts_when_the_image_is_complete(rig):
+    """The default fake podman prints nothing, i.e. nothing missing."""
+    proc, argv, environ, envfile = rig("run-build.sh", f"CLAUDE_CODE_OAUTH_TOKEN={FAKE_OAUTH}\n")
+    assert proc.returncode == 0
+    assert "PREFLIGHT-FAILED" not in proc.stderr
+    assert "run" in argv, "the real container should still have been launched"
+
+
+def test_preflight_can_be_disabled_for_debugging(rig, tmp_path):
+    _with_podman(tmp_path, FAKE_PODMAN_MISSING)
+    proc, argv, environ, envfile = rig(
+        "run-build.sh", f"CLAUDE_CODE_OAUTH_TOKEN={FAKE_OAUTH}\n",
+        {"RESIDENT_PREFLIGHT": "0"})
+    assert proc.returncode == 0
+    assert "PREFLIGHT-FAILED" not in proc.stderr
+
+
+def test_the_refusal_exit_code_matches_the_broker_constant():
+    """TWO FILES, ONE NUMBER. The wrapper exits 78 and the broker refunds on 78;
+    if they ever disagree, a refusal silently burns a slot instead of refunding
+    it — and nothing else in the system would notice. This is the same drift
+    shape that cost a week over a copied version pin, so it gets the same
+    treatment: a test, not a memory."""
+    wrapper = (CC_DIR / "run-build.sh").read_text()
+    m = re.search(r"^PREFLIGHT_EXIT=(\d+)", wrapper, re.M)
+    assert m, "run-build.sh no longer defines PREFLIGHT_EXIT"
+    brokerd = (CC_DIR.parent / "broker" / "brokerd.py").read_text()
+    b = re.search(r"^PREFLIGHT_REFUSED_EXIT\s*=\s*(\d+)", brokerd, re.M)
+    assert b, "brokerd.py no longer defines PREFLIGHT_REFUSED_EXIT"
+    assert m.group(1) == b.group(1), (
+        f"run-build.sh exits {m.group(1)} on a preflight refusal but brokerd "
+        f"refunds on {b.group(1)} — a refused build would burn a slot"
+    )
+
+
+def test_a_probe_that_cannot_RUN_is_also_a_refusal(rig, tmp_path):
+    """FAIL CLOSED. The first version treated anything-but-"missing" as a pass,
+    so when the probe itself crashed — `import importlib` does not bind
+    `importlib.util`, and find_spec raised — a broken probe read as a green
+    seat and the build launched. An uninterrogable seat is not a passing one."""
+    _with_podman(tmp_path, '#!/usr/bin/env bash\n'
+                           '_p=1; [ "${1:-}" = run ] || _p=0\n'
+                           'for a in "$@"; do [ "$a" = "--name" ] && _p=0; done\n'
+                           '[ "$_p" = 1 ] && { echo "Traceback..." >&2; exit 3; }\n'
+                           'exit 0\n')
+    proc, argv, environ, envfile = rig(
+        "run-build.sh", f"CLAUDE_CODE_OAUTH_TOKEN={FAKE_OAUTH}\n")
+    assert proc.returncode == 78
+    assert "could not run" in proc.stderr
+    assert "no build slot has been spent" in proc.stderr
+
+
+def test_the_refusal_survives_set_e(rig, tmp_path):
+    """The wrapper runs under `set -euo pipefail`. A bare
+    `x="$(cmd-that-exits-1)"` aborts the script THERE, so the refusal message
+    and the 78 exit were unreachable code — it died silently with the probe's
+    own exit 1. Asserted because the bug is invisible: the check still
+    'refused', just uselessly and with the wrong code."""
+    _with_podman(tmp_path, FAKE_PODMAN_MISSING)
+    proc, argv, environ, envfile = rig(
+        "run-build.sh", f"CLAUDE_CODE_OAUTH_TOKEN={FAKE_OAUTH}\n")
+    assert proc.returncode == 78, "a bare assignment under set -e would give 1"
+    assert "PREFLIGHT-FAILED" in proc.stderr, "the message must actually print"
+
+
+def test_preflight_probe_uses_the_same_image_and_userns_as_the_real_run():
+    """A probe in a different context tests something other than the seat."""
+    wrapper = (CC_DIR / "run-build.sh").read_text()
+    block = wrapper.split("BEGIN dependency preflight")[1].split("END dependency preflight")[0]
+    assert '"$IMAGE"' in block, "the probe must run the image the build will run"
+    assert 'keep-id:uid=1000,gid=1000' in block, (
+        "the probe must use the build's userns; a root-mapped probe can import "
+        "things the build uid cannot"
+    )

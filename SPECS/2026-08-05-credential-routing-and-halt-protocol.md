@@ -139,6 +139,20 @@ Confirm record**, which is why the tiers confirm sequences ahead of this build.
 
 ## Confirm record
 
+- **Confirmed by**: plink
+- **#custodian seq**: 704
+- **Confirmed at**: 2026-08-05
+
+The three lines above are the two fields the broker's gate parses plus the
+date; everything below is the record of HOW it was confirmed, which is the part
+worth reading. Both are kept because they answer different questions — the gate
+asks "may this build start", a person asks "what did each seat actually agree
+to". Filled 2026-08-14 at the keyboard: the sign-off had existed since 08-05 in
+the per-seat form below, but `parse_confirm_record` reads only
+`- **Confirmed by**:` and `- **#custodian seq**:`, so mechanically there was no
+confirm record and `start-build` would have refused a spec every seat had
+signed.
+
 - **Claudette** — #custodian seq 696, 2026-08-05. Accepted **with two
   amendments**, both adopted into the text above (route-flip fallback; pinned
   upstream), plus one labelling note (proxy metering does not close seq 599).
@@ -152,4 +166,4 @@ Confirm record**, which is why the tiers confirm sequences ahead of this build.
 
 ## Status
 
-confirm
+confirmed
