@@ -58,10 +58,14 @@ Verified 2026-08-04 from running units and live config, not from prose.
 `read-prod-logs`, `read-own-log`, `read-metrics`, `file-proposal`,
 `query-own-audit`, `refresh-mirror`. Gable (5): `read-own-log`,
 `read-metrics`, `file-proposal`, `query-own-audit`, `refresh-mirror`.
-**`restart-disjorn` is OFF for both. `start-build` is ON for Claudette as of
-2026-08-05** (Gable's stays off — his hands are a later project). The gatehouse
-is mounted rw into her container at `/run/gatehouse/disjorn.git`; clone → branch
-→ commit → push round-trips, and plink reads the branch from
+**`restart-disjorn` is OFF for both. `start-build` is OFF for both as of
+2026-08-13** (Claudette's flipped off 08-12 during the Gable-lane work;
+Gable's briefly on 08-12–08-13 for his lane's first build, off again pending
+the harvest path going live end-to-end). **The gatehouse is NO LONGER mounted
+into build containers** (2026-08-13 publish-path build, live): builds commit
+in their workspace clones and the wrapper publishes host-side after exit,
+printing `PUBLISHED <repo>.git <sha>` lines the reaper's banner derives
+from. plink reads branches from
 `/var/lib/disjorn-broker/gatehouse/disjorn.git`.
 
 ## Consolidation: v1 failed, v2 phase 1 shipped, walker re-armed — the live story
@@ -138,10 +142,12 @@ nothing auto-acts, and a slate nobody promotes from costs a review and teaches
 us the shape. The symmetric fix, when it is wanted, is a declared service-read
 epoch that promotion waits out exactly as rent does.
 
-## Build pipeline — two specs in flight
+## Build pipeline — specs in flight
 
 | Spec | Where | Status |
 |---|---|---|
+| **Build publish path** (BUILD-LANE-V2 Stage 0) — host-side harvest, banner from measurement, no gatehouse in the container | [SPECS/2026-08-13-build-publish-path.md](SPECS/2026-08-13-build-publish-path.md) | **BUILT, MERGED (`75a5dbb`), DEPLOYED, LIVE 2026-08-13** — wrapper+kernel installed byte-verified, broker restarted on the new reaper. Owner: keyboard (builder), plink (review, merged). Acceptance: first real build through the harvest (Claudette's lane, needs her `start-build` re-flipped). Post-merge fix same day: quarantine measures ref REACHABILITY, not object existence (Claudette seq 1224 — the 08-08 shape). |
+| **BUILD-LANE-V2 roadmap** — ceremony→collaboration, 5 stages | [BUILD-LANE-V2.md](BUILD-LANE-V2.md) | **Signed unanimous 2026-08-13** (Claudette 1202, Gable 1204), canonical-repo RULED (gatehouse=production). Next: Stage 2a (streams). Open item for 2b: residents can't read `loop/*` refs to review (Claudette seq 1226). |
 | **Memory v2** — caller-tagged retrieval, sealed affect, nomination lane, daydream | [SPECS/2026-07-28-memory-v2.md](SPECS/2026-07-28-memory-v2.md) | **`confirmed` for phase 1** (plink, #custodian seq 604). **PHASE 1 BUILT AND LIVE 08-04** — Disjorn `818f8f5` + claudette `17fac63`, diff posted seq 613. Phases 2–4 await separate confirms. **Both residents signed** — Gable 07-28 (author), Claudette 07-28 via broker seq 508, transcribed at landing per its own terms; her 07-30 withdrawal is resolved, no refusals outstanding. |
 | **Credential routing & halt protocol** — chat on API keys, loops on Max, one halt artifact | [SPECS/2026-08-05-credential-routing-and-halt-protocol.md](SPECS/2026-08-05-credential-routing-and-halt-protocol.md) | `draft`, **all three lanes signed** (Claudette 696 w/ 2 amendments, plink 704, Gable 694/705). Awaits plink's confirm seq. Re-scopes KB-D6. |
 | **Approval tiers** — what "minor" means, who applies what | [SPECS/2026-07-26-approval-tiers.md](SPECS/2026-07-26-approval-tiers.md) | `draft`, landed 07-30, **posted 08-05 by Gable (seq 647)**. Claudette signed as review owner with 4 amendments (seq 649/650); 2 blocking, both wording. **`retag` ruled Tier 0 metadata + per-seat retag count in the nightly ledger** (plink, seq 708). Awaits plink's key: the Amendments/Objections subsection, the retag naming, and the dated Tier-M annotation ride in the same Tier 2 commit. |

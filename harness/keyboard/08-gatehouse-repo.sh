@@ -77,10 +77,11 @@
 # hazard the check exists for.
 #
 # WHAT THIS GRANTS, STATED PLAINLY. A resident added to the `gatehouse` group
-# can write every byte of every repo in the gatehouse — including refs. That is
-# already true through the mount (run-build.sh bind-mounts the gatehouse rw; it
-# is the one writable path out of a build container), so this changes no wall —
-# it makes the existing one work for a second uid. The wall that matters is
+# can write every byte of every repo in the gatehouse — including refs — from
+# HOST-SIDE processes. (Until 2026-08-13 the gatehouse was also bind-mounted
+# rw into build containers; the publish-path spec removed that mount — builds
+# now publish via the wrapper's host-side harvest, and in-container the group
+# never worked anyway: keep-id does not map supplementary groups.) The wall that matters is
 # unchanged: these are BARE repos, so a push deploys nothing and merges nothing,
 # and a human reads every diff. Branch-namespace enforcement in a pre-receive
 # hook is specified in harness/cc/MERGE-CONTRACT.md and is NOT built; until it

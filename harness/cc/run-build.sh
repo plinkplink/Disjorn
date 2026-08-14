@@ -238,14 +238,19 @@ for _repo in "${ENTITLED[@]}"; do
   #
   # "Unharvested" is measured against the GATEHOUSE, not against a marker
   # file: for every loop/* branch in the existing clone, ask the gatehouse
-  # repo whether it holds that branch head as a commit object. Present means
-  # the harvest landed (or the branch never moved off the clone point, which
-  # is the zero-commit build's leftover and is genuinely disposable); absent
-  # means work exists here and nowhere else. Asking about the SHA rather than
-  # about `refs/heads/<branch>` is what keeps a zero-commit leftover from
-  # being quarantined forever — a branch that was never pushed because it had
-  # nothing to push is not lost work, and a quarantine pile full of empty
-  # clones is a pile nobody reads.
+  # whether some REF of its own still reaches that branch head. Reachability,
+  # not object existence — the distinction is the 2026-08-08 incident
+  # (Claudette, seq 1224): that push landed every OBJECT and then died at the
+  # ref update, so a `cat-file -e` test reads the leftover as harvested and
+  # the next launch deletes the only copy — the exact trap this clause
+  # exists to close, wearing the fix as a costume. Object existence also
+  # DECAYS: unreachable loose objects get gc-pruned after weeks, so the same
+  # question would answer differently depending on when it is asked. A ref
+  # contains it or it did not land. Checking the SHA against ALL refs (not
+  # just `refs/heads/<branch>`) is what keeps a zero-commit leftover from
+  # being quarantined forever — its head IS the clone point, so main
+  # contains it, and a quarantine pile full of empty clones is a pile
+  # nobody reads.
   #
   # Preserve and PROCEED (the spec offered "or refuse to launch"): the build
   # that is being launched now is a different spec's build and blocking it on
@@ -258,8 +263,9 @@ for _repo in "${ENTITLED[@]}"; do
       [ -n "$_wbranch" ] || continue
       _whead="$(git -C "$_dest" rev-parse --verify -q "refs/heads/$_wbranch" 2>/dev/null)" || continue
       [ -n "$_whead" ] || continue
-      if git -C "$_repo_path" cat-file -e "$_whead^{commit}" 2>/dev/null; then
-        continue   # the gatehouse holds it: harvested, safe to delete
+      if git -C "$_repo_path" cat-file -e "$_whead^{commit}" 2>/dev/null \
+         && [ -n "$(git -C "$_repo_path" for-each-ref --contains "$_whead" --count=1 2>/dev/null)" ]; then
+        continue   # a gatehouse ref reaches it: harvested (or clone-point), safe to delete
       fi
       _q_branches="${_q_branches:+$_q_branches }$_wbranch"
     done < <(git -C "$_dest" for-each-ref --format='%(refname:short)' 'refs/heads/loop/*' 2>/dev/null)

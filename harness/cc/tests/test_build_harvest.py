@@ -418,10 +418,11 @@ def test_unharvested_clone_is_quarantined_not_deleted(rig):
 
 def test_a_harvested_clone_is_deleted_normally(rig):
     """The clause must not turn every leftover into a quarantine pile. A clone
-    whose commits the gatehouse already holds is disposable, and a zero-commit
-    leftover — a loop branch sitting on the clone point — is too. That is why
-    "unharvested" is measured as "the gatehouse does not have this sha", not
-    as "the gatehouse has no branch by this name"."""
+    whose commits a gatehouse REF still reaches is disposable, and a
+    zero-commit leftover — a loop branch sitting on the clone point, which
+    main contains — is too. "Unharvested" is measured as reachability from
+    the gatehouse's own refs, never as bare object existence (see the 08-08
+    regression below for why the weaker measurement loses work)."""
     old_slug = "2026-08-12-earlier-spec"
     sha = unharvested_clone(rig, "disjorn", old_slug, "already landed\n")
     git("push", "--quiet", str(rig.gatehouse / "disjorn.git"),
@@ -432,6 +433,35 @@ def test_a_harvested_clone_is_deleted_normally(rig):
     assert not lines(proc, "QUARANTINED"), proc.stdout
     assert not (rig.home_vol / "quarantine").exists()
     assert not (rig.work / "disjorn" / "precious.txt").exists()
+
+
+def test_objects_landed_ref_died_is_still_quarantined(rig):
+    """THE 08-08 REGRESSION (Claudette, #custodian seq 1224). That incident's
+    push landed every OBJECT in the gatehouse and then died at the ref
+    update: the branch did not exist, but `cat-file -e <sha>` answered yes.
+    Under an object-existence measurement this leftover reads as harvested
+    and the next launch rm -rf's the only reachable copy of the work. The
+    measurement must be REF reachability: a gatehouse ref contains the sha,
+    or it did not land."""
+    old_slug = "2026-08-12-half-landed"
+    sha = unharvested_clone(rig, "disjorn", old_slug, "objects landed, ref died\n")
+    bare = rig.gatehouse / "disjorn.git"
+    # Land the objects AND the ref, then kill the ref — the objects survive,
+    # exactly the state the 08-08 push left behind.
+    git("push", "--quiet", str(bare),
+        f"{sha}:refs/heads/loop/{old_slug}", cwd=rig.work / "disjorn")
+    git("update-ref", "-d", f"refs/heads/loop/{old_slug}", cwd=bare)
+    # Precondition of the trap: the object IS present in the gatehouse...
+    git("cat-file", "-e", f"{sha}^{{commit}}", cwd=bare)
+
+    proc = rig.run()
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    # ...and the clone must be quarantined anyway, work intact.
+    quarantined = lines(proc, "QUARANTINED disjorn ")
+    assert len(quarantined) == 1, proc.stdout
+    qpath = Path(quarantined[0].split()[2])
+    assert git("rev-parse", f"loop/{old_slug}", cwd=qpath).stdout.strip() == sha
+    assert (qpath / "precious.txt").read_text() == "objects landed, ref died\n"
 
 
 def test_zero_commit_leftover_is_not_quarantined(rig):

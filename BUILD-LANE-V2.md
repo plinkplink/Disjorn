@@ -252,6 +252,15 @@ supersedes the earlier "no stage rewrites a layout" claim — Rev 1
 overclaimed, and the citation that failed (see revision record) failed at
 exactly this seam.
 
+**Open item for this stage's spec** (Claudette, seq 1226, post-signature):
+resident review owners currently cannot read `loop/*` refs at all —
+`classify-diff` won't take gatehouse paths and the mirror carries `main`
+only, so residents sign off on descriptions instead of diffs (it happened
+to Stage 0's own review, twice). The 2b spec must give reviewers eyes:
+either the mirror carries the loop refs, or canonical is mapped read-only
+into residents' roots. Same principle as everything here — no agent
+asserts what it cannot observe, and that includes approvals.
+
 On receipt the server hands the broker the seq; the broker (as in Stage 1)
 verifies the human, then **runs the gates itself** — classifier on
 `main...loop/<slug>`, tests, ff-check — never accepting a caller-supplied
