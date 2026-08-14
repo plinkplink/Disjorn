@@ -684,3 +684,49 @@ Untaken options, cheapest first:
 Note option 3 is a self-inflicted constraint and worth revisiting on its own
 terms: the tabs are really *animated vs still*, and they are named for a file
 format instead.
+
+---
+
+## PW-1 — password rotation is enforced server-side with no way for anyone to comply
+
+**Status: the schema and endpoints are merged and live; the enforcement flag is
+OFF in production.** Turning it back on locks every human out until the client
+can present a rotation screen.
+
+Merged `92bf7b1` (Claudette's build of `SPECS/2026-08-08-password-change.md`,
+confirmed at #custodian seq 1006). Migration 007 ran on restart and set
+`must_change_password = 1` on all four human rows, exactly as specified.
+
+Within seconds, a real user on the LAN was 403ing on `/channels`,
+`/channels/4/members` and `/channels/4/messages` — correct behaviour by the
+spec, which gates every user-authenticated route except `POST /auth/password`,
+`GET /me` and `POST /auth/logout` while the flag is set.
+
+**The gap: `client/` has no password UI at all.** `client/src/api.ts` knows
+exactly one password route, `POST /auth/login`. There is no call to
+`POST /auth/password`, no form, nothing in the built bundle. So the flag makes
+the app unusable and offers no way out of that state from inside the app.
+
+The spec is not wrong and the build is not wrong — the spec's scope is the
+server, its six acceptance tests all pass, and 252 server tests pass on the
+merge. **Nothing in the spec, the build, the review or the tests could have
+caught this**, because every one of them is scoped to the server. The failure
+is that "users can change their password" was true of the API and false of the
+product, and no artifact in the loop owns that distinction.
+
+Flag cleared in production 2026-08-14 to restore service:
+`UPDATE users SET must_change_password = 0`. Migration 007 is recorded in
+`schema_migrations`, so it does not re-run and the clear survives restarts
+(verified). Pre-merge backup: `db-backups/disjorn-pre-007-20260814T164320Z.db`.
+
+To finish, in order:
+
+1. **Client rotation screen** — when any request returns 403 with the rotation
+   reason, or `/me` reports the flag, present a change-password form and let
+   nothing else render. This is the actual missing feature.
+2. **Re-flag** with `UPDATE users SET must_change_password = 1` once (1) ships.
+   Tell the four humans first; they will each be forced through it.
+3. **A spec-level habit worth taking from this**: a spec that changes what a
+   user can do should name the surface they do it on, or say in writing that it
+   is server-only and names its follow-up. Cheap, and it is the whole distance
+   between this incident and no incident.
