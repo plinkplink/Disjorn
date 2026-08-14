@@ -152,7 +152,4 @@ Confirm record**, which is why the tiers confirm sequences ahead of this build.
 
 ## Status
 
-`draft` — all three lanes have signed. **Moves to `confirmed` when plink's
-confirm lands as a seq**, and per this house's own gate, no phase builds
-without one. Sequencing: retag ruling (done, seq 708) → tiers confirm → this
-spec's Tier 2 classification becomes real → proxy build → KB-D6 as probe.
+confirm
