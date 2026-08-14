@@ -38,5 +38,23 @@ One slot. Small implementation, test-heavy: wrong-current-password, session evic
 - **#custodian seq**: 1006
 - **Confirmed at**: 2026-08-12
 
+## Post-merge note (keyboard, 2026-08-14)
+
+Merged as `92bf7b1`. All six acceptance tests pass, plus 252 server tests.
+Verified at the keyboard rather than by the build, which reported `tests: NOT
+RUN` — the build image had no `aiosqlite` (fixed separately in `11dde65`).
+
+**Enforcement is currently OFF in production.** Migration 007 ran and flagged
+all four human rows; a real user was locked out within seconds, because
+`client/` has no password-change UI — `api.ts` knows only `POST /auth/login`.
+The server half is correct and complete; the product half does not exist yet.
+Flag cleared to restore service. See DEFERRED.md § PW-1 for the finish
+sequence.
+
+This spec was scoped to the server and delivered exactly that. Recording it
+here because the next reader needs to know the feature is half-landed, and
+because "the API can do it" and "a person can do it" came apart at exactly the
+place nothing in the loop was watching.
+
 ## Status
 confirmed
