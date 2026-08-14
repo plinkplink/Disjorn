@@ -777,3 +777,68 @@ To finish:
    than `[start_build].resident`, so a build runs as whoever asked for it.
 3. Re-check this table afterwards; `board` will not catch it, because a
    credential file is not a spec, a branch or a proposal.
+
+---
+
+## PW-2 — voluntary password change in Settings
+
+Rotation (PW-1) only gives a password form to someone the server has *walled
+off*. A user who simply wants to change their password has no way to, because
+the form only appears in response to a 403. `POST /auth/password` already does
+the work and already ends the other sessions; this is a Settings panel and a
+form, reusing `changePassword` in the session store.
+
+Filed 2026-08-14 by plink after testing rotation end to end.
+
+## PW-3 — password recovery
+
+Today, a forgotten password is recoverable only by an admin over
+`POST /auth/users/{id}/password`, which hands out a temporary password and sets
+`must_change_password` — fine while the admin is reachable and the deployment
+is four people on a LAN, and not a system. Wants a real design (out-of-band
+proof, single-use time-limited tokens, rate limiting, and a rule for what
+happens to live sessions), not an incremental patch. Larger than it sounds.
+
+## CR-2 — everyone moves to the Max account, and what that costs
+
+**Reverses CR-1's direction, 2026-08-14.** plink checked the Anthropic console:
+Claudette is spending ~$40/day on read-heavy days. New target is the Max account
+for BOTH seats of BOTH residents; metered API keys are out.
+
+Gable's chat seat was moved to the API key earlier the same day under the old
+target and has been **restored from backup** — his account token was never lost,
+so only two tokens need minting: Claudette chat and Claudette build. No summon
+ran in the window, so nothing was spent on the wrong credential.
+
+`harness/keyboard/set-credential.sh` installs a minted token into one seat with
+the right owner, group, mode and — the part that bites — the OTHER credential
+removed. `run-resident.sh` prefers OAuth whenever present, so a leftover API key
+in an account seat is invisible, while a leftover OAuth token in a key seat
+quietly keeps spending the account.
+
+**THE COST OF THIS, NAMED BEFORE IT IS PAID.** The confirmed spec
+(`2026-08-05-credential-routing-and-halt-protocol.md` §1) chose the seat split
+for *failover isolation*, in as many words: "a Max limit halts the loop and
+leaves chat seats untouched, because they never shared a credential." Putting
+every seat on one account deletes that property. A Max rate limit stops being a
+build outage and becomes a total one — both residents, both seats, at once.
+
+That is a real trade for ~$40/day and it is plink's to make. Two consequences
+follow rather than opinions:
+
+1. **The halt protocol (§3, §4) stops being a nicety.** With one credential
+   behind everything, "rate-limited must never be indistinguishable from wedged"
+   is the property that decides whether an outage is diagnosable in a minute or
+   an evening.
+2. **Chat's silent metered fallback must close.** `run-resident.sh` sets
+   `_seat_metered_fallback=allow`, so if an account token expires, chat falls
+   back to the API key and bills silently — which is exactly the surprise this
+   whole change exists to stop. Once the tokens are in, chat should refuse like
+   build already does. Deliberately NOT flipped yet: with no token in
+   Claudette's chat seat today, refusing would take her offline.
+
+**The spec now contradicts the deployment.** It is titled "chat seats on API
+keys, agent loops on Max" and it is confirmed. Amend it — an accurate spec that
+records the reversal and its reasoning, or a stale one that every future reader
+has to be told not to believe. This house has paid for the second option
+repeatedly.
