@@ -122,6 +122,27 @@ RUN pip install --no-cache-dir --break-system-packages \
         chromadb==1.5.8 \
         voyageai==0.3.7
 
+# THE SERVER STACK, from server/requirements.txt VERBATIM — no second pin list.
+#
+# Third instance of one hole (08-06 pytest, 08-12 zero-diff build, 08-14
+# password build). A build session that touches server/ writes its tests, then
+# cannot run them: conftest imports aiosqlite, which no interpreter in the seat
+# has. Every such build reports `tests: NOT RUN` — correctly, because the
+# builders refuse to pip-install their way to a green result, which is the rule
+# working exactly as written against ground that was never laid.
+#
+# Installed from the REAL file rather than a copied pin list, deliberately: the
+# chroma pins above needed a drift test to stay honest, and the cheapest way to
+# never need another one is to not make another copy. server/requirements.txt
+# is staged into the build context by harness/keyboard/07-resident-image.sh —
+# the build context is harness/cc, so this file is not otherwise reachable, and
+# the repo root cannot be the context (871MB, and it contains the production
+# database; an image must never be able to carry that).
+COPY server-requirements.txt /tmp/server-requirements.txt
+RUN pip install --no-cache-dir --break-system-packages \
+        -r /tmp/server-requirements.txt \
+    && rm -f /tmp/server-requirements.txt
+
 # Claude Code CLI, pinned. No API key exists at build time.
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
     && npm cache clean --force

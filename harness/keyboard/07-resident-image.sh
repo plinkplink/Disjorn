@@ -37,15 +37,43 @@ if [[ $EUID -eq 0 ]]; then
   exit 1
 fi
 
+# == stage the build context ==
+# harness/cc PLUS the one file that lives outside it: server/requirements.txt,
+# which the image installs so a build session can actually run server tests.
+#
+# WHY STAGE INSTEAD OF WIDENING THE CONTEXT. `podman build` can only COPY from
+# inside its context, and the obvious fix — make the context $REPO — would put
+# 871MB in it including server/data, i.e. the production database. An image
+# must never be able to carry that, and "we added a .containerignore" is one
+# forgotten line away from it doing so. So the context stays small and we copy
+# the one extra file in.
+#
+# WHY NOT A SECOND PIN LIST IN THE CONTAINERFILE. That is the drift shape that
+# already cost this project a week; the chroma pins there need a test
+# (tests/test_image_deps.py) purely to stay honest. Copying the real file at
+# build time cannot drift — it is regenerated every run, never maintained.
+STAGE="$(mktemp -d /var/tmp/disjorn-image-ctx.XXXXXX)"
+# ONE trap for the whole script. `trap ... EXIT` REPLACES any previous EXIT
+# trap rather than adding to it, so the tarball's cleanup below is folded in
+# here instead of being registered separately — two traps would silently mean
+# only the last one runs, and the staged context (or a ~1GB tarball) would be
+# left in /var/tmp.
+trap 'rm -rf "$STAGE"; rm -f "$TAR"' EXIT
+cp -a "$REPO/harness/cc/." "$STAGE/"
+cp "$REPO/server/requirements.txt" "$STAGE/server-requirements.txt"
+# Never ship caches or a stray venv into an image layer.
+rm -rf "$STAGE"/**/__pycache__ "$STAGE"/__pycache__ "$STAGE/.pytest_cache" "$STAGE/.venv"
+echo "== staged context: harness/cc + server/requirements.txt =="
+
 echo "== build (plink's store, has registry egress) =="
-podman build -t "$IMAGE" -f "$REPO/harness/cc/Containerfile" "$REPO/harness/cc"
+podman build -t "$IMAGE" -f "$STAGE/Containerfile" "$STAGE"
 NEW_ID=$(podman inspect --format '{{.Id}}' "$IMAGE")
 echo "built ${NEW_ID:0:12}"
 
 echo "== save =="
 podman save -o "$TAR" "$IMAGE"
 chmod 0644 "$TAR"
-trap 'rm -f "$TAR"' EXIT
+# (cleanup is in the single EXIT trap above — do not add another one here)
 
 for u in "${RESIDENTS[@]}"; do
   uid=$(id -u "$u")
