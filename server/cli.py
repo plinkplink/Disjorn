@@ -8,7 +8,10 @@ Usage:
 
 Works against the configured DB (config.py / .env); runs migrations first if
 needed. `create-user` prompts for a password via getpass unless
-`--password-stdin` is given (reads one line from stdin — for scripts).
+`--password-stdin` is given (reads one line from stdin — for scripts). The
+password you type is a handover, not the account's password: the new user is
+created with `must_change_password` set, so it is good for logging in and
+calling POST /auth/password and nothing else (see routers/auth.py).
 `create-bot` prints the raw API key exactly once; only its SHA-256 hash is
 stored; `--chibi-pack` sets `bots.chibi_pack` at creation (a bare pack name
 under DATA_DIR/assets/chibi_packs/ or an absolute path to a pack directory —
@@ -55,8 +58,9 @@ async def cmd_create_user(args: argparse.Namespace) -> None:
     await db.run_migrations()
     try:
         cur = await db.execute(
-            """INSERT INTO users (username, password_hash, display_name, is_admin)
-               VALUES (?, ?, ?, ?)""",
+            """INSERT INTO users (username, password_hash, display_name, is_admin,
+                                  must_change_password)
+               VALUES (?, ?, ?, ?, 1)""",
             (
                 args.username,
                 hash_password(password),
@@ -68,6 +72,11 @@ async def cmd_create_user(args: argparse.Namespace) -> None:
         _fail(f"user '{args.username}' already exists")
     admin_note = " [admin]" if args.admin else ""
     print(f"Created user '{args.username}' (id={cur.lastrowid}){admin_note}")
+    print(
+        "This password is a handover only: the account can log in with it, but every "
+        "route except GET /me and POST /auth/password answers 403 until the user sets "
+        "their own via POST /auth/password."
+    )
 
 
 async def cmd_create_bot(args: argparse.Namespace) -> None:
