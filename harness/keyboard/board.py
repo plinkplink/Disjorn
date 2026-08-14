@@ -88,6 +88,25 @@ def spec_confirm_seq(path: Path) -> "int | None":
     return int(m.group(1)) if m else None
 
 
+def _clean_status_prose(status: str, cap: int = 150) -> str:
+    """The trailing prose on a Status line, as a readable sentence.
+
+    Specs write things like ``draft` — all three lanes have signed. **Moves to
+    `confirmed` when plink's key lands**`, and slicing that raw leaves a
+    dangling backtick mid-clause. Drop the leading status token, strip markdown
+    emphasis, and cut on a sentence boundary where there is one.
+    """
+    rest = re.sub(r"^\S+\s*[—–-]*\s*", "", status.strip()).strip()
+    rest = re.sub(r"[*`_]", "", rest)
+    if not rest:
+        return ""
+    if len(rest) > cap:
+        head = rest[:cap]
+        stop = max(head.rfind(". "), head.rfind("; "))
+        rest = (head[:stop + 1] if stop > cap // 3 else head.rsplit(" ", 1)[0] + "…")
+    return rest.strip()
+
+
 def collect_specs() -> list:
     out = []
     for f in sorted(SPECS.glob("*.md")):
@@ -279,7 +298,12 @@ def build_board() -> dict:
                 "kind": "spec",
                 "what": f"Spec waiting on your confirm: {s['slug']}",
                 "where": s["path"],
-                "detail": s["status"][:160],
+                # The Status line is a token followed, sometimes, by prose that
+                # runs on for a paragraph. Show the human sentence, stripped of
+                # markdown, not the raw fragment — a detail line that ends
+                # mid-clause on a stray backtick reads as a rendering bug and
+                # costs the row its credibility.
+                "detail": _clean_status_prose(s["status"]),
                 "how": "post the nod in #custodian, then fill the Confirm record",
                 "slug": s["slug"]})
 

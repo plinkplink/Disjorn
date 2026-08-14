@@ -167,8 +167,8 @@ def render_html(b: dict) -> str:
     n = c["waiting"]
     stamp = b["generated_at"][:16].replace("T", " ")
     verdict_cls = "verdict" if n else "verdict clear"
-    verdict = (f'<span class="n">{n}</span> thing{"" if n == 1 else "s"} '
-               f"need you." if n else
+    verdict = (f'<span class="n">{n}</span> '
+               f'{"thing needs" if n == 1 else "things need"} you.' if n else
                '<span class="n">Nothing</span> needs you right now.')
 
     tiles = [
