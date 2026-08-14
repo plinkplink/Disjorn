@@ -730,3 +730,50 @@ To finish, in order:
    user can do should name the surface they do it on, or say in writing that it
    is server-only and names its follow-up. Cheap, and it is the whole distance
    between this incident and no incident.
+
+---
+
+## CR-1 — Claudette's build seat has no account token, and BR-1 is hiding it
+
+**Target (plink, 2026-08-14): API key in chat, Max account in build, both
+residents.** The wrappers already enforce exactly that — `run-resident.sh` sets
+`_seat_metered_fallback=allow`, `run-build.sh` sets `refuse`. Only the
+credential files disagreed.
+
+Done 2026-08-14: Gable's **chat** seat moved off the Max account to the org API
+key (`/srv/disjorn-resident-config/gable/env`; the OAuth line was *removed*, not
+shadowed — the wrapper prefers OAuth whenever it is present, so adding a key
+beside it changes nothing). Backup in `/home/plink/cred-backups/`.
+
+Still open, and it needs plink's hands because only a human can mint one:
+
+**`/srv/disjorn-build-config/claudette/env` holds `ANTHROPIC_API_KEY` and no
+`CLAUDE_CODE_OAUTH_TOKEN`.** As written, `run-build.sh` REFUSES to launch that
+seat — "offers ANTHROPIC_API_KEY only, and this seat routes to the Max account".
+
+The reason nobody has ever seen that refusal is **BR-1**: `[start_build].resident
+= "gable"` in `/etc/disjorn-broker/broker.toml` is global, so every build runs as
+res-gable whatever seat called it. Claudette's builds have been borrowing
+Gable's token, Gable's home and Gable's spine since the verb was switched on.
+Her missing credential has therefore never once failed — the two defects have
+been concealing each other.
+
+Consequences worth naming before either is fixed:
+
+1. **Fixing BR-1 first breaks her builds immediately**, at the credential wall,
+   until she has her own token. Fix the credential first, or both together.
+2. **The audit trail is presently unreliable for every build ever run.** The
+   broker records the CALLER (`res-claudette` on 2026-08-14T06:53), the process
+   ran as `res-gable`, and the commit is authored `disjorn-build
+   <build@disjorn.local>`. Three records, no two agreeing, and no way to tell
+   from any of them which resident's judgement produced a diff.
+
+To finish:
+
+1. `claude setup-token` as plink → write it to
+   `/srv/disjorn-build-config/claudette/env` as `CLAUDE_CODE_OAUTH_TOKEN`,
+   0640 plink:res-claudette, and drop the API key from that file.
+2. Then BR-1: derive the build identity from the caller's SO_PEERCRED rather
+   than `[start_build].resident`, so a build runs as whoever asked for it.
+3. Re-check this table afterwards; `board` will not catch it, because a
+   credential file is not a spec, a branch or a proposal.
