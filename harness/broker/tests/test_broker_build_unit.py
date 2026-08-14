@@ -35,7 +35,11 @@ from pathlib import Path
 
 import pytest
 
-from broker_testlib import FakeBuildProc  # noqa: F401  (fixtures import first)
+from broker_testlib import (  # noqa: F401  (fixtures import first)
+    STUB_SHA,
+    FakeBuildProc,
+    build_out,
+)
 from brokerd import BUILD_UNIT_PREFIX, build_unit_name, slug_from_spec_filename
 
 REPO_HARNESS = Path(__file__).resolve().parent.parent.parent
@@ -464,8 +468,7 @@ def test_a_sidecar_records_what_a_future_broker_needs(harness):
 
 
 @pytest.mark.parametrize("factory,expect", [
-    (lambda: FakeBuildProc(out=b'{"files": [], "tests": "ok", "diff": ""}'),
-     "build done"),
+    (lambda: FakeBuildProc(out=build_out()), "build done"),
     (lambda: FakeBuildProc(err=b"boom", rc=1), "BUILD FAILED"),
     (lambda: FakeBuildProc(raise_timeout=True), "BUILD FAILED"),
 ])
@@ -531,14 +534,20 @@ def _plant(harness, slug: str, *, out: bytes = b"", err: bytes = b"",
 
 def test_a_build_that_finished_while_the_broker_was_down_is_still_narrated(harness):
     """The plain restart case: the unit outlived the broker, finished, and was
-    --collect'ed away. Its report is still on disk, so the done line still lands
-    — which is the whole reason the sidecar exists."""
+    --collect'ed away. Its spool is still on disk, so the done line still lands
+    — which is the whole reason the sidecar exists.
+
+    DELIBERATE CONTRACT CHANGE (2026-08-13 publish path): what makes this a DONE
+    line is the wrapper's PUBLISHED line, not the session's report. The report
+    still rides along as enrichment."""
     slug = "2026-07-21-orphan"
     _plant(harness, slug,
-           out=b'{"files": ["a.py"], "tests": "9 passed", "diff": "+3 -1"}')
+           out=build_out('{"files": ["a.py"], "tests": "9 passed", '
+                         '"diff": "+3 -1"}'))
     assert harness.broker.adopt_inflight_builds() == []
     (post,) = harness.proposals
     assert post["body"].startswith(f"build done | {slug} -> loop/{slug}")
+    assert f"published: disjorn.git {STUB_SHA}" in post["body"]
     assert "files: a.py" in post["body"] and "9 passed" in post["body"]
     assert harness.build_log_files() == []
 
@@ -563,7 +572,7 @@ def test_a_still_running_build_is_re_adopted_and_narrated_when_it_lands(harness)
     slug = "2026-07-21-inflight"
     harness.broker.BUILD_POLL_SEC = 0.01
     _plant(harness, slug,
-           out=b'{"files": ["b.py"], "tests": "ok", "diff": "+1 -0"}')
+           out=build_out('{"files": ["b.py"], "tests": "ok", "diff": "+1 -0"}'))
     harness.set_unit_state(slug, "active")
 
     assert harness.broker.adopt_inflight_builds() == [slug]
@@ -622,8 +631,8 @@ def test_adoption_leaves_a_build_this_process_owns_alone(harness):
     this process launched is already being reaped, so its ticket and spool must
     not be narrated twice or swept out from under it."""
     harness.set_verbs(**{"start-build": True})
-    proc = FakeBuildProc(out=b'{"files": ["a.py"], "tests": "ok", "diff": ""}',
-                         block=True)
+    proc = FakeBuildProc(out=build_out('{"files": ["a.py"], "tests": "ok", '
+                                       '"diff": ""}'), block=True)
     spawn = harness.use_fake_build(proc_factory=lambda: proc)
     harness.write_spec("2026-07-21-mine.md")
     assert harness.call("start-build", {"spec": "2026-07-21-mine.md"})["ok"]

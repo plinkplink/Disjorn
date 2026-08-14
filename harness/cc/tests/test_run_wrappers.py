@@ -54,30 +54,19 @@ exit 0
 """
 
 
-def build_seat_ground(tmp_path):
-    """The two paths run-build.sh checks before it does anything else: the task
-    kernel it copies, and a gatehouse holding at least one bare repo it clones.
+def seed_bare_repo(path: Path, scratch: Path):
+    """A bare repo with one commit on `main`, built with plumbing only.
 
-    Without these the build wrapper exits at line 130-odd with 'build kernel
-    missing: /usr/local/lib/disjorn/…', i.e. against the PRODUCTION default —
-    so every run-build.sh test silently measured whether the host happened to
-    have a deploy, instead of measuring the wrapper. Pointing them at tmp_path
-    makes the suite hermetic and the assertions real.
+    One commit and not zero, so the clone the wrapper makes has a base to
+    branch from — the same shape a real gatehouse repo has.
     """
-    kernel = tmp_path / "build-kernel.md"
-    kernel.write_text("# Build session\n\nYou are a build tool.\n")
-    gatehouse = tmp_path / "gatehouse"
-    gatehouse.mkdir()
-    repo = gatehouse / "disjorn.git"
-    subprocess.run(["git", "init", "--bare", "-b", "main", str(repo)],
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(path)],
                    check=True, capture_output=True)
-    # One commit, so the clone the wrapper makes has a base to branch from —
-    # the same shape a real gatehouse repo has.
-    env = dict(os.environ, GIT_DIR=str(repo))
+    env = dict(os.environ, GIT_DIR=str(path))
     blob = subprocess.run(["git", "hash-object", "-w", "--stdin"], input="x\n",
                           text=True, capture_output=True, check=True,
                           env=env).stdout.strip()
-    idx = dict(env, GIT_INDEX_FILE=str(tmp_path / "idx"))
+    idx = dict(env, GIT_INDEX_FILE=str(scratch / f"idx-{path.name}"))
     subprocess.run(["git", "update-index", "--add", "--cacheinfo",
                     f"100644,{blob},f"], check=True, capture_output=True, env=idx)
     tree = subprocess.run(["git", "write-tree"], capture_output=True, text=True,
@@ -88,6 +77,32 @@ def build_seat_ground(tmp_path):
                              GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")).stdout.strip()
     subprocess.run(["git", "update-ref", "refs/heads/main", commit],
                    check=True, capture_output=True, env=env)
+    return commit
+
+
+def build_seat_ground(tmp_path):
+    """The two paths run-build.sh checks before it does anything else: the task
+    kernel it copies, and a gatehouse holding the ENTITLED repos it clones.
+
+    Without these the build wrapper exits at line 130-odd with 'build kernel
+    missing: /usr/local/lib/disjorn/…', i.e. against the PRODUCTION default —
+    so every run-build.sh test silently measured whether the host happened to
+    have a deploy, instead of measuring the wrapper. Pointing them at tmp_path
+    makes the suite hermetic and the assertions real.
+
+    BOTH entitled repos since 2026-08-13: the wrapper no longer globs `*.git`,
+    it clones `disjorn.git` + `<name>.git` and REFUSES TO LAUNCH if either is
+    missing. WRAPPERS names the resident `smoketest`, so the gatehouse needs a
+    `smoketest.git`. (The entitled set itself is measured in
+    tests/test_build_harvest.py; here it is only the ground every other
+    run-build.sh assertion stands on.)
+    """
+    kernel = tmp_path / "build-kernel.md"
+    kernel.write_text("# Build session\n\nYou are a build tool.\n")
+    gatehouse = tmp_path / "gatehouse"
+    gatehouse.mkdir()
+    for repo in ("disjorn", WRAPPERS["run-build.sh"][0]):
+        seed_bare_repo(gatehouse / f"{repo}.git", tmp_path)
     return {"RESIDENT_BUILD_KERNEL": str(kernel), "RESIDENT_GATEHOUSE": str(gatehouse)}
 
 
@@ -494,10 +509,12 @@ def test_spine_is_mounted_read_only_at_opt_spine(rig, script, spine_dir):
 
 # The mount set each wrapper produces with no spine asked for. Per-wrapper
 # because the two seats deliberately differ: the resident seat has the broker
-# socket and no gatehouse, the build seat has the gatehouse and NO SOCKET.
+# socket, and the build seat has NO SOCKET and — since 2026-08-13 — NO
+# GATEHOUSE either. The build seat's set is now strictly the smaller one, and
+# nothing in it is a writable path out of the container.
 UNSET_SPINE_MOUNTS = {
     "run-resident.sh": {"/home/resident", "/run/disjorn-broker", "/config", "/config/env"},
-    "run-build.sh": {"/home/resident", "/config", "/run/gatehouse", "/config/env"},
+    "run-build.sh": {"/home/resident", "/config", "/config/env"},
 }
 
 
@@ -1003,32 +1020,87 @@ def test_build_wrapper_has_no_broker_socket():
     assert "BROKER_SOCKET=" not in text
 
 
-def test_build_wrapper_mounts_the_gatehouse_writable():
-    """The one writable path out of a build container."""
+def test_build_wrapper_does_not_mount_the_gatehouse():
+    """NO WRITABLE PATH OUT (2026-08-13, SPECS/2026-08-13-build-publish-path.md).
+
+    This assertion is the exact inverse of the one that stood here until
+    2026-08-13 (`test_build_wrapper_mounts_the_gatehouse_writable`, "the one
+    writable path out of a build container"). It was inverted on purpose, with
+    a confirmed spec behind it: `--userns keep-id` does not map supplementary
+    groups, so the `gatehouse` group never existed inside the container and
+    every in-container push wrote objects by uid-ownership accident. The
+    product now leaves by the wrapper's post-exit harvest, host-side.
+
+    If you are here because a build "has nowhere to push" — correct, it does
+    not push. See the harvest at the bottom of run-build.sh.
+    """
     text = (CC_DIR / "run-build.sh").read_text()
-    assert '-v "$GATEHOUSE:/run/gatehouse"' in text, (
-        "the build seat has no gatehouse mount, so a build has nowhere to push"
-    )
-    assert ":/run/gatehouse:ro" not in text, "the gatehouse must be writable"
+    code = [ln for ln in text.splitlines() if not ln.lstrip().startswith("#")]
+    assert not any("/run/gatehouse" in ln for ln in code), (
+        "run-build.sh references /run/gatehouse in code again — the container "
+        "must have no writable path out")
+    assert not any("GATEHOUSE_IN_CONTAINER" in ln for ln in code)
 
 
-def test_reaper_block_is_identical_in_both_wrappers():
+def test_reaper_blocks_diverge_by_contract():
+    """They were byte-identical until 2026-08-13; now they legitimately differ,
+    and the difference is pinned rather than dropped.
+
+    run-resident.sh still `exec`s podman, so the watchdog sibling is the whole
+    mechanism: a trap would cost the exec and would not cover the SIGKILL both
+    supervisors actually send. run-build.sh cannot exec any more — it has to
+    outlive its container to harvest — so it is podman's PARENT, and a killed
+    parent must not leave a container writing into ~/work while the next launch
+    deletes it ([1175]). It therefore carries BOTH: the watchdog for SIGKILL
+    and a trap for EXIT/INT/TERM.
+
+    What must stay common is the substance of the reap, and that is asserted
+    for both: by cid (never by name), `rm -f -t 0 --ignore`.
+    """
     blocks = {}
     for script in ALL:
         m = REAPER_BLOCK_RE.search((CC_DIR / script).read_text())
         assert m, f"{script} has no marked container reaper block"
         blocks[script] = m.group(0)
-    assert blocks["run-resident.sh"] == blocks["run-build.sh"], (
-        "container reaper block drifted between the two wrappers")
+        assert "--cidfile" in blocks[script], script
+        assert "podman rm -f -t 0 --ignore" in blocks[script], script
+
+    # The resident seat: watchdog only, exec intact, no trap. (Matched as a
+    # STATEMENT, not as the word — the block's prose explains at length why a
+    # trap is not the mechanism there, and that prose must survive.)
+    assert not re.search(r"^\s*trap\s", blocks["run-resident.sh"], re.M), (
+        "run-resident.sh grew a trap — it still `exec`s podman, where a trap "
+        "cannot run and the exec is the mechanism")
+    # The build seat: watchdog AND trap, on every signal a trap can see.
+    bld = blocks["run-build.sh"]
+    assert "trap '_build_reap' EXIT" in bld
+    assert "INT" in bld and "TERM" in bld
+    assert "_reap_pid" in bld, "the SIGKILL watchdog must still be there too"
 
 
-def test_wrappers_still_exec_podman():
-    """The reaper must not have cost us the proven invocation: same PID,
-    same stdin, same exit status, no extra shell between the supervisor and
-    podman. (A signal trap would have required giving that up — and would
-    not have covered SIGKILL anyway.)"""
-    for script in ALL:
-        assert 'exec podman "${args[@]}"' in (CC_DIR / script).read_text()
+def test_the_wrappers_launch_podman_by_their_seat_s_contract():
+    """run-resident.sh execs; run-build.sh runs podman as a child and harvests.
+
+    The exec was load-bearing for years — same PID, same stdin, same exit
+    status, no extra shell between the supervisor and podman — so it is still
+    asserted for the summon path, which has no reason to give it up. The build
+    seat gave it up for the harvest, and the shape it gave it up FOR is pinned
+    here: `&` + `wait` (so the trap is not deferred behind a foreground
+    command) with an explicit `<&0` (so the spec on stdin is not redirected
+    from /dev/null, as bash does to async commands).
+    """
+    res = (CC_DIR / "run-resident.sh").read_text()
+    bld = (CC_DIR / "run-build.sh").read_text()
+    assert 'exec podman "${args[@]}"' in res
+    assert 'podman "${args[@]}" <&0 &' in bld
+    assert 'wait "$_podman_pid"' in bld
+    # The one exec left in the build wrapper is the DETACHED path, where the
+    # caller owns the container and there is nothing yet to harvest.
+    lines = bld.splitlines()
+    execs = [i for i, ln in enumerate(lines)
+             if ln.strip() == 'exec podman "${args[@]}"']
+    assert len(execs) == 1, "run-build.sh must exec podman on the detached path only"
+    assert any('DETACHED" = "1"' in ln for ln in lines[execs[0] - 3:execs[0]])
 
 
 def test_wrappers_never_hardcode_a_spine_under_home_plink():

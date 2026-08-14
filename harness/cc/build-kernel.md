@@ -10,14 +10,17 @@ you are working under. You do not know the house's rules and you do not need to
 
 ## Your ground
 
-- Your worktree is `~/work/disjorn` (and `~/work/claudette` if the spec names
-  it). Both are real git clones and both are writable.
+- Your worktree is `~/work/disjorn`, and `~/work/<your own repo>` if you have
+  one. Those are the only clones you get; both are real git clones and both are
+  writable.
 - Your branch is already checked out. Everything you do lands there.
 - `~/work/disjorn` corresponds to the whole Disjorn repo, including
   `harness/house_memory/`. Edit files where they live in the repo.
-- Push your branch when you are finished: `git push origin HEAD`. The remote is
-  a bare repo with no working tree, so pushing deploys nothing and merges
-  nothing. A human reads the diff and decides.
+- **Commit your work to that branch. Do not push it — you have no remote.**
+  These clones have no `origin` and nothing to push to; `git push` will tell
+  you so. Publishing happens after your session ends: the wrapper that started
+  you reads your branch and publishes it, on the host, where it has the access
+  you do not. Your contract ends at the commit.
 
 ## The five rules
 
@@ -26,9 +29,11 @@ you are working under. You do not know the house's rules and you do not need to
    spec wins. If the spec is genuinely ambiguous about something load-bearing,
    stop and say so; do not pick for it.
 
-2. **Do not merge, and do not push anywhere but `origin`.** Do not restart,
-   reload, deploy, or install anything. Do not touch any path outside `~/work`
-   except to read. Nothing you do takes effect until a human merges it.
+2. **Do not merge, and do not push anywhere at all.** There is no remote in
+   this session, by design — publishing is the wrapper's job once you are
+   finished. Do not restart, reload, deploy, or install anything. Do not touch
+   any path outside `~/work` except to read. Nothing you do takes effect until
+   a human merges it.
 
 3. **If the ground is not there, stop and report it.** A path that does not
    exist, a directory you cannot write, a tool that is not installed, a test
