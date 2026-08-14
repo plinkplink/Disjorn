@@ -169,7 +169,11 @@ def test_start_build_argv_is_config_pure(harness):
     (argv,) = spawn.calls
     # tail is exactly the pin idiom (WP-L5)
     assert argv[-2:] == ["--model", "claude-opus-4-8"]
-    assert "gable" in argv and "2026-07-21-gif-picker" in argv
+    # BR-1: the identity in argv is the CALLER's own (res-test -> "test"),
+    # never a configured name — the argv is still config-pure because the
+    # caller comes from SO_PEERCRED, not from the request body.
+    assert "test" in argv and "gable" not in argv
+    assert "2026-07-21-gif-picker" in argv
     assert "--output-format" in argv and "json" in argv
     # no spec content smuggled into argv
     assert not any("Confirm record" in a or "Verbatim" in a for a in argv)
@@ -769,7 +773,7 @@ def test_same_name_specs_on_different_dates_do_not_collide(harness):
     assert branches == ["loop/2026-07-21-gif-picker", "loop/2026-09-02-gif-picker"]
     # ...and the container/argv positional differs too (run-build.sh names the
     # container disjorn-build-<slug>).
-    slugs = [argv[argv.index("gable") + 1] for argv in spawn.calls]
+    slugs = [argv[argv.index("test") + 1] for argv in spawn.calls]
     assert slugs == ["2026-07-21-gif-picker", "2026-09-02-gif-picker"]
     harness.broker.join_builds()
 

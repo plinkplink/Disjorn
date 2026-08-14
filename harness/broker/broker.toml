@@ -205,7 +205,10 @@ unit_state_command = ["systemctl", "show", "--property=ActiveState", "--value"]
 # WHICH resident the build runs AS — this is now a kernel identity (res-<name>),
 # not a label. It must have a line in /etc/sudoers.d/91-disjorn-build; adding a
 # build resident is a keyboard act with a visible diff, on purpose.
-resident = "gable"
+# resident = — REMOVED (BR-1, 2026-08-14). The build runs as the resident
+# whose SO_PEERCRED called start-build; a configured identity was how every
+# build ran as res-gable whoever pressed, and how a missing credential in
+# Claudette's build seat stayed invisible for a week.
 # The command run INSIDE the container: a headless Claude Code build session.
 # The trailing "$@" + the "build-session" argv0 are load-bearing (WP-L5): the
 # broker appends `--model <id>` after this list, and `bash -lc "<script>"

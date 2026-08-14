@@ -131,7 +131,7 @@ def test_helper_refuses_a_resident_it_cannot_resolve():
 
 def test_helper_refuses_unknown_modes_and_malformed_calls():
     for args in (["frob", "gable", GOOD_SLUG], ["run"], ["run", "gable"],
-                 ["--help"], ["stop", "gable", GOOD_SLUG, "extra"],
+                 ["--help"], ["stop", "test", GOOD_SLUG, "extra"],
                  ["RUN", "gable", GOOD_SLUG]):
         cp = run_helper(*args)
         assert cp.returncode == 2, f"{args} was ACCEPTED: {cp.stdout}"
@@ -194,7 +194,12 @@ def test_sudoers_drop_in_stays_a_boundary():
     body = " ".join(rules)
     # It grants exactly one program, by absolute installed path.
     assert INSTALLED_HELPER in body
-    assert body.count(INSTALLED_HELPER) == 2          # run + stop, nothing else
+    # run + stop per resident. Two residents hold build grants since BR-1
+    # enabled Claudette's pair (identity is the caller's, so anyone whose
+    # start-build flips true needs their lines here). Still asserted exactly:
+    # a fifth mention means someone widened the surface.
+    assert body.count(INSTALLED_HELPER) == 4
+    assert "DISJORN_BUILD_GABLE" in body and "DISJORN_BUILD_CLAUDETTE" in body
     # It NEVER names a general-purpose privileged tool. A wildcard-bearing
     # sudoers rule for systemd-run is equivalent to a grant of full root
     # (sudoers matches args as one concatenated string, so `*` matches spaces
@@ -356,7 +361,9 @@ def test_broker_argv_routes_through_sudo_and_the_helper(harness):
     assert harness.call("start-build", {"spec": f"{GOOD_SLUG}.md"})["ok"] is True
     harness.broker.join_builds()
     (argv,) = spawn.calls
-    assert argv[:6] == ["sudo", "-n", INSTALLED_HELPER, "run", "gable", GOOD_SLUG]
+    # BR-1: the name the helper receives is the CALLER's (res-test -> test),
+    # never a configured identity.
+    assert argv[:6] == ["sudo", "-n", INSTALLED_HELPER, "run", "test", GOOD_SLUG]
     assert argv[-2:] == ["--model", "claude-opus-4-8"]
     assert not any("Confirm record" in a for a in argv)
 
@@ -422,7 +429,12 @@ def test_a_live_adopted_builds_spool_is_not_swept(harness):
     harness.broker._close_build_logs(out_fh, err_fh)
     harness.broker._write_build_sidecar(
         {"slug": slug, "branch": f"loop/{slug}", "confirmed_by": "plink",
-         "seq": 139, "resident": "res-test"},
+         "seq": 139, "resident": "res-test",
+         # what a post-BR-1 broker records: the identity DERIVED from the
+         # caller. A pre-BR-1 sidecar carries its configured name instead, and
+         # adoption stops that unit under the name it actually ran as — which
+         # is exactly right for builds launched before the cutover.
+         "build_resident": "test"},
         out_path=out_p, err_path=err_p, timeout=30)
     harness.set_unit_state(slug, "active")
     harness.broker.BUILD_POLL_SEC = 0.01
@@ -507,7 +519,7 @@ def test_timeout_stops_the_unit_not_just_the_local_process(harness):
     harness.write_spec("2026-07-21-hang2.md")
     assert harness.call("start-build", {"spec": "2026-07-21-hang2.md"})["ok"]
     harness.broker.join_builds()
-    assert harness.stop_calls() == [["stop", "gable", "2026-07-21-hang2"]]
+    assert harness.stop_calls() == [["stop", "test", "2026-07-21-hang2"]]
     assert proc.killed is True           # and the local process is reaped too
     assert any(b.startswith("BUILD FAILED") and "timed out" in b
                for b in [p["body"] for p in harness.proposals])
@@ -523,7 +535,11 @@ def _plant(harness, slug: str, *, out: bytes = b"", err: bytes = b"",
     harness.broker._close_build_logs(out_fh, err_fh)
     path = harness.broker._write_build_sidecar(
         {"slug": slug, "branch": f"loop/{slug}", "confirmed_by": "plink",
-         "seq": 139, "resident": "res-test"},
+         "seq": 139, "resident": "res-test",
+         # the post-BR-1 field: identity DERIVED from the caller. A pre-BR-1
+         # sidecar carries a configured name here instead, and adoption stops
+         # that unit under the name it actually RAN as — right for old builds.
+         "build_resident": "test"},
         out_path=out_p, err_path=err_p, timeout=timeout)
     if deadline is not None:
         rec = json.loads(Path(path).read_text())
@@ -620,7 +636,7 @@ def test_an_adopted_build_honours_the_original_deadline(harness):
     harness.set_unit_state(slug, "active")
     assert harness.broker.adopt_inflight_builds() == [slug]
     harness.broker.join_builds()
-    assert harness.stop_calls() == [["stop", "gable", slug]]
+    assert harness.stop_calls() == [["stop", "test", slug]]
     (post,) = harness.proposals
     assert post["body"].startswith("BUILD FAILED") and "timed out" in post["body"]
     assert harness.build_log_files() == []

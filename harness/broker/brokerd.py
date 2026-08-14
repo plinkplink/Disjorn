@@ -559,6 +559,38 @@ def parse_confirm_record(text: str) -> dict:
     return out
 
 
+# BR-1 (2026-08-14). The identity a build RUNS AS is derived from the identity
+# that ASKED — the SO_PEERCRED-resolved caller — never from configuration.
+#
+# Until today `[start_build].resident` was a single global name, so every build
+# ran as res-gable whoever pressed: Claudette's 08-14 password build was called
+# by res-claudette (audit), ran in res-gable's home on res-gable's credential
+# (process), and its commit says disjorn-build (git). Three records, no two
+# agreeing, and no way to tell from any of them whose judgement produced the
+# diff. Worse, the misattribution CONCEALED a second defect for a week: her
+# build seat had no account credential, and the wrapper's refusal never fired
+# because her builds were never actually hers.
+#
+# The caller arrives as the uid_map name ("res-claudette"); the launch helper
+# takes the short name ("claudette") and re-derives everything — uid, home,
+# config dir — from it. The regex is deliberately the helper's own RESIDENT_RE
+# so the two programs can never disagree about what a resident is called.
+_BUILD_CALLER_RE = re.compile(r"^res-([a-z][a-z0-9]{0,30})$")
+
+
+def build_identity_from_caller(caller: str) -> str:
+    """Short build identity ("claudette") from a uid_map caller name
+    ("res-claudette"). Raises VerbError on anything else — an unparseable
+    caller must refuse loudly, never fall back to some configured default,
+    because a fallback identity is exactly the bug this function removes."""
+    m = _BUILD_CALLER_RE.match(caller or "")
+    if not m:
+        raise VerbError("internal",
+                        f"cannot derive a build identity from caller {caller!r} "
+                        "(expected res-<name>); refusing rather than guessing")
+    return m.group(1)
+
+
 def slug_from_spec_filename(filename: str) -> str:
     """`SPECS/YYYY-MM-DD-<name>.md` -> `YYYY-MM-DD-<name>` (branch =
     loop/<slug>). The date prefix is REQUIRED and KEPT (BL-D4: it is the
@@ -989,6 +1021,17 @@ class Broker:
         # (command + session_argv + model pin), the SPECS/ dir the confirm gate
         # reads, the wall-clock cap, and the per-day build budget.
         self.start_build: dict[str, Any] = config.get("start_build", {})
+        # BR-1 (2026-08-14): the build identity is derived from the CALLER —
+        # build_identity_from_caller — and [start_build].resident is dead. Warn
+        # rather than ignore silently: a config line that still parses but no
+        # longer does anything is how "the ratified default 2" happened, and the
+        # next reader deserves to learn it is dead from the log, not from an
+        # afternoon of tracing why edits to it change nothing.
+        if "resident" in self.start_build:
+            print("disjorn-broker: WARNING [start_build].resident is IGNORED "
+                  "since BR-1 (2026-08-14): builds run as the resident that "
+                  "CALLS start-build (SO_PEERCRED), never as a configured "
+                  "name. Delete the line from broker.toml.", file=sys.stderr)
         # BL-D1: the confirm gate's REAL authorization is that specs_dir is
         # resident-unwritable. Verified HERE, once, at startup — a violation
         # raises ConfigError and main() exits non-zero, so the broker never
@@ -1468,7 +1511,7 @@ class Broker:
         return {"text": text, "slug": slug, "branch": f"loop/{slug}",
                 "confirmed_by": confirm["confirmed_by"], "seq": confirm["seq"]}
 
-    def _build_argv(self, slug: str) -> list[str]:
+    def _build_argv(self, slug: str, build_resident: str) -> list[str]:
         """The detached build command — a PURE function of config + the
         validated slug. Mirrors the summon launcher's contract
         (launcher.build_argv):
@@ -1484,7 +1527,10 @@ class Broker:
                 or not all(isinstance(a, str) for a in command)):
             raise VerbError("internal",
                             "start_build.command must be a non-empty list of strings")
-        resident_arg = str(self.start_build.get("resident", "gable"))
+        # BR-1: the identity is the CALLER's, passed in — see
+        # build_identity_from_caller. [start_build].resident is dead config and
+        # warned about at startup.
+        resident_arg = build_resident
         session_argv = self.start_build.get("session_argv", [])
         if (not isinstance(session_argv, list)
                 or not all(isinstance(a, str) for a in session_argv)):
@@ -1662,7 +1708,7 @@ class Broker:
             return "unknown"
         return (cp.stdout or "").strip().lower() or "unknown"
 
-    def _stop_build_unit(self, slug: str) -> bool:
+    def _stop_build_unit(self, slug: str, build_resident: str) -> bool:
         """Ask systemd to stop a build's unit. THE ONLY WAY the cap still bites:
         the unit lives outside the broker's cgroup, so killing our local
         `sudo`/`systemd-run` process no longer kills the build. Routed through
@@ -1674,8 +1720,7 @@ class Broker:
             argv = self._start_build_argv(
                 "stop_command",
                 ["sudo", "-n", "/usr/local/lib/disjorn/disjorn-build-launch", "stop"])
-            resident_arg = str(self.start_build.get("resident", "gable"))
-            cp = self._run([*argv, resident_arg, slug], 60)
+            cp = self._run([*argv, build_resident, slug], 60)
             return cp.returncode == 0
         except Exception:  # noqa: BLE001 — never crash a reaper on cleanup
             return False
@@ -1696,11 +1741,13 @@ class Broker:
             "slug": meta["slug"],
             "branch": meta["branch"],
             "unit": build_unit_name(meta["slug"]),
-            # Two different residents, never conflate them: `caller` is who asked
-            # (SO_PEERCRED, res-*), `build_resident` is the identity the unit
-            # RUNS AS ([start_build].resident, no res- prefix).
+            # Since BR-1 these two agree by construction — `build_resident` is
+            # DERIVED from `caller` (strip res-, launch helper re-derives uid/
+            # home/config from it). Both are still recorded: their equality is
+            # now an invariant a reader can CHECK, and the day they differ the
+            # sidecar is the evidence of what broke.
             "caller": meta.get("resident"),
-            "build_resident": str(self.start_build.get("resident", "gable")),
+            "build_resident": meta.get("build_resident", ""),
             "confirmed_by": meta.get("confirmed_by"),
             "seq": meta.get("seq"),
             "out_path": out_path,
@@ -1767,7 +1814,8 @@ class Broker:
             try:
                 proc.communicate(spec_bytes, timeout=timeout)
             except subprocess.TimeoutExpired:
-                stopped = self._stop_build_unit(slug)
+                stopped = self._stop_build_unit(
+                    slug, meta.get("build_resident", ""))
                 try:
                     proc.kill()
                     proc.communicate()
@@ -1951,7 +1999,8 @@ class Broker:
                     self._narrate_adopted_outcome(rec, state)
                     break
                 if deadline and time.time() > deadline:
-                    self._stop_build_unit(slug)
+                    self._stop_build_unit(
+                        slug, str(rec.get("build_resident") or ""))
                     out_path = str(rec.get("out_path") or "")
                     self._narrate(format_build_outcome(
                         slug=slug, branch=rec.get("branch", f"loop/{slug}"),
@@ -2037,7 +2086,9 @@ class Broker:
 
         # Build the argv (pure config + validated slug) BEFORE reserving, so a
         # misconfiguration refuses without burning a budget slot.
-        argv = self._build_argv(meta["slug"])
+        build_resident = build_identity_from_caller(resident)
+        meta["build_resident"] = build_resident
+        argv = self._build_argv(meta["slug"], build_resident)
         timeout = int(self.start_build.get("timeout_sec", START_BUILD_DEFAULT_TIMEOUT))
         prompt = build_session_prompt(
             meta["text"], slug=meta["slug"], branch=meta["branch"])

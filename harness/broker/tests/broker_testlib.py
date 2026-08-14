@@ -529,7 +529,6 @@ def harness(tmp_path: Path):
 
         [start_build]
         command = ["{PY}", "{stub_dir / 'build.py'}", "{build_record}"]
-        resident = "gable"
         session_argv = ["--output-format", "json"]
         model = "claude-opus-4-8"
         specs_dir = "{specs_dir}"
