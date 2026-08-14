@@ -96,6 +96,16 @@
   font-size: var(--text-sm);
 }
 
+/* Quiet guidance under a field — the password rule, and what changing it
+   does to your other devices. Sits below the input it describes, so it reads
+   as part of the field rather than as another error. */
+.field-hint {
+  margin: 0;
+  color: var(--text-2);
+  font-size: var(--text-xs);
+  line-height: 1.45;
+}
+
 /* ---- app shell ---- */
 
 .shell {

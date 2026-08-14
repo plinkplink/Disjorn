@@ -20,6 +20,33 @@ import type {
   User,
 } from "./types";
 
+/**
+ * The exact `detail` the server sends on a rotation-gate 403. It is API
+ * surface on purpose — server/app/routers/auth.py calls it out as such — and
+ * matching it is how the client learns the flag at all: GET /me returns the
+ * public User shape, which deliberately does not carry
+ * `must_change_password`.
+ */
+export const PASSWORD_CHANGE_REQUIRED = "Password change required";
+
+/** Mirrors PASSWORD_MIN_LENGTH in server/app/routers/auth.py. */
+export const PASSWORD_MIN_LENGTH = 12;
+
+/**
+ * Called whenever any request comes back walled off by the rotation gate.
+ *
+ * Registered by the session store rather than imported from it: the store
+ * already imports this module, and importing it back would be a cycle. This
+ * keeps the dependency pointing one way and means a 403 on ANY call — not
+ * just the ones someone remembered to special-case — routes the user to the
+ * change form.
+ */
+type RotationHandler = () => void;
+let onRotationRequired: RotationHandler = () => {};
+export function setRotationHandler(fn: RotationHandler): void {
+  onRotationRequired = fn;
+}
+
 export class ApiError extends Error {
   readonly status: number;
   /**
@@ -71,12 +98,32 @@ async function request<T>(
     } catch {
       /* non-JSON error body — keep statusText */
     }
+    if (res.status === 403 && detail === PASSWORD_CHANGE_REQUIRED) {
+      // Every route except the three exempt ones answers like this until the
+      // password is rotated, so this is the one place that needs to notice.
+      onRotationRequired();
+    }
     throw new ApiError(res.status, detail);
   }
   return (await res.json()) as T;
 }
 
 /* ---- auth ---- */
+
+/**
+ * Change your own password. The server also ends every OTHER session for this
+ * user — that eviction is the point of the feature, not a side effect — and
+ * keeps the calling one, so the tab stays logged in.
+ */
+export function changePassword(
+  currentPassword: string,
+  newPassword: string,
+): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>("POST", "/auth/password", {
+    current_password: currentPassword,
+    new_password: newPassword,
+  });
+}
 
 export function login(username: string, password: string): Promise<User> {
   return request<User>("POST", "/auth/login", { username, password });
