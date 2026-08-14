@@ -22,6 +22,22 @@
 # on the host and lands in shell history; stdin does neither.
 set -euo pipefail
 
+# NEEDS ROOT, AND ASKS FOR IT ITSELF — BEFORE reading the token.
+#
+# Two of the four things this script gets right require privilege: the backup
+# directory is root-owned 0700 (it holds credentials in the clear), and the env
+# file must end up group-owned by the res-* user, which plink is not a member
+# of. Run as plink it died at the backup with "cp: cannot stat … Permission
+# denied" — AFTER the token had already been pasted, so the paste was wasted.
+#
+# Re-exec here, at the top, rather than printing "please use sudo": the fix is
+# mechanical, and a tool that makes you retype a freshly minted credential
+# because of its own file modes is a tool with a bug in it. stdin survives the
+# exec, so a piped token still arrives intact.
+if [ "$(id -u)" -ne 0 ]; then
+  exec sudo -- bash "$0" "$@"
+fi
+
 SEAT="${1:-}"
 NAME="${2:-}"
 case "$SEAT" in
