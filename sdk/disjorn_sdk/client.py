@@ -33,6 +33,8 @@ from websockets.asyncio.client import ClientConnection
 from .events import (
     ChannelCreate,
     Event,
+    MemberAdd,
+    MemberRemove,
     MessageCreate,
     MessageDelete,
     MessageEdit,
@@ -560,6 +562,15 @@ class DisjornClient:
             return Presence(user_id=frame["user_id"], status=frame["status"])
         if ftype == "channel_create":
             return ChannelCreate(channel=frame["channel"])
+        if ftype in ("member_add", "member_remove"):
+            cls = MemberAdd if ftype == "member_add" else MemberRemove
+            return cls(
+                channel_id=frame["channel_id"],
+                member_type=frame["member_type"],
+                member_id=frame["member_id"],
+                by_user_id=frame.get("by_user_id"),
+                channel=frame["channel"],
+            )
         logger.debug("ignoring unknown frame type %r", ftype)
         return None
 

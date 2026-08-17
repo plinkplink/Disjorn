@@ -168,11 +168,16 @@ class PresenceEvent(BaseModel):
 
 
 class ChannelCreateRef(BaseModel):
-    """Minimal channel payload carried by channel_create / member events."""
+    """Minimal channel payload carried by channel_create / member events.
+
+    `name` is None only for a DM, which a member event can now name (a bot
+    added to a DM) even though channel_create never does — channel_create fires
+    for named text channels only.
+    """
 
     id: int
     type: ChannelType
-    name: str
+    name: Optional[str] = None
     visibility: ChannelVisibility = "public"
 
 
@@ -193,12 +198,17 @@ class MemberAddEvent(BaseModel):
     """Someone joined a channel (invite accepted for them, or a bot added).
 
     Fanned out to the channel's members plus the affected member themselves.
+
+    `by_user_id` is the user who performed the action — the difference between
+    "alice added you to #backroom" and a room that silently changed shape. None
+    only if a membership change ever has no acting user behind it.
     """
 
     type: Literal["member_add"] = "member_add"
     channel_id: int
     member_type: MemberType
     member_id: int
+    by_user_id: Optional[int] = None
     channel: ChannelCreateRef
 
 
@@ -207,12 +217,16 @@ class MemberRemoveEvent(BaseModel):
 
     Same fan-out as member_add — including the removed member, whose client
     needs to know its access just ended.
+
+    `by_user_id` distinguishes a kick from a walk-out: on /leave it is the
+    leaving member themselves (equal to `member_id`), on /kick it is the owner.
     """
 
     type: Literal["member_remove"] = "member_remove"
     channel_id: int
     member_type: MemberType
     member_id: int
+    by_user_id: Optional[int] = None
     channel: ChannelCreateRef
 
 

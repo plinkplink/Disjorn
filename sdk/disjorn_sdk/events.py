@@ -18,6 +18,8 @@ __all__ = [
     "TypingStart",
     "Presence",
     "ChannelCreate",
+    "MemberAdd",
+    "MemberRemove",
     "Event",
 ]
 
@@ -112,7 +114,42 @@ class ChannelCreate:
     channel: dict[str, Any]
 
 
+@dataclass(slots=True)
+class MemberAdd:
+    """A user or bot was added to a channel (ephemeral, no seq).
+
+    Reaches the channel's members plus the member it happened to, so a bot
+    hears both "someone joined a room I am in" and "I was just added
+    somewhere". ``channel`` is ``{id, type, name, visibility}`` as on
+    :class:`ChannelCreate`; ``member_type`` is ``"user"`` or ``"bot"`` and
+    ``member_id`` identifies the subject in that namespace. ``by_user_id`` is
+    the user who did it (None if nothing acted).
+    """
+
+    channel_id: int
+    member_type: str  # "user" | "bot"
+    member_id: int
+    by_user_id: Optional[int]
+    channel: dict[str, Any]
+
+
+@dataclass(slots=True)
+class MemberRemove:
+    """A user or bot left a channel or was removed from it (ephemeral, no seq).
+
+    Same audience as :class:`MemberAdd`, the subject included — for a bot that
+    is itself the subject, this frame is the last thing it hears about that
+    channel. ``by_user_id`` is the kicker, or the leaving member themselves.
+    """
+
+    channel_id: int
+    member_type: str  # "user" | "bot"
+    member_id: int
+    by_user_id: Optional[int]
+    channel: dict[str, Any]
+
+
 Event = Union[
     Ready, MessageCreate, MessageEdit, MessageDelete, TypingStart, Presence,
-    ChannelCreate,
+    ChannelCreate, MemberAdd, MemberRemove,
 ]

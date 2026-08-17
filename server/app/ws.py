@@ -32,10 +32,18 @@ Server -> client frames (Architecture §8.2; ephemeral events carry no seq):
                                             private channel, which reaches only
                                             its members
     {"type": "member_add"|"member_remove", "channel_id", "member_type",
-     "member_id", "channel": {...}}
+     "member_id", "by_user_id", "channel": {...}}
                                             membership changed — to the
                                             channel's members plus the member
-                                            it happened to
+                                            it happened to. The member may be a
+                                            bot (POST/DELETE .../bots), in any
+                                            channel type including a DM, where
+                                            the members-only rule means the two
+                                            participants and the bot itself.
+                                            `by_user_id` is who did it (the
+                                            inviter, the kicker, the leaver
+                                            themselves, or whoever added the
+                                            bot); null only if nobody acted.
 
 Fan-out (bus subscriber, registered idempotently by init() from the app
 lifespan): message events go to connected users who are members of the channel
@@ -364,6 +372,9 @@ async def handle_bus_event(event: dict[str, Any]) -> None:
             "channel_id": event["channel_id"],
             "member_type": event["member_type"],
             "member_id": event["member_id"],
+            # .get, not [...]: an event published before by_user_id existed (or
+            # by a future caller with no acting user) still fans out, as null.
+            "by_user_id": event.get("by_user_id"),
             "channel": event["channel"],
         }
         await _send_to_members(

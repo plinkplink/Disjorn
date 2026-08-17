@@ -362,11 +362,28 @@ def test_text_channel_fanout_and_channel_create_frame(wsc):
         for ws in (wa, wb, wcl, wot):
             assert ws.receive_json() == frame
 
-        # Only claudette becomes a member (any user may add — bob does it).
+        # Only claudette becomes a member (any user may add — bob does it),
+        # which is itself announced: the channel's members plus the bot that
+        # just arrived hear member_add. Otto, not a member, does not.
         r = wsc.post(
             f"/channels/{cid}/bots", json={"bot_id": member_bot}, headers=cookie(tb)
         )
         assert r.status_code == 200, r.text
+        member_frame = {
+            "type": "member_add",
+            "channel_id": cid,
+            "member_type": "bot",
+            "member_id": member_bot,
+            "by_user_id": b,
+            "channel": {
+                "id": cid,
+                "type": "text",
+                "name": "custodian",
+                "visibility": "public",
+            },
+        }
+        for ws in (wa, wb, wcl):
+            assert ws.receive_json() == member_frame
 
         # Message in the text channel: both users (implicit members) + the
         # member bot receive it; otto does not.

@@ -4,8 +4,9 @@ What is being tested, in the spec's own terms:
 
 - A private channel's CONTENT is unreadable to non-members: history, read
   state, member list, search, WS fan-out and push all refuse.
-- Its EXISTENCE is not hidden: GET /channels lists it honestly, with
-  `member: false` and no snippet.
+- Its EXISTENCE is hidden from ordinary non-members' sidebars, but still shown
+  to an admin as a bare row (`member: false`, no snippet) — RULED by plink
+  2026-08-17, superseding the spec's "existence is not hidden".
 - The wall is the same for bots (no carve in either direction) and there is no
   admin god-view.
 - Existing channels are grandfathered public — nothing changes for anyone on
@@ -243,25 +244,69 @@ async def test_non_member_is_refused_on_every_read_path(client):
     assert await member_row(cid, "user", uid_b) is None
 
 
-async def test_channel_list_is_honest_about_existence_and_silent_about_content(client):
+async def test_channel_list_hides_private_channels_from_ordinary_non_members(client):
+    """RULED by plink, 2026-08-17 (superseding the spec's "existence is not
+    hidden"): an ordinary user's sidebar does not list a private channel they
+    are not in at all. Their own channels are untouched."""
     await make_user("alice")
     await make_user("bob")
     ta = await login(client, "alice")
     tb = await login(client, "bob")
     cid = await make_channel(client, ta, "backroom", "private")
+    public_id = await make_channel(client, ta, "general", "public")
     await post_msg(client, cookie(ta), cid, "a snippet bob must not see")
 
-    # Bob sees the channel exists — the list is not a lie — but gets no content.
     items = (await client.get("/channels", headers=cookie(tb))).json()
-    row = list_item(items, cid)
+    assert cid not in [i["id"] for i in items]
+    # ...and nothing else fell out of Bob's sidebar with it.
+    assert public_id in [i["id"] for i in items]
+    assert any(i["type"] == "main_feed" for i in items)
+
+    # Alice, a member, sees the row with its content.
+    row = list_item((await client.get("/channels", headers=cookie(ta))).json(), cid)
+    assert row["member"] is True and row["unread"] == 1
+    assert row["last_message"]["snippet"] == "a snippet bob must not see"
+
+
+async def test_channel_list_shows_an_admin_the_row_but_never_the_content(client):
+    """The other half of the same ruling: an admin still sees that a private
+    channel EXISTS — and that is all they get. `member: false`, no unread, no
+    snippet, and (test_no_silent_admin_god_view) no way in."""
+    await make_user("alice")
+    await make_user("plink", is_admin=True)
+    ta = await login(client, "alice")
+    tp = await login(client, "plink")
+    cid = await make_channel(client, ta, "backroom", "private")
+    await post_msg(client, cookie(ta), cid, "a snippet plink must not see")
+
+    row = list_item((await client.get("/channels", headers=cookie(tp))).json(), cid)
     assert row["name"] == "backroom" and row["visibility"] == "private"
     assert row["member"] is False
     assert row["unread"] == 0 and row["last_message"] is None
 
-    # Alice, a member, sees the same row with its content.
-    row = list_item((await client.get("/channels", headers=cookie(ta))).json(), cid)
-    assert row["member"] is True and row["unread"] == 1
-    assert row["last_message"]["snippet"] == "a snippet bob must not see"
+
+async def test_channel_list_carries_the_owner_for_owner_only_affordances(client):
+    """`created_by` rides the sidebar row so the client can show invite/kick to
+    the owner alone without a second round trip. None where there is no owner."""
+    uid_a = await make_user("alice")
+    uid_b = await make_user("bob")
+    ta = await login(client, "alice")
+    r = await client.post(
+        "/channels", json={"name": "backroom", "visibility": "private"},
+        headers=cookie(ta),
+    )
+    assert r.json()["created_by"] == uid_a  # also on the create response
+    cid = r.json()["id"]
+    await make_channel(client, ta, "general", "public")
+
+    items = (await client.get("/channels", headers=cookie(ta))).json()
+    assert list_item(items, cid)["created_by"] == uid_a
+    assert list_item(items, await main_feed_id())["created_by"] is None
+
+    # A DM has no creator either.
+    dm = (await client.post("/dms", json={"user_id": uid_b}, headers=cookie(ta))).json()
+    items = (await client.get("/channels", headers=cookie(ta))).json()
+    assert list_item(items, dm["id"])["created_by"] is None
 
 
 async def test_members_listing_of_a_private_channel_is_explicit_only(client):
@@ -685,6 +730,95 @@ async def test_only_the_owner_may_hand_a_bot_the_keys_to_a_private_channel(clien
     assert r.status_code == 200
 
 
+async def test_adding_or_removing_a_bot_publishes_the_same_member_events(client):
+    """A bot joining a channel is a membership change like any other, so it
+    rides the same member_add / member_remove events a human invite does —
+    previously a bot just started talking one day and clients only found out by
+    refetching. Idempotent calls stay silent, exactly as invite/kick do."""
+    uid_a = await make_user("alice")
+    ta = await login(client, "alice")
+    bot_id = await make_bot("claudette")
+    priv = await make_channel(client, ta, "backroom", "private")
+    pub = await make_channel(client, ta, "commons", "public")
+
+    captured: list[dict] = []
+    events.subscribe(captured.append)
+
+    r = await client.post(
+        f"/channels/{priv}/bots", json={"bot_id": bot_id}, headers=cookie(ta)
+    )
+    assert r.status_code == 200 and r.json() == {"ok": True, "added": True}
+    assert [e["type"] for e in captured] == ["member_add"]
+    assert captured[0] == {
+        "type": "member_add",
+        "channel_id": priv,
+        "member_type": "bot",
+        "member_id": bot_id,
+        "by_user_id": uid_a,
+        "channel": {
+            "id": priv,
+            "type": "text",
+            "name": "backroom",
+            "visibility": "private",
+        },
+    }
+
+    # Already a member: no row written, so no second event.
+    r = await client.post(
+        f"/channels/{priv}/bots", json={"bot_id": bot_id}, headers=cookie(ta)
+    )
+    assert r.json() == {"ok": True, "added": False}
+    assert len(captured) == 1
+
+    r = await client.delete(f"/channels/{priv}/bots/{bot_id}", headers=cookie(ta))
+    assert r.status_code == 200 and r.json() == {"ok": True, "removed": True}
+    assert [e["type"] for e in captured] == ["member_add", "member_remove"]
+    assert captured[1] == {**captured[0], "type": "member_remove"}
+
+    # Removing a bot that was never there changes nothing and says nothing.
+    r = await client.delete(f"/channels/{priv}/bots/{bot_id}", headers=cookie(ta))
+    assert r.json() == {"ok": True, "removed": False}
+    assert len(captured) == 2
+
+    # Not a private-channel carve-out: a public channel's bots announce too.
+    await client.post(f"/channels/{pub}/bots", json={"bot_id": bot_id}, headers=cookie(ta))
+    assert captured[2]["type"] == "member_add" and captured[2]["channel_id"] == pub
+    assert captured[2]["channel"]["visibility"] == "public"
+
+
+async def test_bot_added_to_a_dm_announces_it_with_a_nameless_channel_ref(client):
+    """DMs work too — the one channel type whose `name` is null, which the
+    frame carries honestly rather than inventing a label for."""
+    uid_a = await make_user("alice")
+    uid_b = await make_user("bob")
+    ta = await login(client, "alice")
+    bot_id = await make_bot("claudette")
+    dm = (await client.post("/dms", json={"user_id": uid_b}, headers=cookie(ta))).json()
+
+    captured: list[dict] = []
+    events.subscribe(captured.append)
+
+    r = await client.post(
+        f"/channels/{dm['id']}/bots", json={"bot_id": bot_id}, headers=cookie(ta)
+    )
+    assert r.status_code == 200 and r.json() == {"ok": True, "added": True}
+    assert captured == [
+        {
+            "type": "member_add",
+            "channel_id": dm["id"],
+            "member_type": "bot",
+            "member_id": bot_id,
+            "by_user_id": uid_a,
+            "channel": {
+                "id": dm["id"],
+                "type": "dm_1to1",
+                "name": None,
+                "visibility": "public",
+            },
+        }
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Push notifications carry a content snippet — non-members are not candidates
 # ---------------------------------------------------------------------------
@@ -885,6 +1019,7 @@ def test_ws_member_add_and_remove_reach_members_and_the_subject(wsc):
             "channel_id": cid,
             "member_type": "user",
             "member_id": b,
+            "by_user_id": a,  # alice invited: the room hears WHO, not just what
             "channel": {
                 "id": cid,
                 "type": "text",
@@ -896,13 +1031,86 @@ def test_ws_member_add_and_remove_reach_members_and_the_subject(wsc):
         assert wb.receive_json() == expected
 
         # Kick: same audience, including the member it just happened to.
+        # by_user_id is still alice — the kicker, not the kicked.
         r = wsc.post(f"/channels/{cid}/kick", json={"user_id": b}, headers=cookie(ta))
         assert r.status_code == 200, r.text
         expected = {**expected, "type": "member_remove"}
         assert wa.receive_json() == expected
         assert wb.receive_json() == expected
 
+        # Leave: the same frame shape, but by_user_id is the leaver themselves
+        # — how a client tells "bob was removed" from "bob walked out".
+        r = wsc.post(f"/channels/{cid}/invite", json={"user_id": b}, headers=cookie(ta))
+        assert r.status_code == 200, r.text
+        assert wa.receive_json()["type"] == "member_add"
+        assert wb.receive_json()["type"] == "member_add"
+        r = wsc.post(f"/channels/{cid}/leave", headers=cookie(tb))
+        assert r.status_code == 200, r.text
+        expected = {**expected, "by_user_id": b}
+        assert wa.receive_json() == expected
+        assert wb.receive_json() == expected
+
         # Sentinel: Carol, never a member, heard none of it.
+        r = wsc.post(
+            f"/channels/{main}/messages", json={"content": "sentinel"}, headers=cookie(ta)
+        )
+        assert r.status_code == 200, r.text
+        frame = wcar.receive_json()
+        assert frame["type"] == "message_create" and frame["channel_id"] == main
+
+
+def test_ws_bot_membership_events_reach_the_room_and_the_bot(wsc):
+    """A bot added to a DM is announced live to exactly its two participants
+    and to the bot itself — the first time a resident's arrival (or eviction)
+    is visible without a refetch. Carol, in neither, hears none of it."""
+    a, b, c = (
+        ws_make_user(wsc, "alice"),
+        ws_make_user(wsc, "bob"),
+        ws_make_user(wsc, "carol"),
+    )
+    ta, tb, tc = ws_login(wsc, "alice"), ws_login(wsc, "bob"), ws_login(wsc, "carol")
+    bot_id = ws_make_bot(wsc, "claudette")
+    main = call(wsc, db.fetch_one, "SELECT id FROM channels WHERE type = 'main_feed'")["id"]
+
+    with ExitStack() as stack:
+        wa = open_user(stack, wsc, ta, a)
+        wb = open_user(stack, wsc, tb, b, peers=[wa])
+        wcar = open_user(stack, wsc, tc, c, peers=[wa, wb])
+        wbot = open_bot(stack, wsc, bot_id)
+
+        dm = wsc.post("/dms", json={"user_id": b}, headers=cookie(ta)).json()
+        r = wsc.post(
+            f"/channels/{dm['id']}/bots", json={"bot_id": bot_id}, headers=cookie(ta)
+        )
+        assert r.status_code == 200, r.text
+        expected = {
+            "type": "member_add",
+            "channel_id": dm["id"],
+            "member_type": "bot",
+            "member_id": bot_id,
+            "by_user_id": a,
+            "channel": {
+                "id": dm["id"],
+                "type": "dm_1to1",
+                "name": None,  # DMs have no name; the frame says so honestly
+                "visibility": "public",
+            },
+        }
+        assert wa.receive_json() == expected
+        assert wb.receive_json() == expected
+        assert wbot.receive_json() == expected
+
+        # Eviction: same audience, the bot included — its cue that no more of
+        # this channel's traffic is coming.
+        r = wsc.delete(f"/channels/{dm['id']}/bots/{bot_id}", headers=cookie(ta))
+        assert r.status_code == 200, r.text
+        expected = {**expected, "type": "member_remove"}
+        assert wa.receive_json() == expected
+        assert wb.receive_json() == expected
+        assert wbot.receive_json() == expected
+
+        # Sentinel: Carol's NEXT frame is main_feed traffic — none of the DM's
+        # membership frames ever reached her.
         r = wsc.post(
             f"/channels/{main}/messages", json={"content": "sentinel"}, headers=cookie(ta)
         )

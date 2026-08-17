@@ -2,6 +2,7 @@
 
 Endpoints:
     GET    /channels                      (user)  — sidebar list: unread counts + last-message snippet
+                                                    (private channels you are not in: admins only)
     POST   /channels {name, visibility?}  (user)  — create a named `text` channel;
                                                     409 on duplicate name; publishes channel_create
     POST   /dms {user_id}                 (user)  — idempotent get-or-create of the 1:1 DM channel
@@ -11,10 +12,10 @@ Endpoints:
     POST   /channels/{id}/join            (user)  — private channels are invite-only (403)
     POST   /channels/{id}/leave           (user)  — anyone may leave a private channel; member_remove
     POST   /channels/{id}/kick {user_id}  (user)  — private channels; OWNER ONLY; member_remove
-    POST   /channels/{id}/bots {bot_id}   (user)  — add a bot to a channel
+    POST   /channels/{id}/bots {bot_id}   (user)  — add a bot to a channel; member_add
                                                     (DMs: participants only;
                                                      private channels: owner only)
-    DELETE /channels/{id}/bots/{bot_id}   (user)  — remove a bot from a channel
+    DELETE /channels/{id}/bots/{bot_id}   (user)  — remove a bot from a channel; member_remove
                                                     (same access rule as adding)
 
 Exported access-rule helpers (consumed by WP4 messages and WP5 privacy/WS):
@@ -32,8 +33,14 @@ Membership semantics (Architecture §4.1 + SPECS/2026-08-08-per-channel-membersh
   the wall, for humans and bots alike (no bot-shaped exception in either
   direction). Non-members get 403 on every read path, and their messages never
   surface in search or in the sidebar's last-message snippet.
-- A private channel's EXISTENCE is not hidden: GET /channels lists it honestly,
-  with `member: false` and no content.
+- A private channel's EXISTENCE is hidden from ordinary non-members: GET
+  /channels omits it for them (RULED by plink, 2026-08-17, superseding the
+  spec's original "existence is not hidden for everyone" — a sidebar full of
+  rooms you cannot open is not the UX anyone wanted). ADMINS still get the row,
+  with `member: false` and no content: they can see that a channel exists, and
+  that is ALL — no read access, ever, which is rule 5 (no silent god-view)
+  intact. The listing is still derived from membership (user_channel_ids), not
+  from a second visibility rule, so there is only ever one wall to reason about.
 - DM channels have exactly two user members.
 - Bots are explicit-members-only EVERYWHERE — main_feed (cli.py create-bot
   inserts the row), text channels and DMs via POST .../bots.
@@ -140,10 +147,14 @@ class LastMessage(BaseModel):
 class ChannelListItem(BaseModel):
     """One sidebar row.
 
-    `member` is false only for a private channel the caller is not in: the row
-    is still listed (existence is not a secret) but carries NO content —
-    `unread` is 0 and `last_message` is None, because the snippet is content
-    and content is exactly what the wall is for.
+    `member` is false only for a private channel the caller is not in, which
+    (RULED 2026-08-17) only an admin is ever shown. Such a row carries NO
+    content — `unread` is 0 and `last_message` is None, because the snippet is
+    content and content is exactly what the wall is for.
+
+    `created_by` is the channel's owner, so the client can render owner-only
+    affordances (invite / kick) without a second round trip. It is None for
+    main_feed and DMs, which have no creator.
     """
 
     id: int
@@ -154,6 +165,7 @@ class ChannelListItem(BaseModel):
     last_message: Optional[LastMessage] = None
     visibility: ChannelVisibility = "public"
     member: bool = True
+    created_by: Optional[int] = None
 
 
 class ChannelCreateRequest(BaseModel):
@@ -228,9 +240,16 @@ async def _get_channel(channel_id: int) -> dict[str, Any]:
 
 @router.get("/channels")
 async def list_channels(user: CurrentUser) -> list[ChannelListItem]:
-    """Sidebar list. Honest about which channels exist, silent about content
-    the caller may not read: a private channel the caller is not a member of
-    is listed with `member: false`, unread 0 and no last-message snippet."""
+    """Sidebar list: the channels the caller can actually open, plus (for an
+    admin only) the bare existence of the private ones they are not in.
+
+    RULED by plink, 2026-08-17, superseding the merged spec: an ordinary user's
+    sidebar does not list private channels they are not a member of. An admin
+    still sees every row so the house has someone who can tell what exists —
+    and sees it exactly as before, `member: false` with unread 0 and no
+    last-message snippet. Seeing the row is not reading the room: every read
+    path still refuses them (test_no_silent_admin_god_view).
+    """
     main = await db.fetch_one("SELECT * FROM channels WHERE type = 'main_feed'")
     texts = await db.fetch_all(
         "SELECT * FROM channels WHERE type = 'text' ORDER BY name"
@@ -241,13 +260,22 @@ async def list_channels(user: CurrentUser) -> list[ChannelListItem]:
            WHERE c.type = 'dm_1to1' AND cm.member_type = 'user' AND cm.member_id = ?""",
         (user.id,),
     )
+
+    # ONE question, asked once: which channels is this user a member of?
+    # user_channel_ids already answers "public main_feed/text implicitly, plus
+    # my explicit rows", so both the visibility filter below and the content
+    # math further down hang off it rather than re-deriving the wall.
+    member_ids = set(await user_channel_ids(user.id))
+    if not user.is_admin:
+        texts = [c for c in texts if c["id"] in member_ids]
+
     chans = ([main] if main is not None else []) + texts + dms
     if not chans:
         return []
 
     # Content (unread math + snippet) is computed ONLY over the channels the
-    # caller is a member of; the rest are listed as bare rows.
-    member_ids = set(await user_channel_ids(user.id))
+    # caller is a member of; the rest (an admin's view of a private channel
+    # they are not in) are listed as bare rows.
     ids = [c["id"] for c in chans if c["id"] in member_ids]
 
     # One aggregate query each — no per-channel N+1.
@@ -310,6 +338,7 @@ async def list_channels(user: CurrentUser) -> list[ChannelListItem]:
             dm_user_id=partner["user_id"] if partner is not None else None,
             visibility=c["visibility"],
             member=c["id"] in member_ids,
+            created_by=c["created_by"],
             unread=max(0, (max_seqs.get(c["id"]) or 0) - reads.get(c["id"], 0)),
             last_message=LastMessage(
                 seq=lm["seq"],
@@ -394,7 +423,11 @@ async def create_channel(body: ChannelCreateRequest, user: CurrentUser) -> Chann
         }
     )
     return ChannelListItem(
-        id=channel_id, type="text", name=name, visibility=body.visibility
+        id=channel_id,
+        type="text",
+        name=name,
+        visibility=body.visibility,
+        created_by=user.id,
     )
 
 
@@ -571,16 +604,33 @@ def _require_private(channel: dict[str, Any]) -> None:
 
 
 async def _publish_member_event(
-    kind: str, channel: dict[str, Any], member_type: MemberType, member_id: int
+    kind: str,
+    channel: dict[str, Any],
+    member_type: MemberType,
+    member_id: int,
+    by_user_id: Optional[int],
 ) -> None:
     """member_add / member_remove on the bus (WS fans it out to the channel's
-    members plus the affected member — see ws.handle_bus_event)."""
+    members plus the affected member — see ws.handle_bus_event).
+
+    Used for humans (invite / leave / kick) and for bots (POST/DELETE
+    .../bots) alike, so a client has one frame shape to handle rather than two.
+    Note `channel["name"]` is None for a DM, which only the bot verbs can
+    reach — a human membership verb requires a private text channel.
+
+    `by_user_id` is WHO did it, which the subject and the room both need in
+    order to say "alice added bob" rather than "bob appeared". On /leave the
+    actor and the subject are the same person — that is the honest answer, not
+    a missing one, so it is filled in. It is Optional only because a future
+    system-initiated membership change would genuinely have no acting user.
+    """
     await events.publish(
         {
             "type": kind,
             "channel_id": channel["id"],
             "member_type": member_type,
             "member_id": member_id,
+            "by_user_id": by_user_id,
             "channel": {
                 "id": channel["id"],
                 "type": channel["type"],
@@ -609,7 +659,7 @@ async def invite_to_channel(
     )
     added = cur.rowcount > 0
     if added:
-        await _publish_member_event("member_add", channel, "user", body.user_id)
+        await _publish_member_event("member_add", channel, "user", body.user_id, user.id)
     return {"ok": True, "added": added}
 
 
@@ -649,7 +699,7 @@ async def leave_channel(channel_id: int, user: CurrentUser) -> dict[str, bool]:
     )
     left = cur.rowcount > 0
     if left:
-        await _publish_member_event("member_remove", channel, "user", user.id)
+        await _publish_member_event("member_remove", channel, "user", user.id, user.id)
     return {"ok": True, "left": left}
 
 
@@ -677,7 +727,7 @@ async def kick_from_channel(
     )
     removed = cur.rowcount > 0
     if removed:
-        await _publish_member_event("member_remove", channel, "user", body.user_id)
+        await _publish_member_event("member_remove", channel, "user", body.user_id, user.id)
     return {"ok": True, "removed": removed}
 
 
@@ -688,6 +738,13 @@ async def kick_from_channel(
 # may grant/revoke that access. In a PRIVATE channel, handing a bot the stream
 # is an invite by another name, so it is the owner's call alone — the wall is
 # the same for bots, with no carve in either direction.)
+#
+# Both endpoints publish member_add / member_remove, in the same frame shape a
+# human invite or kick produces, with member_type "bot". This is the FIRST time
+# a bot's arrival in (or departure from) a channel is visible live: before it,
+# a bot simply started talking one day and clients only learned it was a member
+# by refetching. Fan-out is the ordinary members-only rule, so a DM's bot events
+# reach exactly its two participants (plus the bot itself, as the subject).
 # ---------------------------------------------------------------------------
 
 async def _require_bot_manage_access(channel_id: int, user: User) -> dict[str, Any]:
@@ -705,7 +762,7 @@ async def _require_bot_manage_access(channel_id: int, user: User) -> dict[str, A
 async def add_bot_to_channel(
     channel_id: int, body: BotRef, user: CurrentUser
 ) -> dict[str, bool]:
-    await _require_bot_manage_access(channel_id, user)
+    channel = await _require_bot_manage_access(channel_id, user)
     bot = await db.fetch_one("SELECT id FROM bots WHERE id = ?", (body.bot_id,))
     if bot is None:
         raise HTTPException(status_code=404, detail="Bot not found")
@@ -714,17 +771,28 @@ async def add_bot_to_channel(
            VALUES (?, 'bot', ?)""",
         (channel_id, body.bot_id),
     )
-    return {"ok": True, "added": cur.rowcount > 0}
+    added = cur.rowcount > 0
+    if added:
+        # Only on a real insert: INSERT OR IGNORE makes a repeat add a no-op,
+        # and a no-op is not news — same silence a repeat invite keeps.
+        await _publish_member_event("member_add", channel, "bot", body.bot_id, user.id)
+    return {"ok": True, "added": added}
 
 
 @router.delete("/channels/{channel_id}/bots/{bot_id}")
 async def remove_bot_from_channel(
     channel_id: int, bot_id: int, user: CurrentUser
 ) -> dict[str, bool]:
-    await _require_bot_manage_access(channel_id, user)
+    channel = await _require_bot_manage_access(channel_id, user)
     cur = await db.execute(
         """DELETE FROM channel_members
            WHERE channel_id = ? AND member_type = 'bot' AND member_id = ?""",
         (channel_id, bot_id),
     )
-    return {"ok": True, "removed": cur.rowcount > 0}
+    removed = cur.rowcount > 0
+    if removed:
+        # The removed bot is in the `also` recipient set (ws._send_to_members),
+        # so it hears its own eviction — the last frame it gets for this
+        # channel, and its cue to stop expecting traffic.
+        await _publish_member_event("member_remove", channel, "bot", bot_id, user.id)
+    return {"ok": True, "removed": removed}

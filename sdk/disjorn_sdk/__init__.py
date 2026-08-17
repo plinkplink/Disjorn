@@ -17,6 +17,8 @@ from .client import DisjornAuthError, DisjornClient, DisjornError, UploadSource
 from .events import (
     ChannelCreate,
     Event,
+    MemberAdd,
+    MemberRemove,
     MessageCreate,
     MessageDelete,
     MessageEdit,
@@ -40,5 +42,7 @@ __all__ = [
     "TypingStart",
     "Presence",
     "ChannelCreate",
+    "MemberAdd",
+    "MemberRemove",
     "__version__",
 ]
