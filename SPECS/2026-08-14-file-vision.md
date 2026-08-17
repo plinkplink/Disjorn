@@ -12,4 +12,10 @@ DECISION POINT flagged, not baked in: two sources (origin for main, gatehouse fo
 
 CLOSES: the structural half of 1226 (residents review loop/* pre-merge — which kills the crossing mechanism, not just labels it), the refresh-mirror schema drift, and the read-main-twice-to-detect-motion token burn that started tonight's economics.
 
-STATUS: draft. No confirm record, so no build. Transcription into SPECS/2026-08-15-file-vision.md is the landing step; this seq is the witness.
+## Confirm record
+- **Confirmed by**: plink
+- **#custodian seq**: 1272
+- **Confirmed at**: 2026-08-15
+
+## Status
+confirmed

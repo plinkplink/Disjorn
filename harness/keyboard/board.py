@@ -66,10 +66,36 @@ def _now() -> datetime:
 
 # ── sources ─────────────────────────────────────────────────────────────────
 
+def _broker():
+    """The broker's OWN parsers, imported — never re-implemented here.
+
+    The board's first two days taught why: it read the Status word, saw
+    `confirmed`, and reported "nothing waiting on you" while the broker's gate
+    was refusing the same spec for a confirm record whose bold was one word
+    off. Two parsers of one file will disagree exactly when it matters. So the
+    board asks the gate what the gate would say."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "brokerd", REPO / "harness" / "broker" / "brokerd.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_BROKER = None
+
+
 def spec_status(path: Path) -> str:
-    """First non-comment line under '## Status'. Mirrors the broker's confirm
-    gate (brokerd.parse_spec_status) so the board and the gate never disagree
-    about what a spec says."""
+    """First non-comment line under '## Status', via the broker's parser."""
+    global _BROKER
+    if _BROKER is None:
+        _BROKER = _broker()
+    return _BROKER.parse_spec_status(
+        path.read_text(encoding="utf-8", errors="replace"))
+
+
+def _spec_status_fallback(path: Path) -> str:
+    """Kept only in case brokerd cannot be imported (e.g. a broken checkout)."""
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     for i, ln in enumerate(lines):
         if ln.strip().lower().startswith("## status"):
@@ -82,10 +108,29 @@ def spec_status(path: Path) -> str:
     return ""
 
 
+def spec_gate(path: Path) -> dict:
+    """What the broker's start-build gate would conclude about this spec:
+    {'passes': bool, 'why': str}. THIS is what decides whether a 'confirmed'
+    spec is genuinely buildable or is silently blocked on a keyboard edit."""
+    global _BROKER
+    if _BROKER is None:
+        _BROKER = _broker()
+    text = path.read_text(encoding="utf-8", errors="replace")
+    status = _BROKER.parse_spec_status(text)
+    rec = _BROKER.parse_confirm_record(text)
+    if status != "confirmed":
+        return {"passes": False, "why": f"Status is {status!r}, not 'confirmed'",
+                "seq": rec.get("seq")}
+    if not rec.get("confirmed_by") or not rec.get("seq"):
+        return {"passes": False,
+                "why": "confirm record does not parse — the broker sees no "
+                       "'Confirmed by' / '#custodian seq' (placeholder, blank, "
+                       "or a markdown slip)", "seq": rec.get("seq")}
+    return {"passes": True, "why": "", "seq": rec["seq"]}
+
+
 def spec_confirm_seq(path: Path) -> "int | None":
-    m = re.search(r"#custodian seq\*{0,2}:?\s*\**\s*(\d+)",
-                  path.read_text(encoding="utf-8", errors="replace"), re.I)
-    return int(m.group(1)) if m else None
+    return spec_gate(path)["seq"]
 
 
 def _clean_status_prose(status: str, cap: int = 150) -> str:
@@ -113,12 +158,15 @@ def collect_specs() -> list:
         if f.stem in {"README", "TEMPLATE"} or f.stem.startswith("PASSDOWN"):
             continue
         status = spec_status(f)
+        gate = spec_gate(f)
         out.append({
             "slug": f.stem,
             "path": f"SPECS/{f.name}",
             "status": status,
             "status_word": status.split()[0].strip("`,.—-").lower() if status else "",
-            "confirm_seq": spec_confirm_seq(f),
+            "confirm_seq": gate["seq"],
+            "gate_passes": gate["passes"],
+            "gate_why": gate["why"],
         })
     return out
 
@@ -278,6 +326,16 @@ def build_board() -> dict:
                 "kind": "running",
                 "what": f"Build running now: {s['slug']}",
                 "where": s["path"], "how": "wait for the reaper's banner",
+                "slug": s["slug"]})
+        elif word == "confirmed" and not s["gate_passes"]:
+            waiting.append({
+                "kind": "gate-blocked",
+                "what": f"Says confirmed, but the build gate would REFUSE it: {s['slug']}",
+                "where": s["path"],
+                "detail": s["gate_why"],
+                "how": "fix the Confirm record so 'Confirmed by' and "
+                       "'#custodian seq' both parse; `board` re-checks with the "
+                       "broker's own parser",
                 "slug": s["slug"]})
         elif word == "confirmed" and s["slug"] not in built_slugs:
             in_flight.append({

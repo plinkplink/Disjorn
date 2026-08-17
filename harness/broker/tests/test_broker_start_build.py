@@ -857,3 +857,32 @@ def test_build_log_dir_defaults_next_to_the_audit_log_not_tmpfs(tmp_path):
     # an explicit config value still wins
     broker.config["broker"]["build_log_dir"] = str(tmp_path / "elsewhere")
     assert broker._build_log_dir() == str(tmp_path / "elsewhere")
+
+
+# ------------------------------------ the confirm record reads words, not bold
+
+@pytest.mark.parametrize("variant", [
+    "- **Confirmed by**: plink\n- **#custodian seq**: 1272",   # canonical
+    "- **Confirmed** by: plink\n- **#custodian** seq: 1272",   # bold closes early (2026-08-17)
+    "- Confirmed by: plink\n- #custodian seq: 1272",           # no bold at all
+    "- **Confirmed by:** plink\n- **#custodian seq:** 1272",   # colon inside the bold
+    "- confirmed BY: plink\n- #CUSTODIAN SEQ: 1272",           # case
+])
+def test_confirm_record_is_read_by_its_words_not_its_markdown(variant):
+    """Twice a spec every seat had signed was refused by the gate for markdown
+    placement alone — `**Confirmed** by:` reads as NO record. The gate verifies
+    who and which seq; grading a human's asterisks is not its job."""
+    text = f"# x\n## Confirm record\n{variant}\n## Status\nconfirmed\n"
+    assert parse_confirm_record(text) == {"confirmed_by": "plink", "seq": 1272}
+
+
+@pytest.mark.parametrize("variant", [
+    "- **Confirmed by**: <username — any human>\n- **#custodian seq**: <seq>",
+    "- **Confirmed by**:\n- **#custodian seq**:",
+    "- Confirmed by: <seq of the confirm message>\n- #custodian seq: <seq>",
+])
+def test_tolerant_parsing_still_refuses_placeholders_and_blanks(variant):
+    """Leniency about asterisks must not become leniency about CONTENT: an
+    unfilled placeholder is still no record."""
+    text = f"# x\n## Confirm record\n{variant}\n## Status\nconfirmed\n"
+    assert parse_confirm_record(text) == {"confirmed_by": None, "seq": None}

@@ -547,10 +547,19 @@ def parse_confirm_record(text: str) -> dict:
     for line in lines[start:]:
         if line.strip().startswith("## "):
             break  # next section
-        m = re.match(r"\s*-\s*\*\*Confirmed by\*\*:\s*(.*)$", line)
+        # MATCH THE WORDS, NOT THE ASTERISKS. Twice now a spec every seat had
+        # signed was invisible to this gate because of markdown placement:
+        # `**Confirmed** by:` (bold closing one word early, 2026-08-17) parses
+        # as no record at all, and so would `Confirmed by:` with no bold, or
+        # `**Confirmed by:**` with the colon inside. The gate's job is to
+        # verify WHO and WHICH SEQ — never to grade a human's markdown. So
+        # strip emphasis from the line first, then match the plain phrase.
+        # (Still `- ` bullets, still first match wins, still `<…>` = unset.)
+        plain = re.sub(r"[*_`]", "", line)
+        m = re.match(r"\s*-\s*Confirmed by\s*:\s*(.*)$", plain, re.I)
         if m:
             out["confirmed_by"] = _clean_field(m.group(1))
-        m = re.match(r"\s*-\s*\*\*#custodian seq\*\*:\s*(.*)$", line)
+        m = re.match(r"\s*-\s*#custodian seq\s*:\s*(.*)$", plain, re.I)
         if m:
             raw = _clean_field(m.group(1))
             if raw is not None:
