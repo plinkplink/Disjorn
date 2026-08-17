@@ -866,7 +866,7 @@ def format_build_started(*, slug: str, branch: str, confirmed_by: str,
 
 def format_build_done(*, slug: str, branch: str, files: str, tests: str,
                       diff: str, tier: str = "pending", published=(),
-                      no_commits=(), quarantined=()) -> str:
+                      no_commits=(), quarantined=(), mirror: str = "") -> str:
     """The 'done' state-transition line. Its LOAD-BEARING field is now what the
     wrapper measured — `published: <repo>.git <sha>` per entitled repo, or the
     honest 'no commits' line when the build produced none. files/tests/diff are
@@ -891,7 +891,7 @@ def format_build_done(*, slug: str, branch: str, files: str, tests: str,
         closing = "nothing to review — nothing merged"
     return (f"build done | {slug} -> {branch} | tier {tier} | {outcome} | "
             f"files: {files} | tests: {tests} | diff: {diff} | {closing}"
-            + _quarantine_suffix(quarantined))
+            + _quarantine_suffix(quarantined) + mirror)
 
 
 # The wrapper's exit code for "this seat cannot run a test; nothing started".
@@ -915,7 +915,7 @@ def format_build_refused(*, slug: str, branch: str, reason: str) -> str:
 
 
 def format_build_failed(*, slug: str, branch: str, reason: str, published=(),
-                        no_commits=(), quarantined=()) -> str:
+                        no_commits=(), quarantined=(), mirror: str = "") -> str:
     """The 'failed' state-transition line — LOUD. A stalled build goes quiet
     then lands here (never a heartbeat) and a human is told to look.
 
@@ -931,7 +931,7 @@ def format_build_failed(*, slug: str, branch: str, reason: str, published=(),
     else:
         where = "nothing published — no branch to review"
     return (f"BUILD FAILED | {slug} -> {branch} | {reason} | {where} | "
-            f"a human should look" + _quarantine_suffix(quarantined))
+            f"a human should look" + _quarantine_suffix(quarantined) + mirror)
 
 
 # The fail-closed clause. A wrapper that is killed at the cap skips its harvest
@@ -944,9 +944,34 @@ NO_HARVEST_REASON = (
     "outcome unknown, nothing was published")
 
 
+def format_mirror_note(branch: str, published, error: "str | None") -> str:
+    """The one line that makes a PUBLISHED banner openable (spec item 5).
+
+    A banner names a sha. Until the mirror has been re-fetched, that sha exists
+    only in the gatehouse — which no resident can read — so the line names
+    something its audience cannot open, and the reviewer's first move is to ask
+    for a refresh. Refreshing FIRST and then saying where to look costs one
+    fetch and removes the round trip.
+
+    On success it prints the exact ref to rev-parse, because "it's in the
+    mirror somewhere" is not an instruction. On failure it says so plainly
+    rather than staying silent: the sha in the banner above is then real but
+    unreadable, and a reader must be told which of the two they are holding."""
+    if not published:
+        return ""
+    if error:
+        return ("\nmirror: NOT refreshed (" + " ".join(error.split())[:200]
+                + ") — the sha above is in the gatehouse but not yet readable "
+                  "in /opt/disjorn; run refresh-mirror before reviewing")
+    refs = ", ".join(f"gatehouse/{repo.removesuffix('.git')}/{branch}"
+                     for repo, _sha in published)
+    return f"\nmirror: refreshed — read it at {refs}"
+
+
 def format_build_outcome(*, slug: str, branch: str, publish: dict,
                          report: "dict | None" = None,
-                         unit_reason: "str | None" = None) -> str:
+                         unit_reason: "str | None" = None,
+                         mirror: str = "") -> str:
     """THE decision: done or failed, from the wrapper's harvest lines. One
     implementation, called by both reapers (the live one and the adopted one) —
     two copies of this ladder would eventually narrate two different truths
@@ -967,7 +992,7 @@ def format_build_outcome(*, slug: str, branch: str, publish: dict,
     no_commits = publish.get("no_commits", [])
     failed = publish.get("failed", [])
     common = {"published": published, "no_commits": no_commits,
-              "quarantined": quarantined}
+              "quarantined": quarantined, "mirror": mirror}
     if unit_reason is not None:
         return format_build_failed(slug=slug, branch=branch, reason=unit_reason,
                                    **common)
@@ -1420,14 +1445,107 @@ class Broker:
         return ({"exit_code": cp.returncode, "summary": summary},
                 f"exit={cp.returncode}: {summary}"[:300])
 
+    # ------------------------------------------------- the gatehouse fetch
+    # SPECS/2026-08-14-file-vision.md item 1. `refresh-mirror` used to move
+    # `main` and nothing else, so the mirror could tell a resident what
+    # production runs and could not show them a single branch anyone was being
+    # asked to review. Every branch now lands under refs/gatehouse/<repo>/*.
+    #
+    # WHY TWO SOURCES AND NOT ONE (decision point, RESOLVED two-source by plink
+    # 2026-08-15, and Claudette's second reason is the sharper one): `main` in
+    # the mirror must equal the main production ACTUALLY RUNS, which is plink's
+    # working clone — push-back to the gatehouse can lag a merge. Pointing
+    # everything at the gatehouse would make mirror-main LEAD prod: the
+    # merged-is-not-deployed gap inverted, in the direction nobody watches.
+    #
+    # NAMESPACES ARE DISJOINT AND THAT IS THE POINT. refs/remotes/origin/* is
+    # incidental — the default refspec drags it along. refs/gatehouse/* is
+    # deliberate, pruned, and named after the thing it mirrors.
+    #
+    # ON BRANCH-HIDING, STATED PLAINLY: nothing is being surrendered here. The
+    # mirror ALREADY leaked a partial, stale, unpruned branch view (origin/loop/*
+    # and even origin/worktree-agent-* ride the default fetch refspec). This
+    # replaces accidental partial vision with deliberate complete vision.
+    _GATEHOUSE_REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+    def _gatehouse_fetch_argvs(self) -> list[tuple[str, list[str]]]:
+        """One fixed argv per entitled gatehouse repo. Zero caller input reaches
+        any of it: the repo list and the gatehouse directory are config, and the
+        refspec is a constant. A resident can refresh, and can never aim git.
+
+        The repo NAME is re-validated even though it is plink's config, on the
+        same reasoning disjorn-build-launch gives for re-validating its slug:
+        the cost is one regex and the failure it prevents is a config typo
+        becoming a git flag."""
+        base_dir = self.commands.get("refresh_mirror_gatehouse_dir")
+        repos = self.commands.get("refresh_mirror_gatehouse_repos")
+        if not base_dir or not repos:
+            return []                     # not configured = today's behaviour
+        if not isinstance(base_dir, str) or not isinstance(repos, list):
+            raise VerbError("internal",
+                            "commands.refresh_mirror_gatehouse_dir must be a "
+                            "string and _repos a list of strings")
+        fetch = self._argv("refresh_mirror_gatehouse_fetch",
+                           ["git", "-C", "/srv/disjorn-ro", "fetch", "--prune"])
+        out: list[tuple[str, list[str]]] = []
+        for repo in repos:
+            if not isinstance(repo, str) or not self._GATEHOUSE_REPO_RE.match(repo):
+                raise VerbError("internal",
+                                f"commands.refresh_mirror_gatehouse_repos holds "
+                                f"{repo!r}, which is not a plain repo name")
+            out.append((repo, [*fetch, f"{base_dir}/{repo}.git",
+                               f"+refs/heads/*:refs/gatehouse/{repo}/*"]))
+        return out
+
+    @staticmethod
+    def _parse_fetch_refs(output: str) -> tuple[list[str], list[str]]:
+        """(arrived, vanished) ref names out of `git fetch --prune` chatter.
+
+        A VANISHED ref is the interesting one and it is deliberately NOT
+        interpreted: the branch was either harvested into main and deleted, or
+        deleted without being harvested, and the mirror cannot tell those apart
+        from here. The banner says "harvested or deleted" and names the ref, so
+        a reader knows exactly what to go and check rather than being told a
+        guess."""
+        arrived, vanished = [], []
+        for line in output.splitlines():
+            ref = line.strip().rsplit(" ", 1)[-1].strip()
+            if not ref:
+                continue
+            if "[deleted]" in line:
+                vanished.append(ref)
+            elif "[new branch]" in line or "[new ref]" in line:
+                arrived.append(ref)
+        return arrived, vanished
+
+    def _fetch_gatehouse_into_mirror(self, timeout: int) -> list[dict]:
+        """Run every gatehouse fetch; return one record per repo. Raises
+        exec-failure on the first failure — a mirror that is half-refreshed and
+        says it succeeded is worse than one that says it did not."""
+        records = []
+        for repo, argv in self._gatehouse_fetch_argvs():
+            cp = self._run(argv, timeout)
+            if cp.returncode != 0:
+                raise VerbError(
+                    "exec-failure",
+                    f"gatehouse fetch for {repo} exit {cp.returncode}: "
+                    f"{(cp.stderr or cp.stdout).strip()[:500]}")
+            arrived, vanished = self._parse_fetch_refs(cp.stderr + cp.stdout)
+            records.append({"repo": repo, "arrived": arrived,
+                            "vanished": vanished})
+        return records
+
     def _verb_refresh_mirror(self, resident: str, args: dict) -> tuple[dict, str]:
         """Fast-forward the shared read-only repo mirror to the canonical
-        repo's main. The mirror is the ONLY view of the repo residents have
-        (bind-mounted RO into each container), and nothing else ever fetches
-        into it — host commits don't cross the wall until this runs. Zero
-        caller args; every argv is fixed config, so a resident can refresh
-        the mirror but can never aim git anywhere else. `--ff-only` on the
-        update: a diverged mirror fails loudly and stays plink's to resolve."""
+        repo's main, THEN re-fetch every entitled gatehouse repo's branches
+        into refs/gatehouse/<repo>/*. The mirror is the ONLY view of the repo
+        residents have (bind-mounted RO into each container), and nothing else
+        ever fetches into it — host commits don't cross the wall until this
+        runs. Zero caller args; every argv is fixed config, so a resident can
+        refresh the mirror but can never aim git anywhere else. `--ff-only` on
+        the main update: a diverged mirror fails loudly and stays plink's to
+        resolve. `--prune` on the gatehouse fetches: a branch that vanished
+        from the gatehouse vanishes here too, and the summary names it."""
         _reject_unknown(args, set())
         timeout = SUBPROCESS_TIMEOUTS["refresh-mirror"]
         head_argv = self._argv("refresh_mirror_head", [
@@ -1453,9 +1571,18 @@ class Broker:
                 raise VerbError("exec-failure",
                                 f"{key} exit {cp.returncode}: "
                                 f"{(cp.stderr or cp.stdout).strip()[:500]}")
+        gatehouse = self._fetch_gatehouse_into_mirror(timeout)
         head = _head()
-        return ({"head": head, "before": before, "updated": head != before},
-                f"mirror at {head}" + ("" if head == before else f" (was {before})"))
+        summary = f"mirror at {head}" + ("" if head == before
+                                         else f" (was {before})")
+        moved = "; ".join(
+            f"{rec['repo']}: +{len(rec['arrived'])} new, "
+            f"-{len(rec['vanished'])} harvested or deleted"
+            for rec in gatehouse if rec["arrived"] or rec["vanished"])
+        if moved:
+            summary = f"{summary}; gatehouse {moved}"
+        return ({"head": head, "before": before, "updated": head != before,
+                 "gatehouse": gatehouse}, summary[:300])
 
     # ------------------------------------------------------------ start-build
 
@@ -1789,6 +1916,55 @@ class Broker:
         except Exception:  # noqa: BLE001 — narration is legibility, not control
             pass
 
+    def _refresh_mirror_for_banner(self, branch: str, published) -> str:
+        """SPEC ITEM 5 — refresh the mirror BEFORE the banner that names a sha.
+
+        WHERE THIS LIVES, AND WHY IT IS NOT THE WRAPPER. The spec's wording is
+        "the wrapper runs the same mirror fetch host-side before the reaper
+        banners". It cannot: run-build.sh runs under `systemd-run --uid=res-<r>`
+        and the res-* uid CANNOT WRITE /srv/disjorn-ro — that is one of the
+        resident->host walls this house has actually verified (AUTHORITY-PLAN.md
+        "verified this session that res-* cannot write /srv/disjorn-ro"), the
+        wrapper holds no sudo, and it mounts the mirror :ro. So the fetch runs
+        in the one process that already owns the mirror argvs and already runs
+        as plink: this reaper, on the last line before the banner. The spec's
+        INVARIANT — "a banner may never name a sha the audience cannot open" —
+        is met exactly; only the hand that does it moved. FLAGGED FOR REVIEW as
+        the single deviation in this build.
+
+        THE SAME FETCH, not a second implementation: it calls the identical
+        argv builder `refresh-mirror` uses, so the two can never drift into
+        disagreeing about what "the mirror is fresh" means.
+
+        Best-effort by construction. A fetch failure must not swallow a build's
+        banner — the banner is the only thing anyone hears — so the error is
+        carried INTO the banner text instead of raised."""
+        if not published:
+            return ""
+        error = None
+        try:
+            if not self._gatehouse_fetch_argvs():
+                # No gatehouse configured: there is no mirror claim to make, so
+                # the banner makes none. An unmigrated broker.toml gets the
+                # 08-13 banner unchanged rather than a line about a refresh
+                # that never happened.
+                return ""
+            self._fetch_gatehouse_into_mirror(
+                SUBPROCESS_TIMEOUTS["refresh-mirror"])
+        except VerbError as exc:
+            error = exc.message
+        except Exception as exc:  # noqa: BLE001 — never crash a reaper
+            error = repr(exc)
+        return format_mirror_note(branch, published, error)
+
+    def _narrate_build_outcome(self, **kwargs) -> None:
+        """Every terminal build banner goes through here, so the mirror fetch
+        cannot be forgotten on one of the five paths that post one."""
+        publish = kwargs.get("publish") or {}
+        kwargs["mirror"] = self._refresh_mirror_for_banner(
+            kwargs.get("branch", ""), publish.get("published", []))
+        self._narrate(format_build_outcome(**kwargs))
+
     def _reap_build(self, proc: Any, spec_bytes: bytes, meta: dict,
                     timeout: int, out_path: str, err_path: str) -> None:
         """Detached-build lifecycle END (runs in a daemon thread; the request
@@ -1815,9 +1991,17 @@ class Broker:
         2026-08-13 (publish path): the terminal banner is derived from the
         wrapper's PUBLISHED / PUBLISH-FAILED / NO-COMMITS / QUARANTINED lines in
         that spool, through format_build_outcome. The reaper runs NO
-        verification of its own — no rev-parse, no git, no second look at the
-        gatehouse. The harvest is the verification; a second mechanism could
-        only ever disagree with it."""
+        verification of its own — no rev-parse, no second look at the gatehouse.
+        The harvest is the verification; a second mechanism could only ever
+        disagree with it.
+
+        2026-08-14 (file vision, item 5): it does now run ONE git command, and
+        the distinction matters. `_narrate_build_outcome` fetches the gatehouse
+        into the read-only mirror before posting. That is a PUBLICATION step,
+        not a verification step: it measures nothing, decides nothing, and
+        cannot change the banner's verdict — it only makes the sha the banner
+        names openable by the people being asked to review it. The one-mechanism
+        rule above is intact."""
         slug, branch = meta["slug"], meta["branch"]
         try:
             try:
@@ -1835,21 +2019,21 @@ class Broker:
                 # are already in the log, and this is exactly the run whose work
                 # is sitting in a quarantine directory. Route through the same
                 # decision so they are appended here too.
-                self._narrate(format_build_outcome(
+                self._narrate_build_outcome(
                     slug=slug, branch=branch,
                     publish=self._harvest_report(
                         out_path, self._read_build_tail(out_path)),
                     unit_reason=f"timed out after {timeout}s — killed"
                                 + ("" if stopped else
                                    " (unit stop reported a problem; check "
-                                   f"systemctl status {build_unit_name(slug)})")))
+                                   f"systemctl status {build_unit_name(slug)})"))
                 return
             except Exception as exc:  # noqa: BLE001 — broken pipe etc. = a failure
-                self._narrate(format_build_outcome(
+                self._narrate_build_outcome(
                     slug=slug, branch=branch,
                     publish=self._harvest_report(
                         out_path, self._read_build_tail(out_path)),
-                    unit_reason=f"build error: {exc!r}"))
+                    unit_reason=f"build error: {exc!r}")
                 return
 
             out_s = self._read_build_tail(out_path)
@@ -1887,9 +2071,9 @@ class Broker:
             unit_reason = None
             if rc is not None and rc != 0:
                 unit_reason = f"exit {rc}: {(err_s or session_out).strip()[:400]}"
-            self._narrate(format_build_outcome(
+            self._narrate_build_outcome(
                 slug=slug, branch=branch, publish=publish, report=report,
-                unit_reason=unit_reason))
+                unit_reason=unit_reason)
         finally:
             self._unlink_build_logs(out_path, err_path)
             self._remove_build_sidecar(slug)
@@ -2011,13 +2195,13 @@ class Broker:
                     self._stop_build_unit(
                         slug, str(rec.get("build_resident") or ""))
                     out_path = str(rec.get("out_path") or "")
-                    self._narrate(format_build_outcome(
+                    self._narrate_build_outcome(
                         slug=slug, branch=rec.get("branch", f"loop/{slug}"),
                         publish=self._harvest_report(
                             out_path, self._read_build_tail(out_path)),
                         unit_reason=f"timed out after {rec.get('timeout_sec')}s "
                                     "— killed (build re-adopted after a broker "
-                                    "restart)"))
+                                    "restart)")
                     break
                 time.sleep(self.BUILD_POLL_SEC)
             else:
@@ -2063,9 +2247,9 @@ class Broker:
                            f"printed no publish lines (unit state {state}) — "
                            "the harvest never reported: outcome unknown, nothing "
                            "was published" + (f": {note}" if note else ""))
-        self._narrate(format_build_outcome(
+        self._narrate_build_outcome(
             slug=slug, branch=branch, publish=publish, report=report,
-            unit_reason=unit_reason))
+            unit_reason=unit_reason)
 
     def _verb_start_build(self, resident: str, args: dict) -> tuple[dict, str]:
         """Launch a DETACHED build of a CONFIRMED spec to `loop/<slug>` (WP-L4).

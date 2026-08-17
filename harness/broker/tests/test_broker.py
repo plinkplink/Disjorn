@@ -186,12 +186,18 @@ def test_classify_diff_rejects_hostile_args(harness, bad):
 
 
 def test_refresh_mirror_runs_fixed_argv_sequence(harness):
-    """head -> fetch -> ff-only merge -> head, all fixed argv, no caller data."""
+    """head -> fetch -> ff-only merge -> head, all fixed argv, no caller data.
+
+    `gatehouse` is [] here because this config names no gatehouse repos —
+    2026-08-14 file vision adds one pruned fetch per ENTITLED repo after the
+    ff-only update, and an unconfigured deployment keeps exactly this
+    behaviour. The gatehouse half has its own file:
+    tests/test_broker_file_vision.py."""
     harness.set_verbs(**{"refresh-mirror": True})
     resp = harness.call("refresh-mirror", {})
     assert resp["ok"] is True
     assert resp["result"] == {"head": "abc1234", "before": "abc1234",
-                              "updated": False}
+                              "updated": False, "gatehouse": []}
     assert harness.recorded_argv() == [
         ["rev-parse", "--short", "HEAD"],
         ["fetch", "origin"],

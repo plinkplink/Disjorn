@@ -263,6 +263,110 @@ def test_a_missing_own_repo_also_refuses(rig):
     assert not (rig.dump / "run-started").exists()
 
 
+def _push_branch(bare: Path, branch: str, content: str):
+    """Put a real branch into a gatehouse repo, the way a previous build's
+    harvest would have."""
+    seed = bare.parent / f".push-{bare.name}-{branch.replace('/', '-')}"
+    git("clone", "--quiet", str(bare), str(seed))
+    git("checkout", "--quiet", "-b", branch, cwd=seed)
+    (seed / "file.txt").write_text(content)
+    git("add", "file.txt", cwd=seed)
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", content,
+        cwd=seed)
+    sha = git("rev-parse", "HEAD", cwd=seed).stdout.strip()
+    git("push", "--quiet", "origin", f"{branch}:refs/heads/{branch}", cwd=seed)
+    subprocess.run(["rm", "-rf", str(seed)], check=True)
+    return sha
+
+
+def _branches(clone: Path):
+    return sorted(git("for-each-ref", "--format=%(refname:short)",
+                      "refs/heads/", cwd=clone).stdout.split())
+
+
+# ── one branch in the build seat (2026-08-14 file vision, item 4) ────────
+#
+# The other half of the spec: the MIRROR gets every branch, the BUILD SEAT gets
+# one. A resident reviewing work needs the whole picture; a builder
+# implementing one spec needs its own ground and no other lane's half-finished
+# one. --single-branch on the provisioning clone is the whole mechanism.
+
+
+def test_the_workspace_holds_main_and_its_own_branch_only(rig):
+    """Every loop/* branch anyone had ever published used to land in every
+    build's workspace — context a build can only be confused by, and tempted to
+    merge."""
+    _push_branch(rig.gatehouse / "disjorn.git", "loop/2026-08-09-someone-else",
+                 "another lane\n")
+    _push_branch(rig.gatehouse / "disjorn.git", "loop/2026-08-11-third",
+                 "a third lane\n")
+    proc = rig.run(build_script=session(rig, "disjorn"))
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert _branches(rig.work / "disjorn") == sorted(["main", BRANCH])
+    # and no remote-tracking leftovers either: origin is removed, so the only
+    # refs in the seat are the two branches above.
+    remotes = git("for-each-ref", "--format=%(refname)", "refs/remotes/",
+                  cwd=rig.work / "disjorn").stdout.split()
+    assert remotes == []
+
+
+def test_the_seat_still_gets_main_and_publishes_from_it(rig):
+    """--single-branch must not cost the build its base. main is the branch it
+    builds on and the one the harvest measures 'beyond the clone point'
+    against."""
+    _push_branch(rig.gatehouse / "disjorn.git", "loop/2026-08-09-someone-else",
+                 "another lane\n")
+    main_sha = head_of(rig.gatehouse / "disjorn.git", "main")
+    proc = rig.run(build_script=session(rig, "disjorn", n=2))
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    clone = rig.work / "disjorn"
+    assert git("rev-parse", "main", cwd=clone).stdout.strip() == main_sha
+    assert git("rev-list", "--count", f"main..{BRANCH}",
+               cwd=clone).stdout.strip() == "2"
+    published = head_of(rig.gatehouse / "disjorn.git", BRANCH)
+    assert published == git("rev-parse", BRANCH, cwd=clone).stdout.strip()
+
+
+def test_a_foreign_branch_is_absent_from_the_seat_and_intact_in_the_gatehouse(rig):
+    """The stated, accepted cost (Claudette, 08-15): the seat carries less. The
+    gatehouse retains the full picture, and that is where the question 'what
+    else is in flight' is answered."""
+    foreign = _push_branch(rig.gatehouse / "disjorn.git",
+                           "loop/2026-08-09-someone-else", "another lane\n")
+    proc = rig.run()
+    assert proc.returncode == 0, proc.stderr
+    assert "loop/2026-08-09-someone-else" not in _branches(rig.work / "disjorn")
+    assert head_of(rig.gatehouse / "disjorn.git",
+                   "loop/2026-08-09-someone-else") == foreign
+
+
+def test_quarantine_still_measures_against_the_gatehouse(rig):
+    """The reachability check asks the GATEHOUSE, not the workspace, so a seat
+    that can no longer see other branches has not lost the ability to notice
+    that its own leftover was never harvested. Asserted here because the two
+    changes shipped together and the failure would be silent: a pile deleted
+    instead of preserved."""
+    old_slug = "2026-08-12-earlier"
+    dest = rig.work / "disjorn"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    git("clone", "--quiet", "--single-branch",
+        str(rig.gatehouse / "disjorn.git"), str(dest))
+    git("checkout", "--quiet", "-b", f"loop/{old_slug}", cwd=dest)
+    (dest / "unharvested.txt").write_text("do not lose me\n")
+    git("add", "unharvested.txt", cwd=dest)
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "wip",
+        cwd=dest)
+    sha = git("rev-parse", "HEAD", cwd=dest).stdout.strip()
+
+    proc = rig.run()
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    quarantined = lines(proc, "QUARANTINED ")
+    assert len(quarantined) == 1, proc.stdout
+    pile = Path(quarantined[0].split()[2])
+    assert git("rev-parse", f"loop/{old_slug}",
+               cwd=pile).stdout.strip() == sha
+
+
 def test_the_provisioned_clone_has_no_origin(rig):
     """[1175] The origin rewrite is DELETED, not repointed. With the mount
     gone, a remote aimed at /run/gatehouse is a path that looks real and is

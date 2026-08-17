@@ -248,13 +248,25 @@ container exits.
 - The gatehouse holds **bare** repos: no working tree, so a push deploys nothing
   and merges nothing. That is the wall, not the group bits.
 - `run-build.sh` clones the **entitled set only** — `disjorn.git` plus
-  `<name>.git` — fresh, per run, and **removes `origin` from each clone**. A
+  `<name>.git` — **`--single-branch`**, fresh, per run, and **removes `origin`
+  from each clone**. A
   missing entitled repo is a loud refusal before podman runs; a foreign repo in
   the gatehouse is simply not cloned. Fresh every time on purpose: a stale
   checkout that silently builds against yesterday's tree is a failure class this
   house has already spent days on. `origin` is removed rather than repointed
   because with the mount gone, a remote aimed at a path the container cannot see
   is a trap — "no such remote" is a better error than a real-looking path.
+- **One branch in the seat** (`SPECS/2026-08-14-file-vision.md` item 4, plink
+  seq 1272). `--single-branch` means the workspace clone carries `main` and the
+  seat's own `loop/<slug>` and no other lane's branches. The mirror got the
+  opposite treatment in the same spec — **every** branch, under
+  `refs/gatehouse/<repo>/*` — and that asymmetry is the point: a resident
+  reviewing work needs the whole picture, a builder implementing one spec needs
+  its own ground. STATED COST, accepted at review: a quarantined workspace now
+  holds less divergence evidence, exactly when someone is reading a pile to
+  work out what was lost. The gatehouse retains the full picture, and the
+  quarantine reachability check already asks the *gatehouse* rather than the
+  workspace, so the flag does not weaken it.
 - **The session commits and stops.** Its contract ends at "commit to
   `loop/<slug>` in `~/work/<repo>`".
 - **The wrapper harvests after a clean container exit**, per entitled repo:
@@ -272,6 +284,23 @@ container exits.
   gatehouse branch moved under us, and the wrapper is not entitled to decide
   whose commits lose.
 
+- **A banner never names a sha its audience cannot open**
+  (`SPECS/2026-08-14-file-vision.md` item 5). Before posting a banner that
+  carries a `PUBLISHED` sha, the broker's reaper runs the *same* gatehouse
+  fetch that `refresh-mirror` runs, so the branch is readable at
+  `gatehouse/<repo>/loop/<slug>` in `/opt/disjorn` by the time anyone is asked
+  to look at it; the banner prints that ref. If the fetch fails the banner says
+  **`mirror: NOT refreshed`** rather than quietly implying otherwise. This is a
+  *publication* step, not a second verification — it measures nothing and
+  cannot change the verdict below.
+
+  **Deviation from the spec's wording, flagged for review:** the spec says
+  *the wrapper* does this. It cannot — `run-build.sh` runs under
+  `systemd-run --uid=res-<name>`, and `res-*` **cannot write `/srv/disjorn-ro`**
+  (a verified wall, `AUTHORITY-PLAN.md`); the wrapper holds no sudo and mounts
+  the mirror `:ro`. It therefore runs in the one process that already owns the
+  mirror argvs and already runs as plink — the reaper, on the last line before
+  the banner. The invariant is met exactly; only the hand moved.
 - **The done-banner is derived from those lines and nothing else.** No separate
   verification path: the harvest *is* the verification, because one mechanism
   cannot disagree with itself. A nonzero container exit prints
