@@ -22,7 +22,10 @@ def test_assemble_orders_chronologically_and_appends_trigger():
     # transcript order: alice, bob, then the summoning trigger last
     body = prompt.split(CHAT_OPEN, 1)[1].split(CHAT_CLOSE, 1)[0]
     lines = [ln for ln in body.strip().splitlines()]
-    assert lines == ["alice: first", "bob: second", "carol: hey gable"]
+    # Order is the property under test; the [#seq] markers are the 2026-08-17
+    # transcript grammar (see prompt.format_line) and ride along in seq order,
+    # which is itself a second witness that the ordering held.
+    assert lines == ["alice: [#48] first", "bob: [#49] second", "carol: [#50] hey gable"]
     assert "summoned in channel 7 by carol" in prompt
 
 

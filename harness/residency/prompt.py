@@ -44,11 +44,26 @@ __all__ = [
 
 
 def format_line(msg: dict[str, Any]) -> str:
+    """One transcript line: ``author: [#seq] content``.
+
+    The ``[#N]`` marker (2026-08-17) is the message's seq — the number every
+    "at seq N" in #custodian and every spec's confirm record points at. Until
+    today the API sent it on every message and this line dropped it, so Gable
+    read a transcript full of citations he could not resolve, and pressed builds
+    against a confirm gate keyed on a number he could not see. Same marker
+    Claudette's context uses, on purpose: one grammar for both residents.
+
+    A message with no seq (a fixture, a synthetic line) renders exactly as
+    before — no marker is invented for a number that does not exist.
+    """
     author = (msg.get("author") or {}).get("name") or (
         f"{msg.get('author_type', 'someone')}:{msg.get('author_id', '?')}"
     )
     content = msg.get("content") or ""
-    return f"{author}: {content}"
+    seq = msg.get("seq")
+    if seq is None:
+        return f"{author}: {content}"
+    return f"{author}: [#{seq}] {content}"
 
 
 def assemble_prompt(
