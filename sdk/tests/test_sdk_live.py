@@ -425,7 +425,12 @@ async def test_text_channel_create_event_and_membership_gate(server, alice, bot_
     cid = created["id"]
 
     event = await _next_matching(agen, lambda e: isinstance(e, ChannelCreate))
-    assert event.channel == {"id": cid, "type": "text", "name": "sdk-test-channel"}
+    assert event.channel == {
+        "id": cid,
+        "type": "text",
+        "name": "sdk-test-channel",
+        "visibility": "public",
+    }
 
     # Not a member yet: REST access denied, live messages skipped entirely.
     with pytest.raises(httpx.HTTPStatusError) as exc_info:

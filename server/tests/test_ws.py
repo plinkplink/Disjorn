@@ -352,7 +352,12 @@ def test_text_channel_fanout_and_channel_create_frame(wsc):
         cid = r.json()["id"]
         frame = {
             "type": "channel_create",
-            "channel": {"id": cid, "type": "text", "name": "custodian"},
+            "channel": {
+                "id": cid,
+                "type": "text",
+                "name": "custodian",
+                "visibility": "public",
+            },
         }
         for ws in (wa, wb, wcl, wot):
             assert ws.receive_json() == frame

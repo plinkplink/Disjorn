@@ -109,6 +109,7 @@ class Ctx:
         actor: Actor,
         flags: Optional[dict[str, Any]] = None,
         channel_type: Optional[str] = None,
+        channel_visibility: str = "public",
     ) -> None:
         self.channel_id = channel_id
         self.args = args
@@ -123,6 +124,11 @@ class Ctx:
         # channel vanished between insert and dispatch — treated as private
         # (fail closed), see is_private_channel.
         self.channel_type = channel_type
+        # channels.visibility ('public' | 'private'). A private text channel is
+        # readable only by its members, so it is private in exactly the sense
+        # is_private_channel means. Defaults to 'public' so a caller that
+        # predates per-channel membership behaves as it always did.
+        self.channel_visibility = channel_visibility
 
     @property
     def poster(self) -> str:
@@ -137,13 +143,16 @@ class Ctx:
     def is_private_channel(self) -> bool:
         """True unless the channel is one everyone in the house can read.
 
-        main_feed and named text channels are house-public (Architecture §4.1:
-        every user is an implicit member). Everything else — DMs today, any
-        future restricted channel type, and an unresolvable channel — counts as
+        main_feed and PUBLIC named text channels are house-public
+        (Architecture §4.1: every user is an implicit member). Everything else
+        — DMs, private text channels (per-channel membership), any future
+        restricted channel type, and an unresolvable channel — counts as
         private. Fail closed: a new channel type is private until someone
         deliberately adds it here.
         """
-        return self.channel_type not in ("main_feed", "text")
+        if self.channel_type not in ("main_feed", "text"):
+            return True
+        return self.channel_visibility != "public"
 
 
 Handler = Callable[[Ctx], Awaitable[Optional[str]]]
@@ -249,9 +258,14 @@ async def dispatch(
             )
         return
 
-    channel = await db.fetch_one("SELECT type FROM channels WHERE id = ?", (channel_id,))
+    channel = await db.fetch_one(
+        "SELECT type, visibility FROM channels WHERE id = ?", (channel_id,)
+    )
     channel_type = channel["type"] if channel is not None else None
-    reply = await handler(Ctx(channel_id, args, actor, flags, channel_type))
+    visibility = channel["visibility"] if channel is not None else "private"
+    reply = await handler(
+        Ctx(channel_id, args, actor, flags, channel_type, visibility)
+    )
     if reply:
         await _post_system_reply(channel_id, reply)
 
