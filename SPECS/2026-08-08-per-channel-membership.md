@@ -43,4 +43,5 @@ One build slot; test-heavy, implementation is small.
 - **Confirmed at**: 2026-08-12
 
 ## Status
-confirmed
+building
+<!-- set by the broker on 2026-08-17 17:45Z (start-build, 2026-08-08-per-channel-membership): build running as disjorn-build-2026-08-08-per-channel-membership.service -> loop/2026-08-08-per-channel-membership, launched by claudette (confirmed by plink, #custodian seq 1007). Not buildable again until this line moves. -->
