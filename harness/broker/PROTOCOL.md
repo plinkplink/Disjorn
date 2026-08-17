@@ -79,8 +79,9 @@ All verbs are per-resident toggleable in `verbs.toml` and default OFF.
 
 ### `refresh-mirror`
 - args: none.
-- result: `{"head": str, "before": str, "updated": bool}` — short HEAD of the
-  mirror after (and before) the refresh.
+- result: `{"head": str, "before": str, "updated": bool, "gatehouse": [...]}` —
+  short HEAD of the mirror after (and before) the refresh, plus one record per
+  gatehouse repo: `{"repo": str, "arrived": [ref], "vanished": [ref]}`.
 - Fast-forwards the shared read-only repo mirror (`/srv/disjorn-ro`, the
   residents' `/opt/disjorn`) to the canonical repo's `origin/main`. The mirror
   is the only view of the repo residents have, and nothing else fetches into
@@ -89,6 +90,28 @@ All verbs are per-resident toggleable in `verbs.toml` and default OFF.
   caller supplies nothing, so the verb can refresh the mirror but never aim
   git anywhere else. A non-fast-forward mirror is `exec-failure` — a diverged
   mirror is plink's to resolve, never a resident's.
+- **Since 2026-08-14 (file vision) it also fetches every ENTITLED gatehouse
+  repo's branches** into `refs/gatehouse/<repo>/*`, with `--prune`, one fixed
+  argv per repo. Still zero caller args. So `loop/<slug>` branches — the work
+  residents are asked to review — are readable in the mirror instead of only
+  in the gatehouse, which no resident can reach. `--prune` means a ref that
+  vanished from the gatehouse vanishes here; the summary names it and says
+  **harvested or deleted**, because from the mirror those two are
+  indistinguishable and a guess would be worse than a fact.
+- **TWO SOURCES, deliberately.** `main` comes from `origin` (plink's working
+  clone = what production actually runs); branches come from the gatehouse.
+  Single-sourcing on the gatehouse would let mirror-`main` LEAD production —
+  the merged-is-not-deployed gap inverted, in the direction nobody watches.
+- **The motion ping** — did their side change since main? One command, no file
+  reads, no broker call, from any seat with a shell:
+
+      git -C /opt/disjorn rev-parse gatehouse/<repo>/loop/<slug>:<path> \
+          main:<path>
+
+  Two identical shas means that path is untouched on the branch; two different
+  ones means read it. (A bot seat has no shell for this yet — `read_repo_file`
+  needs a rev argument and a sha-only mode first; deferred to the tools
+  discussion, plink 2026-08-15.)
 
 ### `start-build`
 - args: `{"spec": str}` — a spec filename (or path) resolving DIRECTLY inside

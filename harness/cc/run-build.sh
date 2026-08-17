@@ -284,7 +284,21 @@ for _repo in "${ENTITLED[@]}"; do
   fi
 
   rm -rf "$_dest"
-  git clone --quiet "$_repo_path" "$_dest" || {
+  # --single-branch: THE BUILD SEAT SEES main AND ITS OWN loop/<slug>, NOTHING
+  # ELSE (SPECS/2026-08-14-file-vision.md item 4). Every branch in the mirror,
+  # one branch in the build seat: a resident reviewing work needs the whole
+  # picture, and a builder implementing one spec needs its own ground and no
+  # other lane's half-finished one. Without this the clone carried every
+  # loop/* branch anyone had ever published, which is context a build can only
+  # be confused by and, worse, tempted to merge.
+  #
+  # STATED COST, ACCEPTED AT REVIEW (Claudette, 08-15): a QUARANTINED workspace
+  # now holds less divergence evidence — main plus one slug — exactly when
+  # someone is reading a pile to work out what was lost. The gatehouse retains
+  # the full picture and is where that question is answered; the quarantine
+  # reachability check above already asks the GATEHOUSE rather than the
+  # workspace, so this flag does not weaken it.
+  git clone --quiet --single-branch "$_repo_path" "$_dest" || {
     echo "run-build: FAILED to clone $_repo_path -> $_dest" >&2; exit 1; }
   git -C "$_dest" checkout --quiet -b "$BRANCH" || {
     echo "run-build: FAILED to create $BRANCH in $_dest" >&2; exit 1; }

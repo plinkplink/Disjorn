@@ -13,6 +13,26 @@
 # There is no `restart-self` line because there is no such verb — residents
 # cannot bring themselves back up unsupervised (plink's ruling #3,
 # AGENTHOOD.md; enforced by test in harness/broker/tests/).
+#
+# THIS FILE IS NOW THE VERB SET, and every seat's schema is generated from it
+# (SPECS/2026-08-14-file-vision.md item 3). Adding or removing a line here
+# means:
+#   1. add or remove the matching entry in harness/broker/verb_surface.toml
+#      (the caller-facing shape: description, flags, argument schema), then
+#   2. run  python3 harness/broker/gen_verb_surface.py write  to rewrite the
+#      shell seat's CLI table, and
+#      python3 harness/broker/gen_verb_surface.py emit-tools \
+#          --out <bot repo>/broker_tools.py
+#      for a bot seat's tool schemas.
+# harness/broker/tests/test_verb_surface.py fails if the two disagree, in
+# EITHER direction — a verb with no surface is a capability nobody can reach,
+# and a surface with no verb is a button wired to nothing. Both have happened;
+# that is why the check exists.
+#
+# The generator reads only the KEY NAMES here, never the booleans: whether a
+# resident may call a verb is decided at the socket, per request, by the
+# broker. If generation followed the switch, flipping one off would delete a
+# tool instead of denying a call.
 
 [res-claudette]
 "restart-disjorn" = false

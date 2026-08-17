@@ -138,6 +138,36 @@ refresh_mirror_fetch = ["git", "-C", "/srv/disjorn-ro", "fetch", "origin"]
 refresh_mirror_update = ["git", "-C", "/srv/disjorn-ro", "merge", "--ff-only", "origin/main"]
 refresh_mirror_head = ["git", "-C", "/srv/disjorn-ro", "rev-parse", "--short", "HEAD"]
 
+# FILE VISION (SPECS/2026-08-14-file-vision.md item 1): the same verb also
+# fetches every ENTITLED gatehouse repo's branches into the mirror, under
+# refs/gatehouse/<repo>/*. Without this the mirror can tell a resident what
+# production runs and cannot show them a single branch they are being asked to
+# review — the structural half of the crossing problem in 1226.
+#
+# TWO SOURCES, DELIBERATELY (plink, 2026-08-15). `main` comes from origin
+# (plink's working clone = deploy truth); BRANCHES come from the gatehouse.
+# Single-sourcing everything on the gatehouse would make mirror-main LEAD
+# production — the merged-is-not-deployed gap inverted, in the direction nobody
+# watches.
+#
+# THIS LIST IS THE ENTITLEMENT. It is not a glob of the gatehouse directory,
+# for the same reason run-build.sh stopped globbing it: a set that grows every
+# time the keyboard creates a lane is a widening that arrives by directory
+# listing rather than by decision. Name the repos; adding one is a visible diff
+# in a plink-owned file. UNSET (either key absent) = today's main-only
+# behaviour, so an unmigrated deployment simply keeps working.
+#
+# The verb still takes NO caller args: the directory and the names are config,
+# the refspec is a constant in brokerd.py, and the repo names are re-validated
+# against ^[A-Za-z0-9][A-Za-z0-9._-]*$ before they reach an argv.
+refresh_mirror_gatehouse_dir = "/var/lib/disjorn-broker/gatehouse"
+refresh_mirror_gatehouse_repos = ["disjorn", "claudette", "gable"]
+# --prune is the load-bearing flag: a branch that vanished from the gatehouse
+# vanishes from the mirror too, so nobody reviews a ref that was harvested into
+# main last week. The verb's summary NAMES what vanished and says "harvested or
+# deleted" — it does not guess which, because from here it cannot tell.
+refresh_mirror_gatehouse_fetch = ["git", "-C", "/srv/disjorn-ro", "fetch", "--prune"]
+
 [paths]
 # read-metrics serves exactly this file. The WP-H12 producer
 # (harness/metrics/metrics.py `build`) writes it; run it on a timer. Until it

@@ -1,0 +1,270 @@
+# harness/broker/verb_surface.toml — THE CALLER-FACING SHAPE of every broker
+# verb, in one file, for every seat.
+#
+# WHY THIS FILE EXISTS (SPECS/2026-08-14-file-vision.md item 3, as upgraded by
+# Claudette's cross-lane review). A verb has, today, THREE descriptions of
+# itself living in three files maintained by three different hands:
+#
+#   * verbs.toml            whether a resident may call it       (plink, /etc)
+#   * broker-cli/broker     the flags a shell seat can type      (Disjorn repo)
+#   * <bot>/core.py         the tool schema a bot seat is given  (bot repo)
+#
+# and nothing checked them against each other. The result is a drift class,
+# not a drift instance — FOUR instances by 2026-08-15:
+#   1. `restart_disjorn` sat in a tool list for two weeks while verbs.toml had
+#      it false: a button wired to nothing.
+#   2. `start-build` was flipped true 2026-08-05 with no tool for it: a
+#      capability the resident could not reach. Found only because she said so.
+#   3. `refresh-mirror` was true while the resident IMAGE predated the CLI
+#      subcommand (KB-D9) — switched back off rather than shipped.
+#   4. `refresh-mirror` ON for both residents and absent from the bot tool
+#      schema, which is the instance this spec was written about.
+#
+# So: verbs.toml stays THE verb set (it is plink's, and it is the kill switch),
+# this file says what each verb LOOKS LIKE to a caller, and every seat's schema
+# is GENERATED from the two by harness/broker/gen_verb_surface.py. Adding a
+# verb is one entry here; forgetting one is a test failure, not a fortnight.
+#
+# THIS FILE GRANTS NOTHING. It is a description of a surface, not an
+# authorization: the broker authenticates by SO_PEERCRED and authorizes by
+# verbs.toml, and a verb described here that verbs.toml has off is refused with
+# verb-disabled exactly as before. Nothing generated from here can widen what
+# the broker accepts — the broker re-validates every argument server-side and
+# is the only authority. Client-side validation, here as in the CLI it
+# replaces, is for a fast readable failure and nothing more.
+#
+# ORDER IS LOAD-BEARING. The entries below are in the order a bot seat
+# registers them, and registration order is prompt order. Append new verbs at
+# the END; do not reorder existing ones to be tidy.
+#
+# ARG GRAMMAR (all keys optional unless noted):
+#   type            "string" | "integer" | "object"        REQUIRED
+#   required        bool, default false
+#   flag            the CLI flag; default "--<name with _ as ->"
+#   description     REQUIRED — shown to a model and in --help
+#   seats           ["cli", "tool"] — which surfaces carry this arg.
+#                   Default both. `read-own-log.path` is cli-only: the broker
+#                   realpath-pins it to the caller's own log, so it is a
+#                   debugging affordance for a shell, not a knob to hand a model.
+#   minimum/maximum integer bounds (type = "integer")
+#   min_len/max_len string length bounds (type = "string")
+#   pattern         anchored regex the string must match
+#   absolute_path   bool — must start with "/"
+#   no_dotdot       bool — no ".." path segment
+#   no_leading_dash bool — must not start with "-" (never let an argument
+#                   become a flag, at any layer, however trusted)
+#   no_nul          bool — must not contain NUL
+#   json_arg        bool — the value is a JSON object; the CLI serializes it
+#                   into the flag, a tool seat passes it through as an object
+#   max_json_bytes  cap on the serialized JSON
+
+# ── read-own-log ─────────────────────────────────────────────────────────
+[verbs.read-own-log]
+tool_name = "read_own_log"
+cli_help = "tail your own configured log"
+announce_preface = false
+description = """\
+Tail your own process log (the adapter's disjorn_bot.log), via the house broker. \
+Use to check on your own recent behavior, errors, or what happened during a glitch. \
+Only your own configured log is readable — no other file, ever.\
+"""
+
+[verbs.read-own-log.args.lines]
+type = "integer"
+minimum = 1
+maximum = 500
+description = "How many trailing lines, 1-500. Default 100."
+
+[verbs.read-own-log.args.grep]
+type = "string"
+min_len = 1
+max_len = 200
+description = "Optional plain substring filter (no regex), max 200 chars."
+
+[verbs.read-own-log.args.path]
+type = "string"
+seats = ["cli"]
+description = "must resolve to YOUR configured log_path (else bad-args)"
+
+# ── read-metrics ─────────────────────────────────────────────────────────
+[verbs.read-metrics]
+tool_name = "read_metrics"
+cli_help = "read the house metrics dashboard JSON"
+announce_preface = false
+description = """\
+Read the house metrics dashboard JSON (retrieval/spine/acceptance stats), via the \
+house broker. Use when you want the measured numbers on your own memory and activity.\
+"""
+
+# ── file-proposal ────────────────────────────────────────────────────────
+[verbs.file-proposal]
+tool_name = "file_proposal"
+cli_help = "post a proposal to #custodian"
+announce_preface = false
+description = """\
+File a proposal to #custodian via the house broker. It is posted by the broker's own \
+bot identity as '[proposal from res-claudette] <text>' for plink to review. Use for \
+change requests about your own runtime, memory, prompt, or tooling — not for chat.\
+"""
+
+[verbs.file-proposal.args.text]
+type = "string"
+required = true
+min_len = 1
+max_len = 4000
+description = "The proposal body, 1-4000 chars. Complete and self-contained."
+
+# ── query-own-audit ──────────────────────────────────────────────────────
+[verbs.query-own-audit]
+tool_name = "query_own_audit"
+cli_help = "query your own broker audit trail"
+announce_preface = false
+description = """\
+Query your own broker audit trail (every broker call you made — allowed or denied), \
+via the house broker. Dates are inclusive UTC. You can only ever see your own entries.\
+"""
+
+[verbs.query-own-audit.args.date_from]
+type = "string"
+required = true
+flag = "--from"
+pattern = "^\\d{4}-\\d{2}-\\d{2}$"
+description = "Start date, YYYY-MM-DD (UTC, inclusive)."
+
+[verbs.query-own-audit.args.date_to]
+type = "string"
+required = true
+flag = "--to"
+pattern = "^\\d{4}-\\d{2}-\\d{2}$"
+description = "End date, YYYY-MM-DD (UTC, inclusive)."
+
+[verbs.query-own-audit.args.limit]
+type = "integer"
+minimum = 1
+maximum = 500
+description = "Max entries, 1-500 (most recent kept). Default 100."
+
+# ── run-server-tests ─────────────────────────────────────────────────────
+[verbs.run-server-tests]
+tool_name = "run_server_tests"
+cli_help = "run the server pytest suite"
+announce_preface = true
+description = """\
+Run the Disjorn server pytest suite, via the house broker. Use to check platform \
+health or to gate a change you're evaluating. Slow (can take a minute or more); \
+returns the suite's summary line, e.g. '148 passed in 25.3s'.\
+"""
+
+# ── classify-diff ────────────────────────────────────────────────────────
+[verbs.classify-diff]
+tool_name = "classify_diff"
+cli_help = "tier-classify a git diff range"
+announce_preface = false
+description = """\
+Classify a git diff range against the house governance tiers (AGENTHOOD.md), via \
+the house broker. Returns the classifier's JSON verdict including 'tier' — Tier 0 \
+auto-apply, Tier 1 auto+post, Tier 2 human gate. Classification is advisory \
+read-only analysis; it merges nothing.\
+"""
+
+[verbs.classify-diff.args.repo]
+type = "string"
+required = true
+absolute_path = true
+no_dotdot = true
+description = "Absolute path to the repo (no '..' segments)."
+
+[verbs.classify-diff.args.range]
+type = "string"
+required = true
+no_leading_dash = true
+pattern = "^[A-Za-z0-9._~^/{}-]{1,200}$"
+description = """\
+Git rev or range, e.g. 'main..proposal', max 200 chars, charset \
+[A-Za-z0-9._~^/{}-], must not start with '-'.\
+"""
+
+[verbs.classify-diff.args.gates]
+type = "object"
+json_arg = true
+max_json_bytes = 8192
+description = """\
+Optional gate results the classifier folds into its verdict, e.g. {"tests": true, \
+"typecheck": true}. Max 8 KiB serialized.\
+"""
+
+# ── read-prod-logs ───────────────────────────────────────────────────────
+[verbs.read-prod-logs]
+tool_name = "read_prod_logs"
+cli_help = "tail the Disjorn service journal"
+announce_preface = false
+description = """\
+Tail the production Disjorn service journal (journalctl -u disjorn), via the house \
+broker. Use to investigate platform errors or check on a restart. This is the \
+platform's log, filtered broker-side — distinct from read_own_log, which is yours.\
+"""
+
+[verbs.read-prod-logs.args.lines]
+type = "integer"
+minimum = 1
+maximum = 500
+description = "How many trailing lines, 1-500. Default 100."
+
+# ── restart-disjorn ──────────────────────────────────────────────────────
+[verbs.restart-disjorn]
+tool_name = "restart_disjorn"
+cli_help = "restart the Disjorn service"
+announce_preface = true
+description = """\
+Restart the production Disjorn service, via the house broker. This briefly drops \
+every connected human and bot, so use it deliberately: after a merged change that \
+needs a reload, or when read_prod_logs shows the service wedged — and say in \
+channel that you're doing it. Not for experiments; scratch servers are for that.\
+"""
+
+# ── start-build ──────────────────────────────────────────────────────────
+[verbs.start-build]
+tool_name = "start_build"
+cli_help = "launch a detached build of a confirmed spec"
+announce_preface = true
+description = """\
+Launch a detached build of a CONFIRMED spec, via the house broker. This is your \
+build hands: the build runs as a headless session under your own uid, writes code, \
+and commits to the branch `loop/<spec-slug>`. It does not merge — plink reads the \
+diff and merges by hand, so nothing you build reaches production without a human \
+having read it.\n\nThe spec is the authorization. The broker refuses unless the \
+file's `## Status` is the single word `confirmed` AND its `## Confirm record` \
+names who confirmed it and the #custodian seq that witnessed it — so a spec you \
+wrote yourself cannot self-authorize a build. Read the spec first with \
+read_repo_file; you are usually its review owner.\n\nIt returns immediately: the \
+build is detached and narrates progress to #custodian. Budget is 10 builds/day. \
+Say in channel that you're starting one.\
+"""
+
+[verbs.start-build.args.spec]
+type = "string"
+required = true
+min_len = 1
+max_len = 300
+no_leading_dash = true
+no_nul = true
+description = """\
+Spec filename inside SPECS/, e.g. '2026-08-05-supersede-preserves-tags.md'. Not a \
+path — just the filename; the broker resolves it inside the read-only mirror.\
+"""
+
+# ── refresh-mirror ───────────────────────────────────────────────────────
+[verbs.refresh-mirror]
+tool_name = "refresh_mirror"
+cli_help = "refresh the read-only repo mirror (main + every gatehouse branch)"
+announce_preface = false
+description = """\
+Refresh the read-only Disjorn repo mirror you read through (/opt/disjorn in \
+your container), via the house broker. Two things move: `main` fast-forwards to \
+what production actually runs, and every entitled gatehouse repo's branches are \
+re-fetched under `refs/gatehouse/<repo>/*` — so a `loop/<slug>` branch a build \
+published is readable here BEFORE anyone is asked to review it. Takes no \
+arguments and can never be aimed anywhere else. Run it before reading a spec, a \
+diff, or a branch somebody just named in channel; a stale mirror is the usual \
+reason a file looks unchanged.\
+"""
