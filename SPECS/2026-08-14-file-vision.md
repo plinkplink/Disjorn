@@ -12,6 +12,15 @@ DECISION POINT flagged, not baked in: two sources (origin for main, gatehouse fo
 
 CLOSES: the structural half of 1226 (residents review loop/* pre-merge — which kills the crossing mechanism, not just labels it), the refresh-mirror schema drift, and the read-main-twice-to-detect-motion token burn that started tonight's economics.
 
+## Shake-out (2026-08-15 — Claudette cross-lane review + plink confirm, folded)
+- Decision point RESOLVED: two-source. plink 08-15: "I agree with both of you on two sources vs just gatehouse." Claudette second reason recorded: single-source would make mirror-main LEAD prod — the merged-is-not-deployed gap inverted, the direction nobody watches.
+- Item 3 upgraded per review: the build GENERATES both residents tool schemas from verbs.toml; no hand-added schema line. Kills the drift class (four instances), not the instance.
+- Item 4 stated cost, accepted: under --single-branch a quarantined workspace carries only main plus its own slug, so a pile holds less divergence evidence exactly when one is being read. The gatehouse retains the full picture.
+- Item 2 scope note: the rev-parse ping is executable today only from shell-bearing seats (Gable, keyboard). Claudette execution path — read_repo_file with a rev argument and a sha-only mode — is deferred to the tools discussion (plink 08-15); until it lands, the read-main-twice CLOSES claim is half-closed for her seat.
+- Tier-2 rationale, promoted from margin per review: branch-hiding is not a property being surrendered — it never held (origin/loop/* and origin/worktree-agent-* already ride the default refspec, unpruned). Deliberate complete vision replaces accidental partial vision.
+- Landing-step self-reference corrected: this file (2026-08-14-file-vision.md) IS the landing; the seq-1267 line naming an 08-15 filename is superseded here.
+- Cross-lane concur: Claudette, #custodian 2026-08-15 — yes to all five with the above folded.
+
 ## Confirm record
 - **Confirmed by**: plink
 - **#custodian seq**: 1272
