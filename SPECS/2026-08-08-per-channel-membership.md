@@ -43,6 +43,7 @@ One build slot; test-heavy, implementation is small.
 - **Confirmed at**: 2026-08-12
 
 ## Status
-confirmed
+building
+<!-- set by the broker on 2026-08-17 20:55Z (start-build, 2026-08-08-per-channel-membership): build running as disjorn-build-2026-08-08-per-channel-membership.service -> loop/2026-08-08-per-channel-membership, launched by claudette (confirmed by plink, #custodian seq 1007). Not buildable again until this line moves. -->
 <!-- set by the broker on 2026-08-17 18:20Z (start-build, 2026-08-08-per-channel-membership): build failed: exit 1: Running as unit: disjorn-build-2026-08-08-per-channel-membership.service; invocation ID: 045166f665dc4ba18052d2fb17803ba9 run-build: auth: CLAUDE_CODE_OAUTH_TOKEN from /srv/disjorn-build-config/claudette/env run-build: container exited 1 — not publishing. The workspace clones under /home/res. To allow another build, set this back to `confirmed` (the confirm record above still stands). -->
 <!-- set by the broker on 2026-08-17 17:45Z (start-build, 2026-08-08-per-channel-membership): build running as disjorn-build-2026-08-08-per-channel-membership.service -> loop/2026-08-08-per-channel-membership, launched by claudette (confirmed by plink, #custodian seq 1007). Not buildable again until this line moves. -->
