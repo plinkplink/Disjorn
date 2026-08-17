@@ -26,13 +26,21 @@ Server -> client frames (Architecture §8.2; ephemeral events carry no seq):
     {"type": "message_delete", "channel_id", "id", "seq"}
     {"type": "typing_start", "channel_id", "author_type", "author_id"}
     {"type": "presence", "user_id", "status"}
-    {"type": "channel_create", "channel": {"id", "type", "name"}}
+    {"type": "channel_create", "channel": {"id", "type", "name", "visibility"}}
                                             new text channel — broadcast to ALL
-                                            connected users and bots
+                                            connected users and bots, EXCEPT a
+                                            private channel, which reaches only
+                                            its members
+    {"type": "member_add"|"member_remove", "channel_id", "member_type",
+     "member_id", "channel": {...}}
+                                            membership changed — to the
+                                            channel's members plus the member
+                                            it happened to
 
 Fan-out (bus subscriber, registered idempotently by init() from the app
 lifespan): message events go to connected users who are members of the channel
-(main_feed and text channels = every user) and to connected bots that are EXPLICIT members
+(public main_feed and text channels = every user; a private channel = its
+listed members only) and to connected bots that are EXPLICIT members
 (bot_channel_ids semantics), after privacy.filter_event_for_bot — a
 secret/off_the_record message reaches no bot in any form, not even the
 tombstone of its deletion. When a message_create mentions a receiving bot
@@ -65,6 +73,7 @@ TYPING_INTERVAL = 3.0       # min seconds between typing_start per sender+channe
 CLOSE_UNAUTHENTICATED = 4401
 
 _MESSAGE_EVENT_TYPES = ("message_create", "message_edit", "message_delete")
+_MEMBER_EVENT_TYPES = ("member_add", "member_remove")
 
 
 # ---------------------------------------------------------------------------
@@ -301,19 +310,69 @@ async def _context_block(
     }
 
 
-async def handle_bus_event(event: dict[str, Any]) -> None:
-    """Bus subscriber: fan message events out to connected users and bots.
+async def _send_to_members(
+    channel_id: int,
+    frame: dict[str, Any],
+    *,
+    also: Optional[tuple[str, int]] = None,
+) -> None:
+    """Send `frame` to every connected member of the channel.
 
-    channel_create (a new text channel) is not privacy-sensitive and goes to
-    every connected socket — users AND bots — so live clients can update their
-    sidebars/state without a refetch.
+    `also` names one extra (type, id) recipient who gets it regardless of
+    membership — used by member_remove, whose subject has just stopped being a
+    member but still needs to hear about it.
     """
-    if event.get("type") == "channel_create":
-        frame = {"type": "channel_create", "channel": event["channel"]}
-        for ws in manager.all_sockets():
+    for uid in manager.connected_user_ids():
+        if also != ("user", uid) and not await is_member(channel_id, "user", uid):
+            continue
+        for ws in manager.user_sockets(uid):
             await _send(ws, frame)
+    for bot_id in manager.connected_bot_ids():
+        if also != ("bot", bot_id) and not await is_member(channel_id, "bot", bot_id):
+            continue
+        for ws in manager.bot_sockets(bot_id):
+            await _send(ws, frame)
+
+
+async def handle_bus_event(event: dict[str, Any]) -> None:
+    """Bus subscriber: fan message and membership events out to users and bots.
+
+    channel_create for a PUBLIC text channel goes to every connected socket —
+    users AND bots — so live clients can update their sidebars/state without a
+    refetch. For a private channel it goes to its members only: the channel's
+    existence is discoverable via GET /channels, but nobody's socket gets
+    poked about a room they were not let into.
+    """
+    etype = event.get("type")
+    if etype == "channel_create":
+        frame = {"type": "channel_create", "channel": event["channel"]}
+        channel_id = event["channel_id"]
+        channel = await db.fetch_one(
+            "SELECT visibility FROM channels WHERE id = ?", (channel_id,)
+        )
+        if channel is None:
+            return  # channel vanished between publish and fan-out: fail closed
+        if channel["visibility"] == "private":
+            await _send_to_members(channel_id, frame)
+        else:
+            for ws in manager.all_sockets():
+                await _send(ws, frame)
         return
-    if event.get("type") not in _MESSAGE_EVENT_TYPES:
+    if etype in _MEMBER_EVENT_TYPES:
+        frame = {
+            "type": etype,
+            "channel_id": event["channel_id"],
+            "member_type": event["member_type"],
+            "member_id": event["member_id"],
+            "channel": event["channel"],
+        }
+        await _send_to_members(
+            event["channel_id"],
+            frame,
+            also=(event["member_type"], event["member_id"]),
+        )
+        return
+    if etype not in _MESSAGE_EVENT_TYPES:
         return
     channel_id = event.get("channel_id")
     if channel_id is None:
@@ -326,11 +385,11 @@ async def handle_bus_event(event: dict[str, Any]) -> None:
 
     frame = _frame_for_event(event)
 
-    # Users: channel members only (main_feed / text = every user).
+    # Users: channel members only. is_member is asked unconditionally — public
+    # main_feed/text answer True without a row, and a private channel is walled
+    # here by the same rule the read paths use.
     for uid in manager.connected_user_ids():
-        if channel["type"] not in ("main_feed", "text") and not await is_member(
-            channel_id, "user", uid
-        ):
+        if not await is_member(channel_id, "user", uid):
             continue
         for ws in manager.user_sockets(uid):
             await _send(ws, frame)

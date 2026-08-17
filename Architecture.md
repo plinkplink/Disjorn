@@ -50,7 +50,7 @@ Client (PWA, React/Vite/TS) <--> REST + WebSocket <--> Server (FastAPI, Python 3
 |---|---|
 | `User` | `id`, `username`, `password_hash`, `display_name`, `avatar_path`, `status`, `is_admin` |
 | `Session` | `token`, `user_id`, `created_at`, `expires_at` |
-| `Channel` | `id`, `type` (`main_feed`, `dm_1to1`, `text`), `name` (`text`: required, unique, lowercase `[a-z0-9-]{1,32}`, shown as `#name`), `created_at` |
+| `Channel` | `id`, `type` (`main_feed`, `dm_1to1`, `text`), `name` (`text`: required, unique, lowercase `[a-z0-9-]{1,32}`, shown as `#name`), `created_at`, `visibility` (`public`\|`private`, default `public`), `created_by` (owner; `text` channels only) |
 | `ChannelMember` | `channel_id`, `member_type` (`user`\|`bot`), `member_id`, `last_read_seq` |
 | `Message` | `id`, `channel_id`, `seq`, `author_type` (`user`\|`bot`), `author_id`, `content`, `created_at`, `edited_at` (nullable), `deleted_at` (nullable, soft delete), `reply_to_id` (nullable), `privacy_flags` (JSON), `emote_refs` (JSON, bot messages) |
 | `Attachment` | `id`, `message_id`, `file_path`, `original_filename`, `mime_type`, `size_bytes`, `width`, `height` |
@@ -59,7 +59,8 @@ Client (PWA, React/Vite/TS) <--> REST + WebSocket <--> Server (FastAPI, Python 3
 | `messages_fts` | FTS5 virtual table over `Message.content`, trigger-maintained |
 
 - **`seq`:** monotonic integer **per channel**, allocated only for persisted messages. Ephemeral events (typing, presence) carry **no seq** — they cannot be backfilled.
-- **Membership:** `main_feed` and named `text` channels implicitly include all users; DM channels have exactly two user members. Bots are members of `main_feed` by default; **bots are members of a DM or `text` channel only if explicitly added**. Any user may create a `text` channel (`POST /channels {name}`) and manage its bots (flat access — every user is a member). `notify_all_main` covers `main_feed` only; `text` channels are mention-notify only.
+- **Membership:** `main_feed` and **public** named `text` channels implicitly include all users; DM channels have exactly two user members. Bots are members of `main_feed` by default; **bots are members of a DM or `text` channel only if explicitly added**. Any user may create a `text` channel (`POST /channels {name, visibility?}`) and, on a public one, manage its bots (flat access — every user is a member). `notify_all_main` covers `main_feed` only; `text` channels are mention-notify only.
+- **Private channels:** a `text` channel created with `visibility: "private"` has **no implicit members** — `ChannelMember` is the enforced wall, for humans and bots alike, checked on every read path (history, read state, member list, search, WS fan-out, push). Non-members get 403; the channel's *existence* is still listed honestly by `GET /channels` (`member: false`, no unread, no snippet). Only its owner (`created_by`) may invite, kick, or add a bot; anyone may leave. There is **no admin god-view**: the app ships no in-product override. Channel-level ACL and message-level `privacy_flags` are independent walls that compose.
 - **Read state:** `last_read_seq` per member per channel drives unread badges and notification suppression.
 
 ### 4.2 Message Metadata

@@ -12,6 +12,9 @@ from pydantic import BaseModel, Field
 
 MemberType = Literal["user", "bot"]
 ChannelType = Literal["main_feed", "dm_1to1", "text"]
+# 'public': every user in the house is a member (implicit membership).
+# 'private': channel_members is the wall — non-members read nothing.
+ChannelVisibility = Literal["public", "private"]
 UserStatus = Literal["online", "idle", "dnd", "offline"]
 BacklogStatus = Literal["open", "spec'd", "built", "rejected"]
 
@@ -42,6 +45,10 @@ class Channel(BaseModel):
     type: ChannelType
     name: Optional[str] = None
     created_at: str
+    visibility: ChannelVisibility = "public"
+    # The owner (creator) of a text channel; only they may invite or kick.
+    # NULL for main_feed and DMs, which have no creator.
+    created_by: Optional[int] = None
 
 
 class ChannelMember(BaseModel):
@@ -161,18 +168,51 @@ class PresenceEvent(BaseModel):
 
 
 class ChannelCreateRef(BaseModel):
-    """Minimal channel payload carried by channel_create frames."""
+    """Minimal channel payload carried by channel_create / member events."""
 
     id: int
     type: ChannelType
     name: str
+    visibility: ChannelVisibility = "public"
 
 
 class ChannelCreateEvent(BaseModel):
-    """A named text channel was created (broadcast to all users and bots)."""
+    """A named text channel was created.
+
+    Broadcast to all users and bots for a public channel; for a private one it
+    reaches only that channel's members (the channel still exists as far as
+    GET /channels is concerned — this is fan-out scoping, not hiding).
+    """
 
     type: Literal["channel_create"] = "channel_create"
     channel_id: int
+    channel: ChannelCreateRef
+
+
+class MemberAddEvent(BaseModel):
+    """Someone joined a channel (invite accepted for them, or a bot added).
+
+    Fanned out to the channel's members plus the affected member themselves.
+    """
+
+    type: Literal["member_add"] = "member_add"
+    channel_id: int
+    member_type: MemberType
+    member_id: int
+    channel: ChannelCreateRef
+
+
+class MemberRemoveEvent(BaseModel):
+    """Someone left a channel or was kicked from it.
+
+    Same fan-out as member_add — including the removed member, whose client
+    needs to know its access just ended.
+    """
+
+    type: Literal["member_remove"] = "member_remove"
+    channel_id: int
+    member_type: MemberType
+    member_id: int
     channel: ChannelCreateRef
 
 
@@ -183,4 +223,6 @@ Event = Union[
     TypingStartEvent,
     PresenceEvent,
     ChannelCreateEvent,
+    MemberAddEvent,
+    MemberRemoveEvent,
 ]

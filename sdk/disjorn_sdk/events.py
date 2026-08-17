@@ -99,13 +99,14 @@ class Presence:
 
 @dataclass(slots=True)
 class ChannelCreate:
-    """A named text channel was created (broadcast to everyone; ephemeral,
-    no seq).
+    """A named text channel was created (ephemeral, no seq).
 
-    ``channel`` is ``{id, type, name}`` — for this event ``type`` is always
-    ``"text"``. Receiving this does NOT make the bot a member: bots must be
-    added explicitly (POST /channels/{id}/bots) before any of the channel's
-    messages reach them.
+    ``channel`` is ``{id, type, name, visibility}`` — for this event ``type``
+    is always ``"text"``. A ``"public"`` channel's creation is broadcast to
+    everyone; a ``"private"`` one reaches only its members, so a bot that is
+    not a member never sees this event for it at all. Receiving this does NOT
+    make the bot a member: bots must be added explicitly (POST
+    /channels/{id}/bots) before any of the channel's messages reach them.
     """
 
     channel: dict[str, Any]

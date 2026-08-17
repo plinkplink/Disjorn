@@ -2,30 +2,48 @@
 
 Endpoints:
     GET    /channels                      (user)  — sidebar list: unread counts + last-message snippet
-    POST   /channels {name}               (user)  — create a named `text` channel (flat access);
+    POST   /channels {name, visibility?}  (user)  — create a named `text` channel;
                                                     409 on duplicate name; publishes channel_create
     POST   /dms {user_id}                 (user)  — idempotent get-or-create of the 1:1 DM channel
     PUT    /channels/{id}/read {seq}      (user)  — monotonic last_read_seq upsert (no event published)
     GET    /channels/{id}/members         (actor) — member listing, membership-gated
+    POST   /channels/{id}/invite {user_id}(user)  — private channels; OWNER ONLY; member_add
+    POST   /channels/{id}/join            (user)  — private channels are invite-only (403)
+    POST   /channels/{id}/leave           (user)  — anyone may leave a private channel; member_remove
+    POST   /channels/{id}/kick {user_id}  (user)  — private channels; OWNER ONLY; member_remove
     POST   /channels/{id}/bots {bot_id}   (user)  — add a bot to a channel
-                                                    (DMs: participants only)
+                                                    (DMs: participants only;
+                                                     private channels: owner only)
     DELETE /channels/{id}/bots/{bot_id}   (user)  — remove a bot from a channel
-                                                    (DMs: participants only)
+                                                    (same access rule as adding)
 
 Exported access-rule helpers (consumed by WP4 messages and WP5 privacy/WS):
     is_member(channel_id, member_type, member_id) -> bool
-    user_channel_ids(user_id) -> list[int]      # main_feed + text implicit
+    user_channel_ids(user_id) -> list[int]      # public main_feed/text implicit
     bot_channel_ids(bot_id)  -> list[int]       # explicit rows only
 
-Membership semantics (Architecture §4.1):
-- main_feed AND named `text` channels implicitly include ALL users (this is a
-  <=5-human server); a channel_members row is created lazily only to store
-  last_read_seq (first PUT /channels/{id}/read).
+Membership semantics (Architecture §4.1 + SPECS/2026-08-08-per-channel-membership):
+- A channel is `public` (the default, and what every pre-existing channel was
+  grandfathered to) or `private`.
+- PUBLIC main_feed AND public named `text` channels implicitly include ALL
+  users (this is a <=5-human server); a channel_members row is created lazily
+  only to store last_read_seq (first PUT /channels/{id}/read).
+- PRIVATE text channels have no implicit members at all: channel_members is
+  the wall, for humans and bots alike (no bot-shaped exception in either
+  direction). Non-members get 403 on every read path, and their messages never
+  surface in search or in the sidebar's last-message snippet.
+- A private channel's EXISTENCE is not hidden: GET /channels lists it honestly,
+  with `member: false` and no content.
 - DM channels have exactly two user members.
 - Bots are explicit-members-only EVERYWHERE — main_feed (cli.py create-bot
   inserts the row), text channels and DMs via POST .../bots.
 - Text-channel names: unique, lowercase [a-z0-9-], 1-32 chars (displayed as
   #name); enforced here plus a partial unique index (005_text_channels.sql).
+- The owner (channels.created_by, set at creation) is the only one who may
+  invite, kick, or hand a bot the keys to a private channel (RULED by plink,
+  2026-08-12). There is deliberately no admin override: an in-product
+  god-view read button would make "private" a lie. plink owns the box and can
+  read the DB directly; the app ships no silent back door.
 """
 
 import re
@@ -36,7 +54,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from .. import db, events
-from ..models import ChannelType, MemberType, User, UserStatus
+from ..models import ChannelType, ChannelVisibility, MemberType, User, UserStatus
 from .auth import Actor, get_actor, get_current_user
 
 router = APIRouter()
@@ -54,14 +72,25 @@ SNIPPET_LEN = 80
 async def is_member(channel_id: int, member_type: MemberType, member_id: int) -> bool:
     """True if the actor may access the channel.
 
-    Users are implicit members of main_feed and text channels (no row
-    required). Everything else — user in a DM, bot anywhere — requires an
-    explicit channel_members row. Unknown channels are never accessible.
+    Users are implicit members of PUBLIC main_feed and text channels (no row
+    required). Everything else — user in a private channel, user in a DM, bot
+    anywhere — requires an explicit channel_members row. Unknown channels are
+    never accessible.
+
+    This is the single wall: every read path (history, seq/read state, search,
+    WS fan-out) asks this question, so a private channel is enforced in one
+    place rather than re-derived per endpoint.
     """
-    channel = await db.fetch_one("SELECT type FROM channels WHERE id = ?", (channel_id,))
+    channel = await db.fetch_one(
+        "SELECT type, visibility FROM channels WHERE id = ?", (channel_id,)
+    )
     if channel is None:
         return False
-    if member_type == "user" and channel["type"] in ("main_feed", "text"):
+    if (
+        member_type == "user"
+        and channel["type"] in ("main_feed", "text")
+        and channel["visibility"] == "public"
+    ):
         return True
     row = await db.fetch_one(
         """SELECT 1 FROM channel_members
@@ -72,10 +101,12 @@ async def is_member(channel_id: int, member_type: MemberType, member_id: int) ->
 
 
 async def user_channel_ids(user_id: int) -> list[int]:
-    """All channel ids the user can access: main_feed + text (implicit) +
-    explicit rows (DMs; lazy read-state rows dedupe via UNION)."""
+    """All channel ids the user can access: public main_feed + public text
+    (implicit) + explicit rows (private channels, DMs; lazy read-state rows
+    dedupe via UNION)."""
     rows = await db.fetch_all(
-        """SELECT id FROM channels WHERE type IN ('main_feed', 'text')
+        """SELECT id FROM channels
+            WHERE type IN ('main_feed', 'text') AND visibility = 'public'
            UNION
            SELECT channel_id FROM channel_members
            WHERE member_type = 'user' AND member_id = ?""",
@@ -107,16 +138,35 @@ class LastMessage(BaseModel):
 
 
 class ChannelListItem(BaseModel):
+    """One sidebar row.
+
+    `member` is false only for a private channel the caller is not in: the row
+    is still listed (existence is not a secret) but carries NO content —
+    `unread` is 0 and `last_message` is None, because the snippet is content
+    and content is exactly what the wall is for.
+    """
+
     id: int
     type: ChannelType
     name: Optional[str] = None          # DMs: the OTHER participant's display name
     dm_user_id: Optional[int] = None    # DMs: the OTHER participant's user id
     unread: int = 0
     last_message: Optional[LastMessage] = None
+    visibility: ChannelVisibility = "public"
+    member: bool = True
 
 
 class ChannelCreateRequest(BaseModel):
     name: str
+    # Omitted -> public, so every existing caller keeps creating exactly the
+    # channel it created before this spec.
+    visibility: ChannelVisibility = "public"
+
+
+class MemberRef(BaseModel):
+    """The subject of an invite/kick."""
+
+    user_id: int
 
 
 class DmCreateRequest(BaseModel):
@@ -178,6 +228,9 @@ async def _get_channel(channel_id: int) -> dict[str, Any]:
 
 @router.get("/channels")
 async def list_channels(user: CurrentUser) -> list[ChannelListItem]:
+    """Sidebar list. Honest about which channels exist, silent about content
+    the caller may not read: a private channel the caller is not a member of
+    is listed with `member: false`, unread 0 and no last-message snippet."""
     main = await db.fetch_one("SELECT * FROM channels WHERE type = 'main_feed'")
     texts = await db.fetch_all(
         "SELECT * FROM channels WHERE type = 'text' ORDER BY name"
@@ -192,39 +245,46 @@ async def list_channels(user: CurrentUser) -> list[ChannelListItem]:
     if not chans:
         return []
 
-    ids = [c["id"] for c in chans]
-    ph = ",".join("?" * len(ids))
+    # Content (unread math + snippet) is computed ONLY over the channels the
+    # caller is a member of; the rest are listed as bare rows.
+    member_ids = set(await user_channel_ids(user.id))
+    ids = [c["id"] for c in chans if c["id"] in member_ids]
 
     # One aggregate query each — no per-channel N+1.
-    max_seqs = {
-        r["channel_id"]: r["max_seq"]
-        for r in await db.fetch_all(
-            f"""SELECT channel_id, MAX(seq) AS max_seq FROM messages
-                WHERE channel_id IN ({ph}) GROUP BY channel_id""",
-            ids,
-        )
-    }
-    last_msgs = {
-        r["channel_id"]: r
-        for r in await db.fetch_all(
-            f"""SELECT m.channel_id, m.seq, m.author_type, m.author_id,
-                       m.content, m.created_at
-                FROM messages m
-                JOIN (SELECT channel_id, MAX(seq) AS s FROM messages
-                      WHERE deleted_at IS NULL AND channel_id IN ({ph})
-                      GROUP BY channel_id) latest
-                  ON latest.channel_id = m.channel_id AND latest.s = m.seq""",
-            ids,
-        )
-    }
-    reads = {
-        r["channel_id"]: r["last_read_seq"]
-        for r in await db.fetch_all(
-            f"""SELECT channel_id, last_read_seq FROM channel_members
-                WHERE member_type = 'user' AND member_id = ? AND channel_id IN ({ph})""",
-            [user.id, *ids],
-        )
-    }
+    max_seqs: dict[int, int] = {}
+    last_msgs: dict[int, dict[str, Any]] = {}
+    reads: dict[int, int] = {}
+    if ids:
+        ph = ",".join("?" * len(ids))
+        max_seqs = {
+            r["channel_id"]: r["max_seq"]
+            for r in await db.fetch_all(
+                f"""SELECT channel_id, MAX(seq) AS max_seq FROM messages
+                    WHERE channel_id IN ({ph}) GROUP BY channel_id""",
+                ids,
+            )
+        }
+        last_msgs = {
+            r["channel_id"]: r
+            for r in await db.fetch_all(
+                f"""SELECT m.channel_id, m.seq, m.author_type, m.author_id,
+                           m.content, m.created_at
+                    FROM messages m
+                    JOIN (SELECT channel_id, MAX(seq) AS s FROM messages
+                          WHERE deleted_at IS NULL AND channel_id IN ({ph})
+                          GROUP BY channel_id) latest
+                      ON latest.channel_id = m.channel_id AND latest.s = m.seq""",
+                ids,
+            )
+        }
+        reads = {
+            r["channel_id"]: r["last_read_seq"]
+            for r in await db.fetch_all(
+                f"""SELECT channel_id, last_read_seq FROM channel_members
+                    WHERE member_type = 'user' AND member_id = ? AND channel_id IN ({ph})""",
+                [user.id, *ids],
+            )
+        }
     partners: dict[int, dict[str, Any]] = {}
     dm_ids = [c["id"] for c in dms]
     if dm_ids:
@@ -248,6 +308,8 @@ async def list_channels(user: CurrentUser) -> list[ChannelListItem]:
             type=c["type"],
             name=partner["display_name"] if partner is not None else c["name"],
             dm_user_id=partner["user_id"] if partner is not None else None,
+            visibility=c["visibility"],
+            member=c["id"] in member_ids,
             unread=max(0, (max_seqs.get(c["id"]) or 0) - reads.get(c["id"], 0)),
             last_message=LastMessage(
                 seq=lm["seq"],
@@ -280,11 +342,16 @@ CHANNEL_NAME_RE = re.compile(r"^[a-z0-9-]{1,32}$")
 
 @router.post("/channels")
 async def create_channel(body: ChannelCreateRequest, user: CurrentUser) -> ChannelListItem:
-    """Create a `text` channel (flat access: any user). 409 on duplicate name.
+    """Create a `text` channel. 409 on duplicate name.
+
+    `visibility` defaults to "public" — flat access, any user, the pre-spec
+    behaviour. A "private" channel starts with exactly one member (its
+    creator, who is also its owner) and grows only by invite.
 
     Publishes a channel_create event on the bus; the WS hub fans it out to all
     connected users and bots as {type: "channel_create", channel: {id, type,
-    name}}. Clients otherwise pick new channels up via GET /channels.
+    name, visibility}} — or, for a private channel, only to its members.
+    Clients otherwise pick new channels up via GET /channels.
     """
     name = body.name
     if not CHANNEL_NAME_RE.fullmatch(name):
@@ -292,24 +359,43 @@ async def create_channel(body: ChannelCreateRequest, user: CurrentUser) -> Chann
             status_code=400,
             detail="Channel name must be 1-32 characters: lowercase a-z, 0-9, or -",
         )
+    private = body.visibility == "private"
     try:
-        cur = await db.execute(
-            "INSERT INTO channels (type, name) VALUES ('text', ?)", (name,)
-        )
+        async with db.transaction() as conn:
+            cur = await conn.execute(
+                """INSERT INTO channels (type, name, visibility, created_by)
+                   VALUES ('text', ?, ?, ?)""",
+                (name, body.visibility, user.id),
+            )
+            channel_id = cur.lastrowid
+            if private:
+                # The wall is channel_members, so the owner needs a real row —
+                # nothing about a private channel is implicit.
+                await conn.execute(
+                    """INSERT INTO channel_members (channel_id, member_type, member_id)
+                       VALUES (?, 'user', ?)""",
+                    (channel_id, user.id),
+                )
     except sqlite3.IntegrityError:
         # Partial unique index on (name) WHERE type='text' — duplicate name.
         raise HTTPException(
             status_code=409, detail=f"Channel #{name} already exists"
         ) from None
-    channel_id = cur.lastrowid
     await events.publish(
         {
             "type": "channel_create",
             "channel_id": channel_id,
-            "channel": {"id": channel_id, "type": "text", "name": name},
+            "channel": {
+                "id": channel_id,
+                "type": "text",
+                "name": name,
+                "visibility": body.visibility,
+            },
         }
     )
-    return ChannelListItem(id=channel_id, type="text", name=name)
+    return ChannelListItem(
+        id=channel_id, type="text", name=name, visibility=body.visibility
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -366,14 +452,16 @@ async def create_or_get_dm(body: DmCreateRequest, user: CurrentUser) -> DmRespon
 
 @router.put("/channels/{channel_id}/read")
 async def mark_read(channel_id: int, body: ReadRequest, user: CurrentUser) -> dict[str, int]:
-    channel = await _get_channel(channel_id)
-    if channel["type"] == "dm_1to1":
-        # DMs require pre-existing membership; the upsert below must never
-        # manufacture DM membership.
-        if not await is_member(channel_id, "user", user.id):
-            raise HTTPException(status_code=403, detail="Not a member of this channel")
-    # main_feed / text: implicit membership — the row is created lazily here,
-    # solely to store last_read_seq. Monotonic: never lowered.
+    await _get_channel(channel_id)
+    # Read state is a read path: a non-member must not learn a private
+    # channel's seq numbers, and the upsert below must never manufacture
+    # membership of a DM or a private channel. is_member is True without a row
+    # only for public main_feed/text, which is exactly where the lazy row is
+    # wanted.
+    if not await is_member(channel_id, "user", user.id):
+        raise HTTPException(status_code=403, detail="Not a member of this channel")
+    # public main_feed / text: implicit membership — the row is created lazily
+    # here, solely to store last_read_seq. Monotonic: never lowered.
     await db.execute(
         """INSERT INTO channel_members (channel_id, member_type, member_id, last_read_seq)
            VALUES (?, 'user', ?, ?)
@@ -402,7 +490,7 @@ async def list_members(channel_id: int, actor: CurrentActor) -> list[MemberOut]:
     ):
         raise HTTPException(status_code=403, detail="Not a member of this channel")
 
-    if channel["type"] in ("main_feed", "text"):
+    if channel["type"] in ("main_feed", "text") and channel["visibility"] == "public":
         # All users are implicit members; bots only via their explicit rows.
         users = await db.fetch_all(
             "SELECT id, display_name, status, avatar_path FROM users ORDER BY id"
@@ -449,10 +537,157 @@ async def list_members(channel_id: int, actor: CurrentActor) -> list[MemberOut]:
 
 
 # ---------------------------------------------------------------------------
-# Bot membership management (flat access among members: any user for main_feed
-# and text channels — every user is an implicit member there — DM participants
-# only for DMs; a bot in a DM streams that DM, so only its members may
-# grant/revoke that access)
+# Membership verbs: invite / join / leave / kick
+#
+# These operate on PRIVATE channels. A public channel has no membership to
+# manage — every user is already a member of it by construction — so the verbs
+# answer truthfully (400) instead of pretending to do something.
+# ---------------------------------------------------------------------------
+
+def _require_owner(channel: dict[str, Any], user: User) -> None:
+    """RULED by plink, 2026-08-12: only the channel owner (creator) may invite.
+
+    Applied to kick and to bot-adds on a private channel for the same reason —
+    all three hand out (or take away) read access to the channel's content.
+    """
+    if channel["created_by"] != user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the channel's owner may change who is in it",
+        )
+
+
+def _require_private(channel: dict[str, Any]) -> None:
+    """Membership is only a thing you can change on a private channel."""
+    if channel["type"] != "text" or channel["visibility"] != "private":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This channel has no membership list to change: DMs are fixed "
+                "pairs, and everyone in the house is already a member of a "
+                "public channel"
+            ),
+        )
+
+
+async def _publish_member_event(
+    kind: str, channel: dict[str, Any], member_type: MemberType, member_id: int
+) -> None:
+    """member_add / member_remove on the bus (WS fans it out to the channel's
+    members plus the affected member — see ws.handle_bus_event)."""
+    await events.publish(
+        {
+            "type": kind,
+            "channel_id": channel["id"],
+            "member_type": member_type,
+            "member_id": member_id,
+            "channel": {
+                "id": channel["id"],
+                "type": channel["type"],
+                "name": channel["name"],
+                "visibility": channel["visibility"],
+            },
+        }
+    )
+
+
+@router.post("/channels/{channel_id}/invite")
+async def invite_to_channel(
+    channel_id: int, body: MemberRef, user: CurrentUser
+) -> dict[str, bool]:
+    """Add a user to a private channel. Owner only; idempotent."""
+    channel = await _get_channel(channel_id)
+    _require_private(channel)
+    _require_owner(channel, user)
+    target = await db.fetch_one("SELECT id FROM users WHERE id = ?", (body.user_id,))
+    if target is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    cur = await db.execute(
+        """INSERT OR IGNORE INTO channel_members (channel_id, member_type, member_id)
+           VALUES (?, 'user', ?)""",
+        (channel_id, body.user_id),
+    )
+    added = cur.rowcount > 0
+    if added:
+        await _publish_member_event("member_add", channel, "user", body.user_id)
+    return {"ok": True, "added": added}
+
+
+@router.post("/channels/{channel_id}/join")
+async def join_channel(channel_id: int, user: CurrentUser) -> dict[str, bool]:
+    """Join a channel — which, in this house, you almost always already have.
+
+    Public main_feed/text channels include every user implicitly, so joining
+    one is a no-op that reports `joined: false`. Private channels are
+    invite-only (RULED: only the owner adds members), so a non-member asking
+    to join gets a truthful 403 rather than a way in.
+    """
+    channel = await _get_channel(channel_id)
+    if await is_member(channel_id, "user", user.id):
+        return {"ok": True, "joined": False}  # already in — nothing to do
+    if channel["visibility"] == "private":
+        raise HTTPException(
+            status_code=403,
+            detail=f"#{channel['name']} is invite-only — ask its owner",
+        )
+    raise HTTPException(status_code=403, detail="Not a member of this channel")
+
+
+@router.post("/channels/{channel_id}/leave")
+async def leave_channel(channel_id: int, user: CurrentUser) -> dict[str, bool]:
+    """Leave a private channel. Anyone may leave, including the owner.
+
+    Idempotent: leaving a channel you are not in reports `left: false`.
+    Leaving takes your last_read_seq with it — the row IS the membership.
+    """
+    channel = await _get_channel(channel_id)
+    _require_private(channel)
+    cur = await db.execute(
+        """DELETE FROM channel_members
+           WHERE channel_id = ? AND member_type = 'user' AND member_id = ?""",
+        (channel_id, user.id),
+    )
+    left = cur.rowcount > 0
+    if left:
+        await _publish_member_event("member_remove", channel, "user", user.id)
+    return {"ok": True, "left": left}
+
+
+@router.post("/channels/{channel_id}/kick")
+async def kick_from_channel(
+    channel_id: int, body: MemberRef, user: CurrentUser
+) -> dict[str, bool]:
+    """Remove a user from a private channel. Owner only; idempotent.
+
+    The owner cannot be kicked (their own way out is /leave), so a channel
+    never ends up with an owner it has evicted.
+    """
+    channel = await _get_channel(channel_id)
+    _require_private(channel)
+    _require_owner(channel, user)
+    if body.user_id == channel["created_by"]:
+        raise HTTPException(
+            status_code=400,
+            detail="The channel's owner cannot be kicked (use leave)",
+        )
+    cur = await db.execute(
+        """DELETE FROM channel_members
+           WHERE channel_id = ? AND member_type = 'user' AND member_id = ?""",
+        (channel_id, body.user_id),
+    )
+    removed = cur.rowcount > 0
+    if removed:
+        await _publish_member_event("member_remove", channel, "user", body.user_id)
+    return {"ok": True, "removed": removed}
+
+
+# ---------------------------------------------------------------------------
+# Bot membership management (flat access among members: any user for public
+# main_feed and text channels — every user is an implicit member there — DM
+# participants only for DMs; a bot in a DM streams that DM, so only its members
+# may grant/revoke that access. In a PRIVATE channel, handing a bot the stream
+# is an invite by another name, so it is the owner's call alone — the wall is
+# the same for bots, with no carve in either direction.)
 # ---------------------------------------------------------------------------
 
 async def _require_bot_manage_access(channel_id: int, user: User) -> dict[str, Any]:
@@ -461,6 +696,8 @@ async def _require_bot_manage_access(channel_id: int, user: User) -> dict[str, A
         channel_id, "user", user.id
     ):
         raise HTTPException(status_code=403, detail="Not a member of this channel")
+    if channel["visibility"] == "private":
+        _require_owner(channel, user)
     return channel
 
 

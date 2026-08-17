@@ -260,7 +260,7 @@ async def _plan_notifications(
     if channel_id is None or not message:
         return [], {}
     channel = await db.fetch_one(
-        "SELECT id, type, name FROM channels WHERE id = ?", (channel_id,)
+        "SELECT id, type, name, visibility FROM channels WHERE id = ?", (channel_id,)
     )
     if channel is None:
         return [], {}
@@ -268,11 +268,13 @@ async def _plan_notifications(
     is_main = channel["type"] == "main_feed"
     is_dm = channel["type"] == "dm_1to1"
 
-    # Candidates: the channel's USER members. main_feed and text channels =
-    # every user (implicit membership); DMs from explicit rows. Bots never
-    # receive pushes. Eligibility below keeps notify_all_main scoped to
-    # main_feed alone: text channels are mention-notify only.
-    if channel["type"] in ("main_feed", "text"):
+    # Candidates: the channel's USER members. PUBLIC main_feed and text
+    # channels = every user (implicit membership); private channels and DMs
+    # from explicit rows — a push payload carries a content snippet, so a
+    # non-member must never be a candidate. Bots never receive pushes.
+    # Eligibility below keeps notify_all_main scoped to main_feed alone: text
+    # channels are mention-notify only.
+    if channel["type"] in ("main_feed", "text") and channel["visibility"] == "public":
         candidates = await db.fetch_all(
             "SELECT id, username, display_name, notify_all_main FROM users"
         )

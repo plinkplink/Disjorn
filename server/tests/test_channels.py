@@ -445,7 +445,12 @@ async def test_create_text_channel_and_channel_create_event(client):
         {
             "type": "channel_create",
             "channel_id": cid,
-            "channel": {"id": cid, "type": "text", "name": "custodian"},
+            "channel": {
+                "id": cid,
+                "type": "text",
+                "name": "custodian",
+                "visibility": "public",
+            },
         }
     ]
 
