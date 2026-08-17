@@ -85,6 +85,13 @@ def _broker():
 _BROKER = None
 
 
+def _broker_load():
+    global _BROKER
+    if _BROKER is None:
+        _BROKER = _broker()
+    return _BROKER
+
+
 def spec_status(path: Path) -> str:
     """First non-comment line under '## Status', via the broker's parser."""
     global _BROKER
@@ -195,6 +202,84 @@ def collect_branches() -> list:
                 "subject": _git_bare(repo, "log", "-1", "--format=%s", ref).strip(),
             })
     return out
+
+
+def merged_slugs() -> dict:
+    """slug -> merge commit (short) for every spec whose build has landed on
+    main. Two witnesses, either suffices:
+      * a merge commit on main whose message names the slug (the merge ritual
+        writes `merge: <slug> (SPECS/<slug>.md, confirmed seq N)`), or
+      * a gatehouse `loop/<slug>` branch that is an ancestor of main.
+    The second catches builds merged by hand without the ritual; the first
+    catches builds whose branch was already deleted from the shelf."""
+    out: dict = {}
+    for ln in _run("git", "-C", str(REPO), "log", "--merges", "--format=%h %s",
+                   "main").splitlines():
+        sha, _, msg = ln.partition(" ")
+        for m in re.findall(r"(20\d\d-\d\d-\d\d-[a-z0-9][a-z0-9-]{0,50})", msg):
+            out.setdefault(m, sha)
+    for repo in sorted(GATEHOUSE.glob("*.git")):
+        head = (_git_bare(repo, "symbolic-ref", "--quiet", "--short", "HEAD").strip()
+                or "main")
+        for ref in _git_bare(repo, "branch", "--merged", head).split():
+            if ref.startswith("loop/"):
+                out.setdefault(ref[len("loop/"):],
+                               _git_bare(repo, "rev-parse", "--short", ref).strip())
+    return out
+
+
+def mark_merged(dry_run: bool = True) -> list:
+    """Advance the Status line of every spec whose build is merged from
+    `confirmed` to `merged`, and say so in the file.
+
+    WHY THE BOARD DOES THIS AND NOT A HUMAN. Nothing in the loop ever moved a
+    spec past `confirmed`: the gate reads it, the build runs, the merge lands,
+    and the word stays. On 2026-08-17 seven merged specs still said
+    `confirmed`, so the "buildable now" list a resident posted had eleven
+    items when four were real, and another resident was about to rebuild two
+    finished ones. A status the keyboard must remember to set is the "ratified
+    default 2" problem again — a value that drifts from the truth by nothing
+    more than time passing. The board already computes the truth; it should
+    write it. SPECS/ is resident-unwritable by design (BL-D1), so this runs
+    with the keyboard's privilege and nowhere else.
+
+    The FILENAME is deliberately untouched: slug == branch == unit == sidecar
+    key, regex-validated in three programs. Renaming a done spec would break
+    every backward pointer to it (loop/<slug>, seq citations, the gate's path
+    resolution). The Status line is the field that exists for this."""
+    _broker_load()
+    merged = merged_slugs()
+    changed = []
+    for f in sorted(SPECS.glob("20*.md")):
+        slug = f.stem
+        if slug not in merged:
+            continue
+        gate = spec_gate(f)
+        text = f.read_text(encoding="utf-8")
+        if _BROKER.parse_spec_status(text) != "confirmed":
+            continue  # already advanced, or never confirmed — leave it
+        # Replace the first non-comment line under ## Status.
+        lines = text.splitlines(keepends=True)
+        idx = None
+        for i, ln in enumerate(lines):
+            if ln.strip().lower() == "## status":
+                for j in range(i + 1, len(lines)):
+                    st = lines[j].strip()
+                    if st and not st.startswith("<!--"):
+                        idx = j
+                        break
+                break
+        if idx is None:
+            continue
+        stamp = _now().date().isoformat()
+        lines[idx] = (f"merged\n<!-- advanced from `confirmed` by `board --mark-merged` "
+                      f"on {stamp}: build merged as {merged[slug]}. The word "
+                      f"`confirmed` on a merged spec made it indistinguishable "
+                      f"from a buildable one. -->\n")
+        changed.append({"slug": slug, "path": f"SPECS/{f.name}", "merge": merged[slug]})
+        if not dry_run:
+            f.write_text("".join(lines), encoding="utf-8")
+    return changed
 
 
 def collect_running_builds() -> list:
@@ -315,7 +400,10 @@ def build_board() -> dict:
             })
 
     running_slugs = {r["slug"] for r in running}
-    built_slugs = set(by_slug)
+    # "built" = merged, by either witness — a spec whose branch was cleaned off
+    # the shelf is still built. Shelf-only detection is how seven merged specs
+    # went on reading as buildable.
+    built_slugs = set(by_slug) | set(merged_slugs())
 
     for s in specs:
         word = s["status_word"]
@@ -347,9 +435,9 @@ def build_board() -> dict:
         elif word == "confirmed" and s["slug"] in built_slugs:
             tidy.append({
                 "kind": "stale-status",
-                "what": f"Spec still says 'confirmed' but its build is merged: {s['slug']}",
+                "what": f"Merged, but the file still says 'confirmed': {s['slug']}",
                 "where": s["path"],
-                "how": "set the Status line to 'merged' so it stops looking pending",
+                "how": "board --mark-merged   (advances every such Status line to 'merged')",
                 "slug": s["slug"]})
         elif word == "draft":
             waiting.append({
@@ -435,7 +523,26 @@ def main(argv=None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--json", action="store_true", help="emit the data, not the view")
     ap.add_argument("--html", metavar="FILE", help="write the shareable page")
+    ap.add_argument("--mark-merged", action="store_true",
+                    help="advance the Status line of every merged spec from "
+                         "'confirmed' to 'merged' (writes SPECS/; needs sudo)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="with --mark-merged: show what would change, write nothing")
     ns = ap.parse_args(argv)
+
+    if ns.mark_merged:
+        if _BROKER is None:
+            _broker_load()
+        changed = mark_merged(dry_run=ns.dry_run)
+        verb = "would advance" if ns.dry_run else "advanced"
+        if not changed:
+            print("nothing to do: no merged spec still says 'confirmed'.")
+            return 0
+        for c in changed:
+            print(f"  {verb} {c['path']}  (merged as {c['merge']})")
+        if not ns.dry_run:
+            print("Now: commit SPECS/, then refresh the mirror so residents read it.")
+        return 0
 
     b = build_board()
     if ns.json:

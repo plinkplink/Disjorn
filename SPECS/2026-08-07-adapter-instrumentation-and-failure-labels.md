@@ -28,7 +28,8 @@ Build B (metrics.py configured-but-absent → `unknown`, fifteen lines, harness 
 Server test suite green before and after. Item 1 verified by inspection of two days of logs, not by a test asserting the bug.
 
 ## Status
-confirmed
+merged
+<!-- advanced from `confirmed` by `board --mark-merged` on 2026-08-17: build merged as aa7de3e. The word `confirmed` on a merged spec made it indistinguishable from a buildable one. -->
 
 ## Confirm record
 - **Confirmed by**: plink

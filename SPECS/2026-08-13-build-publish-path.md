@@ -122,4 +122,5 @@ function, kernel text, contract doc, tests.
 - **Confirmed at**: 2026-08-13
 
 ## Status
-`confirmed`
+merged
+<!-- advanced from `confirmed` by `board --mark-merged` on 2026-08-17: build merged as 75a5dbb. The word `confirmed` on a merged spec made it indistinguishable from a buildable one. -->

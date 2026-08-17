@@ -57,4 +57,5 @@ because "the API can do it" and "a person can do it" came apart at exactly the
 place nothing in the loop was watching.
 
 ## Status
-confirmed
+merged
+<!-- advanced from `confirmed` by `board --mark-merged` on 2026-08-17: build merged as 92bf7b1. The word `confirmed` on a merged spec made it indistinguishable from a buildable one. -->

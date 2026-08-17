@@ -57,4 +57,5 @@ Small. Single-file bash edit; one build slot.
 <!-- No Confirm record → no build. This is the gate. -->
 
 ## Status
-confirmed
+merged
+<!-- advanced from `confirmed` by `board --mark-merged` on 2026-08-17: build merged as c9ab3f0. The word `confirmed` on a merged spec made it indistinguishable from a buildable one. -->

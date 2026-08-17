@@ -37,4 +37,5 @@ One build slot for repo-side; host-side is keyboard, near zero.
 - **Confirmed at**: 2026-08-12
 
 ## Status
-confirmed
+merged
+<!-- advanced from `confirmed` by `board --mark-merged` on 2026-08-17: build merged as 4a30124. The word `confirmed` on a merged spec made it indistinguishable from a buildable one. -->

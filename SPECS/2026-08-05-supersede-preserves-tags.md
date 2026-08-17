@@ -165,7 +165,8 @@ and the file is the record.
 
 ## Status
 
-`confirmed`
+merged
+<!-- advanced from `confirmed` by `board --mark-merged` on 2026-08-17: build merged as 2b96ae8. The word `confirmed` on a merged spec made it indistinguishable from a buildable one. -->
 <!-- ONE TOKEN ONLY: draft / confirmed / building / built@<branch> / merged /
 failed. The broker's confirm gate compares the first non-comment line here to
 the literal word and nothing else. Narrative goes in the Confirm record. -->
