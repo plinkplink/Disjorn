@@ -1,7 +1,7 @@
 import { create } from "zustand";
 
 import { listChannels, markRead as apiMarkRead, openDm as apiOpenDm } from "../api";
-import type { ChannelListItem, Message } from "../types";
+import type { ChannelListItem, ChannelVisibility, Message } from "../types";
 
 function sortChannels(channels: ChannelListItem[]): ChannelListItem[] {
   // main_feed pinned first; text channels alphabetically; DMs by most recent
@@ -41,7 +41,12 @@ interface ChannelsState {
     id: number;
     type: ChannelListItem["type"];
     name: string;
+    visibility?: ChannelVisibility;
   }) => void;
+  /** Drop a row we can no longer see (membership revoked / left). */
+  removeChannel: (channelId: number) => void;
+  /** The main feed's id — where the app falls back when a channel goes away. */
+  mainFeedId: () => number | null;
 }
 
 export const useChannels = create<ChannelsState>()((set, get) => ({
@@ -111,6 +116,14 @@ export const useChannels = create<ChannelsState>()((set, get) => ({
   onChannelCreate: (channel) => {
     // The creator may already have it via the post-create refresh — dedupe.
     if (get().channels.some((c) => c.id === channel.id)) return;
+    // A private channel_create only reaches its members, so the row we would
+    // synthesize is one we can read — but it also needs `created_by` (the
+    // owner-only affordances key off it), which the frame does not carry.
+    // Refetching is the honest way to learn it, and it happens once.
+    if (channel.visibility === "private") {
+      void get().refresh();
+      return;
+    }
     set({
       channels: sortChannels([
         ...get().channels,
@@ -121,8 +134,15 @@ export const useChannels = create<ChannelsState>()((set, get) => ({
           dm_user_id: null,
           unread: 0,
           last_message: null,
+          visibility: channel.visibility ?? "public",
+          member: true,
         },
       ]),
     });
   },
+
+  removeChannel: (channelId) =>
+    set({ channels: get().channels.filter((c) => c.id !== channelId) }),
+
+  mainFeedId: () => get().channels.find((c) => c.type === "main_feed")?.id ?? null,
 }));

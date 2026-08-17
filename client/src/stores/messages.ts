@@ -133,6 +133,10 @@ interface MessagesState {
    */
   fillGap: (channelId: number, afterSeq: number) => Promise<void>;
 
+  /** Forget a channel's cached messages — used when membership is revoked, so
+      the history we were allowed to read yesterday isn't still on screen. */
+  dropChannel: (channelId: number) => void;
+
   /* -- jump-to-message (search results) -- */
   requestJump: (channelId: number, messageId: number) => void;
   clearJump: () => void;
@@ -288,6 +292,12 @@ export const useMessages = create<MessagesState>()((set, get) => {
           gaps: recomputeGaps(list, fetched, current.gaps, below.seq),
         };
       });
+    },
+
+    dropChannel: (channelId) => {
+      const next = { ...get().byChannel };
+      delete next[channelId];
+      set({ byChannel: next });
     },
 
     requestJump: (channelId, messageId) => {

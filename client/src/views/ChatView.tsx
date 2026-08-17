@@ -9,6 +9,7 @@ import { useEffect, useState } from "react";
 
 import { Composer } from "../components/Composer";
 import { ImageModal } from "../components/ImageModal";
+import { ChannelLabel } from "../components/LockGlyph";
 import { MessageList } from "../components/MessageList";
 import { SummarizeModal } from "../components/SummarizeModal";
 import { useChannels } from "../stores/channels";
@@ -16,6 +17,7 @@ import { useMembers } from "../stores/members";
 import { usePresence } from "../stores/presence";
 import { useSession } from "../stores/session";
 import type { Attachment, Message } from "../types";
+import { isChannelMember, isPrivateChannel } from "../types";
 
 function TypingLine({ channelId }: { channelId: number }) {
   const typists = usePresence((s) => s.typing[channelId]);
@@ -66,21 +68,46 @@ export function ChatView() {
   const [imageAtt, setImageAtt] = useState<Attachment | null>(null);
   const [summarizeTarget, setSummarizeTarget] = useState<string | null>(null);
 
+  /* A private channel we are not in: the row is visible (admins see them all),
+     the content is not. Every read path for it answers 403, so this view
+     fetches NOTHING for it — no roster, no history, no mark-read.
+
+     `canRead` is deliberately fail-closed AND a dependency: while the sidebar
+     is still loading, the row is unknown, nothing is fetched, and the effect
+     re-runs the moment the row (and with it the answer) arrives. */
+  const walled = channel !== undefined && !isChannelMember(channel);
+  const canRead = channel !== undefined && isChannelMember(channel);
+
   // Channel switch resets transient composer state and loads the roster.
   useEffect(() => {
     setReplyTo(null);
     setEditing(null);
     setImageAtt(null);
     setSummarizeTarget(null);
-    if (activeChannelId !== null) {
+    if (activeChannelId !== null && canRead) {
       void useMembers.getState().ensureLoaded(activeChannelId);
     }
-  }, [activeChannelId]);
+  }, [activeChannelId, canRead]);
 
   if (activeChannelId === null) {
     return (
       <div className="chat-placeholder">
         <p>Select a channel to start chatting.</p>
+      </div>
+    );
+  }
+
+  if (walled) {
+    return (
+      <div className="chat-placeholder">
+        <p>
+          You're not a member of{" "}
+          <ChannelLabel
+            name={channel?.name ?? ""}
+            isPrivate={isPrivateChannel(channel)}
+          />{" "}
+          — ask its owner.
+        </p>
       </div>
     );
   }

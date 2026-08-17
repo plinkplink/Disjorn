@@ -3,6 +3,9 @@
 
 export type MemberType = "user" | "bot";
 export type ChannelType = "main_feed" | "dm_1to1" | "text";
+/** Per-channel access mode. Everything created before the membership spec —
+    and everything created without asking — is `public`. */
+export type ChannelVisibility = "public" | "private";
 export type UserStatus = "online" | "idle" | "dnd" | "offline";
 /** Statuses a user can pick; "offline" is derived (disconnect), never set. */
 export type SettableStatus = Exclude<UserStatus, "offline">;
@@ -98,6 +101,32 @@ export interface ChannelListItem {
   dm_user_id: number | null;
   unread: number;
   last_message: LastMessage | null;
+  /* The three fields below arrived with per-channel membership. All optional
+     (not merely nullable) so a payload from a server that predates the spec is
+     still a valid row — read them through isPrivateChannel/isChannelMember,
+     never raw, so "absent" keeps meaning "public, and I'm in it". */
+  visibility?: ChannelVisibility;
+  /**
+   * False ONLY for a private channel the caller is not a member of: the row is
+   * listed (existence is not a secret) but carries no content, and every read
+   * path for it answers 403. Absent => member.
+   */
+  member?: boolean;
+  /** The owner — the one account that may invite/kick/add bots. Null for
+      main_feed and DMs, which have no creator. */
+  created_by?: number | null;
+}
+
+/** Private = the wall is up. Absent visibility means public (older payload). */
+export function isPrivateChannel(channel: {
+  visibility?: ChannelVisibility;
+}): boolean {
+  return channel.visibility === "private";
+}
+
+/** Am I in it? Only an explicit `false` means no — see ChannelListItem.member. */
+export function isChannelMember(channel: { member?: boolean }): boolean {
+  return channel.member !== false;
 }
 
 export interface DmResponse {
@@ -219,10 +248,45 @@ export interface PresenceFrame {
   status: UserStatus;
 }
 
-/** A named text channel was created (broadcast to everyone). */
+/** A named text channel was created. Public: everyone. Private: members only
+    (which, at creation time, is exactly its owner). */
 export interface ChannelCreateFrame {
   type: "channel_create";
-  channel: { id: number; type: ChannelType; name: string };
+  channel: {
+    id: number;
+    type: ChannelType;
+    name: string;
+    visibility?: ChannelVisibility;
+  };
+}
+
+/** Shared shape of member_add / member_remove. The subject of the event is
+    always among the recipients — including a member_remove that names you,
+    which is the last frame you get for that channel. */
+interface MemberEventFrame {
+  channel_id: number;
+  member_type: MemberType;
+  member_id: number;
+  /**
+   * Who did it: the inviter/kicker, the leaver themselves (member_remove where
+   * by_user_id === member_id), or null/absent when no acting user is known
+   * (older server, or a server-side action). Never assume it resolves.
+   */
+  by_user_id?: number | null;
+  channel: {
+    id: number;
+    type: ChannelType;
+    name: string | null;
+    visibility?: ChannelVisibility;
+  };
+}
+
+export interface MemberAddFrame extends MemberEventFrame {
+  type: "member_add";
+}
+
+export interface MemberRemoveFrame extends MemberEventFrame {
+  type: "member_remove";
 }
 
 export type ServerFrame =
@@ -232,7 +296,9 @@ export type ServerFrame =
   | MessageDeleteFrame
   | TypingStartFrame
   | PresenceFrame
-  | ChannelCreateFrame;
+  | ChannelCreateFrame
+  | MemberAddFrame
+  | MemberRemoveFrame;
 
 /* ---- Web Push payload (WP7 shape; consumed by src/sw.ts) ---- */
 

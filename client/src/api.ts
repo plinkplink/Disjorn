@@ -8,6 +8,7 @@ import type {
   Bot,
   ChannelListItem,
   ChannelMemberOut,
+  ChannelVisibility,
   DmResponse,
   Message,
   NotifyPrefs,
@@ -151,9 +152,44 @@ export function listChannels(): Promise<ChannelListItem[]> {
 }
 
 /** Create a named text channel (name: lowercase a-z, 0-9, dashes; 1-32 chars).
-    409 -> name taken, 400 -> invalid name (both surface as ApiError.detail). */
-export function createChannel(name: string): Promise<ChannelListItem> {
-  return request<ChannelListItem>("POST", "/channels", { name });
+    409 -> name taken, 400 -> invalid name (both surface as ApiError.detail).
+
+    A `private` channel starts with exactly one member — you, its owner — and
+    only you can invite anyone else into it. */
+export function createChannel(
+  name: string,
+  visibility: ChannelVisibility = "public",
+): Promise<ChannelListItem> {
+  return request<ChannelListItem>("POST", "/channels", { name, visibility });
+}
+
+/**
+ * Add a user to a private channel. OWNER ONLY server-side (403 otherwise) —
+ * this client only offers the affordance to the owner, but the refusal, not
+ * the hidden button, is the wall. Idempotent: `added: false` = already in.
+ */
+export function inviteToChannel(
+  channelId: number,
+  userId: number,
+): Promise<{ ok: boolean; added: boolean }> {
+  return request("POST", `/channels/${channelId}/invite`, { user_id: userId });
+}
+
+/** Remove a user from a private channel. Owner only; 400 if the target IS the
+    owner (an owner's only way out is leaving). */
+export function kickFromChannel(
+  channelId: number,
+  userId: number,
+): Promise<{ ok: boolean; removed: boolean }> {
+  return request("POST", `/channels/${channelId}/kick`, { user_id: userId });
+}
+
+/** Leave a private channel — anyone may, the owner included (who keeps
+    ownership, and with it the power to re-add themselves). Idempotent. */
+export function leaveChannel(
+  channelId: number,
+): Promise<{ ok: boolean; left: boolean }> {
+  return request("POST", `/channels/${channelId}/leave`);
 }
 
 export function openDm(userId: number): Promise<DmResponse> {

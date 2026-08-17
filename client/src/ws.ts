@@ -12,6 +12,7 @@
      every (re)connect because focus is per-connection server state. */
 
 import { useChannels } from "./stores/channels";
+import { useMembership } from "./stores/membership";
 import { useMessages } from "./stores/messages";
 import { usePresence } from "./stores/presence";
 import type { ServerFrame, SettableStatus } from "./types";
@@ -164,6 +165,14 @@ export class DisjornSocket {
       case "channel_create":
         useChannels.getState().onChannelCreate(frame.channel);
         return;
+      // Membership changes (mine or someone else's) — the membership store
+      // owns the fallout: sidebar row, cached messages, roster, notice.
+      case "member_add":
+        useMembership.getState().onMemberAdd(frame);
+        return;
+      case "member_remove":
+        useMembership.getState().onMemberRemove(frame);
+        return;
     }
   }
 
@@ -171,6 +180,10 @@ export class DisjornSocket {
   private async resync(): Promise<void> {
     try {
       await useChannels.getState().refresh();
+      // Membership may have changed while we were away: drop anything the
+      // fresh list says we can no longer read BEFORE backfilling, so the
+      // resync never asks for a channel that would 403.
+      useMembership.getState().pruneUnreadable();
       const messages = useMessages.getState();
       await Promise.all(
         messages.channelIdsWithMessages().map((id) => messages.backfill(id)),

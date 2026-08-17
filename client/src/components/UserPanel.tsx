@@ -12,13 +12,15 @@
 
 import { useEffect, useMemo, useState } from "react";
 
-import { ApiError, removeChannelBot } from "../api";
+import { ApiError, kickFromChannel, removeChannelBot } from "../api";
 import { useChannels } from "../stores/channels";
 import { useMembers } from "../stores/members";
 import { usePresence } from "../stores/presence";
 import { useSession } from "../stores/session";
 import type { ChannelMemberOut, UserStatus } from "../types";
+import { isChannelMember, isPrivateChannel } from "../types";
 import { AddBotModal } from "./AddBotModal";
+import { AddMembersModal } from "./AddMembersModal";
 import { Avatar, BotAvatar } from "./Avatar";
 
 const STATUS_ORDER: Record<UserStatus, number> = {
@@ -39,15 +41,20 @@ function MemberRow({
   member,
   status,
   isSelf,
+  isOwner = false,
   onOpenDm,
   onRemove,
+  removeLabel,
 }: {
   member: ChannelMemberOut;
   status: UserStatus | null; // null for bots
   isSelf: boolean;
+  /** This channel's owner — the only one who can invite, kick or add bots. */
+  isOwner?: boolean;
   onOpenDm: (userId: number) => void;
-  /** Bots only, and only when the viewer may manage them. */
+  /** Only when the viewer may manage this member (never on the owner row). */
   onRemove?: () => void;
+  removeLabel?: string;
 }) {
   const isBot = member.type === "bot";
   const clickable = !isBot && !isSelf;
@@ -69,11 +76,16 @@ function MemberRow({
         {member.name}
         {isSelf && <span className="member-you"> (you)</span>}
       </span>
+      {isOwner && (
+        <span className="member-owner" title="Channel owner" aria-label="Channel owner">
+          ♔
+        </span>
+      )}
       {isBot && <span className="bot-tag">BOT</span>}
     </>
   );
 
-  if (clickable) {
+  if (clickable && onRemove === undefined) {
     return (
       <button
         className="member-row"
@@ -91,12 +103,24 @@ function MemberRow({
       className="member-row static"
       title={status !== null ? STATUS_LABEL[status] : undefined}
     >
-      {body}
+      {clickable ? (
+        // Still a DM jump — just not the whole row, because the row now also
+        // carries a remove control and buttons don't nest.
+        <button
+          className="member-row-open"
+          title={`Message ${member.name}`}
+          onClick={() => onOpenDm(member.id)}
+        >
+          {body}
+        </button>
+      ) : (
+        body
+      )}
       {onRemove !== undefined && (
         <button
           className="member-remove"
-          title={`Remove ${member.name} from this channel`}
-          aria-label={`Remove ${member.name} from this channel`}
+          title={removeLabel ?? `Remove ${member.name} from this channel`}
+          aria-label={removeLabel ?? `Remove ${member.name} from this channel`}
           onClick={onRemove}
         >
           ✕
@@ -119,12 +143,19 @@ export function UserPanel({
   const me = useSession((s) => s.user);
   const channel = useChannels((s) => s.channels.find((c) => c.id === channelId));
   const [addingBot, setAddingBot] = useState(false);
+  const [addingMembers, setAddingMembers] = useState(false);
+
+  /* Fail-closed, and a dependency: an unknown row (sidebar still loading) is
+     not yet a channel we know we may read, and the effect re-runs when the
+     row lands. A private channel we are not in only ever answers 403. */
+  const canRead = channel !== undefined && isChannelMember(channel);
 
   // Fresh roster whenever the panel is shown for a channel (statuses in the
   // roster payload seed presence for users we haven't seen frames for).
   useEffect(() => {
+    if (!canRead) return;
     void useMembers.getState().refresh(channelId);
-  }, [channelId]);
+  }, [channelId, canRead]);
 
   const statusFor = (m: ChannelMemberOut): UserStatus =>
     statuses[m.id] ?? m.status ?? "offline";
@@ -159,8 +190,15 @@ export function UserPanel({
      therefore the same question the server asks before it will touch bot
      membership — and the roster is only served to members in the first place. */
   const isDm = channel?.type === "dm_1to1";
-  const canManageBots =
+  const isPrivate = channel !== undefined && isPrivateChannel(channel);
+  /* A private channel narrows "any member" to "the owner": invite, kick and
+     bot membership are all the owner's alone (server-enforced). */
+  const isOwner =
+    me !== null && channel?.created_by != null && channel.created_by === me.id;
+  const inRoster =
     me !== null && members !== undefined && users.some((u) => u.id === me.id);
+  const canManageBots = inRoster && (!isPrivate || isOwner);
+  const canManageMembers = isPrivate && isOwner;
   const channelLabel =
     channel === undefined
       ? "this channel"
@@ -181,10 +219,41 @@ export function UserPanel({
     );
   };
 
+  const kickUser = (member: ChannelMemberOut) => {
+    if (
+      !window.confirm(
+        `Remove ${member.name} from ${channelLabel}? They lose access to it, ` +
+          `including everything already posted there.`,
+      )
+    ) {
+      return;
+    }
+    kickFromChannel(channelId, member.id).then(
+      () => void useMembers.getState().refresh(channelId),
+      (err: unknown) => {
+        window.alert(
+          err instanceof ApiError ? err.detail : "Failed to remove the member",
+        );
+      },
+    );
+  };
+
   return (
     <>
       <aside className="member-panel" aria-label="Channel members">
-        <div className="member-section">Members — {users.length + bots.length}</div>
+        <div className="member-section member-section-row">
+          <span>Members — {users.length + bots.length}</span>
+          {canManageMembers && (
+            <button
+              className="icon-btn add-bot-btn"
+              title={`Add members to ${channelLabel}`}
+              aria-label={`Add members to ${channelLabel}`}
+              onClick={() => setAddingMembers(true)}
+            >
+              +
+            </button>
+          )}
+        </div>
         {members === undefined && <div className="member-hint">Loading…</div>}
         {users.map((m) => (
           <MemberRow
@@ -192,7 +261,16 @@ export function UserPanel({
             member={m}
             status={statusFor(m)}
             isSelf={me !== null && m.id === me.id}
+            isOwner={channel?.created_by != null && channel.created_by === m.id}
             onOpenDm={openDm}
+            /* Never on the owner's row: the server 400s a kick aimed at the
+               owner, whose only way out is leaving. */
+            onRemove={
+              canManageMembers && channel?.created_by !== m.id
+                ? () => kickUser(m)
+                : undefined
+            }
+            removeLabel={`Remove ${m.name} from ${channelLabel}`}
           />
         ))}
         {(bots.length > 0 || canManageBots) && (
@@ -223,11 +301,20 @@ export function UserPanel({
             isSelf={false}
             onOpenDm={openDm}
             onRemove={canManageBots ? () => removeBot(m) : undefined}
+            removeLabel={`Remove ${m.name} from ${channelLabel}`}
           />
         ))}
       </aside>
       {/* Sibling, not a child: the panel is a fixed, scrolling column on
           mobile and a modal has no business living inside it. */}
+      {addingMembers && canManageMembers && (
+        <AddMembersModal
+          channelId={channelId}
+          channelName={channel?.name ?? ""}
+          onAdded={() => void useMembers.getState().refresh(channelId)}
+          onClose={() => setAddingMembers(false)}
+        />
+      )}
       {addingBot && canManageBots && (
         <AddBotModal
           channelId={channelId}
