@@ -27,4 +27,5 @@ CLOSES: the structural half of 1226 (residents review loop/* pre-merge — which
 - **Confirmed at**: 2026-08-15
 
 ## Status
-confirmed
+merged
+<!-- advanced from `confirmed` by `board --mark-merged` on 2026-08-17: build merged as c20eceb. The word `confirmed` on a merged spec made it indistinguishable from a buildable one. -->
