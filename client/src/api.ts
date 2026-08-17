@@ -249,6 +249,31 @@ export function search(q: string): Promise<SearchResult[]> {
   return request<SearchResult[]>("GET", `/search?q=${encodeURIComponent(q)}`);
 }
 
+/**
+ * The one message a seq names in a channel, shaped like a search result so
+ * the search panel can show it and `goTo` can jump to it — or null.
+ *
+ * Reuses the backfill read (`from_seq` + `limit=1`), which returns the first
+ * message with seq >= N in ascending order; a match is only a match if the
+ * seq is exactly N. No new endpoint: this is the same row a resident's
+ * read_message reads, seen from the human side.
+ */
+export async function messageBySeq(
+  channel: ChannelListItem,
+  seq: number,
+): Promise<SearchResult | null> {
+  const rows = await request<Message[]>(
+    "GET",
+    `/channels/${channel.id}/messages?from_seq=${seq}&limit=1`,
+  );
+  const hit = rows.find((m) => m.seq === seq);
+  if (hit === undefined) return null;
+  return {
+    message: hit,
+    channel: { id: channel.id, type: channel.type, name: channel.name },
+  };
+}
+
 /* ---- voice-to-text (WP12) ---- */
 
 /**

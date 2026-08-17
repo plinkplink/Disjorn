@@ -11,7 +11,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import { ApiError, search } from "../api";
+import { ApiError, messageBySeq, search } from "../api";
 import { stripEmotionTags } from "./Markdown";
 import { useChannels } from "../stores/channels";
 import { useMessages } from "../stores/messages";
@@ -19,6 +19,19 @@ import type { SearchResult } from "../types";
 
 const DEBOUNCE_MS = 300;
 const MIN_CHARS = 2;
+
+/**
+ * "1272", "#1272", "seq 1272", "seq#1272", "#seq 1272" -> 1272; anything else
+ * -> null. Digits alone count: a bare number typed into search is far more
+ * often a seq than a phone number here, and the text search still runs
+ * underneath, so nothing is lost if it was not.
+ */
+export function parseSeqQuery(q: string): number | null {
+  const m = /^\s*(?:#?\s*seq\s*#?\s*|#\s*)?(\d{1,9})\s*$/i.exec(q);
+  if (m === null) return null;
+  const n = Number(m[1]);
+  return Number.isSafeInteger(n) && n >= 1 ? n : null;
+}
 const SNIPPET_RADIUS = 36;
 
 /** Context snippet around the first query-term hit, term wrapped in <mark>. */
@@ -66,7 +79,14 @@ function resultDate(iso: string): string {
 type PanelState =
   | { kind: "closed" }
   | { kind: "loading" }
-  | { kind: "results"; query: string; results: SearchResult[] }
+  | {
+      kind: "results";
+      query: string;
+      results: SearchResult[];
+      /** The message the query names by seq, pinned above the text hits. */
+      seqHit?: SearchResult | null;
+      seqAsked?: number;
+    }
   | { kind: "error"; detail: string };
 
 export function SearchBar() {
@@ -107,10 +127,43 @@ export function SearchBar() {
     }
     const mySeq = ++seqRef.current;
     setPanel((p) => (p.kind === "results" ? p : { kind: "loading" }));
-    search(trimmed).then(
-      (results) => {
+
+    // A query that IS a seq — "1272", "#1272", "seq 1272" — gets two answers:
+    // the one message that seq names (pinned first), then every message that
+    // mentions the number (the ordinary text search). The exact hit is looked
+    // up in the channel you're in, because "seq 1272" without a channel is
+    // ambiguous by construction — every channel numbers from 1 — and the one
+    // you have open is what you almost certainly mean. Falls through to
+    // #custodian if you're somewhere seqs are rarely cited, since that is
+    // where confirm records and "at seq N" live.
+    const seqAsked = parseSeqQuery(trimmed);
+    const seqLookup: Promise<SearchResult | null> = (() => {
+      if (seqAsked === null) return Promise.resolve(null);
+      const chans = useChannels.getState();
+      const active = chans.channels.find((c) => c.id === chans.activeChannelId);
+      const custodian = chans.channels.find((c) => c.name === "custodian");
+      const first = active ?? custodian;
+      if (first === undefined) return Promise.resolve(null);
+      return messageBySeq(first, seqAsked).then((hit) => {
+        if (hit !== null || custodian === undefined || custodian.id === first.id) return hit;
+        return messageBySeq(custodian, seqAsked);
+      }).catch(() => null);
+    })();
+    // The text search for a seq query drops the "#"/"seq" and keeps the digits:
+    // FTS tokenises "1272" as its own word, so this finds every mention.
+    const textQuery = seqAsked === null ? trimmed : String(seqAsked);
+
+    Promise.all([search(textQuery), seqLookup]).then(
+      ([results, seqHit]) => {
         if (seqRef.current !== mySeq) return;
-        setPanel({ kind: "results", query: trimmed, results });
+        // Don't list the pinned message twice.
+        const rest = seqHit === null
+          ? results
+          : results.filter((r) => r.message.id !== seqHit.message.id);
+        setPanel({
+          kind: "results", query: textQuery, results: rest,
+          seqHit, seqAsked: seqAsked ?? undefined,
+        });
       },
       (err: unknown) => {
         if (seqRef.current !== mySeq) return;
@@ -218,9 +271,59 @@ export function SearchBar() {
             {panel.kind === "error" && (
               <p className="search-note error">{panel.detail}</p>
             )}
-            {panel.kind === "results" && panel.results.length === 0 && (
-              <p className="search-note">No results for “{panel.query}”.</p>
+            {panel.kind === "results" &&
+              panel.results.length === 0 &&
+              !panel.seqHit && (
+                <p className="search-note">
+                  {panel.seqAsked !== undefined
+                    ? `No message #${panel.seqAsked} in this channel, and nothing mentions it.`
+                    : `No results for “${panel.query}”.`}
+                </p>
+              )}
+            {panel.kind === "results" && panel.seqHit && (
+              <>
+                <p className="search-note search-section">The message itself</p>
+                <button
+                  key={`seq-${panel.seqHit.message.id}`}
+                  className="search-row search-row-seq"
+                  role="option"
+                  aria-selected={false}
+                  onClick={() => goTo(panel.seqHit!)}
+                >
+                  <span className="search-row-meta">
+                    <span className="search-row-seqchip">#{panel.seqHit.message.seq}</span>
+                    <span className="search-row-channel">
+                      {panel.seqHit.channel.type !== "dm_1to1"
+                        ? `#${panel.seqHit.channel.name ?? "main"}`
+                        : "@DM"}
+                    </span>
+                    <span className="search-row-author">
+                      {panel.seqHit.message.author.name}
+                    </span>
+                    <span className="search-row-date">
+                      {resultDate(panel.seqHit.message.created_at)}
+                    </span>
+                  </span>
+                  <span className="search-row-snippet">
+                    {panel.seqHit.message.content.slice(0, 220)}
+                    {panel.seqHit.message.content.length > 220 ? "…" : ""}
+                  </span>
+                </button>
+                {panel.results.length > 0 && (
+                  <p className="search-note search-section">
+                    Messages that mention #{panel.seqAsked}
+                  </p>
+                )}
+              </>
             )}
+            {panel.kind === "results" &&
+              panel.seqAsked !== undefined &&
+              !panel.seqHit &&
+              panel.results.length > 0 && (
+                <p className="search-note search-section">
+                  No message #{panel.seqAsked} in this channel — but these mention it
+                </p>
+              )}
             {panel.kind === "results" &&
               panel.results.map((r) => (
                 <button
