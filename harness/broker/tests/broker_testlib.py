@@ -319,7 +319,9 @@ class BrokerHarness:
                  build_log_dir: Path | None = None,
                  stub_dir: Path | None = None,
                  unit_state_file: Path | None = None,
-                 stop_record: Path | None = None) -> None:
+                 stop_record: Path | None = None,
+                 spec_repo: Path | None = None) -> None:
+        self.spec_repo = spec_repo
         self.broker = broker
         self.verbs_path = verbs_path
         self.record_file = record_file
@@ -417,14 +419,45 @@ class BrokerHarness:
 
     # -- start-build helpers ---------------------------------------------
     def write_spec(self, filename: str, *, status: str = "confirmed",
-                   confirmed_by: str = "plink", seq="139") -> str:
-        """Write a spec into the configured SPECS/ dir; return its filename.
-        Pass a draft status or a `<...>` placeholder confirmed_by/seq to
-        exercise the confirm gate."""
+                   confirmed_by: str = "plink", seq="139",
+                   body: str | None = None) -> str:
+        """Write a spec into the configured SPECS/ dir (the mirror the gate
+        reads) AND commit the same text to the canonical spec repo's main (the
+        repo the broker stamps Status lines into); return its filename. Pass a
+        draft status or a `<...>` placeholder confirmed_by/seq to exercise the
+        confirm gate."""
         assert self.specs_dir is not None
-        (self.specs_dir / filename).write_text(
-            SPEC_BODY.format(status=status, confirmed_by=confirmed_by, seq=seq))
+        text = body if body is not None else SPEC_BODY.format(
+            status=status, confirmed_by=confirmed_by, seq=seq)
+        (self.specs_dir / filename).write_text(text)
+        if self.spec_repo is not None:
+            (self.spec_repo / "SPECS" / filename).write_text(text)
+            self._git("add", "--", f"SPECS/{filename}")
+            self._git("commit", "-q", "-m", f"spec {filename}")
         return filename
+
+    # -- canonical spec repo (Status stamping) ----------------------------
+    def _git(self, *args: str) -> str:
+        assert self.spec_repo is not None
+        import subprocess as _sp
+        cp = _sp.run(["git", "-C", str(self.spec_repo), *args],
+                     capture_output=True, text=True, check=True,
+                     env={**os.environ, "GIT_AUTHOR_NAME": "t",
+                          "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+                          "GIT_COMMITTER_EMAIL": "t@t"})
+        return cp.stdout
+
+    def spec_text_on_main(self, filename: str) -> str:
+        """The spec as COMMITTED on the canonical repo's main — what the
+        broker's stamp changes and what the mirror would fast-forward to."""
+        return self._git("show", f"main:SPECS/{filename}")
+
+    def spec_status_on_main(self, filename: str) -> str | None:
+        from brokerd import parse_spec_status
+        return parse_spec_status(self.spec_text_on_main(filename))
+
+    def main_log(self) -> list[str]:
+        return [ln for ln in self._git("log", "--format=%s", "main").splitlines()]
 
     def build_log_files(self) -> list[Path]:
         """Leftover build stdout/stderr temp files (BL-D2 cleanup assertions).
@@ -479,6 +512,21 @@ def harness(tmp_path: Path):
     stop_record = tmp_path / "stop.jsonl"
     specs_dir = tmp_path / "SPECS"
     specs_dir.mkdir()
+    # The CANONICAL repo whose SPECS/ the mirror follows: a real git repo, so
+    # the broker's Status stamps (plumbing commits on its main) are exercised
+    # for real. specs_dir above stands in for the mirror the gate reads; the
+    # refresh argvs that would fast-forward it are stubs (mirror.py).
+    spec_repo = tmp_path / "canon"
+    (spec_repo / "SPECS").mkdir(parents=True)
+    import subprocess as _sp
+    _env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    _sp.run(["git", "-C", str(spec_repo), "init", "-q", "-b", "main"],
+            check=True, env=_env)
+    (spec_repo / "SPECS" / "README.md").write_text("specs\n")
+    _sp.run(["git", "-C", str(spec_repo), "add", "."], check=True, env=_env)
+    _sp.run(["git", "-C", str(spec_repo), "commit", "-q", "-m", "init"],
+            check=True, env=_env)
     # BL-D2: the detached build's stdout/stderr temp files. In production this
     # is the daemon's PrivateTmp; here it is a scratch dir so the tests can
     # assert they are created 0600 and REMOVED on every exit path.
@@ -532,6 +580,7 @@ def harness(tmp_path: Path):
         session_argv = ["--output-format", "json"]
         model = "claude-opus-4-8"
         specs_dir = "{specs_dir}"
+        spec_repo = "{spec_repo}"
         timeout_sec = 30
         daily_build_cap = 2
         stop_command = ["{PY}", "{stub_dir / 'buildstop.py'}", "{stop_record}", "{unit_state_file}", "stop"]
@@ -558,7 +607,8 @@ def harness(tmp_path: Path):
     h = BrokerHarness(broker, verbs_path, record_file, proposals,
                       specs_dir=specs_dir, build_record=build_record,
                       build_log_dir=build_logs, stub_dir=stub_dir,
-                      unit_state_file=unit_state_file, stop_record=stop_record)
+                      unit_state_file=unit_state_file, stop_record=stop_record,
+                      spec_repo=spec_repo)
     h.set_verbs()  # everything explicitly OFF to start
 
     t = threading.Thread(target=broker.serve_forever, daemon=True)

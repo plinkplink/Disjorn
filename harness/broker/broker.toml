@@ -265,6 +265,21 @@ model = "claude-opus-4-8"
 # the RO mirror; if you must move it, move it somewhere plink owns and
 # residents never mount.
 specs_dir = "/srv/disjorn-ro/SPECS"
+# The CANONICAL repo whose SPECS/ that mirror follows. Since 2026-08-17 the
+# broker moves a spec's `## Status` line as its build moves — `confirmed` ->
+# `building` at start-build, then `built@<branch>` / `failed` (or `confirmed`
+# again for a build that produced nothing) with the terminal banner — as
+# plumbing commits on this repo's `main` (never touching the keyboard's index
+# or working tree unless the file is provably clean), each followed by the same
+# fetch + --ff-only refresh `refresh-mirror` runs, so residents and the confirm
+# gate read the word at once. Unset = stamping off, warned at startup, and every
+# build banner says "spec status: NOT updated" — a spec under construction then
+# keeps reading `confirmed` and the board lists it as buildable, which is the
+# 2026-08-17 confusion this exists to end. `board --mark-merged` writes the last
+# word (`merged`); the broker never sees a merge.
+spec_repo = "/home/plink/Disjorn/Disjorn"
+# spec_repo_branch = "main"    # default
+# spec_repo_subdir = "SPECS"   # default
 # Wall-clock cap for the detached build (seconds). Longer than the 300s summon
 # — a build is a whole feature, not a chat turn. The reaper kills at the cap
 # and narrates a loud failure.

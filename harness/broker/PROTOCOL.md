@@ -118,11 +118,47 @@ All verbs are per-resident toggleable in `verbs.toml` and default OFF.
   the configured `SPECS/` dir. Absolute paths, `..` traversal, and symlink
   escape are all rejected (`bad-args`); a leading `-` or NUL is rejected.
 - result: `{"started": true, "branch": str, "slug": str, "pid": int?,
-  "unit": str, "confirmed_by": str, "seq": int}` — the build was accepted and
-  launched DETACHED; the branch is `loop/<slug>` and the build runs in the
-  transient systemd unit `disjorn-build-<slug>.service` under the resident's own
-  uid (see **Identity** below). `pid` is the broker's LOCAL launch process, not
-  the build.
+  "unit": str, "confirmed_by": str, "seq": int, "spec_status": {...}}` — the
+  build was accepted and launched DETACHED; the branch is `loop/<slug>` and the
+  build runs in the transient systemd unit `disjorn-build-<slug>.service` under
+  the resident's own uid (see **Identity** below). `pid` is the broker's LOCAL
+  launch process, not the build. `spec_status` is `{"ok": bool, "status":
+  "building", "commit": str?, "why": str}` — what happened to the spec's
+  `## Status` line (see **The Status line moves with the build** below);
+  `ok: false` is NOT a refusal, the build runs regardless, but say so where a
+  human will read it.
+- **The Status line moves with the build (2026-08-17).** SPECS/README.md rules
+  that state lives in the file — `draft → confirmed → building → built@<branch>
+  → merged` (or `failed`) — and the broker is the process that knows each
+  transition the instant it happens, so it writes the middle words:
+  - on accept, BEFORE the started line: `confirmed → building`;
+  - with the terminal banner, from the same ladder the banner is derived from:
+    published → `built@<branch>`; failed (unit failed, PUBLISH-FAILED, timed
+    out, no harvest) → `failed`; only NO-COMMITS → back to `confirmed`;
+  - a launch that never ran (spawn error, preflight refusal) → back to
+    `confirmed`.
+  Each stamp is a **plumbing commit on the canonical repo's `main`**
+  (`[start_build].spec_repo`, branch `spec_repo_branch` default `main`,
+  subdir `spec_repo_subdir` default `SPECS`), authored `disjorn-broker`,
+  followed by the SAME fetch + `--ff-only` refresh `refresh-mirror` runs, so
+  the mirror the gate and the residents read carries the word at once. The
+  keyboard's index and working tree are never read or written — except a
+  courtesy `checkout HEAD -- <spec>` when HEAD is that branch and the file is
+  provably clean, so `git status` stays quiet. A dirty file is left alone and
+  named in `why`. The stamp only ever moves FROM the word it expects
+  (`confirmed` at start, `building` at the end): a spec the keyboard already
+  advanced (merged, superseded) is never overwritten. The merge is the one
+  transition the broker never sees; `board --mark-merged` writes that word.
+  Every banner ends with a `spec status:` line saying what moved, or that
+  nothing did and why — a stamp that fails must be heard, or the next resident
+  reads a stale `confirmed` and rebuilds. Nothing a resident controls reaches
+  the file: the slug is the gate-validated filename, the words are the
+  broker's own, and the one resident-influenced string (a failure reason) is
+  flattened to one line with every `--` broken before it enters the comment.
+  Consequence for callers: a spec that reads `building` / `built@…` / `failed`
+  is refused by the gate exactly like `draft` (only `confirmed` builds); to
+  allow another attempt after a failure, a human sets the line back to
+  `confirmed` — the confirm record is never touched by any of this.
 - Launches a headless Claude Code **build session** that builds the confirmed
   spec to a NEW branch `loop/<slug>`, where **slug = the spec filename minus
   `.md`, date prefix INCLUDED** (`2026-07-21-gif-picker.md` →

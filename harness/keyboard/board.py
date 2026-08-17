@@ -228,9 +228,24 @@ def merged_slugs() -> dict:
     return out
 
 
+# The words a merged spec may still carry that `--mark-merged` advances. Since
+# 2026-08-17 the broker moves `confirmed` -> `building` -> `built@<branch>` /
+# `failed` as the build runs (brokerd._stamp_spec_status); the merge is the one
+# transition the broker never sees, so it stays the board's to write. `failed`
+# is included on purpose: a build that failed and was then merged by hand IS
+# merged, and the evidence (a merge commit / an ancestor branch) outranks the
+# word.
+MERGEABLE_STATUSES = ("confirmed", "building", "failed")
+
+
+def _advances_to_merged(word: str) -> bool:
+    return word in MERGEABLE_STATUSES or word.startswith("built@")
+
+
 def mark_merged(dry_run: bool = True) -> list:
     """Advance the Status line of every spec whose build is merged from
-    `confirmed` to `merged`, and say so in the file.
+    `confirmed` / `building` / `built@<branch>` / `failed` to `merged`, and
+    say so in the file.
 
     WHY THE BOARD DOES THIS AND NOT A HUMAN. Nothing in the loop ever moved a
     spec past `confirmed`: the gate reads it, the build runs, the merge lands,
@@ -254,31 +269,24 @@ def mark_merged(dry_run: bool = True) -> list:
         slug = f.stem
         if slug not in merged:
             continue
-        gate = spec_gate(f)
         text = f.read_text(encoding="utf-8")
-        if _BROKER.parse_spec_status(text) != "confirmed":
+        word = _BROKER.parse_spec_status(text) or ""
+        if not _advances_to_merged(word):
             continue  # already advanced, or never confirmed — leave it
-        # Replace the first non-comment line under ## Status.
-        lines = text.splitlines(keepends=True)
-        idx = None
-        for i, ln in enumerate(lines):
-            if ln.strip().lower() == "## status":
-                for j in range(i + 1, len(lines)):
-                    st = lines[j].strip()
-                    if st and not st.startswith("<!--"):
-                        idx = j
-                        break
-                break
-        if idx is None:
-            continue
         stamp = _now().date().isoformat()
-        lines[idx] = (f"merged\n<!-- advanced from `confirmed` by `board --mark-merged` "
-                      f"on {stamp}: build merged as {merged[slug]}. The word "
-                      f"`confirmed` on a merged spec made it indistinguishable "
-                      f"from a buildable one. -->\n")
-        changed.append({"slug": slug, "path": f"SPECS/{f.name}", "merge": merged[slug]})
+        # The broker's own line-rewriter: one shape for a Status line, one
+        # parser that reads it back.
+        new_text = _BROKER.replace_spec_status(
+            text, "merged",
+            f"advanced from `{word}` by `board --mark-merged` on {stamp}: "
+            f"build merged as {merged[slug]}. The word `{word}` on a merged "
+            f"spec made it indistinguishable from a buildable one.")
+        if new_text is None:
+            continue
+        changed.append({"slug": slug, "path": f"SPECS/{f.name}",
+                        "merge": merged[slug], "from": word})
         if not dry_run:
-            f.write_text("".join(lines), encoding="utf-8")
+            f.write_text(new_text, encoding="utf-8")
     return changed
 
 
@@ -432,12 +440,40 @@ def build_board() -> dict:
                 "where": s["path"],
                 "how": "a resident presses start_build; nothing needed from you",
                 "slug": s["slug"]})
-        elif word == "confirmed" and s["slug"] in built_slugs:
+        elif _advances_to_merged(word) and s["slug"] in built_slugs:
             tidy.append({
                 "kind": "stale-status",
-                "what": f"Merged, but the file still says 'confirmed': {s['slug']}",
+                "what": f"Merged, but the file still says '{word}': {s['slug']}",
                 "where": s["path"],
                 "how": "board --mark-merged   (advances every such Status line to 'merged')",
+                "slug": s["slug"]})
+        elif word == "building":
+            # The broker stamped it at start-build and no unit is running now:
+            # either the broker is between the build ending and its terminal
+            # stamp (seconds), or the reaper died before it could write the
+            # word (a broker crash mid-build, with no sidecar to adopt).
+            waiting.append({
+                "kind": "stuck-building",
+                "what": f"Says 'building' but no build is running: {s['slug']}",
+                "where": s["path"],
+                "how": "check #custodian for its banner; if none came, set the "
+                       "Status line back to `confirmed` (or `failed`) by hand",
+                "slug": s["slug"]})
+        elif word.startswith("built@"):
+            in_flight.append({
+                "kind": "built",
+                "what": f"Built and waiting for review/merge: {s['slug']}",
+                "where": s["path"],
+                "how": f"brief review {s['slug']} --full; `board --mark-merged` "
+                       "after the merge",
+                "slug": s["slug"]})
+        elif word == "failed":
+            waiting.append({
+                "kind": "failed-build",
+                "what": f"Last build FAILED: {s['slug']}",
+                "where": s["path"],
+                "how": "read the BUILD FAILED banner in #custodian; to allow "
+                       "another attempt set the Status line back to `confirmed`",
                 "slug": s["slug"]})
         elif word == "draft":
             waiting.append({
@@ -525,7 +561,8 @@ def main(argv=None) -> int:
     ap.add_argument("--html", metavar="FILE", help="write the shareable page")
     ap.add_argument("--mark-merged", action="store_true",
                     help="advance the Status line of every merged spec from "
-                         "'confirmed' to 'merged' (writes SPECS/; needs sudo)")
+                         "'confirmed' / 'building' / 'built@<branch>' / 'failed' "
+                         "to 'merged' (writes SPECS/; needs sudo)")
     ap.add_argument("--dry-run", action="store_true",
                     help="with --mark-merged: show what would change, write nothing")
     ns = ap.parse_args(argv)
@@ -536,7 +573,8 @@ def main(argv=None) -> int:
         changed = mark_merged(dry_run=ns.dry_run)
         verb = "would advance" if ns.dry_run else "advanced"
         if not changed:
-            print("nothing to do: no merged spec still says 'confirmed'.")
+            print("nothing to do: no merged spec still says 'confirmed' / "
+                  "'building' / 'built@…' / 'failed'.")
             return 0
         for c in changed:
             print(f"  {verb} {c['path']}  (merged as {c['merge']})")

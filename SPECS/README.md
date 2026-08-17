@@ -21,6 +21,14 @@ flow in brief; the plan is the authority.
 4. **State lives in the file.** Status moves `draft → confirmed → building →
    built@<branch> → merged` (or `failed`), updated in place. The next summon
    reads the file to pick up where the last left off — never chat scrollback.
+   Who writes which word (since 2026-08-17): the resident writes `draft`, a
+   human's confirm makes it `confirmed`; the **broker** writes `building` at
+   `start_build`, then `built@<branch>` / `failed` (or `confirmed` again for a
+   build that produced nothing) with its terminal banner — as commits on
+   `main`, mirrored at once; the **board** (`board --mark-merged`) writes
+   `merged` when the merge lands. Nobody has to remember. Only `confirmed`
+   builds: a spec reading `building` or `built@…` is claimed, and after
+   `failed` a human sets it back to `confirmed` to allow another attempt.
 
 ## Review owner vs. builder — kept apart on purpose
 

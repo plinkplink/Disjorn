@@ -85,6 +85,7 @@ SUBPROCESS_TIMEOUTS = {  # seconds, per verb
     "classify-diff": 120,
     "read-prod-logs": 30,
     "refresh-mirror": 120,
+    "spec-status": 60,
 }
 
 # start-build (WP-L4): the detached build is NOT a synchronous _run() call, so
@@ -529,6 +530,104 @@ def parse_spec_status(text: str) -> Optional[str]:
     return None
 
 
+
+def replace_spec_status(text: str, new_status: str, comment: str) -> Optional[str]:
+    """Rewrite the `## Status` token in a spec to `new_status`, followed by ONE
+    HTML comment line saying who moved it and why. Returns the new text, or
+    None if the file has no parseable Status line (the caller then leaves the
+    file alone — a spec the gate cannot read is not one this should invent a
+    section in).
+
+    Only the FIRST non-blank, non-comment line under the heading is replaced —
+    the same line parse_spec_status reads — and everything else in the file
+    (the confirm record above all) is byte-for-byte untouched. The board's
+    `--mark-merged` and the broker's build stamps both go through here, so a
+    Status line always has one shape and one parser."""
+    lines = text.splitlines(keepends=True)
+    for i, ln in enumerate(lines):
+        if ln.strip().lower() != "## status":
+            continue
+        for j in range(i + 1, len(lines)):
+            st = lines[j].strip()
+            if not st or st.startswith("<!--"):
+                continue
+            if st.startswith("#"):
+                return None
+            lines[j] = f"{new_status}\n<!-- {comment} -->\n"
+            return "".join(lines)
+        return None
+    return None
+
+
+def _status_comment_text(text: str, cap: int = 300) -> str:
+    """Make resident-influenced text safe INSIDE an HTML comment. A build's
+    failure reason comes from the build's own output, so it could carry `-->`
+    (closing the comment early and putting a line of its choosing where the
+    parser reads the status) or a newline. Collapse whitespace, break every
+    `--` run, cap the length. Never write build output into SPECS/ unfiltered."""
+    flat = " ".join(str(text).split())
+    flat = re.sub(r"-{2,}", "-", flat).replace(">", "&gt;")
+    return flat[:cap]
+
+
+def build_outcome_class(publish: dict, unit_reason: "str | None") -> str:
+    """'failed' or 'done', from the harvest lines — THE ladder, in this order:
+      1. the unit itself failed (`unit_reason`)      -> failed
+      2. ANY PUBLISH-FAILED line                     -> failed
+      3. at least one PUBLISHED or NO-COMMITS line   -> done
+      4. nothing at all                              -> failed (never assume
+         success from silence).
+    format_build_outcome narrates from it and spec_status_after_build stamps
+    the spec from it: one ladder, so the banner and the file can never disagree
+    about whether a build failed."""
+    if unit_reason is not None or publish.get("failed"):
+        return "failed"
+    if publish.get("published") or publish.get("no_commits"):
+        return "done"
+    return "failed"
+
+
+def spec_status_after_build(*, branch: str, publish: dict,
+                            unit_reason: "str | None") -> tuple[str, str]:
+    """(status token, comment) the spec should carry once its build is
+    terminal. TEMPLATE.md's vocabulary, no new words:
+      * published                 -> `built@<branch>`  (work is on the branch,
+                                     waiting for review; NOT buildable again)
+      * failed (any way)          -> `failed`          (a human is told to look;
+                                     set it back to `confirmed` to allow
+                                     another attempt — the confirm record still
+                                     stands, nothing here touches it)
+      * only NO-COMMITS lines     -> `confirmed`       (the build ran and
+                                     produced nothing: no branch, nothing to
+                                     review, so it is honestly buildable again)
+    The comment records what happened, sanitized (_status_comment_text)."""
+    published = publish.get("published", [])
+    verdict = build_outcome_class(publish, unit_reason)
+    if verdict == "failed":
+        if unit_reason is not None:
+            why = unit_reason
+        elif publish.get("failed"):
+            why = "publish failed: " + "; ".join(
+                f"{repo}: {err}" for repo, err in publish["failed"])
+        else:
+            why = NO_HARVEST_REASON
+        where = ""
+        if published:
+            where = " Published anyway: " + ", ".join(
+                f"{repo} {sha}" for repo, sha in published) + "."
+        return ("failed", f"build failed: {_status_comment_text(why)}.{where} "
+                          "To allow another build, set this back to `confirmed` "
+                          "(the confirm record above still stands).")
+    if published:
+        shas = ", ".join(f"{repo} {sha}" for repo, sha in published)
+        return (f"built@{branch}",
+                f"build published: {_status_comment_text(shas)} — on the branch "
+                "for review, nothing merged. `board --mark-merged` advances "
+                "this to `merged` once the merge lands.")
+    return ("confirmed", "the build ran and produced no commits — no branch, "
+                         "nothing to review; buildable again.")
+
+
 def parse_confirm_record(text: str) -> dict:
     """`{confirmed_by, seq}` from the `## Confirm record` section. A field that
     is blank or still the `<...>` placeholder comes back None — mechanically,
@@ -968,6 +1067,22 @@ def format_mirror_note(branch: str, published, error: "str | None") -> str:
     return f"\nmirror: refreshed — read it at {refs}"
 
 
+def format_spec_status_note(stamp: dict) -> str:
+    """One trailing line for a build banner saying what happened to the spec's
+    Status line — moved (to what, in which commit) or NOT moved (and why). The
+    file is the state of record (SPECS/README.md: 'state lives in the file'),
+    so a stamp that failed has to be said out loud where the humans are, or the
+    next resident reads a stale word and rebuilds."""
+    if not stamp:
+        return ""
+    if stamp.get("ok"):
+        commit = stamp.get("commit") or "?"
+        return f"\nspec status: {stamp.get('status')} (commit {commit})"
+    return ("\nspec status: NOT updated — "
+            + " ".join(str(stamp.get("why", "")).split())[:300]
+            + " — fix the Status line by hand or a resident may rebuild")
+
+
 def format_build_outcome(*, slug: str, branch: str, publish: dict,
                          report: "dict | None" = None,
                          unit_reason: "str | None" = None,
@@ -993,6 +1108,10 @@ def format_build_outcome(*, slug: str, branch: str, publish: dict,
     failed = publish.get("failed", [])
     common = {"published": published, "no_commits": no_commits,
               "quarantined": quarantined, "mirror": mirror}
+    if build_outcome_class(publish, unit_reason) == "done":
+        return format_build_done(slug=slug, branch=branch, files=report["files"],
+                                 tests=report["tests"], diff=report["diff"],
+                                 tier="pending", **common)
     if unit_reason is not None:
         return format_build_failed(slug=slug, branch=branch, reason=unit_reason,
                                    **common)
@@ -1000,10 +1119,6 @@ def format_build_outcome(*, slug: str, branch: str, publish: dict,
         errors = "; ".join(f"{repo}: {err}" for repo, err in failed)
         return format_build_failed(slug=slug, branch=branch,
                                    reason=f"publish failed: {errors}", **common)
-    if published or no_commits:
-        return format_build_done(slug=slug, branch=branch, files=report["files"],
-                                 tests=report["tests"], diff=report["diff"],
-                                 tier="pending", **common)
     return format_build_failed(slug=slug, branch=branch,
                                reason=NO_HARVEST_REASON, **common)
 
@@ -1075,6 +1190,14 @@ class Broker:
         # forge. Presence of the section means someone intends to run builds,
         # and then specs_dir is mandatory and audited.
         self.specs_dir_real: Optional[str] = None
+        if self.start_build and self._spec_repo() is None:
+            print("disjorn-broker: WARNING [start_build].spec_repo is not set: "
+                  "the broker cannot move a spec's Status line to `building` / "
+                  "`built@<branch>` / `failed` as its build moves, so a spec "
+                  "under construction keeps reading `confirmed` and the board "
+                  "lists it as buildable. Set spec_repo to the canonical repo "
+                  "the mirror follows (e.g. /home/plink/Disjorn/Disjorn).",
+                  file=sys.stderr)
         if self.start_build:
             specs_dir = self.start_build.get("specs_dir")
             if not isinstance(specs_dir, str) or not specs_dir:
@@ -1560,17 +1683,7 @@ class Broker:
             return cp.stdout.strip()
 
         before = _head()
-        for key, default in (
-            ("refresh_mirror_fetch",
-             ["git", "-C", "/srv/disjorn-ro", "fetch", "origin"]),
-            ("refresh_mirror_update",
-             ["git", "-C", "/srv/disjorn-ro", "merge", "--ff-only", "origin/main"]),
-        ):
-            cp = self._run(self._argv(key, default), timeout)
-            if cp.returncode != 0:
-                raise VerbError("exec-failure",
-                                f"{key} exit {cp.returncode}: "
-                                f"{(cp.stderr or cp.stdout).strip()[:500]}")
+        self._ff_mirror_main(timeout)
         gatehouse = self._fetch_gatehouse_into_mirror(timeout)
         head = _head()
         summary = f"mirror at {head}" + ("" if head == before
@@ -1583,6 +1696,198 @@ class Broker:
             summary = f"{summary}; gatehouse {moved}"
         return ({"head": head, "before": before, "updated": head != before,
                  "gatehouse": gatehouse}, summary[:300])
+
+    def _ff_mirror_main(self, timeout: int) -> None:
+        """Fetch origin into the read-only mirror and fast-forward it to
+        origin/main — the two fixed argvs `refresh-mirror` has always run,
+        factored so the spec-status stamp can use the SAME refresh (never a
+        second implementation of "the mirror is fresh"). Raises VerbError."""
+        for key, default in (
+            ("refresh_mirror_fetch",
+             ["git", "-C", "/srv/disjorn-ro", "fetch", "origin"]),
+            ("refresh_mirror_update",
+             ["git", "-C", "/srv/disjorn-ro", "merge", "--ff-only", "origin/main"]),
+        ):
+            cp = self._run(self._argv(key, default), timeout)
+            if cp.returncode != 0:
+                raise VerbError("exec-failure",
+                                f"{key} exit {cp.returncode}: "
+                                f"{(cp.stderr or cp.stdout).strip()[:500]}")
+
+    # ------------------------------------------------- spec Status stamping
+
+    def _spec_repo(self) -> Optional[tuple[str, str, str]]:
+        """(repo path, branch, SPECS subdir) of the CANONICAL repo whose SPECS/
+        the mirror follows, from `[start_build].spec_repo` (+ `spec_repo_branch`,
+        default main; `spec_repo_subdir`, default SPECS). None when unset —
+        stamping is then off and every banner says so."""
+        repo = self.start_build.get("spec_repo")
+        if not isinstance(repo, str) or not repo:
+            return None
+        branch = self.start_build.get("spec_repo_branch", "main")
+        subdir = self.start_build.get("spec_repo_subdir", "SPECS")
+        if (not isinstance(branch, str) or not branch
+                or not isinstance(subdir, str) or not subdir):
+            return None
+        return repo, branch, subdir.strip("/")
+
+    def _git(self, repo: str, *args: str, stdin: Optional[str] = None,
+             env: Optional[dict] = None) -> subprocess.CompletedProcess:
+        """One git command against the canonical repo, fixed argv, no shell.
+        `commands.spec_repo_git` may replace the git binary (tests)."""
+        argv = [*self._argv("spec_repo_git", ["git"]), "-C", repo, *args]
+        full_env = None
+        if env:
+            full_env = dict(os.environ)
+            full_env.update(env)
+        try:
+            return subprocess.run(  # noqa: S603 — argv list, no shell
+                argv, capture_output=True, text=True, input=stdin,
+                timeout=SUBPROCESS_TIMEOUTS["spec-status"], env=full_env)
+        except subprocess.TimeoutExpired:
+            raise VerbError("exec-failure", "git timed out") from None
+        except OSError as exc:
+            raise VerbError("exec-failure", f"git failed to start: {exc}") from None
+
+    def _git_ok(self, repo: str, *args: str, **kw) -> str:
+        cp = self._git(repo, *args, **kw)
+        if cp.returncode != 0:
+            raise VerbError("exec-failure",
+                            f"git {args[0]} exit {cp.returncode}: "
+                            f"{(cp.stderr or cp.stdout).strip()[:300]}")
+        return cp.stdout
+
+    def _stamp_spec_status(self, slug: str, new_status: str, comment: str, *,
+                           expect: tuple[str, ...]) -> dict:
+        """Move a spec's `## Status` line in the CANONICAL repo and commit it,
+        then fast-forward the read-only mirror so residents (and this broker's
+        own confirm gate) read the new word at once. Never raises: returns
+        {ok, status, commit, why} and the caller narrates it.
+
+        WHY THE BROKER WRITES SPECS/ AT ALL. "State lives in the file"
+        (SPECS/README.md): a spec moves draft -> confirmed -> building ->
+        built@<branch> -> merged, and the next resident reads the FILE, never
+        chat scrollback. Nothing ever wrote the middle words. So a spec under
+        construction still said `confirmed`, the board listed it as buildable,
+        and on 2026-08-17 a resident set out to build one that another build
+        had already claimed. The broker is the one process that KNOWS the
+        transition the instant it happens — it launched the build — so it
+        stamps the word; `board --mark-merged` stamps the last one when the
+        merge lands. Same shape as the board's own reasoning: the thing that
+        computes the truth writes it, and nobody has to remember.
+
+        WHY A COMMIT ON THE CANONICAL REPO, NOT AN EDIT OF THE MIRROR FILE.
+        The mirror is a fast-forward follower of the canonical repo's main; a
+        dirty file in it makes the very next refresh refuse to merge the commit
+        that touches that spec (mark-merged does, every cycle), and a
+        broker-owned overlay that survives refreshes needs a second mechanism
+        to re-derive it. Committing to the source and letting the existing
+        refresh carry it keeps ONE truth with ONE reader.
+
+        HOW, without touching the keyboard's working tree: plumbing against
+        refs/heads/<branch> — read the blob at <branch>:SPECS/<slug>.md, rewrite
+        the Status line, hash-object, build a tree in a THROWAWAY index
+        (GIT_INDEX_FILE), commit-tree, then update-ref with the old sha as a
+        compare-and-swap. The keyboard may be on any branch, mid-anything: its
+        index and worktree are never read or written — EXCEPT one courtesy:
+        when HEAD is that branch and the file is clean, `checkout HEAD -- path`
+        syncs the worktree so `git status` stays quiet. A dirty file is left
+        alone and named in the result.
+
+        WHAT A RESIDENT CONTROLS: nothing here. The slug is the gate-validated
+        filename; the words written are this function's own; the one
+        resident-influenced string (a failure reason) goes through
+        _status_comment_text. `expect` guards the transition: the file must
+        currently carry one of those words, else the stamp is refused — a
+        keyboard that already advanced the spec is never overwritten."""
+        cfg = self._spec_repo()
+        if cfg is None:
+            return {"ok": False, "status": new_status, "commit": None,
+                    "why": "start_build.spec_repo is not configured, so the "
+                           "broker cannot move Status lines"}
+        repo, branch, subdir = cfg
+        relpath = f"{subdir}/{slug}.md"
+        ref = f"refs/heads/{branch}"
+        try:
+            old_sha = self._git_ok(repo, "rev-parse", "--verify", "--quiet",
+                                   ref).strip()
+            text = self._git_ok(repo, "show", f"{old_sha}:{relpath}")
+            have = parse_spec_status(text)
+            if have not in expect:
+                return {"ok": False, "status": new_status, "commit": None,
+                        "why": f"{relpath} on {branch} says {have!r}, expected "
+                               f"one of {sorted(expect)} — left as is"}
+            stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d %H:%MZ")
+            new_text = replace_spec_status(
+                text, new_status,
+                f"set by the broker on {stamp} (start-build, {slug}): {comment}")
+            if new_text is None:
+                return {"ok": False, "status": new_status, "commit": None,
+                        "why": f"{relpath} has no parseable ## Status line"}
+            blob = self._git_ok(repo, "hash-object", "-w", "--stdin",
+                                stdin=new_text).strip()
+            fd, index = tempfile.mkstemp(prefix="disjorn-broker-index.")
+            os.close(fd)
+            os.unlink(index)          # git wants a path, not an empty file
+            env = {"GIT_INDEX_FILE": index}
+            try:
+                self._git_ok(repo, "read-tree", old_sha, env=env)
+                self._git_ok(repo, "update-index", "--add", "--cacheinfo",
+                             f"100644,{blob},{relpath}", env=env)
+                tree = self._git_ok(repo, "write-tree", env=env).strip()
+            finally:
+                try:
+                    os.unlink(index)
+                except OSError:
+                    pass
+            msg = (f"{slug}: Status -> {new_status}\n\nStamped by the broker "
+                   f"(start-build). {comment}\n")
+            ident = {"GIT_AUTHOR_NAME": "disjorn-broker",
+                     "GIT_AUTHOR_EMAIL": "broker@disjorn.local",
+                     "GIT_COMMITTER_NAME": "disjorn-broker",
+                     "GIT_COMMITTER_EMAIL": "broker@disjorn.local"}
+            commit = self._git_ok(repo, "commit-tree", tree, "-p", old_sha,
+                                  "-m", msg, env=ident).strip()
+            self._git_ok(repo, "update-ref", "-m", f"broker: {slug} -> {new_status}",
+                         ref, commit, old_sha)
+        except VerbError as exc:
+            return {"ok": False, "status": new_status, "commit": None,
+                    "why": exc.message}
+        except Exception as exc:  # noqa: BLE001 — a stamp must never sink a build
+            return {"ok": False, "status": new_status, "commit": None,
+                    "why": repr(exc)}
+        result = {"ok": True, "status": new_status, "commit": commit[:7],
+                  "why": ""}
+        # Courtesy sync of the keyboard's worktree, only when it is provably
+        # safe: HEAD is this branch and the file has no local edits.
+        try:
+            head = self._git(repo, "symbolic-ref", "--quiet", "HEAD").stdout.strip()
+            if head == ref:
+                # "Clean" = worktree AND index still equal the commit we just
+                # moved past (old_sha), not HEAD — HEAD is already the new
+                # commit, against which an untouched checkout looks modified.
+                dirty = (self._git(repo, "diff", "--quiet", old_sha, "--",
+                                   relpath).returncode != 0
+                         or self._git(repo, "diff", "--quiet", "--cached",
+                                      old_sha, "--", relpath).returncode != 0)
+                if dirty:
+                    result["why"] = (f"{relpath} has local edits in the working "
+                                     "tree; the commit landed on the branch but "
+                                     "the worktree was not touched")
+                else:
+                    self._git_ok(repo, "checkout", "HEAD", "--", relpath)
+        except Exception as exc:  # noqa: BLE001 — courtesy only
+            result["why"] = f"worktree not synced: {exc!r}"
+        # Carry the word to the mirror the gate and the residents read.
+        try:
+            self._ff_mirror_main(SUBPROCESS_TIMEOUTS["refresh-mirror"])
+        except VerbError as exc:
+            result["why"] = (result["why"] + "; " if result["why"] else "") + \
+                f"mirror NOT refreshed: {exc.message}"
+        except Exception as exc:  # noqa: BLE001
+            result["why"] = (result["why"] + "; " if result["why"] else "") + \
+                f"mirror NOT refreshed: {exc!r}"
+        return result
 
     # ------------------------------------------------------------ start-build
 
@@ -1963,7 +2268,18 @@ class Broker:
         publish = kwargs.get("publish") or {}
         kwargs["mirror"] = self._refresh_mirror_for_banner(
             kwargs.get("branch", ""), publish.get("published", []))
-        self._narrate(format_build_outcome(**kwargs))
+        # The spec's Status line moves with the banner — `built@<branch>`,
+        # `failed`, or back to `confirmed` — from the SAME ladder the banner is
+        # narrated from (build_outcome_class), so file and banner cannot tell
+        # two stories. Only from `building`: a keyboard that already moved the
+        # word (merged it by hand, superseded it) is never overwritten.
+        status, comment = spec_status_after_build(
+            branch=kwargs.get("branch", ""), publish=publish,
+            unit_reason=kwargs.get("unit_reason"))
+        stamp = self._stamp_spec_status(kwargs.get("slug", ""), status, comment,
+                                        expect=("building",))
+        self._narrate(format_build_outcome(**kwargs)
+                      + format_spec_status_note(stamp))
 
     def _reap_build(self, proc: Any, spec_bytes: bytes, meta: dict,
                     timeout: int, out_path: str, err_path: str) -> None:
@@ -2063,9 +2379,16 @@ class Broker:
                 resident = meta.get("resident")
                 if resident:
                     self._release_build(resident, slug)
+                # Nothing ran, the slot came back — the word comes back too.
+                stamp = self._stamp_spec_status(
+                    slug, "confirmed",
+                    "the build seat failed its dependency preflight; nothing "
+                    "ran, no slot spent, buildable again.",
+                    expect=("building",))
                 self._narrate(format_build_refused(
                     slug=slug, branch=branch,
-                    reason=(err_s or session_out).strip()[:400]))
+                    reason=(err_s or session_out).strip()[:400])
+                    + format_spec_status_note(stamp))
                 return
 
             unit_reason = None
@@ -2315,11 +2638,27 @@ class Broker:
             raise VerbError("exec-failure",
                             f"cannot record the build: {exc}") from None
 
+        # The spec's Status line moves to `building` NOW — before the started
+        # line and before the spawn — so the file (the state of record) never
+        # says `confirmed` about a build that is under way, and so the reaper
+        # thread, which may finish in milliseconds under test, always finds
+        # `building` when it comes to stamp the terminal word. Best-effort:
+        # the result rides on the started line, and a failed stamp is said
+        # there out loud, never swallowed.
+        stamp = self._stamp_spec_status(
+            meta["slug"], "building",
+            f"build running as {build_unit_name(meta['slug'])} -> {meta['branch']}, "
+            f"launched by {build_resident} (confirmed by {meta['confirmed_by']}, "
+            f"#custodian seq {meta['seq']}). Not buildable again until this "
+            "line moves.",
+            expect=("confirmed",))
+
         # 'started' — a state transition; best-effort (a failed post must never
         # sink a launched build, and is never a heartbeat).
         self._narrate(format_build_started(
             slug=meta["slug"], branch=meta["branch"],
-            confirmed_by=meta["confirmed_by"], seq=meta["seq"], eta_sec=timeout))
+            confirmed_by=meta["confirmed_by"], seq=meta["seq"], eta_sec=timeout)
+            + format_spec_status_note(stamp))
 
         try:
             proc = self._build_spawn(argv, stdout=out_fh, stderr=err_fh)
@@ -2332,9 +2671,14 @@ class Broker:
             self._close_build_logs(out_fh, err_fh)
             self._unlink_build_logs(out_path, err_path)
             self._remove_build_sidecar(meta["slug"])
+            unstamp = self._stamp_spec_status(
+                meta["slug"], "confirmed",
+                f"the launch failed before anything ran ({_status_comment_text(exc)}); "
+                "no build happened, buildable again.",
+                expect=("building",)) if stamp.get("ok") else {}
             self._narrate(format_build_failed(
                 slug=meta["slug"], branch=meta["branch"],
-                reason=f"launch failed: {exc}"))
+                reason=f"launch failed: {exc}") + format_spec_status_note(unstamp))
             raise VerbError("exec-failure",
                             f"build failed to launch: {exc}") from None
         finally:
@@ -2356,7 +2700,11 @@ class Broker:
                   # `pid` alone is now the LOCAL sudo/systemd-run process, not
                   # the build.
                   "unit": build_unit_name(meta["slug"]),
-                  "confirmed_by": meta["confirmed_by"], "seq": meta["seq"]}
+                  "confirmed_by": meta["confirmed_by"], "seq": meta["seq"],
+                  # What happened to the spec's Status line (-> `building`).
+                  # ok=False is NOT a refusal — the build runs regardless —
+                  # but the caller should say so where a human will read it.
+                  "spec_status": stamp}
         budget_str = f"{used}/{cap}" if cap is not None else str(used)
         # Third element = audit extras. `build_started` is the BL-D3 marker:
         # the ONLY place it is emitted is here, after a successful spawn, so

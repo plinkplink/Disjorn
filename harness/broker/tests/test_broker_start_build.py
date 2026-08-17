@@ -134,10 +134,16 @@ def test_start_build_launches_confirmed_spec(harness):
     # systemd unit the build runs in. `pid` is the LOCAL sudo/systemd-run
     # process; the unit is what makes the build itself inspectable and stoppable
     # after this broker process is gone, so it belongs in the reply.
+    # And (2026-08-17) what happened to the spec's Status line: it moved to
+    # `building` in a commit on the canonical repo's main, so the file — the
+    # state of record — never says `confirmed` about a build under way.
     assert r == {"started": True, "branch": "loop/2026-07-21-gif-picker",
                  "slug": "2026-07-21-gif-picker", "pid": r["pid"],
                  "unit": "disjorn-build-2026-07-21-gif-picker.service",
-                 "confirmed_by": "plink", "seq": 139}
+                 "confirmed_by": "plink", "seq": 139,
+                 "spec_status": {"ok": True, "status": "building",
+                                 "commit": r["spec_status"]["commit"],
+                                 "why": ""}}
     harness.broker.join_builds()
     # narration: exactly a 'started' then a 'done', state-transition only.
     bodies = [p["body"] for p in harness.proposals]

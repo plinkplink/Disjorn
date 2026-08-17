@@ -278,8 +278,13 @@ def test_the_adopted_reaper_derives_the_same_banner(harness, publish, expect):
     harness.proposals.clear()
     adopted = _adopt(harness, "2026-08-13-samea", out)
     assert live.startswith(expect) and adopted.startswith(expect)
-    assert (live.replace("2026-08-13-same", "S")
-            == adopted.replace("2026-08-13-samea", "S"))
+    # The trailing `spec status:` line reports a WRITE to the spec repo, and
+    # what it says depends on the repo's state at the time (the adopted build
+    # here has no committed spec to stamp), not on the harvest bytes. The
+    # verdict — everything above that line — is what must be identical.
+    strip = lambda b: b.split("\nspec status:")[0]  # noqa: E731
+    assert (strip(live).replace("2026-08-13-same", "S")
+            == strip(adopted).replace("2026-08-13-samea", "S"))
 
 
 def test_an_adopted_build_with_no_publish_lines_fails_loud(harness):
