@@ -168,7 +168,8 @@ class PresenceEvent(BaseModel):
 
 
 class ChannelCreateRef(BaseModel):
-    """Minimal channel payload carried by channel_create / member events.
+    """Minimal channel payload carried by channel_create / channel_delete /
+    member events.
 
     `name` is None only for a DM, which a member event can now name (a bot
     added to a DM) even though channel_create never does — channel_create fires
@@ -191,6 +192,28 @@ class ChannelCreateEvent(BaseModel):
 
     type: Literal["channel_create"] = "channel_create"
     channel_id: int
+    channel: ChannelCreateRef
+
+
+class ChannelDeleteEvent(BaseModel):
+    """A text channel was deleted, along with everything in it.
+
+    Fanned out to everyone who could see the channel a moment ago — every
+    connected user and bot for a public one; for a private one its members,
+    whoever deleted it, and every admin (an admin's sidebar carries a private
+    channel they are not in as a bare row, which now has to go). That audience
+    has to be computed before the row is deleted, because afterwards
+    `is_member` answers False for everybody; the router carries it on the bus
+    event and the WS hub delivers to exactly that list. The recipient list itself is internal and
+    never reaches the wire.
+
+    `channel` describes the channel that just stopped existing, so a client can
+    say "#backroom was deleted" without having kept its own copy of the name.
+    """
+
+    type: Literal["channel_delete"] = "channel_delete"
+    channel_id: int
+    by_user_id: Optional[int] = None
     channel: ChannelCreateRef
 
 
@@ -237,6 +260,7 @@ Event = Union[
     TypingStartEvent,
     PresenceEvent,
     ChannelCreateEvent,
+    ChannelDeleteEvent,
     MemberAddEvent,
     MemberRemoveEvent,
 ]

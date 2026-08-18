@@ -5,6 +5,9 @@ Endpoints:
                                                     (private channels you are not in: admins only)
     POST   /channels {name, visibility?}  (user)  — create a named `text` channel;
                                                     409 on duplicate name; publishes channel_create
+    DELETE /channels/{id}                 (user)  — delete a `text` channel; OWNER or ADMIN;
+                                                    hard delete (content included);
+                                                    publishes channel_delete
     POST   /dms {user_id}                 (user)  — idempotent get-or-create of the 1:1 DM channel
     PUT    /channels/{id}/read {seq}      (user)  — monotonic last_read_seq upsert (no event published)
     GET    /channels/{id}/members         (actor) — member listing, membership-gated
@@ -48,9 +51,14 @@ Membership semantics (Architecture §4.1 + SPECS/2026-08-08-per-channel-membersh
   #name); enforced here plus a partial unique index (005_text_channels.sql).
 - The owner (channels.created_by, set at creation) is the only one who may
   invite, kick, or hand a bot the keys to a private channel (RULED by plink,
-  2026-08-12). There is deliberately no admin override: an in-product
-  god-view read button would make "private" a lie. plink owns the box and can
-  read the DB directly; the app ships no silent back door.
+  2026-08-12). There is deliberately no admin override on those verbs: an
+  in-product god-view read button would make "private" a lie. plink owns the
+  box and can read the DB directly; the app ships no silent back door.
+- DELETING a channel is the one verb an admin may do to a channel they do not
+  own (RULED by plink, 2026-08-17). It is not an exception to the paragraph
+  above, because it hands nobody a way to READ anything: destroying content is
+  the opposite of leaking it. Rule 5 (no silent god-view) is untouched —
+  invite/kick/bot-adds stay owner-only.
 """
 
 import re
@@ -432,6 +440,108 @@ async def create_channel(body: ChannelCreateRequest, user: CurrentUser) -> Chann
 
 
 # ---------------------------------------------------------------------------
+# DELETE /channels/{id} — destroy a text channel and everything in it
+# ---------------------------------------------------------------------------
+
+def _require_owner_or_admin(channel: dict[str, Any], user: User) -> None:
+    """Deletion is the owner's call — or an admin's (RULED by plink, 2026-08-17).
+
+    Every OTHER channel verb that admins are kept out of (invite, kick,
+    bot-adds) grants read access to content; this one destroys content and
+    grants nothing, so letting an admin clear out a room they were never in
+    leaks exactly nothing. `_require_owner` stays as-is for those verbs.
+    """
+    if channel["created_by"] != user.id and not user.is_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the channel's owner or an admin may delete it",
+        )
+
+
+@router.delete("/channels/{channel_id}")
+async def delete_channel(channel_id: int, user: CurrentUser) -> dict[str, bool]:
+    """Delete a `text` channel, its membership rows and all of its messages.
+
+    Owner or admin only. main_feed and DMs are refused (400): main_feed is the
+    house's one permanent room, and a DM belongs to two people rather than to a
+    creator who could delete it out from under the other one.
+
+    HARD delete, in one transaction: `DELETE FROM channels` cascades to
+    channel_members, to messages (ON DELETE CASCADE, and foreign_keys is ON for
+    the shared connection — see db.connect), and on through messages to
+    attachments. The messages_fts AFTER DELETE trigger fires on the cascaded
+    row deletions too, so a deleted channel's content stops being searchable
+    rather than lingering in the index (test_channel_delete asserts this, plus
+    an FTS integrity-check).
+
+    ORPHANS: attachment FILES under DATA_DIR are deliberately left on disk. The
+    rows that name them are gone, so nothing serves them; reclaiming the bytes
+    is a housekeeping job for whoever owns the box, not something this request
+    should be doing inline with a user waiting on it.
+
+    Publishes `channel_delete` on the bus. The recipient list is computed HERE,
+    before the row disappears — after the delete `is_member` answers False for
+    everyone, so the WS hub could not work out who used to be able to see the
+    channel. A public channel carries `recipients: None` (= everyone, the same
+    audience channel_create had). A private one carries its explicit member
+    list, plus the acting user, plus EVERY admin: an admin's sidebar shows a
+    private channel they are not in as a bare row (RULED 2026-08-17), so an
+    admin needs this frame to drop a ghost row for a room that no longer
+    exists. It tells them nothing they could not already see — the row was
+    already on their screen, and the frame carries no content.
+    """
+    channel = await _get_channel(channel_id)
+    if channel["type"] != "text":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Only named text channels can be deleted: main_feed is "
+                "permanent, and a DM belongs to both of its participants"
+            ),
+        )
+    _require_owner_or_admin(channel, user)
+
+    recipients: Optional[list[list[Any]]] = None
+    if channel["visibility"] == "private":
+        rows = await db.fetch_all(
+            "SELECT member_type, member_id FROM channel_members WHERE channel_id = ?",
+            (channel_id,),
+        )
+        pairs: set[tuple[str, int]] = {
+            (r["member_type"], r["member_id"]) for r in rows
+        }
+        pairs.add(("user", user.id))
+        # Admins had the channel in their sidebar as a bare, contentless row;
+        # without this frame it would sit there pointing at nothing.
+        pairs.update(
+            ("user", r["id"])
+            for r in await db.fetch_all("SELECT id FROM users WHERE is_admin = 1")
+        )
+        recipients = [[t, i] for t, i in sorted(pairs)]
+
+    async with db.transaction() as conn:
+        await conn.execute("DELETE FROM channels WHERE id = ?", (channel_id,))
+
+    await events.publish(
+        {
+            "type": "channel_delete",
+            "channel_id": channel_id,
+            "by_user_id": user.id,
+            "channel": {
+                "id": channel_id,
+                "type": channel["type"],
+                "name": channel["name"],
+                "visibility": channel["visibility"],
+            },
+            # Internal to the bus: the WS frame never carries it (knowing who
+            # else was in a room you just lost is not the client's business).
+            "recipients": recipients,
+        }
+    )
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
 # POST /dms — idempotent get-or-create 1:1 DM
 # ---------------------------------------------------------------------------
 
@@ -582,6 +692,7 @@ def _require_owner(channel: dict[str, Any], user: User) -> None:
 
     Applied to kick and to bot-adds on a private channel for the same reason —
     all three hand out (or take away) read access to the channel's content.
+    Deletion is deliberately NOT one of these: see _require_owner_or_admin.
     """
     if channel["created_by"] != user.id:
         raise HTTPException(

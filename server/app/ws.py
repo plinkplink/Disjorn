@@ -31,6 +31,16 @@ Server -> client frames (Architecture §8.2; ephemeral events carry no seq):
                                             connected users and bots, EXCEPT a
                                             private channel, which reaches only
                                             its members
+    {"type": "channel_delete", "channel_id", "by_user_id",
+     "channel": {"id", "type", "name", "visibility"}}
+                                            a text channel (and everything in
+                                            it) was deleted — everyone for a
+                                            public channel; for a private one
+                                            the members it had a moment ago,
+                                            plus every admin (who saw its bare
+                                            sidebar row).
+                                            `channel` describes what is gone so
+                                            a client can name it.
     {"type": "member_add"|"member_remove", "channel_id", "member_type",
      "member_id", "by_user_id", "channel": {...}}
                                             membership changed — to the
@@ -350,6 +360,10 @@ async def handle_bus_event(event: dict[str, Any]) -> None:
     refetch. For a private channel it goes to its members only: the channel's
     existence is discoverable via GET /channels, but nobody's socket gets
     poked about a room they were not let into.
+
+    channel_delete mirrors that audience, but cannot re-derive it: by the time
+    this runs the channel row is gone. It ships with its recipient list already
+    computed by the router — see below.
     """
     etype = event.get("type")
     if etype == "channel_create":
@@ -365,6 +379,34 @@ async def handle_bus_event(event: dict[str, Any]) -> None:
         else:
             for ws in manager.all_sockets():
                 await _send(ws, frame)
+        return
+    if etype == "channel_delete":
+        # The channel row is already gone, so is_member answers False for
+        # everyone and _send_to_members would deliver to nobody. The router
+        # worked the audience out while the channel still existed and put it in
+        # the event: `recipients` None means "everyone" (it was public), a list
+        # of [member_type, member_id] pairs means exactly those (it was
+        # private: its members, whoever deleted it, and the admins who saw its
+        # bare sidebar row). The pairs stay off the wire.
+        frame = {
+            "type": "channel_delete",
+            "channel_id": event["channel_id"],
+            "by_user_id": event.get("by_user_id"),
+            "channel": event["channel"],
+        }
+        recipients = event.get("recipients")
+        if recipients is None:
+            for ws in manager.all_sockets():
+                await _send(ws, frame)
+        else:
+            for member_type, member_id in recipients:
+                sockets = (
+                    manager.user_sockets(member_id)
+                    if member_type == "user"
+                    else manager.bot_sockets(member_id)
+                )
+                for ws in sockets:
+                    await _send(ws, frame)
         return
     if etype in _MEMBER_EVENT_TYPES:
         frame = {

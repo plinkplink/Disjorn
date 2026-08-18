@@ -16,6 +16,7 @@ Quickstart::
 from .client import DisjornAuthError, DisjornClient, DisjornError, UploadSource
 from .events import (
     ChannelCreate,
+    ChannelDelete,
     Event,
     MemberAdd,
     MemberRemove,
@@ -42,6 +43,7 @@ __all__ = [
     "TypingStart",
     "Presence",
     "ChannelCreate",
+    "ChannelDelete",
     "MemberAdd",
     "MemberRemove",
     "__version__",

@@ -61,6 +61,7 @@ python examples/echo_bot.py --url http://localhost:8000 --api-key KEY
 | `TypingStart` | `channel_id`, `author_type`, `author_id` | ephemeral, no seq |
 | `Presence` | `user_id`, `status` | ephemeral, no seq |
 | `ChannelCreate` | `channel` (`{id, type, name}`, `type` is `"text"`) | a named text channel was created; broadcast to everyone, ephemeral, no seq. Receiving it does **not** make the bot a member — a user must add the bot (`POST /channels/{id}/bots`) before its messages reach you. |
+| `ChannelDelete` | `channel_id`, `by_user_id`, `channel` | a text channel was deleted, with every message in it — same audience as `ChannelCreate` (everyone for a public channel, its members for a private one). The delete is **hard**: no `MessageDelete` tombstones follow and a backfill of that channel 404s, so drop any state you keep for it. Ephemeral, no seq. |
 | `MemberAdd` | `channel_id`, `member_type`, `member_id`, `by_user_id`, `channel` | someone (a user or a bot) was added to a channel; reaches the channel's members plus the subject, so you hear both "someone joined a room I'm in" and "I was just added". `by_user_id` is who did it. Ephemeral, no seq. |
 | `MemberRemove` | `channel_id`, `member_type`, `member_id`, `by_user_id`, `channel` | someone left or was removed; same audience, subject included. `by_user_id` is the kicker, or the leaver themselves. Ephemeral, no seq. |
 

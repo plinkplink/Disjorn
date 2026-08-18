@@ -32,6 +32,7 @@ from websockets.asyncio.client import ClientConnection
 
 from .events import (
     ChannelCreate,
+    ChannelDelete,
     Event,
     MemberAdd,
     MemberRemove,
@@ -562,6 +563,12 @@ class DisjornClient:
             return Presence(user_id=frame["user_id"], status=frame["status"])
         if ftype == "channel_create":
             return ChannelCreate(channel=frame["channel"])
+        if ftype == "channel_delete":
+            return ChannelDelete(
+                channel_id=frame["channel_id"],
+                by_user_id=frame.get("by_user_id"),
+                channel=frame["channel"],
+            )
         if ftype in ("member_add", "member_remove"):
             cls = MemberAdd if ftype == "member_add" else MemberRemove
             return cls(

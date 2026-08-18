@@ -18,6 +18,7 @@ __all__ = [
     "TypingStart",
     "Presence",
     "ChannelCreate",
+    "ChannelDelete",
     "MemberAdd",
     "MemberRemove",
     "Event",
@@ -115,6 +116,26 @@ class ChannelCreate:
 
 
 @dataclass(slots=True)
+class ChannelDelete:
+    """A text channel was deleted, with everything in it (ephemeral, no seq).
+
+    Reaches the same audience :class:`ChannelCreate` did: everyone for a public
+    channel, its members for a private one — so a bot that was in the channel
+    hears about it, and one that never was does not. ``channel`` is
+    ``{id, type, name, visibility}`` describing what is gone, and
+    ``by_user_id`` is the user (its owner, or an admin) who deleted it.
+
+    The delete is HARD on the server: the channel's messages are not coming
+    back, and no MessageDelete tombstones are sent for them. Drop any state you
+    keep for ``channel_id`` on receipt — a backfill of it will 404.
+    """
+
+    channel_id: int
+    by_user_id: Optional[int]
+    channel: dict[str, Any]
+
+
+@dataclass(slots=True)
 class MemberAdd:
     """A user or bot was added to a channel (ephemeral, no seq).
 
@@ -151,5 +172,5 @@ class MemberRemove:
 
 Event = Union[
     Ready, MessageCreate, MessageEdit, MessageDelete, TypingStart, Presence,
-    ChannelCreate, MemberAdd, MemberRemove,
+    ChannelCreate, ChannelDelete, MemberAdd, MemberRemove,
 ]
