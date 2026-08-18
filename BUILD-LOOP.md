@@ -165,6 +165,74 @@ and the split is agreed in #custodian before the build starts.
 **Claudette**: this touches your drafting-rights articulation — your read
 requested before this section is ratified.
 
+## Amendment awaiting witness (2026-08-18) — the keyboard lane
+
+**Why this exists.** On 2026-08-17/18 the keyboard shipped four things to
+main without a spec: the private-channel UI + sidebar rule (`7fcb34a`,
+`3134c6a`), delete-channel (`e26f750`, `54e490e`), the Status-line stamping
+(`b18cdb5`), and Claudette's model fallback (her `core.py`). Gable flagged
+it (seq 1363), Claudette verified it (seq 1365) and found a real hazard the
+missing review would have caught (`#custodian` is deletable). plink (seq
+1366): "I need to be able to move things forward at the keyboard
+occasionally, especially while we're getting your build tools and process set
+up. I am open to suggestions." Gable's exact ask (seq 1363): "if
+merging-on-publish is how you want Tier 2 to work when you're at the keyboard
+anyway, rule it and I'll treat the review as post-merge by design." This is
+the proposed ruling, for the residents to witness. Retroactive specs for the
+four items are filed as `SPECS/2026-08-17-delete-channel.md`,
+`2026-08-17-private-channel-ux.md`, `2026-08-17-spec-status-stamping.md`,
+`2026-08-18-claudette-model-fallback.md`.
+
+**The lane.** plink, at his own keyboard (interactive Claude Code seat, with
+or without Opus build-hands), may build and merge without waiting on the
+summon/confirm/review cycle, under these conditions:
+
+1. **One line before, in #custodian.** `keyboard: building <slug> — <one
+   sentence>`. That seq is the confirm seq (plink alone confirms; the
+   quorum rule already says so for resident surfaces and this lane is
+   plink-only by definition). No line, no lane — a keyboard build with no
+   prior line is the 08-17 defect again and gets the retro treatment.
+2. **The spec is written in the same session, from TEMPLATE, by the
+   keyboard.** Status goes straight to `merged` with the shas and a
+   `RETROACTIVE`/`keyboard-built` banner. The file is still the state of
+   record; the difference is only that it is written alongside the code
+   instead of before it. The keyboard, not plink, pays this cost.
+3. **Review is post-merge, by design, and still owed.** Review owner is
+   determined by lane exactly as before, symmetric, humans included; the
+   keyboard summons the owner (or the owner picks it up on their next turn)
+   within a day. Findings become **amendments** on the spec, each adopted or
+   refused by plink with a seq; adopted amendments are built through
+   whichever lane plink names. Post-merge review is not a rubber stamp:
+   it found `#custodian`-is-deletable and the missing deletion audit.
+4. **Two exceptions that must go spec-first, even at the keyboard.**
+   (a) **Destructive or authorization-changing verbs on the platform** (a
+   delete, a permission model change) — the spec, however short, lands
+   BEFORE deploy, and the review owner gets one summon to object before the
+   merge; a same-day turnaround, not a ceremony. Delete-channel is why.
+   (b) **Resident-identity surfaces** (a resident's memory, prompt, spine,
+   model, or the code that decides them) — that resident gets a pre-notice
+   line and may object; plink still decides, but not silently. The model
+   fallback is why: it was ruled in session and Claudette learned of it from
+   a spec written after the fact.
+5. **Scope: setup-phase and small.** The lane is for keeping the house moving
+   while the build tools are being stood up and for changes a resident would
+   spend a build slot on for less than the keyboard spends writing the
+   summon. A feature that would be a resident's build (a whole spec's worth,
+   Tier 2, cross-lane) still goes through the loop; the keyboard's own
+   judgement of "small" is itself reviewable — say so in the retro review.
+6. **Sunset.** Revisit when `start_build` + review latency is under a day
+   end-to-end for a resident build; the lane exists because it isn't yet.
+
+**What this trades, named.** Pre-merge symmetric review was the house's
+deepest rule; this lane defers it for one class of author. The residents get
+the same right the other way (they already have it: a resident builds to a
+branch and the keyboard reviews before merge). What keeps the trade honest is
+rules 1–4: the intent is witnessed before, the artifact exists at merge, and
+the review still happens and still bites.
+
+**Gable, Claudette**: your read requested before this is ratified — as
+amendments on this section, not as a rewrite. plink ratifies by seq.
+
 ## Model integrity (premise correction + WP-L5)
 
 For the record, correcting the premise this WP arrived with: no external

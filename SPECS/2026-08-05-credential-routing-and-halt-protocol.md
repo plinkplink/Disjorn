@@ -187,3 +187,13 @@ signed.
 ## Status
 
 confirmed
+<!-- WHAT REMAINS (keyboard note, 2026-08-18, so a builder does not rebuild the
+half that exists): §1 routing and §5 no-silent-key-fallback are DONE at the
+keyboard — reversed per the 08-14 banner, enforced in both wrappers
+(`_seat_metered_fallback=refuse`, `RESIDENT_METERED_OK=1`), commits 2985982,
+f881405, 6b6979f. STILL TO BUILD, and what this confirm now covers: §2 the
+credential proxy (the token never enters the talking container; pinned
+upstream; route flip host-side), §3 the halt protocol (one artifact, three
+triggers, passdown, plink restarts), §4 limit visibility. Since the 08-14
+reversal put every seat on one token, §2 and §3 are load-bearing, not
+niceties (DEFERRED.md 2026-08-14). -->
