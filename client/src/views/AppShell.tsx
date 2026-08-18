@@ -3,8 +3,10 @@ import { useEffect, useRef, useState } from "react";
 import { ApiError } from "../api";
 import { AddMembersModal } from "../components/AddMembersModal";
 import { Avatar } from "../components/Avatar";
+import { ChannelDeletedToast } from "../components/ChannelDeletedToast";
 import { CheatSheet } from "../components/CheatSheet";
 import { CreateChannelModal } from "../components/CreateChannelModal";
+import { DeleteChannelModal } from "../components/DeleteChannelModal";
 import { LockGlyph } from "../components/LockGlyph";
 import { stripMarkdown } from "../components/Markdown";
 import { MembershipNotice } from "../components/MembershipNotice";
@@ -46,22 +48,33 @@ function MemberCount({ channelId }: { channelId: number }) {
   );
 }
 
-/** The private channel's own menu: invite (owner) and leave (anyone). Same
-    scrim + popover pattern as the status picker in the footer. */
+/** The channel's own menu: invite (private, owner), leave (private, member)
+    and delete (text channel, owner or admin). Same scrim + popover pattern as
+    the status picker in the footer.
+
+    Each item is passed in as a flag rather than derived here, because the
+    three answer to different rules — membership for the first two, ownership
+    or the admin bit for the third — and only the shell knows all of them. */
 function ChannelMenu({
-  isOwner,
+  canAddMembers,
+  canLeave,
+  canDelete,
   open,
   onToggle,
   onClose,
   onAddMembers,
   onLeave,
+  onDelete,
 }: {
-  isOwner: boolean;
+  canAddMembers: boolean;
+  canLeave: boolean;
+  canDelete: boolean;
   open: boolean;
   onToggle: () => void;
   onClose: () => void;
   onAddMembers: () => void;
   onLeave: () => void;
+  onDelete: () => void;
 }) {
   return (
     <span className="channel-menu-wrap">
@@ -79,7 +92,7 @@ function ChannelMenu({
         <>
           <div className="picker-scrim" onClick={onClose} />
           <div className="status-pop channel-menu" role="menu">
-            {isOwner && (
+            {canAddMembers && (
               <button
                 role="menuitem"
                 className="status-option"
@@ -88,13 +101,31 @@ function ChannelMenu({
                 Add members
               </button>
             )}
-            <button
-              role="menuitem"
-              className="status-option danger"
-              onClick={onLeave}
-            >
-              Leave channel
-            </button>
+            {canLeave && (
+              <button
+                role="menuitem"
+                className="status-option danger"
+                onClick={onLeave}
+              >
+                Leave channel
+              </button>
+            )}
+            {canDelete && (
+              <>
+                {/* Kept apart from the reversible items above it: this one
+                    takes the history with it. */}
+                {(canAddMembers || canLeave) && (
+                  <div className="menu-sep" role="separator" />
+                )}
+                <button
+                  role="menuitem"
+                  className="status-option danger"
+                  onClick={onDelete}
+                >
+                  Delete channel
+                </button>
+              </>
+            )}
           </div>
         </>
       )}
@@ -249,6 +280,7 @@ export function AppShell() {
   const [cheatOpen, setCheatOpen] = useState(false);
   const [creatingChannel, setCreatingChannel] = useState(false);
   const [addingMembers, setAddingMembers] = useState(false);
+  const [deletingChannel, setDeletingChannel] = useState(false);
   const [channelMenuOpen, setChannelMenuOpen] = useState(false);
   const me = useSession((s) => s.user);
   const showSettingsRef = useRef(showSettings);
@@ -318,7 +350,11 @@ export function AppShell() {
       socket.sendFocus(activeChannelId);
     }
     setSidebarOpen(false);
+    // Every one of these is bound to the channel we just left — including
+    // when we left it because it was deleted out from under us.
     setChannelMenuOpen(false);
+    setAddingMembers(false);
+    setDeletingChannel(false);
     if (activeChannelId === null) return;
     /* Fetch nothing until the sidebar has landed and says we may read this
        channel. A deep link (#/channels/7) can name a private channel we are
@@ -343,6 +379,12 @@ export function AppShell() {
         if (seq > 0 && (channel === undefined || channel.unread > 0)) {
           void st.markRead(activeChannelId, seq);
         }
+      })
+      .catch(() => {
+        /* The channel can vanish between the row landing and the fetch
+           answering — deleted, or our membership revoked. Both tear the
+           channel down through their own path (the WS frame, or the resync
+           prune); a 404/403 here is that race, not something to shout about. */
       });
   }, [activeChannelId, loaded]);
 
@@ -425,6 +467,16 @@ export function AppShell() {
   const activeMember = active === undefined || isChannelMember(active);
   const isOwner =
     me !== null && active?.created_by != null && active.created_by === me.id;
+  /* Deletion is a text-channel verb only: the main feed and DMs are not
+     deletable at all (the server 400s), so the item is never offered there.
+     An admin may delete a private channel they are not in — the row is all
+     they can see of it, and it is enough to take it away. */
+  const canDelete =
+    active !== undefined &&
+    active.type === "text" &&
+    (isOwner || me?.is_admin === true);
+  const canAddMembers = activePrivate && activeMember && isOwner;
+  const canLeave = activePrivate && activeMember;
 
   const leaveActive = () => {
     if (active === undefined) return;
@@ -521,9 +573,11 @@ export function AppShell() {
               {activePrivate && activeMember && (
                 <MemberCount channelId={active.id} />
               )}
-              {activePrivate && activeMember && (
+              {(canAddMembers || canLeave || canDelete) && (
                 <ChannelMenu
-                  isOwner={isOwner}
+                  canAddMembers={canAddMembers}
+                  canLeave={canLeave}
+                  canDelete={canDelete}
                   open={channelMenuOpen}
                   onToggle={() => setChannelMenuOpen((v) => !v)}
                   onClose={() => setChannelMenuOpen(false)}
@@ -532,6 +586,10 @@ export function AppShell() {
                     setAddingMembers(true);
                   }}
                   onLeave={leaveActive}
+                  onDelete={() => {
+                    setChannelMenuOpen(false);
+                    setDeletingChannel(true);
+                  }}
                 />
               )}
               <SearchBar />
@@ -593,8 +651,19 @@ export function AppShell() {
           onClose={() => setAddingMembers(false)}
         />
       )}
+      {deletingChannel && active !== undefined && canDelete && (
+        <DeleteChannelModal
+          channelId={active.id}
+          channelName={active.name ?? ""}
+          isPrivate={activePrivate}
+          onClose={() => setDeletingChannel(false)}
+        />
+      )}
       {/* Added to / removed from a private channel — a modal for now. */}
       <MembershipNotice onOpenChannel={select} />
+      {/* The channel you were reading just went away — a corner notice, not a
+          dialog: nothing was done to you and there is nothing to answer. */}
+      <ChannelDeletedToast />
     </div>
   );
 }

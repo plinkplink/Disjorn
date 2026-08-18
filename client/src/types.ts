@@ -281,6 +281,29 @@ interface MemberEventFrame {
   };
 }
 
+/**
+ * A text channel was deleted, for good — it and every message in it.
+ *
+ * Sent to everyone who could see the channel (public: everyone; private: its
+ * members), the deleter's own tab included, so the frame is the one path that
+ * has to be idempotent with the DELETE the deleter just made. `channel` is
+ * the row as it was a moment ago: enough to name it in a notice after the
+ * sidebar entry is gone.
+ */
+export interface ChannelDeleteFrame {
+  type: "channel_delete";
+  channel_id: number;
+  /** Who deleted it — its owner, or an admin. Optional for the same reason
+      the member frames' is: never assume it resolves. */
+  by_user_id?: number | null;
+  channel: {
+    id: number;
+    type: ChannelType;
+    name: string;
+    visibility?: ChannelVisibility;
+  };
+}
+
 export interface MemberAddFrame extends MemberEventFrame {
   type: "member_add";
 }
@@ -297,6 +320,7 @@ export type ServerFrame =
   | TypingStartFrame
   | PresenceFrame
   | ChannelCreateFrame
+  | ChannelDeleteFrame
   | MemberAddFrame
   | MemberRemoveFrame;
 

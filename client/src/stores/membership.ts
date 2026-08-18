@@ -69,8 +69,14 @@ interface MembershipState {
  */
 const selfLeaving = new Set<number>();
 
-/** Drop every trace of a channel and step off it if it was on screen. */
-function forgetChannel(channelId: number): void {
+/**
+ * Drop every trace of a channel and step off it if it was on screen.
+ *
+ * Idempotent, and shared with the delete store: losing access and the channel
+ * ceasing to exist have exactly the same local fallout, and it must happen
+ * exactly once per channel however many times it is asked for.
+ */
+export function forgetChannel(channelId: number): void {
   const channels = useChannels.getState();
   channels.removeChannel(channelId);
   useMessages.getState().dropChannel(channelId);

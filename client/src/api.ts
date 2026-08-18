@@ -192,6 +192,17 @@ export function leaveChannel(
   return request("POST", `/channels/${channelId}/leave`);
 }
 
+/**
+ * Delete a text channel and everything posted in it. Its OWNER or an admin
+ * (403 otherwise); text channels only — the main feed and DMs are not
+ * deletable and answer 400, which is why this client never offers the
+ * affordance there. Everyone who could see the channel gets a
+ * `channel_delete` frame, the caller included.
+ */
+export function deleteChannel(channelId: number): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>("DELETE", `/channels/${channelId}`);
+}
+
 export function openDm(userId: number): Promise<DmResponse> {
   return request<DmResponse>("POST", "/dms", { user_id: userId });
 }

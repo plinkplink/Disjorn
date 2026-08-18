@@ -11,6 +11,7 @@
      channels, so this must stay accurate. The last focus is re-sent after
      every (re)connect because focus is per-connection server state. */
 
+import { useChannelDelete } from "./stores/channelDelete";
 import { useChannels } from "./stores/channels";
 import { useMembership } from "./stores/membership";
 import { useMessages } from "./stores/messages";
@@ -164,6 +165,11 @@ export class DisjornSocket {
         return;
       case "channel_create":
         useChannels.getState().onChannelCreate(frame.channel);
+        return;
+      // The channel is gone for everyone. Idempotent with the deleter's own
+      // teardown — this frame reaches their tab too.
+      case "channel_delete":
+        useChannelDelete.getState().onChannelDelete(frame);
         return;
       // Membership changes (mine or someone else's) — the membership store
       // owns the fallout: sidebar row, cached messages, roster, notice.

@@ -85,6 +85,18 @@
   background: var(--accent-hover);
 }
 
+/* The destructive confirm button: same weight as .btn-primary, so it reads as
+   the dialog's answer rather than a warning label, but in the danger colour. */
+.btn-danger {
+  background: var(--danger);
+  color: var(--text-on-accent);
+  font-weight: 600;
+}
+
+.btn-danger:hover {
+  background: var(--danger-hover);
+}
+
 .btn:disabled {
   opacity: 0.6;
   cursor: default;
@@ -828,7 +840,8 @@
 
 /* z-index sits above the image modal (40) — it is a small corner notice that
    blocks nothing, and being buried under a dialog would defeat the point. */
-.update-toast {
+.update-toast,
+.channel-toast {
   position: fixed;
   z-index: 50;
   right: var(--space-4);
@@ -844,7 +857,8 @@
   box-shadow: var(--shadow-raised);
 }
 
-.update-toast-text {
+.update-toast-text,
+.channel-toast-text {
   flex: 1;
   font-size: var(--text-sm);
   color: var(--text-0);
@@ -859,7 +873,8 @@
 /* Narrow screens: the composer owns the bottom-right corner, so span the
    width and sit clear of it rather than covering the send button. */
 @media (max-width: 767px) {
-  .update-toast {
+  .update-toast,
+  .channel-toast {
     left: var(--space-2);
     right: var(--space-2);
     bottom: var(--space-2);
@@ -2667,4 +2682,44 @@
   margin: 0;
   color: var(--text-1);
   font-size: var(--text-sm);
+}
+
+/* ---- delete channel ---- */
+
+/* A hairline between the reversible menu items and the one that isn't. */
+.menu-sep {
+  height: 1px;
+  margin: var(--space-1) 0;
+  background: var(--border-subtle);
+}
+
+.delete-channel-modal {
+  width: min(94vw, 440px);
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-l);
+  box-shadow: var(--shadow-raised);
+  padding: var(--space-4);
+}
+
+/* The sentence names the channel inline, so the label has to wrap with it
+   rather than hold a line to itself the way a title does. */
+.delete-channel-modal .member-modal-note .channel-label {
+  color: var(--text-1);
+}
+
+.delete-channel-modal .field input {
+  background: var(--bg-3);
+  color: var(--text-0);
+  font: inherit;
+}
+
+/* The channel name in the toast keeps its "#name" shape, on one line with
+   the sentence around it. */
+.channel-toast-text .channel-label {
+  vertical-align: baseline;
 }
