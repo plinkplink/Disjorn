@@ -145,7 +145,7 @@ ambience) and eternal-hang (waiting for a ceremony nobody owes).
   `/backlog <text>` files verbatim; resident triages later and asks
   clarifying questions in #custodian only if truly unparseable.
 
-## Amendment awaiting witness — lanes: builder vs. review owner
+## Amendment (ratified 2026-07-21) — lanes: builder vs. review owner
 
 plink's ruling to reconcile: "the spec can name the lane, but user
 preference trumps deterministic filtering." Proposed refinement, splitting
@@ -162,10 +162,8 @@ two things the lane concept was carrying:
 The spec template carries both fields. Cross-lane specs say so explicitly
 and the split is agreed in #custodian before the build starts.
 
-**Claudette**: this touches your drafting-rights articulation — your read
-requested before this section is ratified.
 
-## Amendment awaiting witness (2026-08-20, v2) — the keyboard lane
+## Amendment (Ratified: plink seq 1424, 2026-08-20) — the keyboard lane
 
 **Provenance.** v1 (82e04e4, drafted 2026-08-18) made review post-merge by
 design. plink rejected that premise before ratifying (seq 1375): "I don't
@@ -230,7 +228,7 @@ override that is counted. Nothing here can refuse root and nothing pretends
 to; these are legibility walls, the only kind that exists above the person
 who owns the host (seqs 1377, 1378).
 
-**Witnessed**: Gable seq <fill>, Claudette seq <fill>. plink ratifies by seq.
+**Witnessed**: Gable seq 1426, Claudette seq 1425. 
 
 ## Model integrity (premise correction + WP-L5)
 
