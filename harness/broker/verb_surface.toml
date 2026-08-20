@@ -33,6 +33,13 @@
 # is the only authority. Client-side validation, here as in the CLI it
 # replaces, is for a fast readable failure and nothing more.
 #
+# TWO TABLES SINCE 2026-08-19. [verbs] below is the broker's surface and is
+# what the generator reads. [adapter_tools], at the END of this file, is a
+# DESCRIPTION of tools a bot seat has from its own adapter code, with no
+# broker and no verbs.toml row behind them — it is inert to the generator by
+# construction and by test. Its own header says why that inertness is
+# load-bearing rather than incidental; read it before adding a row there.
+#
 # ORDER IS LOAD-BEARING. The entries below are in the order a bot seat
 # registers them, and registration order is prompt order. Append new verbs at
 # the END; do not reorder existing ones to be tidy.
@@ -267,4 +274,76 @@ published is readable here BEFORE anyone is asked to review it. Takes no \
 arguments and can never be aimed anywhere else. Run it before reading a spec, a \
 diff, or a branch somebody just named in channel; a stale mirror is the usual \
 reason a file looks unchanged.\
+"""
+
+
+# ══ ADAPTER TOOLS ═════════════════════════════════════════════════════════
+#
+# Everything above this line is a BROKER VERB. Everything below it is not.
+#
+# An adapter tool is a tool a bot seat has because its OWN code registers it —
+# no socket, no verbs.toml row, no broker in the path at all. `read_repo_file`
+# is the case that forced this table (SPECS/2026-08-19-read-repo-file-rev.md
+# item 3): it reads the mounted read-only mirror directly, so it sits outside
+# the generated-schema drift check the [verbs] table above exists to be, and
+# there was nowhere in this house that said what shape it has.
+#
+# THIS TABLE GRANTS NOTHING — AND UNLIKE [verbs] ABOVE, NOTHING ELSE GRANTS
+# EITHER. That difference is the whole reason to read this paragraph. For a
+# broker verb, this file is a description and verbs.toml is the grant: two
+# files, and the grant is the other one. For an adapter tool there IS no
+# verbs.toml row and no third authority anywhere — the tool exists because the
+# adapter's code registers it, and its wall is the adapter's own code. So an
+# entry here is a NOTE ABOUT code that already exists. Adding one hands nobody
+# a tool. Removing one takes nothing away. Editing one changes nothing but
+# what a reader of this file is told.
+#
+# WHICH IS WHY IT IS INERT TO THE GENERATOR, deliberately and by test.
+# gen_verb_surface.py reads [verbs] and nothing else: this table is never an
+# input to emit-tools, emit-cli, or the drift check's verb lists. It is
+# VALIDATED there (a malformed entry should fail at generation, not in a
+# container) and it is never GENERATED FROM. tests/test_verb_surface.py
+# asserts that inertness directly, because the day this table starts feeding
+# emit-tools is the day editing a config file becomes a new path that hands a
+# bot a tool — the exact opposite of why this file exists.
+#
+# WHAT KEEPS IT HONEST. test_verb_surface.py reads the adapter's core.py and
+# checks both directions: a tool described here that the adapter does not
+# register, and a tool the adapter registers that nobody described. That check
+# needs the adapter repo on disk; where it is not, the test says so and skips
+# rather than passing quietly.
+#
+# SCOPE. Tools DECLARED IN core.py, which is what a static read of that file
+# can see. Memory tools arrive from the memory package through a loop over
+# MEMORY_TOOLS, and `search_topic` is registered by the platform adapter
+# (disjorn_bot.py) — both are out of scope here and named so nobody reads
+# their absence as drift.
+#
+# GRAMMAR: seat, module, args (list), description. All four required.
+
+[adapter_tools.brave_search]
+seat = "res-claudette"
+module = "core.py"
+args = ["query"]
+description = """\
+Web search, via the Brave Search API, straight from the adapter. The oldest \
+tool this seat has and the reason this table needed more than one row: a \
+catalogue with a single entry describes an instance, not a surface.\
+"""
+
+[adapter_tools.read_repo_file]
+seat = "res-claudette"
+module = "core.py"
+args = ["path", "rev", "sha_only"]
+description = """\
+Read a file, or list a directory, from the read-only Disjorn repo mirror \
+mounted in the resident container (/opt/disjorn). No broker in the path: the \
+MOUNT is the wall, and the working-tree branch adds realpath containment so \
+no path argument can escape it.\n\nSince 2026-08-19 it has two more \
+arguments. `rev` reads the path at a revision instead — 'main', a sha, or \
+'gatehouse/<repo>/<branch>', resolved read-only against the mirror's object \
+store through git plumbing, never a checkout. `sha_only` returns just the \
+object sha (blob for a file, tree for a directory) and no content, which is \
+the motion ping in PROTOCOL.md: one call at the branch, one at 'main', \
+compare. Unknown-rev and absent-path are DISTINCT answers, deliberately.\
 """

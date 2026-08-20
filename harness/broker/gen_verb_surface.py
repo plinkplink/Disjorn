@@ -30,6 +30,14 @@ verbs.toml is the VERB SET and nothing else: it is plink's file, it is the kill
 switch, and this generator reads only the KEY NAMES from it (never the
 booleans). A verb switched off is still a verb that exists; whether a resident
 may call it is decided at the socket, per request, by the broker.
+
+ONE TABLE IS GENERATED FROM, AND IT IS NOT THE ONLY TABLE. Since 2026-08-19
+verb_surface.toml also carries [adapter_tools]: a description of tools a bot
+seat has from its own adapter code, with no broker and no verbs.toml row
+behind them. This file VALIDATES that table (a malformed entry should fail at
+a keyboard) and generates NOTHING from it — load_surface does not even return
+it. See load_adapter_tools, and the table's own header, for why the inertness
+is the point rather than an omission.
 """
 
 from __future__ import annotations
@@ -69,6 +77,15 @@ ARG_KEYS = {
 VERB_KEYS = {"tool_name", "cli_help", "description", "announce_preface", "args"}
 TYPES = {"string", "integer", "object"}
 
+# The adapter-tools table (SPECS/2026-08-19-read-repo-file-rev.md item 3).
+# READ ONLY TO BE VALIDATED, NEVER TO BE GENERATED FROM — see load_adapter_tools.
+ADAPTER_KEYS = {"seat", "module", "args", "description"}
+
+# Every top-level table verb_surface.toml is allowed to have. A typo'd table
+# name (`[adapter_tool.x]`) would otherwise be a section that silently does
+# nothing, which is the failure mode this whole file exists to end.
+SURFACE_TABLES = {"verbs", "adapter_tools"}
+
 
 class SurfaceError(Exception):
     """The catalogue and the verb set disagree, or the catalogue is malformed."""
@@ -94,7 +111,21 @@ def verb_names(verbs_path: Path = VERBS_TOML) -> list[str]:
 
 
 def load_surface(surface_path: Path = SURFACE_TOML) -> dict:
+    """The [verbs] table — THE ONLY THING ANY GENERATED ARTIFACT IS MADE FROM.
+
+    Note what this does NOT return: the [adapter_tools] table, which lives in
+    the same file and is deliberately invisible from here. Everything
+    downstream — cli_table, tool_schemas, emit_cli_block, emit_tools_module —
+    takes this function's result, so adapter tools cannot reach a generated
+    schema even by accident. That is the inertness the table's own header
+    promises, expressed as the shape of this function rather than as a
+    resolution to be careful."""
     data = tomllib.loads(surface_path.read_text(encoding="utf-8"))
+    unknown_tables = set(data) - SURFACE_TABLES
+    if unknown_tables:
+        raise SurfaceError(
+            f"{surface_path}: unknown top-level table(s) "
+            f"{sorted(unknown_tables)} — expected {sorted(SURFACE_TABLES)}")
     verbs = data.get("verbs")
     if not isinstance(verbs, dict):
         raise SurfaceError(f"{surface_path} has no [verbs] table")
@@ -123,6 +154,41 @@ def load_surface(surface_path: Path = SURFACE_TOML) -> dict:
     return verbs
 
 
+def load_adapter_tools(surface_path: Path = SURFACE_TOML) -> dict:
+    """The [adapter_tools] table — VALIDATED HERE, GENERATED FROM NOWHERE.
+
+    Adapter tools are tools a bot seat has because its own code registers
+    them: no socket, no verbs.toml row, no third authority. So this table
+    cannot be a grant even in principle, and the one way it could BECOME one
+    is by being fed to emit-tools. It is not: the only callers in this module
+    are `check` and the line `check` mode prints, neither of which emits
+    anything. Read the call sites before adding one.
+    tests/test_verb_surface.py asserts the inertness from outside.
+
+    Validating it here is not the same as generating from it: a malformed
+    entry should fail at a keyboard, loudly, rather than sit in the catalogue
+    describing nothing."""
+    data = tomllib.loads(surface_path.read_text(encoding="utf-8"))
+    tools = data.get("adapter_tools") or {}
+    if not isinstance(tools, dict):
+        raise SurfaceError(f"{surface_path}: [adapter_tools] is not a table")
+    for name, entry in tools.items():
+        unknown = set(entry) - ADAPTER_KEYS
+        if unknown:
+            raise SurfaceError(
+                f"adapter_tools.{name}: unknown key(s) {sorted(unknown)}")
+        for key in ("seat", "module", "description"):
+            if not entry.get(key):
+                raise SurfaceError(f"adapter_tools.{name}: missing {key}")
+        args = entry.get("args")
+        if not isinstance(args, list) or not all(
+                isinstance(a, str) for a in args):
+            raise SurfaceError(
+                f"adapter_tools.{name}: args must be a list of argument names "
+                f"(use [] for a tool that takes none)")
+    return tools
+
+
 # ── the drift check ──────────────────────────────────────────────────────
 
 def check(verbs_path: Path = VERBS_TOML,
@@ -149,6 +215,20 @@ def check(verbs_path: Path = VERBS_TOML,
     tool_names = [e["tool_name"] for e in surface.values()]
     for dup in {n for n in tool_names if tool_names.count(n) > 1}:
         problems.append(f"two verbs share tool_name {dup!r}")
+    # The adapter table: its GRAMMAR is checked here, its CONTENTS are checked
+    # against the adapter's own core.py by test_verb_surface.py (the two
+    # directions of that drift are not visible from this repo alone). Nothing
+    # below folds an adapter tool into the verb lists above.
+    try:
+        adapter = load_adapter_tools(surface_path)
+    except SurfaceError as exc:
+        return problems + [str(exc)]
+    for name in adapter:
+        if name in tool_names:
+            problems.append(
+                f"adapter tool {name!r} has the same name as a broker verb's "
+                f"tool: a seat would register two tools under one name and the "
+                f"second would win silently. Rename one.")
     return problems
 
 
@@ -311,7 +391,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if ns.mode == "check":
         print(f"verb surface: {len(load_surface(ns.surface))} verbs, "
-              f"every one described and switched")
+              f"every one described and switched; "
+              f"{len(load_adapter_tools(ns.surface))} adapter tools described "
+              f"and generated from nowhere")
         return 0
 
     surface = load_surface(ns.surface)
