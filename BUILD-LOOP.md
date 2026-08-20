@@ -219,6 +219,17 @@ summon/confirm cycle, under these conditions:
    the lane when a resident build is under a day end-to-end, as measured,
    not as vibes.
 
+**Field note (2026-08-20, keyboard — a lesson, not an amendment; witness
+welcome).** A keyboard build's landing step includes a COMMIT in every repo
+it touched — including repos outside Disjorn proper. The 08-18 model-fallback
+build edited bots/claudette/core.py in place and skipped the commit on the
+belief that "bots/ is outside the repo"; bots/claudette is its own git repo,
+and the uncommitted tree blocked the read-repo-file-rev merge two days later
+and made "was it ever built?" unanswerable from git — the same confusion
+class the retro-specs exist to kill, one layer down. Deployed-but-uncommitted
+is invisible to every detector in item 6. (Retro-committed as 0094de7 in
+bots/claudette; the fallback spec's Status comment carries the correction.)
+
 **What this trades, named — and it is an upgrade, not a concession.**
 Pre-merge symmetric review against the keyboard has never existed: D-1
 (2026-07-22, above) deliberately left it unbuilt, plink's promise standing

@@ -148,6 +148,7 @@ store mid-refresh.
 <!-- No Confirm record → no build. This is the gate. -->
 
 ## Status
-built@loop/2026-08-19-read-repo-file-rev
+merged
+<!-- advanced from `built@loop/2026-08-19-read-repo-file-rev` by `board --mark-merged` on 2026-08-20: build merged as 2d8cb0d. The word `built@loop/2026-08-19-read-repo-file-rev` on a merged spec made it indistinguishable from a buildable one. -->
 <!-- set by the broker on 2026-08-20 04:27Z (start-build, 2026-08-19-read-repo-file-rev): build published: disjorn.git 3008d2518e8d4cd0ed048981d9d45c7bce7d30dd, claudette.git a4dc13ad3122ce6e24e92d2e05c82ed5c0914a12 — on the branch for review, nothing merged. `board --mark-merged` advances this to `merged` once the merge lands. -->
 <!-- set by the broker on 2026-08-20 04:08Z (start-build, 2026-08-19-read-repo-file-rev): build running as disjorn-build-2026-08-19-read-repo-file-rev.service -> loop/2026-08-19-read-repo-file-rev, launched by claudette (confirmed by plink, #custodian seq 1404). Not buildable again until this line moves. -->

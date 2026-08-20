@@ -60,5 +60,9 @@ Spent: one keyboard session.
 
 ## Status
 merged
-<!-- keyboard-built and deployed 2026-08-18; not a Disjorn-repo commit (bots/
-is outside the repo) — the artifact is the file at the two paths above. -->
+<!-- keyboard-built and deployed 2026-08-18. CORRECTED 2026-08-20: the original
+note here claimed "not a Disjorn-repo commit (bots/ is outside the repo)" —
+wrong, bots/claudette is its own git repo (branch disjorn-port), and the
+uncommitted tree this reasoning left behind blocked the read-repo-file-rev
+merge two days later. The artifact is commit 0094de7 in bots/claudette,
+committed retroactively when the block was found. -->
