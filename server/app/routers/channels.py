@@ -443,6 +443,16 @@ async def create_channel(body: ChannelCreateRequest, user: CurrentUser) -> Chann
 # DELETE /channels/{id} — destroy a text channel and everything in it
 # ---------------------------------------------------------------------------
 
+# Channels the house cannot lose: deletion is refused outright, no matter who
+# asks (plink, 2026-08-19). "main" is doubly safe — the real #main is the
+# main_feed row, which the type check below already refuses — but the name is
+# listed anyway so a text channel christened `main` can never be torn down
+# either. #custodian is an ordinary text channel only by accident of birth;
+# this set is what stands between it and one fat-fingered owner/admin delete.
+# Mirrored client-side (AppShell.tsx) so the menu item is never even offered.
+PROTECTED_CHANNEL_NAMES = frozenset({"main", "custodian"})
+
+
 def _require_owner_or_admin(channel: dict[str, Any], user: User) -> None:
     """Deletion is the owner's call — or an admin's (RULED by plink, 2026-08-17).
 
@@ -464,7 +474,10 @@ async def delete_channel(channel_id: int, user: CurrentUser) -> dict[str, bool]:
 
     Owner or admin only. main_feed and DMs are refused (400): main_feed is the
     house's one permanent room, and a DM belongs to two people rather than to a
-    creator who could delete it out from under the other one.
+    creator who could delete it out from under the other one. Channels named in
+    PROTECTED_CHANNEL_NAMES (#custodian) are refused the same way — 400, the
+    target's problem rather than the caller's rights — before the permission
+    check, so nobody, owner and admin included, can delete them.
 
     HARD delete, in one transaction: `DELETE FROM channels` cascades to
     channel_members, to messages (ON DELETE CASCADE, and foreign_keys is ON for
@@ -498,6 +511,11 @@ async def delete_channel(channel_id: int, user: CurrentUser) -> dict[str, bool]:
                 "Only named text channels can be deleted: main_feed is "
                 "permanent, and a DM belongs to both of its participants"
             ),
+        )
+    if channel["name"] in PROTECTED_CHANNEL_NAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"#{channel['name']} is protected and cannot be deleted",
         )
     _require_owner_or_admin(channel, user)
 

@@ -196,6 +196,25 @@ async def test_main_feed_and_dms_are_not_deletable(client):
     assert await db.fetch_one("SELECT 1 FROM channels WHERE id = ?", (dm["id"],)) is not None
 
 
+async def test_protected_channels_are_not_deletable(client):
+    """#custodian (and any text channel named `main`) survives owner and admin
+    alike: 400 like main_feed's refusal — the target's problem, not the
+    caller's rights — and the check runs before the permission check, so even
+    the owner's own delete is refused."""
+    await make_user("alice")
+    ta = await login(client, "alice")
+    await make_user("root", is_admin=True)
+    tadmin = await login(client, "root")
+
+    for name in ("custodian", "main"):
+        cid = await make_channel(client, ta, name)
+        for token in (ta, tadmin):
+            r = await client.delete(f"/channels/{cid}", headers=cookie(token))
+            assert r.status_code == 400, r.text
+            assert "protected" in r.json()["detail"]
+        assert await db.fetch_one("SELECT 1 FROM channels WHERE id = ?", (cid,)) is not None
+
+
 async def test_unknown_channel_is_404(client):
     await make_user("alice")
     ta = await login(client, "alice")

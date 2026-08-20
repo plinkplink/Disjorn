@@ -30,6 +30,11 @@ import { SettingsView } from "./SettingsView";
 
 const SETTINGS_HASH = "#/settings";
 
+/* Channels the house cannot lose — the server refuses to delete these (400;
+   PROTECTED_CHANNEL_NAMES in server/app/routers/channels.py is the authority),
+   so the Delete item is never offered for them. */
+const PROTECTED_CHANNEL_NAMES = new Set(["main", "custodian"]);
+
 function PresenceDot({ userId }: { userId: number }) {
   const status = usePresence((s) => s.statuses[userId] ?? "offline");
   return <span className={`presence-dot ${status}`} />;
@@ -470,10 +475,14 @@ export function AppShell() {
   /* Deletion is a text-channel verb only: the main feed and DMs are not
      deletable at all (the server 400s), so the item is never offered there.
      An admin may delete a private channel they are not in — the row is all
-     they can see of it, and it is enough to take it away. */
+     they can see of it, and it is enough to take it away. Protected names
+     (#custodian; mirrors PROTECTED_CHANNEL_NAMES in
+     server/app/routers/channels.py) are refused by the server the same way,
+     so the item is withheld for them too. */
   const canDelete =
     active !== undefined &&
     active.type === "text" &&
+    !PROTECTED_CHANNEL_NAMES.has(active.name ?? "") &&
     (isOwner || me?.is_admin === true);
   const canAddMembers = activePrivate && activeMember && isOwner;
   const canLeave = activePrivate && activeMember;
