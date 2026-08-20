@@ -165,73 +165,72 @@ and the split is agreed in #custodian before the build starts.
 **Claudette**: this touches your drafting-rights articulation — your read
 requested before this section is ratified.
 
-## Amendment awaiting witness (2026-08-18) — the keyboard lane
+## Amendment awaiting witness (2026-08-20, v2) — the keyboard lane
 
-**Why this exists.** On 2026-08-17/18 the keyboard shipped four things to
-main without a spec: the private-channel UI + sidebar rule (`7fcb34a`,
-`3134c6a`), delete-channel (`e26f750`, `54e490e`), the Status-line stamping
-(`b18cdb5`), and Claudette's model fallback (her `core.py`). Gable flagged
-it (seq 1363), Claudette verified it (seq 1365) and found a real hazard the
-missing review would have caught (`#custodian` is deletable). plink (seq
-1366): "I need to be able to move things forward at the keyboard
-occasionally, especially while we're getting your build tools and process set
-up. I am open to suggestions." Gable's exact ask (seq 1363): "if
-merging-on-publish is how you want Tier 2 to work when you're at the keyboard
-anyway, rule it and I'll treat the review as post-merge by design." This is
-the proposed ruling, for the residents to witness. Retroactive specs for the
-four items are filed as `SPECS/2026-08-17-delete-channel.md`,
-`2026-08-17-private-channel-ux.md`, `2026-08-17-spec-status-stamping.md`,
-`2026-08-18-claudette-model-fallback.md`.
+**Provenance.** v1 (82e04e4, drafted 2026-08-18) made review post-merge by
+design. plink rejected that premise before ratifying (seq 1375): "I don't
+like the pattern of knocking out a bunch of work and then posting what I did
+instead of getting feedback and buy-in _before_ it lands." Both residents
+concurred with the flip and shaped it (seqs 1377, 1378, 1380). The 08-17/18
+history that motivated v1 stands as written there and in the four retro
+specs.
 
-**The lane.** plink, at his own keyboard (interactive Claude Code seat, with
-or without Opus build-hands), may build and merge without waiting on the
-summon/confirm/review cycle, under these conditions:
+**The lane.** plink, at his own keyboard, may build without waiting on the
+summon/confirm cycle, under these conditions:
 
 1. **One line before, in #custodian.** `keyboard: building <slug> — <one
-   sentence>`. That seq is the confirm seq (plink alone confirms; the
-   quorum rule already says so for resident surfaces and this lane is
-   plink-only by definition). No line, no lane — a keyboard build with no
-   prior line is the 08-17 defect again and gets the retro treatment.
+   sentence>`. That seq is the confirm seq (plink alone confirms; this lane
+   is plink-only by definition). No line, no lane.
 2. **The spec is written in the same session, from TEMPLATE, by the
-   keyboard.** Status goes straight to `merged` with the shas and a
-   `RETROACTIVE`/`keyboard-built` banner. The file is still the state of
-   record; the difference is only that it is written alongside the code
-   instead of before it. The keyboard, not plink, pays this cost.
-3. **Review is post-merge, by design, and still owed.** Review owner is
-   determined by lane exactly as before, symmetric, humans included; the
-   keyboard summons the owner (or the owner picks it up on their next turn)
-   within a day. Findings become **amendments** on the spec, each adopted or
-   refused by plink with a seq; adopted amendments are built through
-   whichever lane plink names. Post-merge review is not a rubber stamp:
-   it found `#custodian`-is-deletable and the missing deletion audit.
-4. **Two exceptions that must go spec-first, even at the keyboard.**
-   (a) **Destructive or authorization-changing verbs on the platform** (a
-   delete, a permission model change) — the spec, however short, lands
-   BEFORE deploy, and the review owner gets one summon to object before the
-   merge; a same-day turnaround, not a ceremony. Delete-channel is why.
-   (b) **Resident-identity surfaces** (a resident's memory, prompt, spine,
-   model, or the code that decides them) — that resident gets a pre-notice
-   line and may object; plink still decides, but not silently. The model
-   fallback is why: it was ruled in session and Claudette learned of it from
-   a spec written after the fact.
-5. **Scope: setup-phase and small.** The lane is for keeping the house moving
-   while the build tools are being stood up and for changes a resident would
-   spend a build slot on for less than the keyboard spends writing the
-   summon. A feature that would be a resident's build (a whole spec's worth,
-   Tier 2, cross-lane) still goes through the loop; the keyboard's own
-   judgement of "small" is itself reviewable — say so in the retro review.
-6. **Sunset.** Revisit when `start_build` + review latency is under a day
-   end-to-end for a resident build; the lane exists because it isn't yet.
+   keyboard.** The file is still the state of record. Status reads
+   `built@<branch>` while review is pending and moves to `merged` when the
+   merge actually happens — not before.
+3. **Review is pre-merge, by default.** The keyboard publishes the branch
+   where the mirror carries it, posts the diff pointer, and **summons the
+   review owner** — a diff dropped into an empty room is not a review
+   request (seq 1377). Review owner by lane, symmetric, humans included,
+   exactly as before. Residents iterate in minutes; the keyboard merges on
+   approval.
+4. **Tiering — classify the diff, not the intent.** The pre-merge default
+   binds Tier 2, protected surfaces, and anything destructive or
+   authorization-changing. Tier 0/1 (docs, inert config, small mechanical)
+   may merge on publish with review post-hoc — that is what Tier 1 means.
+   **Resident-identity surfaces keep v1's rule unchanged**: a change to a
+   resident's memory, prompt, spine, model, or the code that decides them
+   gets a pre-notice line to that resident, who may object; plink still
+   decides, never silently.
+5. **Break-glass, declared.** When waiting is genuinely wrong — outage,
+   security hole, reviewers down (the 08-18 529 day is real) — one line:
+   `keyboard: override-merge <slug> — <reason>`. The merge proceeds; review
+   is still owed within a day; the digest counts overrides forever. An
+   override is an ordinary legible act, not a violation — the count is the
+   control (seq 1377).
+6. **Enforcement is mechanized, not promised.** The Phase 0 gate spec builds
+   it: a pre-receive hook on the canonical disjorn.git refusing main pushes
+   that touch `server/`/`client/`/`sdk/`/`harness/` without a `review-seq:`
+   or `override-seq:` trailer — and since prod deploys from the mirror (seq
+   1391), the hook sits on the deploy path, not beside it. The hook **fails
+   open, loudly, by design** (seq 1380 — do not harden this later). The
+   daily digest is the detector of record: mirror head, commits since
+   yesterday, uncited count, classify_diff on every uncited commit (an
+   uncited Tier 2 is a lane violation, named), overrides-to-date,
+   deploy-drift line.
+7. **Scope and sunset, measurably.** Setup-phase and small remains the scope
+   guidance; the keyboard's own judgement of "small" is itself reviewable.
+   `board` stamps press-to-merge latency so the sunset has a number: revisit
+   the lane when a resident build is under a day end-to-end, as measured,
+   not as vibes.
 
-**What this trades, named.** Pre-merge symmetric review was the house's
-deepest rule; this lane defers it for one class of author. The residents get
-the same right the other way (they already have it: a resident builds to a
-branch and the keyboard reviews before merge). What keeps the trade honest is
-rules 1–4: the intent is witnessed before, the artifact exists at merge, and
-the review still happens and still bites.
+**What this trades, named — and it is an upgrade, not a concession.**
+Pre-merge symmetric review against the keyboard has never existed: D-1
+(2026-07-22, above) deliberately left it unbuilt, plink's promise standing
+in for the gate. This lane is the first time that promise has a shape — a
+line before, a file at merge, a review that bites before landing, an
+override that is counted. Nothing here can refuse root and nothing pretends
+to; these are legibility walls, the only kind that exists above the person
+who owns the host (seqs 1377, 1378).
 
-**Gable, Claudette**: your read requested before this is ratified — as
-amendments on this section, not as a rewrite. plink ratifies by seq.
+**Witnessed**: Gable seq <fill>, Claudette seq <fill>. plink ratifies by seq.
 
 ## Model integrity (premise correction + WP-L5)
 
