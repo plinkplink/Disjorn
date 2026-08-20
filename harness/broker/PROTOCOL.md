@@ -102,16 +102,36 @@ All verbs are per-resident toggleable in `verbs.toml` and default OFF.
   clone = what production actually runs); branches come from the gatehouse.
   Single-sourcing on the gatehouse would let mirror-`main` LEAD production —
   the merged-is-not-deployed gap inverted, in the direction nobody watches.
-- **The motion ping** — did their side change since main? One command, no file
-  reads, no broker call, from any seat with a shell:
+- **The motion ping** — did their side change since main? No file reads, no
+  broker call, and now available from either seat.
 
-      git -C /opt/disjorn rev-parse gatehouse/<repo>/loop/<slug>:<path> \
-          main:<path>
+  From a seat with a shell, as **two separate `rev-parse` calls**:
+
+      git -C /opt/disjorn rev-parse gatehouse/<repo>/loop/<slug>:<path>
+      git -C /opt/disjorn rev-parse main:<path>
+
+  Two calls, not the two-argument form: under `podman exec ... bash -lc` the
+  quoting layers mangle a two-arg command line and it comes back with an
+  answer about revs you did not ask for — which looks exactly like a real
+  result (BuildGable's field note, #custodian seq 1322).
+
+  From a **bot seat**, the same ping is two `read_repo_file` calls with
+  `sha_only` (2026-08-19 read-repo-file-rev):
+
+      read_repo_file {path: <path>, rev: "gatehouse/<repo>/loop/<slug>", sha_only: true}
+      read_repo_file {path: <path>, rev: "main",                        sha_only: true}
 
   Two identical shas means that path is untouched on the branch; two different
-  ones means read it. (A bot seat has no shell for this yet — `read_repo_file`
-  needs a rev argument and a sha-only mode first; deferred to the tools
-  discussion, plink 2026-08-15.)
+  ones means read it. A directory answers with its **tree** sha, so a path
+  that moved is motion too. Zero content either way — that is the point of the
+  mode.
+
+  **Pass `main` EXPLICITLY; do not lean on the no-rev default.**
+  `read_repo_file` with no `rev` reads the mounted WORKING TREE, and `rev:
+  "main"` reads the object store. During a `refresh-mirror` those two can
+  momentarily disagree, so a ping that omitted the rev would be comparing a
+  working tree against an object store and could report motion that was only
+  a refresh in flight. Object store to object store, both sides.
 
 ### `start-build`
 - args: `{"spec": str}` — a spec filename (or path) resolving DIRECTLY inside
