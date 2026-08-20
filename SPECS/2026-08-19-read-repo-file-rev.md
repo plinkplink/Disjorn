@@ -142,10 +142,10 @@ explicitly — object store to object store, never working tree vs object
 store mid-refresh.
 
 ## Confirm record
-- **Confirmed by**: <pending>
-- **#custodian seq**: <pending>
-- **Confirmed at**: <pending>
+- **Confirmed by**: plink
+- **#custodian seq**: 1404
+- **Confirmed at**: 8/20/2026
 <!-- No Confirm record → no build. This is the gate. -->
 
 ## Status
-`draft`
+`confirmed`
