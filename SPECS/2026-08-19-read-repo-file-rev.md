@@ -148,4 +148,5 @@ store mid-refresh.
 <!-- No Confirm record → no build. This is the gate. -->
 
 ## Status
-`confirmed`
+building
+<!-- set by the broker on 2026-08-20 04:08Z (start-build, 2026-08-19-read-repo-file-rev): build running as disjorn-build-2026-08-19-read-repo-file-rev.service -> loop/2026-08-19-read-repo-file-rev, launched by claudette (confirmed by plink, #custodian seq 1404). Not buildable again until this line moves. -->
