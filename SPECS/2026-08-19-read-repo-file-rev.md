@@ -26,32 +26,57 @@ the Confirm record below is empty until a human confirms in #custodian. -->
    <rev>:<path>` or `cat-file`), never a checkout, never a write. Accepted
    forms: `main`, a sha, or `gatehouse/<repo>/<branch>` — validated with the
    broker's existing rev charset rule (`[A-Za-z0-9._~^/{}-]`, max 200, no
-   leading dash, and additionally NO range operators: one rev, not `a..b`).
-   A directory path at a rev lists via `ls-tree`, same shape as today's
-   listing. Unknown rev or path-at-rev answers plainly ("no such rev in the
-   mirror — refresh_mirror first?"), because a stale mirror is the usual
-   cause and the tool should say so.
-2. **`sha_only` mode.** Optional boolean. True → return only the blob sha of
-   `<rev>:<path>` (or "absent"), no content. Two such calls — the branch and
-   `main` — are the motion ping from file-vision item 2, finally executable
-   from her seat: zero file reads, zero content tokens. This closes the
-   half-closed CLOSES claim in the file-vision shake-out (line: "half-closed
-   for her seat").
-3. **Catalogue membership (proposal Ask B) — DECISION POINT, flagged not
-   baked in.** `read_repo_file` is adapter-side, so it sits OUTSIDE the
-   generated-schema drift check that file-vision item 3 built. Either (a) add
-   a second table to verb_surface.toml — adapter tools, described-not-switched
-   since the broker does not authorize them — and extend
-   test_verb_surface.py to cover it, or (b) record the exemption in
-   verb_surface.toml in so many words. Claudette's argument for (a): an
-   exemption nobody recorded is how the first four drift instances happened.
-   Keyboard concurs with (a); plink decides at confirm.
+   leading dash) PLUS an explicit `..` substring rejection: `.` is in the
+   charset, so "no range operators" must be a check of its own, not an
+   implication (Claudette review, 2026-08-19). The `gatehouse/<repo>/<branch>`
+   form is normalized to the full `refs/gatehouse/<repo>/<branch>` inside the
+   tool and tested as such — today it only resolves via git's DWIM ref search
+   order, a lookup precedence nobody in this house will remember in November.
+   The rev branch carries the SAME 200 KB cap and truncation message as the
+   working-tree branch (a blob at a rev eats context just as fast), and an
+   `ls-tree` listing caps its entry count too. A directory path at a rev
+   lists via `ls-tree`, same shape as today's listing. Failures answer
+   plainly and DISTINCTLY: "rev unknown in the mirror — refresh_mirror
+   first?" is a different 3am diagnosis from "path absent at that rev", and
+   the tool must never collapse the two.
+2. **`sha_only` mode.** Optional boolean. True → return only the sha of
+   `<rev>:<path>`, no content: blob sha for a file, TREE sha for a
+   directory (a directory that moved is motion too), with the same
+   distinct absent-path / unknown-rev answers as item 1. Two such calls —
+   the branch and `main` — are the motion ping from file-vision item 2,
+   finally executable from her seat: zero file reads, zero content tokens.
+   This closes the half-closed CLOSES claim in the file-vision shake-out
+   (line: "half-closed for her seat"). NOTE the seam: absent `rev` reads
+   the checked-out working tree while `rev="main"` reads the object store,
+   and during a reaper refresh those can momentarily disagree — so a
+   motion ping passes `main` EXPLICITLY and compares object store to
+   object store (folded into the PROTOCOL.md footnote, item 4).
+3. **Catalogue membership (proposal Ask B) — DECIDED: (a), a second table,
+   with its inertness load-bearing** (Claudette review, 2026-08-19).
+   `read_repo_file` is adapter-side, so it sits OUTSIDE the generated-schema
+   drift check that file-vision item 3 built. A second table in
+   verb_surface.toml describes adapter tools — but verb_surface.toml's whole
+   premise is that it describes a surface the broker authorizes from
+   verbs.toml, and for adapter tools there is NO verbs.toml row: no third
+   authority exists. So the adapter table must be explicitly INERT to the
+   generator — checked by a test against core.py's actual schema, never fed
+   into schema generation — and it carries its own version of the header's
+   "THIS FILE GRANTS NOTHING" sentence, written for the case where nothing
+   else grants either. Get that wrong and editing a config file becomes a
+   new path that hands a bot a tool — the exact opposite of why the file
+   exists. test_verb_surface.py extends to cover the new table in both
+   directions (a described tool the adapter lacks, an adapter tool the
+   table misses).
 4. **PROTOCOL.md footnote (proposal Ask C).** The motion-ping example gains
    BuildGable's field note from #1322: run the two revs as separate
    `rev-parse` calls — the two-arg form gets mangled by quoting under
    `podman exec ... bash -lc`. Also updated to name the bot-seat path now
    that it exists (the "no shell for this yet" parenthetical at
-   PROTOCOL.md:112-114 comes out).
+   PROTOCOL.md:112-114 comes out), and to say a motion ping passes `main`
+   EXPLICITLY rather than leaning on the no-rev default: the default reads
+   the working tree, `main` reads the object store, and during a reaper
+   refresh the two can disagree — a ping must compare object store to
+   object store.
 
 ## Architecture notes
 - `bots/claudette/core.py`: `READ_REPO_FILE_TOOL` schema gains `rev` +
@@ -63,7 +88,9 @@ the Confirm record below is empty until a human confirms in #custodian. -->
 - Same change lands in `bots/fable` if Gable's adapter carries the tool
   (verify during build; if absent, note it and move on).
 - `harness/broker/verb_surface.toml` + `gen_verb_surface.py` +
-  `tests/test_verb_surface.py`: only under decision (a) of item 3.
+  `tests/test_verb_surface.py`: the adapter-tools table per item 3 —
+  descriptive only, generator-inert (asserted by test), never an input to
+  emit-tools.
 - `harness/broker/PROTOCOL.md`: item 4.
 - Deploy note: adapter code runs from the DEPLOYED copies, not the repo
   (2026-07-23 lesson) — the build's landing step must name the copy-out, and
@@ -94,6 +121,25 @@ Tier 2 advisory — `bots/claudette/core.py` is a protected path
 ## Token estimate
 One small build slot — an argument, a plumbing branch, a schema table or a
 recorded exemption, a doc footnote, tests for each.
+
+## Merge gate note
+Gable reads the full diff before this one merges (plink, 2026-08-19): the
+change slightly widens Claudette's reach, and a reach-widening change gets a
+second pair of eyes before it lands — recorded here as the practice for any
+change of that shape, not just this one.
+
+## Shake-out (2026-08-19 — Claudette review, folded)
+Approved with six deltas, all folded above: (1) item 3's (a) decided, with
+the adapter table explicitly inert to the generator, test-checked against
+core.py, carrying its own "grants nothing" header sentence; (2) the rev
+branch gets the working-tree branch's 200 KB cap + truncation message, and
+ls-tree caps its entry count; (3) `..` rejected by explicit substring check,
+not by charset implication; (4) `gatehouse/<repo>/<branch>` normalized to
+the full ref, not left to DWIM lookup order; (5) `sha_only` answers for
+directories (tree sha), and absent-path vs unknown-rev are distinct
+answers; (6) the PROTOCOL.md footnote says a motion ping passes `main`
+explicitly — object store to object store, never working tree vs object
+store mid-refresh.
 
 ## Confirm record
 - **Confirmed by**: <pending>
