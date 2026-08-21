@@ -25,6 +25,7 @@ specifically and each has a test that fails if it is quietly re-implemented:
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import sqlite3
@@ -73,7 +74,8 @@ create table messages (
   seq integer not null, author_type text not null, author_id integer not null,
   content text not null, created_at text not null default '',
   edited_at text, deleted_at text);
-create table bots (id integer primary key autoincrement, name text not null unique);
+create table bots (id integer primary key autoincrement, name text not null unique,
+  api_key_hash text);
 create table users (id integer primary key autoincrement,
   username text not null unique, display_name text not null);
 """
@@ -109,13 +111,20 @@ class Lane:
         shutil.copy2(HOOK_SRC, self.deployed)
         (self.canonical / "hooks" / "pre-receive").symlink_to(self.deployed)
 
+        # -- the broker's posting key: bot 3 is the digest's own identity.
+        # The hash scheme is pinned to the server's (auth.py hash_api_key:
+        # sha256 hexdigest) — the same coupling metrics.py declares.
+        self.key_path = root / "broker-api-key"
+        self.key_path.write_text("test-broker-key\n", encoding="utf-8")
+        broker_key_hash = hashlib.sha256(b"test-broker-key").hexdigest()
+
         # -- the message store
         self.db_path = root / "disjorn.db"
         db = sqlite3.connect(self.db_path)
         db.executescript(SCHEMA)
-        db.executemany("insert into bots (id, name) values (?, ?)",
-                       [(1, "Claudette"), (2, "Gable"), (3, "broker"),
-                        (5, "keyboard")])
+        db.executemany("insert into bots (id, name, api_key_hash) values (?, ?, ?)",
+                       [(1, "Claudette", None), (2, "Gable", None),
+                        (3, "broker", broker_key_hash), (5, "keyboard", None)])
         db.execute("insert into users (id, username, display_name) "
                    "values (1, 'plink', 'plink')")
         db.commit()
@@ -188,7 +197,8 @@ class Lane:
                 "deploy_tree": str(self.prod), "message_db": str(self.db_path)}
         gate.update(over)
         return {"gate": gate,
-                "disjorn": {"custodian_channel_id": CUSTODIAN},
+                "disjorn": {"custodian_channel_id": CUSTODIAN,
+                            "api_key_path": str(self.key_path)},
                 "paths": {"protected_paths": str(PROTECTED)},
                 "residents": {}}
 
@@ -315,7 +325,8 @@ def test_an_unchanged_floor_is_reported_as_unchanged(lane):
 def test_a_moved_floor_is_the_loudest_line(lane):
     lane.write_log(lane.genesis("seeded", lane.head()))
     lane.post(2000, CUSTODIAN, "bot", 3,
-              f"{M.DRIFT_HEADER}\nfloor: {'c' * 40}\nmirror head: {'c' * 40}")
+              f"{M.DRIFT_HEADER} — keyboard lane\n"
+              f"floor: {'c' * 40}\nmirror head: {'c' * 40}")
     d = lane.drift()
     assert d["floor_moved"] is True
     block = lane.block()
@@ -328,7 +339,8 @@ def test_a_log_deleted_whole_and_relost_still_trips_floor_motion(lane):
     second genesis line and no truncation to see. The baseline lives in the
     message store, outside the git-dir, so this still fires."""
     lane.post(2000, CUSTODIAN, "bot", 3,
-              f"{M.DRIFT_HEADER}\nfloor: {'d' * 40}\nmirror head: {'d' * 40}")
+              f"{M.DRIFT_HEADER} — keyboard lane\n"
+              f"floor: {'d' * 40}\nmirror head: {'d' * 40}")
     d = lane.drift()  # no log at all
     assert d["genesis"]["state"] == "NO LOG"
     assert d["floor_moved"] is True
@@ -346,6 +358,86 @@ def test_the_block_round_trips_its_own_floor_line(lane):
     prev = M.previous_digest(M.gate_paths(lane.config()))
     assert prev["floor"] == floor
     assert prev["mirror_head"] == lane.head()
+
+
+def test_no_one_else_can_write_the_baseline(lane):
+    """The baseline moved into the message store to survive a log delete —
+    but the store is a CHANNEL, writable by everyone. Without the author
+    filter, anyone quoting a drift block (verbatim, floor line and all)
+    becomes the baseline: chat as detector input, the G1d hole one layer
+    out."""
+    lane.write_log(lane.genesis("seeded", lane.head()))
+    quote = (f"{M.DRIFT_HEADER} — keyboard lane\n"
+             f"floor: {'c' * 40}\nmirror head: {'c' * 40}")
+    lane.post(2000, CUSTODIAN, "bot", 1, quote)    # a resident
+    lane.post(2001, CUSTODIAN, "user", 1, quote)   # a human
+    d = lane.drift()
+    assert d["previous"] is None
+    assert d["floor_moved"] is False
+    assert "no baseline yet" in lane.block()
+
+
+def test_the_brokers_own_build_banner_is_not_the_baseline(lane):
+    """The author filter alone cannot carry this: build banners post under
+    the SAME bot identity as the digest, and the gate build's own banner
+    mentions the header mid-sentence. On day one that banner is the newest
+    match — without the block-form rule the first live digest opens with
+    FLOOR MOVED against a banner."""
+    lane.write_log(lane.genesis("seeded", lane.head()))
+    lane.post(2000, CUSTODIAN, "bot", 3,
+              f"build done | gate -> loop/gate | diff: hook plus the "
+              f"digest's {M.DRIFT_HEADER} block (liveness, floor motion)")
+    d = lane.drift()
+    assert d["previous"] is None
+    assert d["floor_moved"] is False
+    assert "no baseline yet" in lane.block()
+
+
+def test_a_floorless_own_block_is_skipped_for_an_older_true_baseline(lane):
+    """A drift block with no parseable floor line (DETECTOR NOT CONFIGURED,
+    a mangled post) is no-baseline, never motion — and the scan continues to
+    the next-older candidate, because floors never legitimately move, so an
+    older true baseline still detects a replaced log."""
+    floor = lane.head()
+    lane.write_log(lane.genesis("seeded", floor))
+    lane.post(2000, CUSTODIAN, "bot", 3,
+              f"[custodian daily] x\n\n{M.DRIFT_HEADER} — keyboard lane\n"
+              f"floor: {floor}\nmirror head: {floor}")
+    lane.post(2100, CUSTODIAN, "bot", 3,
+              f"{M.DRIFT_HEADER} — keyboard lane\n"
+              f"DETECTOR NOT CONFIGURED: broker.toml has no [gate] block")
+    d = lane.drift()
+    assert d["previous"] and d["previous"]["seq"] == 2000
+    assert d["floor_moved"] is False
+
+
+def test_an_unresolvable_identity_is_a_detector_fault_not_a_first_run(lane):
+    """If the digest cannot resolve its OWN posting identity, widening the
+    query would hand the baseline to anyone in the channel, and quietly
+    reporting 'no baseline yet' would retire the floor-motion check forever
+    behind a benign line. It renders as a fault, and floor motion is
+    UNCHECKED, said out loud."""
+    floor = lane.head()
+    lane.write_log(lane.genesis("seeded", floor))
+    lane.post(2000, CUSTODIAN, "bot", 3,
+              f"{M.DRIFT_HEADER} — keyboard lane\n"
+              f"floor: {floor}\nmirror head: {floor}")
+    cfg = lane.config()
+    cfg["disjorn"]["api_key_path"] = str(lane.root / "no-such-key")
+    d = M.gate_drift(cfg, date=DATE)
+    assert d["previous"] is None and d["floor_moved"] is False
+    assert d["baseline_error"]
+    block = M.compose_drift_block(d)
+    assert "BASELINE UNAVAILABLE" in block
+    assert "no baseline yet" not in block
+
+
+def test_a_key_no_bot_owns_is_the_same_detector_fault(lane):
+    lane.write_log(lane.genesis("seeded", lane.head()))
+    lane.key_path.write_text("rotated-but-not-registered\n", encoding="utf-8")
+    d = lane.drift()
+    assert d["baseline_error"]
+    assert "BASELINE UNAVAILABLE" in lane.block()
 
 
 # --------------------------------------------------------------------------
@@ -529,13 +621,32 @@ def test_below_a_lazy_floor_is_unverifiable_not_clean(lane):
     assert "Not clean, just unknown" in block
 
 
-def test_a_covered_commit_is_not_uncovered_even_when_the_push_was_refused(lane):
-    """Coverage asks whether the hook SAW the range, not what it decided."""
+def test_a_refused_push_is_not_permanent_mirror_drift_noise(lane):
+    """A refusal is the hook doing its one job: nothing landed, so the range
+    can never resolve in the mirror. Rev-listing it would increment 'N logged
+    push ranges do not resolve — history was rewritten' on every digest
+    forever, one legitimate refusal at a time — a counter that only goes up
+    and never means anything gets muted in a week."""
+    floor = lane.head()
+    lane.write_log(lane.genesis("seeded", floor),
+                   lane.push(floor, "e" * 40, "NONE", "refused"))
+    d = lane.drift()
+    assert d["unresolvable_ranges"] == 0
+    assert "do not resolve" not in lane.block()
+
+
+def test_commits_on_main_whose_only_log_line_is_a_refusal_are_uncovered(lane):
+    """A refused line attests a refusal, not a landing. If the range's commits
+    are on `main` anyway, they arrived by a path the hook never passed — the
+    absent-or-disarmed case — and reading the refusal as coverage would
+    render exactly that arrival as clean, forever, once it ages out of the
+    digest window. (Before the review fix this asserted the opposite:
+    refused ranges counted as covered.)"""
     floor = lane.head()
     sha = lane.commit("harness/x.py", "x = 1\n", "harness: x")
     lane.write_log(lane.genesis("seeded", floor),
                    lane.push(floor, sha, "NONE", "refused"))
-    assert lane.drift()["uncovered"] == []
+    assert lane.drift()["uncovered"] == [sha]
 
 
 # --------------------------------------------------------------------------

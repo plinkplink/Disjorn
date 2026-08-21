@@ -525,6 +525,10 @@ def gate_paths(config: dict) -> dict:
         "deploy_tree": deploy_tree,
         "message_db": message_db,
         "custodian_channel_id": config.get("disjorn", {}).get("custodian_channel_id"),
+        # The key behind the digest's own posts (_sdk_transport reads the same
+        # path). previous_digest needs it to tell its own posts apart from
+        # anyone else typing the drift header into the channel.
+        "api_key_path": config.get("disjorn", {}).get("api_key_path"),
         "protected_paths": config.get("paths", {}).get("protected_paths"),
         "author_aliases": aliases,
     }
@@ -834,11 +838,12 @@ def _committer(mirror: str, sha: str) -> Optional[str]:
 def push_coverage(paths: dict, log: dict, db) -> dict:
     """Fold the push log into commit sets. THE definition of cited (G1/G1b).
 
-    covered — every commit inside any logged push range, whatever the outcome.
+    covered — every commit inside a logged push range that LANDED (passed or
+      failed-open). A refused push never landed — its commits are not on
+      `main` to need covering, and its range can never resolve in the mirror.
       A commit with no covering line never met the hook at all.
     cited — commits inside a logged range whose trailer RESOLVES per G2.
-      Outcome is not consulted: a push the hook refused never landed, and a
-      push that failed open with a real trailer is still a cited push. What
+      A push that failed open with a real trailer is still a cited push. What
       cannot happen is the laundering case — a failed-open push with NO trailer
       contributes no citation, and no later push can reach back and bless it,
       because coverage is per logged range and never per reachability."""
@@ -855,6 +860,12 @@ def push_coverage(paths: dict, log: dict, db) -> dict:
     for push in log.get("pushes", []):
         if push["outcome"] == "failed-open":
             fail_open += 1
+        if push["outcome"] == "refused":
+            # A refused push never landed: nothing to cover, nothing to cite,
+            # and its range can never resolve in the mirror. Rev-listing it
+            # would misattribute every legitimate refusal — the hook doing
+            # its one job — as permanent "history was rewritten" noise.
+            continue
         old, new = push["old"], push["new"]
         if set(new) == {"0"}:
             continue  # a ref deletion covers nothing
@@ -1038,6 +1049,45 @@ def deploy_state(config: Optional[dict] = None, *, mirror: Optional[str] = None,
 
 FLOOR_LINE_RE = re.compile(r"^floor:\s+(\S+)", re.MULTILINE)
 MIRROR_HEAD_LINE_RE = re.compile(r"^mirror head:\s+(\S+)", re.MULTILINE)
+# The drift header as it opens a real block: at the start of a line, followed
+# by the em-dash tail compose_drift_block writes. The same broker bot also
+# posts build banners that mention the header MID-sentence ("the digest's GATE
+# DRIFT block"); those are not digests and must never become the baseline.
+DRIFT_BLOCK_RE = re.compile(rf"^{re.escape(DRIFT_HEADER)} — ", re.MULTILINE)
+# Newest-first scan bound for the baseline query. The baseline is normally the
+# first or second row; the cap only exists so a pathological channel cannot
+# turn this read into a full-table walk.
+BASELINE_SCAN_CAP = 50
+
+
+def _digest_author_id(paths: dict, db) -> Optional[int]:
+    """The bot id behind the broker's posting key ([disjorn].api_key_path) —
+    the identity every digest post carries. None when the key or its bot row
+    cannot be read; the caller reports that loudly rather than widening the
+    query, because a baseline query with no author filter lets anyone who can
+    post in the channel write the floor-motion baseline.
+
+    The lookup is pinned to the server's key scheme (routers/auth.py,
+    hash_api_key: sha256 hexdigest over the raw key). If that scheme ever
+    changes, this resolves to None and the BASELINE UNAVAILABLE line is the
+    tell — a detector fault, never a silent no-baseline."""
+    key_path = paths.get("api_key_path")
+    if not key_path:
+        return None
+    try:
+        with open(key_path, "r", encoding="utf-8") as fh:
+            key = fh.read().strip()
+    except OSError:
+        return None
+    if not key:
+        return None
+    key_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    try:
+        row = db.execute("select id from bots where api_key_hash=?",
+                         (key_hash,)).fetchone()
+    except sqlite3.Error:
+        return None
+    return int(row["id"]) if row else None
 
 
 def previous_digest(paths: dict, db=None) -> Optional[dict]:
@@ -1047,29 +1097,55 @@ def previous_digest(paths: dict, db=None) -> Optional[dict]:
     outside the git-dir — and not in the log, because the whole point of the
     check is to survive the log being deleted and lazily re-born. It adds no
     storage anywhere (G5): it is read back out of a post that already exists,
-    through the message-store access G2 already grants."""
+    through the message-store access G2 already grants.
+
+    Three rules decide what counts as the baseline (review findings, seqs
+    1470/1471), and all three are needed:
+      * only posts by the digest's OWN identity — the bot behind the broker's
+        posting key — are considered. The channel is writable by everyone,
+        and a baseline anyone can write is the G1d hole reopened one layer
+        out. If that identity cannot be resolved, the return is an ``error``
+        marker, never a widened query and never a quiet no-baseline.
+      * the header must OPEN a line, in block form. The same broker bot posts
+        build banners that mention the header mid-sentence; a banner is not a
+        digest.
+      * the post must carry a parseable ``floor:`` line. A drift block
+        without one (DETECTOR NOT CONFIGURED, a mangled post) is skipped and
+        the scan continues to the next-older candidate — no-baseline rather
+        than motion, and an older true baseline still beats none: floors
+        never legitimately move, so age does not stale it."""
     own = db is None
     db = db or _open_db(paths.get("message_db"))
     if db is None:
         return None
     try:
-        row = db.execute(
+        author = _digest_author_id(paths, db)
+        if author is None:
+            return {"seq": None, "floor": None, "mirror_head": None,
+                    "error": "could not resolve the digest's own posting "
+                             "identity (api_key_path -> bots row)"}
+        rows = db.execute(
             "select seq, content from messages where channel_id=? "
-            "and deleted_at is null and content like ? "
-            "order by seq desc limit 1",
-            (paths.get("custodian_channel_id"), f"%{DRIFT_HEADER}%")).fetchone()
+            "and deleted_at is null and author_type='bot' and author_id=? "
+            "and content like ? order by seq desc limit ?",
+            (paths.get("custodian_channel_id"), author,
+             f"%{DRIFT_HEADER}%", BASELINE_SCAN_CAP)).fetchall()
     except sqlite3.Error:
         return None
     finally:
         if own:
             db.close()
-    if row is None:
-        return None
-    floor = FLOOR_LINE_RE.search(row["content"])
-    head = MIRROR_HEAD_LINE_RE.search(row["content"])
-    return {"seq": row["seq"],
-            "floor": floor.group(1) if floor else None,
-            "mirror_head": head.group(1) if head else None}
+    for row in rows:
+        content = row["content"]
+        if not DRIFT_BLOCK_RE.search(content):
+            continue  # our own banner quoting the header mid-sentence
+        floor = FLOOR_LINE_RE.search(content)
+        if floor is None:
+            continue  # a block with no floor line is no baseline, not motion
+        head = MIRROR_HEAD_LINE_RE.search(content)
+        return {"seq": row["seq"], "floor": floor.group(1),
+                "mirror_head": head.group(1) if head else None}
+    return None
 
 
 # -- the drift block --------------------------------------------------------
@@ -1092,6 +1168,12 @@ def gate_drift(config: dict, *, date: str, now: Optional[_dt.datetime] = None,
     try:
         if previous is None:
             previous = previous_digest(paths, db)
+        if previous and previous.get("error"):
+            # Identity failure is a detector fault and renders as one — it
+            # must never look like the benign first-digest state, or a broken
+            # key file silently retires the floor-motion check forever.
+            drift["baseline_error"] = previous["error"]
+            previous = None
         drift["previous"] = previous
         drift["floor_moved"] = bool(
             previous and (previous.get("floor") or "NONE")
@@ -1242,6 +1324,11 @@ def compose_drift_block(drift: dict) -> str:
     elif prev:
         L.append(f"floor: {floor_txt} — unchanged since the previous digest "
                  f"(seq {prev['seq']})")
+    elif drift.get("baseline_error"):
+        L.append(f"floor: {floor_txt}")
+        L.append(f"  BASELINE UNAVAILABLE: {drift['baseline_error']} — floor "
+                 f"motion UNCHECKED this digest. This is a detector fault, "
+                 f"not a first run.")
     else:
         L.append(f"floor: {floor_txt} — no baseline yet (first digest since "
                  f"install); this is the floor every later digest checks "
