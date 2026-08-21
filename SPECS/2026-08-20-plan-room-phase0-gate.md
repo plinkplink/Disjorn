@@ -208,4 +208,5 @@ Named so the press doesn't discover them.
 <!-- No Confirm record → no build. This is the gate. -->
 
 ## Status
-`confirmed`
+building
+<!-- set by the broker on 2026-08-21 16:35Z (start-build, 2026-08-20-plan-room-phase0-gate): build running as disjorn-build-2026-08-20-plan-room-phase0-gate.service -> loop/2026-08-20-plan-room-phase0-gate, launched by gable (confirmed by plink, #custodian seq 1434). Not buildable again until this line moves. -->
