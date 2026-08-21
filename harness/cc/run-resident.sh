@@ -82,6 +82,12 @@ NETWORK="${RESIDENT_NETWORK:-pasta}"
 
 args=(
   run --rm
+  # --init: catatonit as PID 1 reaps orphaned children. Same fix as
+  # run-build.sh (where the first gate build's git zombies hit pids.max);
+  # a summon spawns too few subprocesses to hit the wall, but the failure
+  # mode — fork() EAGAIN that reads as a tool call randomly erroring — is
+  # identical, and a long agentic session is a build by another name.
+  --init
   # --replace: if a container with this name survived the last stop, take the
   # name anyway instead of refusing. Without it, a stop that timed out leaves a
   # stale container and EVERY subsequent start fails with podman exit 125
