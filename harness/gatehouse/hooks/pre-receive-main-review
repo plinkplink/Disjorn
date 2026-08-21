@@ -1,0 +1,425 @@
+#!/usr/bin/env python3
+"""pre-receive-main-review — the keyboard lane's own gate (Plan Room Phase 0).
+
+WHY THIS EXISTS. plink, #custodian seq 1375: "why not gate my merges on your
+reviews? Just like your builds are gated on mine? [...] I don't like the
+pattern of knocking out a bunch of work and then posting what I did instead of
+getting feedback and buy-in *before* it lands." A resident's build cannot reach
+`main` without a confirmed spec; the keyboard's could, and did, all week. This
+hook is the other half of that symmetry.
+
+WHAT IT DOES, AND NOTHING MORE. It refuses a `main` ref update whose commit
+range touches `server/`, `client/`, `sdk/` or `harness/` unless the pushed
+head's commit message carries a `review-seq: <n>` or `override-seq: <n>`
+trailer.
+
+IT IS DELIBERATELY DUMB — paths plus a trailer, a presence check on text. It
+does NOT check that the seq exists, that it lives in #custodian, or that the
+person who wrote it is not the person pushing. That validation is real and it
+is the DAILY DIGEST's (harness/metrics/metrics.py, G2): the digest is the
+detector of record, and a gate that tried to resolve a seq would need the
+message store on the push path, which is one more thing that can wedge the
+keyboard. Everything else passes untouched: non-main branches, gatehouse refs,
+doc-only ranges.
+
+FAIL-OPEN IS THE DESIGN INTENT, NOT AN OPERATIONAL NOTE (Claudette, seq 1380 —
+recorded here so nobody "hardens" it later). Any error other than a definite
+missing trailer — an unreadable config, a range git cannot parse, a log that
+will not open — allows the push and prints a loud warning. A gate that can
+wedge the keyboard while the reviewers are down (the 08-18 529 outage) is worse
+than the disease it treats. There is exactly ONE refusal path in this file, and
+it is reached only when the hook positively knows both facts: the range touches
+a guarded path, and the head commit carries no trailer.
+
+IT ALSO WRITES WHAT IT SAW (seq 1433, G1b). One appended line per `main` push
+decision — timestamp, `old..new`, the trailer found or `NONE`, and the outcome
+— to an append-only log beside the hook in the canonical repo's git-dir. That
+log is not a cache and cannot be rebuilt: push boundaries and fail-open firings
+exist nowhere in git. It is the digest's ONLY source for what a "push" was, so
+a five-commit push with one trailer on the tip reads as one cited range rather
+than one pass and four false violations.
+
+THE LOG OPENS WITH A GENESIS LINE (seq 1446 G1c), AND THE LINE NAMES ITS OWN
+PROVENANCE (seq 1450 G1d). The digest flags any commit that entered `main`
+above the floor with no covering log line — that is how a disarmed hook is
+caught — so the floor has to exist before the first coverage line does, or
+every commit in history reads as uncovered on day one. Two births:
+
+  * `GENESIS seeded` — written by the install step (`--seed-genesis`), naming
+    `main`'s head at install. The floor predates the first push, and what is
+    below it is out of scope BY AGREEMENT.
+  * `GENESIS lazy` — written by this hook, before the first decision line, if
+    it finds no log at all. The floor's *existence* must never depend on a hand
+    step being remembered (this week's install record argues against trusting
+    one), but the two births are not equivalent and must not read alike: a lazy
+    floor is minted from whatever `main` looked like the first time the hook
+    happened to fire, which proves nothing about the window between install and
+    that firing — exactly the window the uncovered flag exists to catch. So the
+    digest renders a lazy floor as a WARNING and calls everything below it
+    unverifiable rather than clean. The hand step's forgetting becomes loud
+    instead of load-bearing.
+
+Writing the line is inside the fail-open envelope: a log write that errors warns
+loudly and never blocks the push.
+
+INSTALL — see ../README.md. One plink symlink into `disjorn.git/hooks/`,
+pointing at a DEPLOYED COPY under the broker's tree, never a working clone
+(seq 1428 G4): a `git checkout` in a clone would silently disarm the gate.
+
+Usage:
+    pre-receive-main-review                       # as git's pre-receive hook
+    pre-receive-main-review --seed-genesis        # install step; seeds the floor
+    pre-receive-main-review --print-log-path      # where the log lives
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as _dt
+import os
+import re
+import subprocess
+import sys
+from typing import Optional
+
+MAIN_REF = "refs/heads/main"
+
+# The lanes the gate covers. Everything else — SPECS/, the markdown at the repo
+# root, notes — is doc-only and passes without a trailer.
+GUARDED_PREFIXES = ("server/", "client/", "sdk/", "harness/")
+
+# Presence check on text, matched per line, last one wins (trailers sit at the
+# bottom of a message). Deliberately not `git interpret-trailers`: the hook must
+# behave identically to the digest's reader, and one regex in two files is
+# easier to keep honest than one parser and one regex.
+TRAILER_RE = re.compile(
+    r"^\s*(review-seq|override-seq)\s*:\s*(\d+)\s*$", re.IGNORECASE)
+
+LOG_NAME = "disjorn-push-log"
+NO_TRAILER = "NONE"
+
+PASSED = "passed"
+REFUSED = "refused"
+FAILED_OPEN = "failed-open"
+
+# git's sha1 empty tree. Used as the base when `main` is being CREATED (old is
+# all zeros), so "the range" is the whole tree rather than an unparseable spec.
+EMPTY_TREE_SHA1 = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+
+class GitError(RuntimeError):
+    """A git invocation this hook cannot interpret. Always fails OPEN."""
+
+
+# --------------------------------------------------------------------------
+# Small helpers — pure, so the tests can reach them without a repo.
+# --------------------------------------------------------------------------
+
+def now_str(now: Optional[_dt.datetime] = None) -> str:
+    now = now or _dt.datetime.now(_dt.timezone.utc)
+    return now.astimezone(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def is_zero(sha: str) -> bool:
+    """git's all-zeros sha: ref creation (as `old`) or deletion (as `new`)."""
+    return bool(sha) and set(sha) == {"0"}
+
+
+def find_trailer(message: str) -> Optional[str]:
+    """`review-seq:<n>` / `override-seq:<n>` from a commit message, or None.
+
+    Returns the NORMALISED form (lowercase kind, no spaces) because that string
+    goes straight into the log and the digest parses it back."""
+    found = None
+    for line in message.splitlines():
+        m = TRAILER_RE.match(line)
+        if m:
+            found = f"{m.group(1).lower()}:{m.group(2)}"
+    return found
+
+
+def guarded_hits(paths) -> list:
+    """The subset of a diff's paths that live in a gated lane."""
+    return sorted({p for p in paths if p.startswith(GUARDED_PREFIXES)})
+
+
+# --------------------------------------------------------------------------
+# git plumbing (read-only).
+# --------------------------------------------------------------------------
+
+def _git(git_dir: str, *args: str) -> str:
+    proc = subprocess.run(
+        ["git", "--git-dir", git_dir, *args],
+        capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if proc.returncode != 0:
+        raise GitError(f"git {' '.join(args)}: {proc.stderr.strip()}")
+    return proc.stdout
+
+
+def resolve_git_dir() -> str:
+    """The git-dir git is running this hook in. Absolute, so the log path does
+    not move with the cwd."""
+    env = os.environ.get("GIT_DIR")
+    if env:
+        return os.path.abspath(env)
+    proc = subprocess.run(["git", "rev-parse", "--git-dir"],
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise GitError(f"git rev-parse --git-dir: {proc.stderr.strip()}")
+    return os.path.abspath(proc.stdout.strip())
+
+
+def log_path_for(git_dir: str) -> str:
+    """Where the push log lives: beside the hook, in the canonical git-dir.
+
+    `DISJORN_PUSH_LOG` overrides it — that is how the tests point it at a
+    scratch file, and how a deployment can move it if it ever must. The digest
+    reads the same key from broker.toml's `[gate].push_log`; if you override one
+    you must set the other, or the detector goes blind while the gate keeps
+    working (which the digest's liveness line will say out loud)."""
+    override = os.environ.get("DISJORN_PUSH_LOG")
+    if override:
+        return os.path.abspath(override)
+    return os.path.join(git_dir, "hooks", LOG_NAME)
+
+
+def changed_paths(git_dir: str, old: str, new: str) -> list:
+    """Repo-relative paths the range old..new touches.
+
+    A two-dot tree comparison on purpose: a force-push that rewrites `main`
+    should be judged on what the ref's content actually becomes, not on the
+    commits that happen to be reachable."""
+    base = EMPTY_TREE_SHA1 if is_zero(old) else old
+    out = _git(git_dir, "diff", "--name-only", base, new)
+    return [p for p in out.splitlines() if p.strip()]
+
+
+def head_message(git_dir: str, new: str) -> str:
+    return _git(git_dir, "log", "-1", "--format=%B", new)
+
+
+# --------------------------------------------------------------------------
+# The decision.
+# --------------------------------------------------------------------------
+
+def decide(git_dir: str, old: str, new: str) -> dict:
+    """What this `main` update is: {outcome, trailer, hits, why}.
+
+    NEVER raises. Anything it cannot establish becomes `failed-open` with a
+    reason — see the fail-open note in the module docstring."""
+    if is_zero(new):
+        # A deletion of main. There is no range and no head commit to read a
+        # trailer from, so there is nothing this hook can check; it is also
+        # nothing a trailer would make safer. Pass it, and LOG it, so the
+        # digest's reader sees the event rather than a hole.
+        return {"outcome": PASSED, "trailer": None, "hits": [],
+                "why": "ref deletion — no commit range to gate"}
+    try:
+        hits = guarded_hits(changed_paths(git_dir, old, new))
+    except GitError as exc:
+        return {"outcome": FAILED_OPEN, "trailer": None, "hits": [],
+                "why": f"cannot read the commit range: {exc}"}
+    if not hits:
+        return {"outcome": PASSED, "trailer": None, "hits": [],
+                "why": "no gated lane touched"}
+    try:
+        trailer = find_trailer(head_message(git_dir, new))
+    except GitError as exc:
+        return {"outcome": FAILED_OPEN, "trailer": None, "hits": hits,
+                "why": f"cannot read the head commit message: {exc}"}
+    if trailer:
+        return {"outcome": PASSED, "trailer": trailer, "hits": hits,
+                "why": f"trailer present: {trailer}"}
+    return {"outcome": REFUSED, "trailer": None, "hits": hits,
+            "why": "gated lane touched and the head commit carries no "
+                   "review-seq / override-seq trailer"}
+
+
+# --------------------------------------------------------------------------
+# The append-only push log.
+# --------------------------------------------------------------------------
+
+def format_genesis(kind: str, sha: str, now=None) -> str:
+    return f"GENESIS {kind} {now_str(now)} {sha}\n"
+
+
+def format_push(old: str, new: str, trailer, outcome: str, now=None) -> str:
+    return (f"PUSH {now_str(now)} {old}..{new} "
+            f"{trailer or NO_TRAILER} {outcome}\n")
+
+
+def _append(path: str, line: str) -> None:
+    """One O_APPEND write of one whole line. No read-modify-write, so two
+    concurrent pushes interleave as two lines rather than corrupting one."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        os.write(fd, line.encode("utf-8"))
+    finally:
+        os.close(fd)
+
+
+def opens_with_genesis(path: str) -> bool:
+    """True iff the log exists and its FIRST line is a genesis line. False for
+    a missing or empty log — and for a truncated one, which is the point: the
+    digest reports that case as TRUNCATED rather than as merely young."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            first = fh.readline()
+    except OSError:
+        return False
+    return first.startswith("GENESIS ")
+
+
+def ensure_genesis(path: str, old: str, warn, now=None) -> None:
+    """Write `GENESIS lazy` if there is no log at all.
+
+    Only when the file is MISSING OR EMPTY. A log whose first line is not a
+    genesis line was truncated, and prepending a fresh floor to it would erase
+    the evidence — so this leaves it alone and lets the digest shout."""
+    try:
+        if os.path.exists(path) and os.path.getsize(path) > 0:
+            return
+        _append(path, format_genesis("lazy", old, now))
+        warn(f"push log seeded lazily at {path} (floor {old}). The install "
+             f"step's --seed-genesis was never run; the digest will report "
+             f"every commit below this floor as UNVERIFIABLE, not clean.")
+    except OSError as exc:
+        warn(f"could not seed the push log at {path}: {exc}")
+
+
+def record(path: str, old: str, new: str, trailer, outcome: str,
+           warn, now=None) -> None:
+    """Genesis-if-needed, then one decision line. Inside the fail-open
+    envelope: a log write that errors warns loudly and never blocks."""
+    try:
+        ensure_genesis(path, old, warn, now)
+        _append(path, format_push(old, new, trailer, outcome, now))
+    except OSError as exc:
+        warn(f"PUSH LOG WRITE FAILED at {path}: {exc}. The push is allowed "
+             f"(fail-open), but this push is now invisible to the digest and "
+             f"will be reported as an UNCOVERED commit.")
+
+
+# --------------------------------------------------------------------------
+# Hook entry point.
+# --------------------------------------------------------------------------
+
+BANNER = "disjorn keyboard-lane gate"
+
+
+def run_hook(stdin_text: str, git_dir: str, log_path: str,
+             out=sys.stderr, now=None) -> int:
+    """Process git's pre-receive stdin. 0 allows the push, 1 refuses it."""
+
+    def say(msg: str) -> None:
+        out.write(f"{BANNER}: {msg}\n")
+
+    def warn(msg: str) -> None:
+        out.write(f"{BANNER}: WARNING — {msg}\n")
+
+    refused = False
+    for raw in stdin_text.splitlines():
+        parts = raw.split()
+        if len(parts) != 3:
+            if raw.strip():
+                warn(f"unparseable pre-receive line {raw.strip()!r} — allowed")
+            continue
+        old, new, ref = parts
+        if ref != MAIN_REF:
+            continue  # non-main branches, gatehouse refs, tags: untouched
+
+        d = decide(git_dir, old, new)
+        record(log_path, old, new, d["trailer"], d["outcome"], warn, now)
+
+        if d["outcome"] == FAILED_OPEN:
+            warn(f"THE GATE FAILED OPEN on {old}..{new}: {d['why']}. The push "
+                 f"is ALLOWED — a gate that can wedge the keyboard is worse "
+                 f"than the disease. The daily digest counts this.")
+        elif d["outcome"] == REFUSED:
+            refused = True
+            say(f"REFUSED {old}..{new} -> {ref}")
+            say(f"  this push touches a gated lane: "
+                f"{', '.join(d['hits'][:8])}"
+                + (f" (+{len(d['hits']) - 8} more)" if len(d["hits"]) > 8 else ""))
+            say("  the head commit carries no review-seq / override-seq trailer.")
+            say("  Either get a review and cite it:")
+            say("      review-seq: <#custodian seq of the review>")
+            say("  or take the override, which is an ordinary legible act and")
+            say("  not a violation — post in #custodian:")
+            say("      keyboard: override-merge <slug> — <reason>")
+            say("  and cite that seq:")
+            say("      override-seq: <that seq>")
+            say("  Review is still owed within a day. Overrides are counted")
+            say("  forever, in every daily digest. The count is the control.")
+            say("  Amend the tip commit with the trailer and push again.")
+    return 1 if refused else 0
+
+
+# --------------------------------------------------------------------------
+# Install helper — the seeded floor.
+# --------------------------------------------------------------------------
+
+def seed_genesis(git_dir: str, log_path: str, out=sys.stderr, now=None) -> int:
+    """`--seed-genesis`: write `GENESIS seeded <ts> <main head>`.
+
+    Idempotent when the log is already properly born (re-running the install is
+    a no-op), and LOUD when it is not: a log that exists without a genesis line
+    was truncated, and seeding on top of it would launder that."""
+    if opens_with_genesis(log_path):
+        out.write(f"{BANNER}: push log already seeded at {log_path} — "
+                  f"nothing to do.\n")
+        return 0
+    if os.path.exists(log_path) and os.path.getsize(log_path) > 0:
+        out.write(f"{BANNER}: REFUSING to seed {log_path}: it already has "
+                  f"content but does not open with a genesis line. That log "
+                  f"was truncated, not merely young — do not paper over it.\n")
+        return 1
+    try:
+        head = _git(git_dir, "rev-parse", MAIN_REF).strip()
+    except GitError as exc:
+        out.write(f"{BANNER}: cannot read {MAIN_REF} in {git_dir}: {exc}\n")
+        return 1
+    try:
+        _append(log_path, format_genesis("seeded", head, now))
+    except OSError as exc:
+        out.write(f"{BANNER}: cannot write {log_path}: {exc}\n")
+        return 1
+    out.write(f"{BANNER}: seeded {log_path} with floor {head}. Commits below "
+              f"this floor are out of scope by agreement; the first digest "
+              f"after install flags nothing historical.\n")
+    return 0
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(
+        description="disjorn keyboard-lane pre-receive gate (Plan Room Phase 0)")
+    ap.add_argument("--seed-genesis", action="store_true",
+                    help="install step: seed the push log's floor with main's "
+                         "current head, so the floor predates the first push")
+    ap.add_argument("--print-log-path", action="store_true",
+                    help="print where the push log lives and exit")
+    ap.add_argument("--git-dir", default=None,
+                    help="the canonical repo (default: git's own GIT_DIR)")
+    ns = ap.parse_args(argv)
+
+    try:
+        git_dir = os.path.abspath(ns.git_dir) if ns.git_dir else resolve_git_dir()
+    except GitError as exc:
+        # Even here: if this is running AS a hook, not knowing the git-dir must
+        # not refuse the push.
+        sys.stderr.write(f"{BANNER}: WARNING — {exc}; allowing the push.\n")
+        return 0 if not (ns.seed_genesis or ns.print_log_path) else 1
+
+    log_path = log_path_for(git_dir)
+
+    if ns.print_log_path:
+        print(log_path)
+        return 0
+    if ns.seed_genesis:
+        return seed_genesis(git_dir, log_path)
+    return run_hook(sys.stdin.read(), git_dir, log_path)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

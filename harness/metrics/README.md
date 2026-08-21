@@ -77,9 +77,59 @@ tool-action cap. WP-H12 adds **no parallel wall-clock mechanism** — it only
 are legible next to the broker budget. The broker is connectionless and has no
 session concept; session wall-clock is correctly H5's job.
 
+## The GATE DRIFT block — keyboard-lane detector of record (Plan Room Phase 0)
+
+Every daily digest carries one `GATE DRIFT` block. It is the validating half of
+the pre-receive gate in `harness/gatehouse/` — that hook is deliberately dumb
+(paths plus a trailer, a presence check on text), so everything it delegates
+lands here. Without this, `review-seq: 1` passes forever and the gate is a
+spelling test.
+
+The block opens with the detector's **own liveness**, three lines, in this
+order and for this reason:
+
+1. **the hook** — installed path, the sha of the file the symlink actually
+   resolves to, and the mirror's sha for
+   `harness/gatehouse/hooks/pre-receive-main-review`, or `ABSENT`. Committed is
+   not installed.
+2. **the push log's genesis** — `seeded` / `lazy` (a warning, never a plain
+   state) / `TRUNCATED` / `REPLACED` / `NO LOG`.
+3. **the floor**, against the floor *this digest's own previous post* reported.
+   Any motion is `FLOOR MOVED`, the loudest line in the block. Floors don't
+   move. That baseline lives in the message store, outside the git-dir, so it
+   survives the log being deleted and lazily re-born — the one tamper case both
+   in-log tells miss.
+
+Then: mirror head, commits since the last digest and how many are uncited,
+`classify_diff` on every uncited commit with an uncited Tier 2 named as a
+**LANE VIOLATION**, the fail-open count, uncovered commits, overrides to date,
+and a deploy-drift line.
+
+**Citation is defined once, from push truth.** A commit is cited iff a logged
+push covers it and that push's trailer resolves — the seq exists and lives in
+#custodian. Push boundaries come from the hook's log and are never
+reconstructed from reachability, so a five-commit push with one trailer on the
+tip is one cited range rather than one pass and four false violations. A
+`review-seq` whose author is the person who pushed is flagged **self-cited**.
+
+**Nothing here is derived-but-stored.** The override count is recomputed from
+`main`'s trailers every time, so "counted forever" survives a database rebuild.
+The floor baseline is read back out of a post that already exists. The push log
+is the one primary record — push boundaries and fail-open firings exist nowhere
+in git — which puts it in the broker audit log's class, not a cache's.
+
+Config lives in `broker.toml [gate]`. **With that block absent the digest still
+posts a drift block, and it says `DETECTOR NOT CONFIGURED`** — an empty drift
+block and a disarmed detector must never read alike.
+
+`deploy_state()` is exported as a named function on purpose: the Plan Room's
+tri-state badge is the same computation and calls it rather than
+re-implementing it.
+
 ## Tests
 
 ```
-server/.venv/bin/python -m pytest harness/metrics/tests -q      # 14, no network
-server/.venv/bin/python -m pytest harness/broker/tests  -q      # 33 incl. budget
+server/.venv/bin/python -m pytest harness/metrics/tests   -q    # no network
+server/.venv/bin/python -m pytest harness/gatehouse/tests -q    # the hook itself
+server/.venv/bin/python -m pytest harness/broker/tests    -q    # 33 incl. budget
 ```
