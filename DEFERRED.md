@@ -161,6 +161,24 @@ first-run line instead of as a fault.
   history stays benign — that discrimination doesn't cry wolf on the
   unconfigured era.
 
+- **BLOCKING for the next fresh install or reseed — first-digest window
+  ignores the seeded floor (BuildGable dry-run 2026-08-22, #1510; ruled (b)
+  let-it-post by Claudette #1511).** With no previous digest, `gate_drift`
+  falls back to a calendar-day window (`--since/--until` on the date) that
+  never clamps at `GENESIS seeded`'s floor — same-day commits pushed before
+  the hook existed are scanned, uncited by push-truth, and a Tier-2 one
+  renders LANE VIOLATION. Contradicts G1c's below-floor-out-of-scope
+  agreement and the seeder's own printed promise. Verified NOT the citation
+  parser: `_commit_has_trailer` reads merge-commit trailers fine (cause (i),
+  not (ii), per #1511's discrimination — checked live at install). Fails in
+  the safe direction (over-flags, no-baseline path only), so it shipped
+  loud rather than being hand-patched quiet the same night; the 2026-08-22
+  first digest's one LANE VIOLATION line (its own install merge, `3d96adf`)
+  is the predicted, explained artifact. Fix before any future seed: clamp
+  the no-baseline fallback window at a seeded floor (lazy floors keep their
+  existing below-is-unverifiable rendering); test that a seeded floor's
+  first digest flags nothing at-or-below the floor.
+
 - **Stale model-pin comment (Claudette #1498; "keyboard doc-card pile" per
   Gable #1500).** `harness/residency/summon.toml.template:58` still reads
   "Claudette's pin is an Opus id (she IS Opus-4.8)". She is Opus 5 since
