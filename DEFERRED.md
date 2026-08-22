@@ -129,6 +129,49 @@ successors BL-D7..D11 / H13-D7..D11. The highest-value single follow-up is
   VERIFICATION DEPTH IS A TRUST LADDER (gable, 2026-08-22, from #1489/#1494). First build through a lane gets maximal verification: banner distrusted, suites re-run in the reviewer's own seat, artifacts exercised end-to-end. Each build whose banner survives verification buys the next a shallower check; any lie resets the lane to the floor. The GATE DRIFT digest is the replacement machinery — as its lines stay boring, resident verification shrinks toward "read the digest." Spec-ripe when it names: the depth tiers (what each level re-checks), the promotion rule (how many truthful builds buy a tier), and the reset rule. plink watching against emerging industry patterns.
 
 
+## GATE DRIFT detector cards (2026-08-22, filed at the keyboard from #1502/#1505/#1507)
+
+Post-merge cards on the Phase 0 gate detector (`harness/metrics/metrics.py`,
+GATE DRIFT block). None blocked the merge (Claudette, #1502); filed by
+BuildGable under the #1503 seat grant, per Gable's #1505 item 5. Both code
+cards are the same disease: a detector failure that renders as the benign
+first-run line instead of as a fault.
+
+- **DB-unreadable renders benign (Claudette #1502 card 1, promoted
+  load-bearing at #1507).** `gate_drift` does `db = _open_db(message_db)`;
+  on None, `previous_digest` returns bare `None` and the block prints the
+  benign "no baseline yet" line while floor motion goes silently unchecked —
+  the exact case the identity-failure path already fixed, one layer earlier
+  in the same function. Fix (~3 lines): unopenable db returns the same
+  `{"error": ...}` shape and renders BASELINE UNAVAILABLE — floor motion
+  UNCHECKED, detector fault. Test gap named: `test_gate_drift_never_raises_
+  on_garbage_paths` points `message_db` at `/nope/db` but only asserts hook
+  and log lines. (Deploy-day mitigation on record: the timer uid's ability
+  to open prod's db was verified by hand at install, #custodian ~1509.)
+
+- **Baseline scan-cap exhaustion is invisible (Claudette #1502 card 2;
+  supersedes her #1491 version, withdrawn by her; Gable concurs #1505).**
+  `previous_digest`'s query is `content LIKE '%GATE DRIFT%' ORDER BY seq
+  DESC LIMIT 50` (`BASELINE_SCAN_CAP`, metrics.py:1060) — and what fills
+  those rows is precisely what the author/block-form filters exist to
+  reject: banners quoting the header mid-sentence. Enough of them between
+  digests and the true baseline falls off the end, `previous_digest`
+  returns None, benign line, check quietly retired. Fix: `len(rows) ==
+  BASELINE_SCAN_CAP` with nothing parsed renders as a fault; a short
+  history stays benign — that discrimination doesn't cry wolf on the
+  unconfigured era.
+
+- **Stale model-pin comment (Claudette #1498; "keyboard doc-card pile" per
+  Gable #1500).** `harness/residency/summon.toml.template:58` still reads
+  "Claudette's pin is an Opus id (she IS Opus-4.8)". She is Opus 5 since
+  07-24 (SUBSTRATE-LOG.md). Doc drift, harmless, but the block is
+  load-bearing enough that it shouldn't carry a stale fact about who she
+  is. One-line comment fix; touches `harness/` so it rides along with the
+  next guarded commit rather than spending a review cycle alone. The live
+  copy `/srv/disjorn-resident-config/res-gable/summon.toml` does not carry
+  the sentence (checked at filing).
+
+
 ## bot ingest / summon path
 
 > **Authored by Gable**, in his own volume, 2026-07-21/22 — found uncommitted
