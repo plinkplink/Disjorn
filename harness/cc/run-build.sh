@@ -329,6 +329,15 @@ unset _repo_path _repo _dest
 
 args=(
   run --rm
+  # --init: podman injects catatonit as PID 1, which reaps children orphaned
+  # onto it. Without it PID 1 is the session itself, which never wait()s for
+  # processes it didn't spawn — the first gate build orphaned 2036 git
+  # zombies against the cgroup's pids.max of 2048 and its post-commit test
+  # re-run died in fork() with EAGAIN. From inside a session that failure
+  # mode looks like a tool call randomly erroring, not like exhaustion: a
+  # longer build hits the wall mid-work. Raising pids.max only buys time;
+  # a reaping PID 1 kills the class.
+  --init
   # Per-build container name so concurrent builds never collide; the slug is
   # broker-validated kebab (branch/argv-safe).
   --name "$CONTAINER_NAME"
