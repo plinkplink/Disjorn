@@ -34,8 +34,12 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import hashlib
 import json
 import os
+import re
+import sqlite3
+import subprocess
 import sys
 import tempfile
 import tomllib
@@ -419,13 +423,1010 @@ def write_metrics(config: dict, doc: dict) -> str:
     return out_path
 
 
+# ==========================================================================
+# KEYBOARD-LANE GATE — the detector of record (Plan Room Phase 0).
+# ==========================================================================
+#
+# The pre-receive hook (harness/gatehouse/hooks/pre-receive-main-review) is
+# deliberately dumb: paths plus a trailer, a presence check on text. Everything
+# it delegates lands HERE, and it has to actually exist here or `review-seq: 1`
+# passes forever and the whole gate is a spelling test (seq 1428, G2).
+#
+# This half computes, for one day:
+#
+#   * the gate's OWN LIVENESS first (G3) — an empty drift block must be
+#     distinguishable from a disarmed detector. Install is hand-made, and
+#     committed-isn't-installed went four-for-four on 08-19/20.
+#   * CITATION, defined once from PUSH TRUTH (G1/G1b): a commit is cited iff a
+#     logged push covers it AND that push's trailer resolves (the seq exists,
+#     lives in #custodian). Push boundaries come from the hook's log and are
+#     never reconstructed from reachability — a five-commit push with one
+#     trailer on the tip is ONE cited range, not one pass and four false
+#     violations. And because coverage is per logged range, a later
+#     trailer-bearing push cannot retroactively bless its ancestors: an uncited
+#     push that landed only because the hook failed open stays uncited forever,
+#     which is exactly the case this detector exists to catch.
+#   * SELF-CITATION — a `review-seq` whose author is the person who pushed. The
+#     comfortable failure mode, named so it cannot pass as review. (An
+#     `override-seq` IS the pusher's own line by design; no check there.)
+#   * UNCOVERED commits — anything that entered `main` above the genesis floor
+#     with no covering log line arrived while the hook was absent or disarmed.
+#     Together with the fail-open count, these are the two facts that exist
+#     nowhere else in the house.
+#   * FLOOR MOTION — the floor this digest sees against the floor its own
+#     PREVIOUS post reported. That baseline lives in the message store, outside
+#     the git-dir, beyond the reach of a log delete or a repo re-create, so it
+#     is the tell that survives when both in-log tamper tells die with the log.
+#
+# NOTHING HERE IS DERIVED-BUT-STORED (G5). The override count is recomputed
+# from `main`'s trailers every time, so "counted forever" survives a database
+# rebuild. The floor-motion baseline is read back out of the previous post. The
+# push log is the one primary record — push boundaries and fail-open firings
+# exist nowhere in git and cannot be derived after the fact, which makes it the
+# same class as the broker audit log, not a cache.
+
+GATE_GUARDED_PREFIXES = ("server/", "client/", "sdk/", "harness/")
+HOOK_REPO_PATH = "harness/gatehouse/hooks/pre-receive-main-review"
+DRIFT_HEADER = "GATE DRIFT"
+
+# The push log's grammar, pinned on both sides: the hook writes it, this reads
+# it, and harness/gatehouse/tests pins the writer's output against these shapes.
+GENESIS_RE = re.compile(r"^GENESIS\s+(seeded|lazy)\s+(\S+)\s+(\S+)\s*$")
+PUSH_RE = re.compile(r"^PUSH\s+(\S+)\s+(\S+)\.\.(\S+)\s+(\S+)\s+(\S+)\s*$")
+TRAILER_VALUE_RE = re.compile(r"^(review-seq|override-seq):(\d+)$")
+# The same trailer, as it appears in a commit message (the override count is
+# derived from `main`'s history, never from the log).
+TRAILER_LINE_RE = re.compile(
+    r"^\s*(review-seq|override-seq)\s*:\s*(\d+)\s*$", re.IGNORECASE | re.MULTILINE)
+
+# How many named flags of one kind go on the line before it summarises. NO
+# SILENT CAPS: whenever a list is cut, the line says how many were dropped.
+FLAG_CAP = 10
+
+# git identities that belong to a message-store author under another name.
+# Overridable per-deployment in `[gate.author_aliases]`.
+DEFAULT_AUTHOR_ALIASES = {"keyboard": ["plink"], "broker": ["disjorn-broker"]}
+
+# Post-hoc classification asks about the SHAPE of a landed diff — which paths,
+# how large — not about whether it was auto-appliable. classify() fails closed
+# on missing gate results, so a digest that passed none would call every commit
+# in history Tier 2 and the LANE VIOLATION flag would mean nothing.
+CLASSIFY_GATES = {"tests": True, "typecheck": True, "build": True}
+
+
+def gate_paths(config: dict) -> dict:
+    """The `[gate]` block, with every path this module needs resolved.
+
+    Absent config is NOT an error and NOT silence: `configured` goes False and
+    the drift block says the detector is not wired up, which is the whole point
+    of G3 — an empty block and a disarmed one must not read alike."""
+    g = config.get("gate", {}) if isinstance(config.get("gate"), dict) else {}
+    canonical = g.get("canonical_repo")
+    deploy_tree = g.get("deploy_tree")
+    hook_link = g.get("hook_link")
+    push_log = g.get("push_log")
+    if canonical:
+        hook_link = hook_link or os.path.join(canonical, "hooks", "pre-receive")
+        push_log = push_log or os.path.join(canonical, "hooks", "disjorn-push-log")
+    message_db = g.get("message_db")
+    if not message_db and deploy_tree:
+        message_db = os.path.join(deploy_tree, "server", "data", "disjorn.db")
+    aliases = dict(DEFAULT_AUTHOR_ALIASES)
+    for name, alts in (g.get("author_aliases") or {}).items():
+        if isinstance(alts, list):
+            aliases[str(name)] = [str(a) for a in alts]
+    return {
+        "configured": bool(canonical and g.get("mirror")),
+        "canonical_repo": canonical,
+        "hook_link": hook_link,
+        "push_log": push_log,
+        "mirror": g.get("mirror"),
+        "branch": g.get("mirror_branch", "main"),
+        "deploy_tree": deploy_tree,
+        "message_db": message_db,
+        "custodian_channel_id": config.get("disjorn", {}).get("custodian_channel_id"),
+        # The key behind the digest's own posts (_sdk_transport reads the same
+        # path). previous_digest needs it to tell its own posts apart from
+        # anyone else typing the drift header into the channel.
+        "api_key_path": config.get("disjorn", {}).get("api_key_path"),
+        "protected_paths": config.get("paths", {}).get("protected_paths"),
+        "author_aliases": aliases,
+    }
+
+
+# -- read-only plumbing -----------------------------------------------------
+
+def _git(repo: str, *args: str) -> Optional[str]:
+    """`git -C repo …`, or None if it fails. Never raises: a drift block that
+    dies on one unreadable repo reports nothing at all, which is the failure
+    mode this whole build exists to prevent."""
+    if not repo:
+        return None
+    try:
+        proc = subprocess.run(["git", "-C", repo, *args], capture_output=True,
+                              text=True, encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def _read_bytes(path: Optional[str]) -> tuple[Optional[bytes], Optional[str]]:
+    """Read a file, falling back to `sudo -n cat` for broker-owned paths.
+
+    The push log lives in the canonical repo's git-dir, which belongs to the
+    broker user; board.py reaches the same gatehouse through `sudo git` for the
+    same reason. If BOTH fail the caller reports NO LOG — a permission problem
+    is indistinguishable from a deletion from out here, and that is the correct
+    direction to fail: a lost log degrades to more flags, never fewer."""
+    if not path:
+        return None, "no path configured"
+    missing = False
+    try:
+        return Path(path).read_bytes(), None
+    except FileNotFoundError as exc:
+        first, missing = str(exc), True
+    except OSError as exc:
+        first = str(exc)
+    if missing and os.access(os.path.dirname(path) or ".", os.R_OK):
+        # We can see the directory and the file is not in it. That is an
+        # answer, not a permission problem — do not go asking sudo.
+        return None, first
+    try:
+        proc = subprocess.run(["sudo", "-n", "cat", path],
+                              capture_output=True)
+    except OSError:
+        return None, first
+    if proc.returncode == 0:
+        return proc.stdout, None
+    return None, first
+
+
+def _resolve_link(path: Optional[str]) -> tuple[Optional[str], bool]:
+    """(target, target_exists) for the installed hook symlink.
+
+    Returns (None, False) when the link is missing — which, from a process that
+    may not be able to traverse the broker's tree, also covers "cannot see it".
+    ABSENT is the loud answer and the safe one."""
+    if not path:
+        return None, False
+    if os.path.lexists(path):
+        target = os.path.realpath(path)
+        return target, os.path.exists(target)
+    if os.access(os.path.dirname(path) or ".", os.R_OK):
+        return None, False  # the hooks dir is readable and the link is not in it
+    try:
+        proc = subprocess.run(["sudo", "-n", "readlink", "-f", path],
+                              capture_output=True, text=True)
+    except OSError:
+        return None, False
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None, False
+    target = proc.stdout.strip()
+    probe = subprocess.run(["sudo", "-n", "test", "-e", target],
+                           capture_output=True)
+    return target, probe.returncode == 0
+
+
+def _blob_sha(mirror: Optional[str], data: bytes) -> Optional[str]:
+    """The git blob sha of some bytes, computed by the MIRROR's git so the hash
+    algorithm matches the sha we compare it against. Falls back to sha1 (git's
+    default object format) if the mirror is unavailable."""
+    if mirror:
+        try:
+            proc = subprocess.run(
+                ["git", "-C", mirror, "hash-object", "--no-filters",
+                 "--stdin"], input=data, capture_output=True)
+            if proc.returncode == 0:
+                return proc.stdout.decode().strip()
+        except OSError:
+            pass
+    h = hashlib.sha1()
+    h.update(b"blob %d\0" % len(data))
+    h.update(data)
+    return h.hexdigest()
+
+
+def _short(sha: Optional[str], n: int = 8) -> str:
+    return (sha or "?")[:n]
+
+
+# -- the push log -----------------------------------------------------------
+
+def parse_push_log(path: Optional[str]) -> dict:
+    """Read the hook's append-only log. Never raises."""
+    doc = {"path": path, "present": False, "error": None, "genesis": [],
+           "first_is_genesis": False, "pushes": [], "malformed": 0}
+    data, err = _read_bytes(path)
+    if data is None:
+        doc["error"] = err
+        return doc
+    doc["present"] = True
+    first = True
+    for raw in data.decode("utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        m = GENESIS_RE.match(line)
+        if m:
+            doc["genesis"].append({"kind": m.group(1), "ts": m.group(2),
+                                   "sha": m.group(3)})
+            if first:
+                doc["first_is_genesis"] = True
+            first = False
+            continue
+        m = PUSH_RE.match(line)
+        if m:
+            doc["pushes"].append({
+                "ts": m.group(1), "old": m.group(2), "new": m.group(3),
+                "trailer": None if m.group(4) == "NONE" else m.group(4),
+                "outcome": m.group(5),
+            })
+        else:
+            doc["malformed"] += 1
+        first = False
+    return doc
+
+
+def genesis_state(log: dict) -> dict:
+    """The floor and how it was born (G1c/G1d).
+
+    state is one of `seeded`, `lazy`, `TRUNCATED`, `REPLACED`, `NO LOG`.
+
+    A SEEDED floor puts everything below it out of scope by agreement — the
+    gate starts where the log starts, so the first digest after install flags
+    nothing historical and the detector doesn't cry wolf on its first breath.
+    A LAZY floor does not: it was minted from whatever `main` looked like the
+    first time the hook happened to fire, on the far side of exactly the window
+    the uncovered flag exists to catch, so what is below it is UNVERIFIABLE
+    rather than clean. The two must never read alike."""
+    if not log.get("present"):
+        return {"state": "NO LOG", "floor": None, "ts": None,
+                "provenance": None,
+                "detail": f"push log unreadable ({log.get('error')})"}
+    gens = log.get("genesis") or []
+    floor = gens[0]["sha"] if gens else None
+    ts = gens[0]["ts"] if gens else None
+    if len(gens) > 1:
+        return {"state": "REPLACED", "floor": floor, "ts": ts,
+                "provenance": gens[0]["kind"],
+                "detail": f"{len(gens)} genesis lines — an append-only log with "
+                          f"a second genesis line was deleted and recreated"}
+    if not log.get("first_is_genesis"):
+        return {"state": "TRUNCATED", "floor": floor, "ts": ts,
+                "provenance": gens[0]["kind"] if gens else None,
+                "detail": "the log's first line is not a genesis line — it was "
+                          "truncated, not merely young"}
+    return {"state": gens[0]["kind"], "floor": floor, "ts": ts,
+            "provenance": gens[0]["kind"], "detail": ""}
+
+
+# -- liveness (G3) ----------------------------------------------------------
+
+def hook_liveness(paths: dict) -> dict:
+    """Is the detector armed? The installed path, the sha of the file the
+    symlink ACTUALLY resolves to, and the mirror's sha for the same file.
+
+    The comparison is against the DEPLOYED COPY (G4), never a working clone: a
+    `git checkout` in a clone would silently disarm the gate, and this line is
+    what would notice."""
+    link = paths.get("hook_link")
+    out = {"link": link, "target": None, "state": "ABSENT",
+           "deployed_sha": None, "mirror_sha": None, "detail": ""}
+    if not link:
+        out["detail"] = "no [gate].canonical_repo / hook_link configured"
+        return out
+    target, exists = _resolve_link(link)
+    out["target"] = target
+    if not target or not exists:
+        out["detail"] = ("the pre-receive symlink is missing or dangling — "
+                         "the gate is NOT installed")
+        return out
+    data, err = _read_bytes(target)
+    if data is None:
+        out["state"] = "UNREADABLE"
+        out["detail"] = f"cannot read the deployed hook: {err}"
+        return out
+    out["deployed_sha"] = _blob_sha(paths.get("mirror"), data)
+    mirror_sha = _git(paths.get("mirror") or "", "rev-parse",
+                      f"{paths.get('branch', 'main')}:{HOOK_REPO_PATH}")
+    out["mirror_sha"] = mirror_sha.strip() if mirror_sha else None
+    if out["mirror_sha"] is None:
+        out["state"] = "UNKNOWN"
+        out["detail"] = (f"the mirror has no {HOOK_REPO_PATH} to compare "
+                         f"against")
+    elif out["mirror_sha"] == out["deployed_sha"]:
+        out["state"] = "MATCH"
+    else:
+        out["state"] = "MISMATCH"
+        out["detail"] = ("the installed hook is NOT the committed one — "
+                         "committed is not installed")
+    return out
+
+
+# -- the message store: resolving a cited seq (G2) --------------------------
+
+def _open_db(path: Optional[str]):
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return None
+    db.row_factory = sqlite3.Row
+    return db
+
+
+def resolve_seq(db, seq: int, custodian_channel_id) -> dict:
+    """Does this seq exist, does it live in #custodian, and who wrote it?
+
+    `seq` is per-channel (server migration 001), so "resolves somewhere else"
+    is a real and different answer from "does not resolve" — and both mean the
+    citation does not hold."""
+    out = {"seq": seq, "resolves": False, "in_custodian": False,
+           "author": None, "detail": ""}
+    if db is None:
+        out["detail"] = "message store unreadable — citation NOT verified"
+        return out
+    try:
+        rows = db.execute(
+            "select channel_id, author_type, author_id from messages "
+            "where seq=? and deleted_at is null", (seq,)).fetchall()
+    except sqlite3.Error as exc:
+        out["detail"] = f"message store query failed: {exc}"
+        return out
+    if not rows:
+        out["detail"] = "no such seq in the message store"
+        return out
+    out["resolves"] = True
+    hit = next((r for r in rows if r["channel_id"] == custodian_channel_id), None)
+    if hit is None:
+        out["detail"] = "the seq resolves, but not in #custodian"
+        return out
+    out["in_custodian"] = True
+    out["author"] = _author_name(db, hit["author_type"], hit["author_id"])
+    return out
+
+
+def _author_name(db, author_type: str, author_id: int) -> str:
+    # The table/column pair is chosen from a literal 2-tuple, never from input;
+    # the only value that reaches the query as data is bound.
+    table, column = ("bots", "name") if author_type == "bot" else ("users", "username")
+    try:
+        row = db.execute(f"select {column} as n from {table} where id=?",
+                         (author_id,)).fetchone()
+    except sqlite3.Error:
+        row = None
+    return row["n"] if row and row["n"] else f"{author_type}:{author_id}"
+
+
+def identity_matches(author: Optional[str], git_identity: Optional[str],
+                     aliases: dict) -> bool:
+    """Is the #custodian author of a cited seq the same person as the committer
+    of the commit that cited it?
+
+    The push log records what the hook saw — timestamp, range, trailer, outcome
+    — and not who pushed, so the committer identity on the pushed head is the
+    proxy. It is a name match, deliberately crude and deliberately generous:
+    this flag is a prompt to look, and a false SELF-CITED is cheap next to a
+    self-review that reads as reviewed."""
+    if not author or not git_identity:
+        return False
+    hay = git_identity.lower()
+    tokens = [author.lower()] + [a.lower() for a in aliases.get(author, [])]
+    return any(t and t in hay for t in tokens)
+
+
+# -- coverage, citation, and what fell through ------------------------------
+
+def _rev_list(mirror: str, *args: str) -> Optional[list]:
+    out = _git(mirror, "rev-list", *args)
+    if out is None:
+        return None
+    return [ln.strip() for ln in out.splitlines() if ln.strip()]
+
+
+def _commit_line(mirror: str, sha: str) -> str:
+    out = _git(mirror, "log", "-1", "--format=%s", sha)
+    return (out or "").strip() or "(subject unavailable)"
+
+
+def _committer(mirror: str, sha: str) -> Optional[str]:
+    out = _git(mirror, "log", "-1", "--format=%cn <%ce>|%an <%ae>", sha)
+    return (out or "").strip() or None
+
+
+def push_coverage(paths: dict, log: dict, db) -> dict:
+    """Fold the push log into commit sets. THE definition of cited (G1/G1b).
+
+    covered — every commit inside a logged push range that LANDED (passed or
+      failed-open). A refused push never landed — its commits are not on
+      `main` to need covering, and its range can never resolve in the mirror.
+      A commit with no covering line never met the hook at all.
+    cited — commits inside a logged range whose trailer RESOLVES per G2.
+      A push that failed open with a real trailer is still a cited push. What
+      cannot happen is the laundering case — a failed-open push with NO trailer
+      contributes no citation, and no later push can reach back and bless it,
+      because coverage is per logged range and never per reachability."""
+    mirror = paths.get("mirror") or ""
+    aliases = paths.get("author_aliases", {})
+    custodian = paths.get("custodian_channel_id")
+    covered: set = set()
+    cited: set = set()
+    citations: list = []
+    unresolvable: list = []
+    fail_open = 0
+    seq_cache: dict = {}
+
+    for push in log.get("pushes", []):
+        if push["outcome"] == "failed-open":
+            fail_open += 1
+        if push["outcome"] == "refused":
+            # A refused push never landed: nothing to cover, nothing to cite,
+            # and its range can never resolve in the mirror. Rev-listing it
+            # would misattribute every legitimate refusal — the hook doing
+            # its one job — as permanent "history was rewritten" noise.
+            continue
+        old, new = push["old"], push["new"]
+        if set(new) == {"0"}:
+            continue  # a ref deletion covers nothing
+        spec = [new] if set(old) == {"0"} else [f"{old}..{new}"]
+        commits = _rev_list(mirror, *spec)
+        if commits is None:
+            unresolvable.append(push)
+            continue
+        covered.update(commits)
+
+        trailer = push["trailer"]
+        if not trailer:
+            continue
+        m = TRAILER_VALUE_RE.match(trailer)
+        if not m:
+            citations.append({"push": push, "trailer": trailer, "kind": None,
+                              "seq": None, "holds": False, "self_cited": False,
+                              "detail": "unparseable trailer in the push log"})
+            continue
+        kind, seq = m.group(1), int(m.group(2))
+        if seq not in seq_cache:
+            seq_cache[seq] = resolve_seq(db, seq, custodian)
+        res = seq_cache[seq]
+        holds = bool(res["in_custodian"])
+        self_cited = False
+        if holds and kind == "review-seq":
+            # An override-seq IS the pusher's own line by design; only a review
+            # can be self-cited.
+            self_cited = identity_matches(res["author"], _committer(mirror, new),
+                                          aliases)
+        citations.append({"push": push, "trailer": trailer, "kind": kind,
+                          "seq": seq, "holds": holds, "self_cited": self_cited,
+                          "author": res.get("author"), "detail": res["detail"]})
+        if holds:
+            cited.update(commits)
+    return {"covered": covered, "cited": cited, "citations": citations,
+            "fail_open": fail_open, "unresolvable": unresolvable}
+
+
+def override_trailers(mirror: str, branch: str = "main") -> Optional[list]:
+    """Every `override-seq` on `main`, DERIVED (G5) — never stored, never read
+    from the push log. Computed from trailers in `main`'s history at digest
+    time, so "counted forever" survives any database rebuild, the same
+    cards-derive-from-artifacts rule the Plan Room spec is built on."""
+    out = _git(mirror, "log", branch, "--format=%H%x1f%B%x1e")
+    if out is None:
+        return None
+    seqs = []
+    for record in out.split("\x1e"):
+        if "\x1f" not in record:
+            continue
+        sha, _, body = record.strip("\n").partition("\x1f")
+        for kind, seq in TRAILER_LINE_RE.findall(body):
+            if kind.lower() == "override-seq":
+                seqs.append({"commit": sha.strip(), "seq": int(seq)})
+    return seqs
+
+
+# -- classification of the uncited (G4 of item 4) ---------------------------
+
+_CLASSIFIER = None
+
+
+def _classifier():
+    """The classifier module, imported from the tree — never re-implemented.
+    Same reason board.py imports the broker's own parsers: two implementations
+    of one rule disagree exactly when it matters."""
+    global _CLASSIFIER
+    if _CLASSIFIER is None:
+        import importlib.util
+        path = Path(__file__).resolve().parent.parent / "classifier" / "classify_diff.py"
+        spec = importlib.util.spec_from_file_location("classify_diff", path)
+        mod = importlib.util.module_from_spec(spec)
+        # REGISTERED BEFORE EXEC, and load-bearing: @dataclass resolves its own
+        # module out of sys.modules while the class body runs, so a
+        # module_from_spec that is not registered dies on classify_diff's very
+        # first decorator. The failure surfaced as every commit reading
+        # "UNCLASSIFIED" — a detector that had quietly stopped detecting.
+        sys.modules.setdefault("classify_diff", mod)
+        spec.loader.exec_module(mod)
+        _CLASSIFIER = mod
+    return _CLASSIFIER
+
+
+def classify_commit(mirror: str, protected_paths: Optional[str],
+                    sha: str) -> dict:
+    """`classify_diff` over one landed commit. {tier, reasons, error}."""
+    if not protected_paths:
+        return {"tier": None, "error": "no [paths].protected_paths configured"}
+    try:
+        mod = _classifier()
+        result = mod.classify(mirror, protected_paths,
+                              range_spec=f"{sha}~1..{sha}",
+                              gates=dict(CLASSIFY_GATES))
+    except Exception as exc:  # a broken checkout, a root commit, a bad config
+        return {"tier": None, "error": f"{type(exc).__name__}: {exc}"}
+    return {"tier": result.get("tier"), "reasons": result.get("reasons", []),
+            "protected_hits": result.get("protected_hits", []), "error": None}
+
+
+def guarded_hits_for(mirror: str, sha: str) -> list:
+    """Which gated lanes a commit touched — the hook's own question, asked
+    again after the fact so a LANE VIOLATION line can name the paths."""
+    out = _git(mirror, "diff", "--name-only", f"{sha}~1", sha)
+    if out is None:
+        return []
+    return sorted({p.strip() for p in out.splitlines()
+                   if p.strip().startswith(GATE_GUARDED_PREFIXES)})
+
+
+# -- deploy drift -----------------------------------------------------------
+
+def deploy_state(config: Optional[dict] = None, *, mirror: Optional[str] = None,
+                 deploy_tree: Optional[str] = None,
+                 branch: str = "main") -> dict:
+    """Prod's running tree against mirror head. THE tri-state, one computation.
+
+    NAMED AND IMPORTABLE ON PURPOSE (seq 1428, P6): the Plan Room's tri-state
+    badge is this same question, and it calls this rather than re-implementing
+    it. Two implementations of "is prod current" would disagree on exactly the
+    day it mattered.
+
+    `state` is one of `in-sync`, `drift`, `unknown`. Since prod deploys from the
+    mirror (plink, seq 1391) the hook already sits on the deploy path, so this
+    is belt-and-braces — except for the case it uniquely catches: a DIRTY prod
+    tree is code that is running and was never published, which is the
+    ship-by-not-publishing incentive Claudette named at seq 1380."""
+    if config is not None:
+        p = gate_paths(config)
+        mirror = mirror or p["mirror"]
+        deploy_tree = deploy_tree or p["deploy_tree"]
+        branch = branch or p["branch"]
+    out = {"state": "unknown", "mirror_head": None, "deployed_head": None,
+           "dirty": None, "ahead": None, "behind": None, "detail": ""}
+    if not mirror or not deploy_tree:
+        out["detail"] = "no [gate].mirror / [gate].deploy_tree configured"
+        return out
+    mirror_head = _git(mirror, "rev-parse", branch)
+    deployed_head = _git(deploy_tree, "rev-parse", "HEAD")
+    if mirror_head is None or deployed_head is None:
+        out["detail"] = ("cannot read " + ("the mirror" if mirror_head is None
+                                           else "prod's tree"))
+        return out
+    out["mirror_head"] = mirror_head.strip()
+    out["deployed_head"] = deployed_head.strip()
+    status = _git(deploy_tree, "status", "--porcelain")
+    out["dirty"] = None if status is None else bool(status.strip())
+    # Ask whichever repo can resolve BOTH commits. The mirror usually can (prod
+    # deploys from it); prod cannot, the moment the mirror moves ahead — which
+    # is precisely the case this line exists to describe.
+    counts = (_git(mirror, "rev-list", "--left-right", "--count",
+                   f"{out['mirror_head']}...{out['deployed_head']}")
+              or _git(deploy_tree, "rev-list", "--left-right", "--count",
+                      f"{out['mirror_head']}...{out['deployed_head']}"))
+    if counts:
+        parts = counts.split()
+        if len(parts) == 2 and all(p.isdigit() for p in parts):
+            out["behind"], out["ahead"] = int(parts[0]), int(parts[1])
+    if out["mirror_head"] == out["deployed_head"] and out["dirty"] is False:
+        out["state"] = "in-sync"
+        out["detail"] = "prod runs mirror head, working tree clean"
+        return out
+    out["state"] = "drift"
+    bits = []
+    if out["mirror_head"] != out["deployed_head"]:
+        bits.append(f"prod is at {_short(out['deployed_head'])}, mirror head is "
+                    f"{_short(out['mirror_head'])}")
+        if out["behind"] is not None:
+            bits.append(f"prod is {out['behind']} behind and {out['ahead']} "
+                        f"ahead of the mirror")
+    if out["dirty"]:
+        bits.append("prod's working tree is DIRTY — code is running that was "
+                    "never published")
+    elif out["dirty"] is None:
+        bits.append("could not read prod's working tree state")
+    out["detail"] = "; ".join(bits)
+    return out
+
+
+# -- the previous digest, read back out of the message store ----------------
+
+FLOOR_LINE_RE = re.compile(r"^floor:\s+(\S+)", re.MULTILINE)
+MIRROR_HEAD_LINE_RE = re.compile(r"^mirror head:\s+(\S+)", re.MULTILINE)
+# The drift header as it opens a real block: at the start of a line, followed
+# by the em-dash tail compose_drift_block writes. The same broker bot also
+# posts build banners that mention the header MID-sentence ("the digest's GATE
+# DRIFT block"); those are not digests and must never become the baseline.
+DRIFT_BLOCK_RE = re.compile(rf"^{re.escape(DRIFT_HEADER)} — ", re.MULTILINE)
+# Newest-first scan bound for the baseline query. The baseline is normally the
+# first or second row; the cap only exists so a pathological channel cannot
+# turn this read into a full-table walk.
+BASELINE_SCAN_CAP = 50
+
+
+def _digest_author_id(paths: dict, db) -> Optional[int]:
+    """The bot id behind the broker's posting key ([disjorn].api_key_path) —
+    the identity every digest post carries. None when the key or its bot row
+    cannot be read; the caller reports that loudly rather than widening the
+    query, because a baseline query with no author filter lets anyone who can
+    post in the channel write the floor-motion baseline.
+
+    The lookup is pinned to the server's key scheme (routers/auth.py,
+    hash_api_key: sha256 hexdigest over the raw key). If that scheme ever
+    changes, this resolves to None and the BASELINE UNAVAILABLE line is the
+    tell — a detector fault, never a silent no-baseline."""
+    key_path = paths.get("api_key_path")
+    if not key_path:
+        return None
+    try:
+        with open(key_path, "r", encoding="utf-8") as fh:
+            key = fh.read().strip()
+    except OSError:
+        return None
+    if not key:
+        return None
+    key_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    try:
+        row = db.execute("select id from bots where api_key_hash=?",
+                         (key_hash,)).fetchone()
+    except sqlite3.Error:
+        return None
+    return int(row["id"]) if row else None
+
+
+def previous_digest(paths: dict, db=None) -> Optional[dict]:
+    """The floor and mirror head THIS digest reported last time.
+
+    The baseline for the floor-motion check lives HERE — in the message store,
+    outside the git-dir — and not in the log, because the whole point of the
+    check is to survive the log being deleted and lazily re-born. It adds no
+    storage anywhere (G5): it is read back out of a post that already exists,
+    through the message-store access G2 already grants.
+
+    Three rules decide what counts as the baseline (review findings, seqs
+    1470/1471), and all three are needed:
+      * only posts by the digest's OWN identity — the bot behind the broker's
+        posting key — are considered. The channel is writable by everyone,
+        and a baseline anyone can write is the G1d hole reopened one layer
+        out. If that identity cannot be resolved, the return is an ``error``
+        marker, never a widened query and never a quiet no-baseline.
+      * the header must OPEN a line, in block form. The same broker bot posts
+        build banners that mention the header mid-sentence; a banner is not a
+        digest.
+      * the post must carry a parseable ``floor:`` line. A drift block
+        without one (DETECTOR NOT CONFIGURED, a mangled post) is skipped and
+        the scan continues to the next-older candidate — no-baseline rather
+        than motion, and an older true baseline still beats none: floors
+        never legitimately move, so age does not stale it."""
+    own = db is None
+    db = db or _open_db(paths.get("message_db"))
+    if db is None:
+        return None
+    try:
+        author = _digest_author_id(paths, db)
+        if author is None:
+            return {"seq": None, "floor": None, "mirror_head": None,
+                    "error": "could not resolve the digest's own posting "
+                             "identity (api_key_path -> bots row)"}
+        rows = db.execute(
+            "select seq, content from messages where channel_id=? "
+            "and deleted_at is null and author_type='bot' and author_id=? "
+            "and content like ? order by seq desc limit ?",
+            (paths.get("custodian_channel_id"), author,
+             f"%{DRIFT_HEADER}%", BASELINE_SCAN_CAP)).fetchall()
+    except sqlite3.Error:
+        return None
+    finally:
+        if own:
+            db.close()
+    for row in rows:
+        content = row["content"]
+        if not DRIFT_BLOCK_RE.search(content):
+            continue  # our own banner quoting the header mid-sentence
+        floor = FLOOR_LINE_RE.search(content)
+        if floor is None:
+            continue  # a block with no floor line is no baseline, not motion
+        head = MIRROR_HEAD_LINE_RE.search(content)
+        return {"seq": row["seq"], "floor": floor.group(1),
+                "mirror_head": head.group(1) if head else None}
+    return None
+
+
+# -- the drift block --------------------------------------------------------
+
+def gate_drift(config: dict, *, date: str, now: Optional[_dt.datetime] = None,
+               previous: Optional[dict] = None) -> dict:
+    """Everything the drift block reports, as data. Never raises."""
+    paths = gate_paths(config)
+    drift = {"date": date, "configured": paths["configured"], "paths": paths}
+    if not paths["configured"]:
+        return drift
+
+    log = parse_push_log(paths["push_log"])
+    genesis = genesis_state(log)
+    drift["log"] = log
+    drift["genesis"] = genesis
+    drift["liveness"] = hook_liveness(paths)
+
+    db = _open_db(paths["message_db"])
+    try:
+        if previous is None:
+            previous = previous_digest(paths, db)
+        if previous and previous.get("error"):
+            # Identity failure is a detector fault and renders as one — it
+            # must never look like the benign first-digest state, or a broken
+            # key file silently retires the floor-motion check forever.
+            drift["baseline_error"] = previous["error"]
+            previous = None
+        drift["previous"] = previous
+        drift["floor_moved"] = bool(
+            previous and (previous.get("floor") or "NONE")
+            != (genesis.get("floor") or "NONE"))
+
+        mirror, branch = paths["mirror"], paths["branch"]
+        head = _git(mirror, "rev-parse", branch)
+        drift["mirror_head"] = head.strip() if head else None
+
+        # -- what the hook saw, and what it missed
+        if log.get("present"):
+            cov = push_coverage(paths, log, db)
+        else:
+            # STRICT FALLBACK (G1b): no reachability inference, ever. With no
+            # log there are no push boundaries, so citation degrades to
+            # per-commit trailer presence — more flags, never fewer.
+            cov = {"covered": set(), "cited": set(), "citations": [],
+                   "fail_open": None, "unresolvable": [],
+                   "strict_fallback": True}
+        drift["fail_open"] = cov["fail_open"]
+        drift["citations"] = cov["citations"]
+        drift["self_cited"] = [c for c in cov["citations"] if c["self_cited"]]
+        drift["broken_citations"] = [c for c in cov["citations"] if not c["holds"]]
+        drift["unresolvable_ranges"] = len(cov["unresolvable"])
+        drift["strict_fallback"] = cov.get("strict_fallback", False)
+
+        # -- the window: since the previous digest's mirror head
+        base = previous.get("mirror_head") if previous else None
+        window = None
+        drift["window_source"] = "— the mirror is unreadable"
+        if drift["mirror_head"]:
+            if base:
+                window = _rev_list(mirror, f"{base}..{drift['mirror_head']}")
+                drift["window_source"] = (f"since the previous digest "
+                                          f"(seq {previous['seq']})")
+            if window is None:
+                # No baseline (the first digest after install), or a baseline
+                # the mirror no longer has. Fall back to the reported day.
+                window = _rev_list(mirror, branch, f"--since={date}T00:00:00Z",
+                                   f"--until={date}T23:59:59Z")
+                drift["window_source"] = (f"on {date} UTC — no previous digest "
+                                          f"to measure from")
+        window = window or []
+        drift["window"] = window
+
+        if drift["strict_fallback"]:
+            uncited = [c for c in window
+                       if not _commit_has_trailer(mirror, c)]
+        else:
+            uncited = [c for c in window if c not in cov["cited"]]
+        drift["uncited"] = uncited
+        drift["classified"] = [
+            {"sha": c, "subject": _commit_line(mirror, c),
+             "hits": guarded_hits_for(mirror, c),
+             **classify_commit(mirror, paths["protected_paths"], c)}
+            for c in uncited
+        ]
+        drift["violations"] = [c for c in drift["classified"] if c["tier"] == 2]
+
+        # -- uncovered: above the floor, no covering log line at all
+        #
+        # A floor of all zeros is a lazy floor minted when `main` itself was
+        # created: there is nothing below it, and everything is above it.
+        floor = genesis.get("floor")
+        effective_floor = None if (floor and set(floor) == {"0"}) else floor
+        above = None
+        if drift["mirror_head"]:
+            above = (_rev_list(mirror, f"{effective_floor}..{drift['mirror_head']}")
+                     if effective_floor else _rev_list(mirror, drift["mirror_head"]))
+        drift["floor_resolves"] = above is not None
+        above = above or []
+        drift["above_floor"] = len(above)
+        drift["uncovered"] = ([] if not log.get("present")
+                              else [c for c in above if c not in cov["covered"]])
+        # Below a LAZY floor is not out of scope, it is UNVERIFIABLE (G1d).
+        drift["unverifiable"] = 0
+        if genesis.get("state") == "lazy" and effective_floor:
+            below = _rev_list(mirror, effective_floor)
+            drift["unverifiable"] = len(below or [])
+
+        overrides = override_trailers(mirror, branch)
+        drift["overrides"] = overrides
+        drift["deploy"] = deploy_state(mirror=mirror,
+                                       deploy_tree=paths["deploy_tree"],
+                                       branch=branch)
+    finally:
+        if db is not None:
+            db.close()
+    return drift
+
+
+def _commit_has_trailer(mirror: str, sha: str) -> bool:
+    body = _git(mirror, "log", "-1", "--format=%B", sha)
+    return bool(body) and bool(TRAILER_LINE_RE.search(body))
+
+
+def _named(items: list, render) -> list:
+    """Render up to FLAG_CAP items and SAY SO when the list was cut. A silent
+    truncation reads as 'covered everything' when it didn't."""
+    lines = [render(i) for i in items[:FLAG_CAP]]
+    if len(items) > FLAG_CAP:
+        lines.append(f"    …and {len(items) - FLAG_CAP} more, not named here")
+    return lines
+
+
+def compose_drift_block(drift: dict) -> str:
+    """The drift block, opening with the detector's own liveness (G3)."""
+    L = [f"{DRIFT_HEADER} — keyboard lane, {drift['date']} UTC"]
+    if not drift.get("configured"):
+        L.append("DETECTOR NOT CONFIGURED: broker.toml has no [gate] block "
+                 "with canonical_repo + mirror. The gate may or may not be "
+                 "installed; from here nothing can be said. This is not an "
+                 "empty drift block.")
+        return "\n".join(L)
+
+    # 1. the hook itself
+    live = drift["liveness"]
+    if live["state"] == "ABSENT":
+        L.append(f"hook: ABSENT at {live['link']} — {live['detail']}")
+    elif live["state"] in ("UNREADABLE", "UNKNOWN"):
+        L.append(f"hook: {live['state']} at {live['link']} — {live['detail']}")
+    else:
+        L.append(f"hook: {live['link']} -> {live['target']}, "
+                 f"sha {_short(live['deployed_sha'])} vs mirror "
+                 f"{_short(live['mirror_sha'])} ({live['state']})"
+                 + (f" — {live['detail']}" if live["detail"] else ""))
+
+    # 2. the log's genesis
+    g = drift["genesis"]
+    if g["state"] == "seeded":
+        L.append(f"push log: genesis seeded, floor {_short(g['floor'])} "
+                 f"at {g['ts']}")
+    elif g["state"] == "lazy":
+        L.append(f"push log: genesis LAZY (warning), floor "
+                 f"{_short(g['floor'])} at {g['ts']} — floor minted at first "
+                 f"push; commits before {_short(g['floor'])} unverifiable")
+    else:
+        L.append(f"push log: {g['state']} — {g['detail']}")
+
+    # 3. the floor, against the previous digest's own report
+    prev = drift.get("previous")
+    floor_txt = g["floor"] or "NONE"
+    if drift.get("floor_moved"):
+        L.append(f"floor: {floor_txt}")
+        L.append(f"  FLOOR MOVED: the previous digest (seq {prev['seq']}) "
+                 f"reported {prev.get('floor') or 'NONE'}. Floors do not move. "
+                 f"The log was replaced, whatever the log itself claims.")
+    elif prev:
+        L.append(f"floor: {floor_txt} — unchanged since the previous digest "
+                 f"(seq {prev['seq']})")
+    elif drift.get("baseline_error"):
+        L.append(f"floor: {floor_txt}")
+        L.append(f"  BASELINE UNAVAILABLE: {drift['baseline_error']} — floor "
+                 f"motion UNCHECKED this digest. This is a detector fault, "
+                 f"not a first run.")
+    else:
+        L.append(f"floor: {floor_txt} — no baseline yet (first digest since "
+                 f"install); this is the floor every later digest checks "
+                 f"against")
+
+    # 4. the drift itself
+    # `floor:` and `mirror head:` carry FULL shas, and not for tidiness: the
+    # next digest parses both back out of this post — the floor as its
+    # motion baseline, the head as the start of its window.
+    L.append(f"mirror head: {drift.get('mirror_head') or 'UNREADABLE'}")
+    window, uncited = drift.get("window", []), drift.get("uncited", [])
+    L.append(f"commits on main {drift.get('window_source', '')}: "
+             f"{len(window)} ({len(uncited)} uncited)")
+    if drift.get("strict_fallback"):
+        L.append("  NOTE: no push log, so citation fell back to strict "
+                 "per-commit trailer presence — no reachability inference. "
+                 "Multi-commit pushes will read as uncited.")
+    for v in _named(drift.get("violations", []),
+                    lambda c: f"  LANE VIOLATION: {_short(c['sha'])} "
+                              f"{c['subject']} — Tier 2, uncited"
+                              + (f" ({', '.join(c['hits'][:4])})" if c["hits"] else "")):
+        L.append(v)
+    for c in drift.get("classified", []):
+        if c["tier"] is None and c.get("error"):
+            L.append(f"  UNCLASSIFIED: {_short(c['sha'])} {c['subject']} — "
+                     f"{c['error']}")
+    for c in drift.get("self_cited", []):
+        L.append(f"  SELF-CITED: {c['trailer']} on "
+                 f"{_short(c['push']['new'])} was posted by {c['author']}, who "
+                 f"pushed it. A review you wrote yourself is not a review.")
+    for c in drift.get("broken_citations", []):
+        L.append(f"  CITATION DOES NOT RESOLVE: {c['trailer']} on "
+                 f"{_short(c['push']['new'])} — {c['detail']}. That range "
+                 f"counts as UNCITED.")
+
+    # 5. the two facts that exist nowhere else
+    fo = drift.get("fail_open")
+    L.append(f"fail-open pushes in the log: "
+             f"{'UNKNOWN (no log)' if fo is None else fo}")
+    unc = drift.get("uncovered", [])
+    if not drift.get("log", {}).get("present"):
+        L.append("uncovered commits: UNKNOWN — the push log is unreadable, so "
+                 "the one record of what the hook saw is gone")
+    elif not drift.get("floor_resolves", True):
+        L.append(f"uncovered commits: UNKNOWN — the floor "
+                 f"{_short(g['floor'])} does not resolve in the mirror, so "
+                 f"'above the floor' cannot be computed")
+    else:
+        L.append(f"uncovered commits above the floor: {len(unc)} "
+                 f"of {drift.get('above_floor', 0)}")
+        for line in _named(unc, lambda c: f"  UNCOVERED: {_short(c)} "
+                                          f"{_commit_line(drift['paths']['mirror'], c)} "
+                                          f"— entered main with no push-log "
+                                          f"line; the hook was absent or "
+                                          f"disarmed"):
+            L.append(line)
+    if drift.get("unverifiable"):
+        L.append(f"  UNVERIFIABLE: {drift['unverifiable']} commits below the "
+                 f"LAZY floor {_short(g['floor'])} — the window between install "
+                 f"and the hook's first firing cannot be ruled out. Not clean, "
+                 f"just unknown.")
+    if drift.get("unresolvable_ranges"):
+        L.append(f"  {drift['unresolvable_ranges']} logged push range(s) do not "
+                 f"resolve in the mirror — history was rewritten, or the mirror "
+                 f"is behind")
+
+    # 6. overrides, counted forever, derived from main's trailers
+    ov = drift.get("overrides")
+    if ov is None:
+        L.append("overrides to date: UNKNOWN (cannot read the mirror's history)")
+    else:
+        seqs = ", ".join(str(o["seq"]) for o in ov[:FLAG_CAP])
+        more = f" +{len(ov) - FLAG_CAP} more" if len(ov) > FLAG_CAP else ""
+        L.append(f"overrides to date: {len(ov)}"
+                 + (f" (override-seq {seqs}{more})" if ov else ""))
+
+    # 7. deploy drift
+    d = drift.get("deploy", {})
+    L.append(f"deploy: {d.get('state', 'unknown')}"
+             + (f" — {d['detail']}" if d.get("detail") else ""))
+    return "\n".join(L)
+
+
 # --------------------------------------------------------------------------
 # End-of-day #custodian line.
 # --------------------------------------------------------------------------
 
-def compose_daily_line(doc: dict, config: dict, date: str) -> str:
-    """One compact message: per-resident action counts for `date`. Posted by
-    the broker's own identity (not a resident), so no `[proposal from ...]`."""
+def compose_daily_line(doc: dict, config: dict, date: str,
+                       drift: Optional[dict] = None) -> str:
+    """One compact message: per-resident action counts for `date`, plus the
+    keyboard-lane GATE DRIFT block when one was computed. Posted by the broker's
+    own identity (not a resident), so no `[proposal from ...]`.
+
+    `drift` is passed IN rather than computed here on purpose: composing stays a
+    pure function of its inputs (this module's whole shape), and the drift
+    block's git + message-store reads stay in one place, `post_daily_line`.
+    The floor-motion check reads THIS message back next time, so the block's
+    `floor:` and `mirror head:` lines are load-bearing text, not decoration."""
     broker_by = doc.get("broker_actions", {}).get("by_resident", {})
     tool_by = doc.get("tool_actions", {}).get("by_resident", {})
     segments = []
@@ -450,21 +1451,32 @@ def compose_daily_line(doc: dict, config: dict, date: str) -> str:
     # in this header. Every other log in the house is UTC and splitting the
     # digest off would create a reconciliation problem worse than the
     # confusion; so it stays UTC and says so.
-    return (
+    body = (
         f"[custodian daily {date} UTC — complete day, 00:00:00–23:59:59] "
         f"action counts\n" + "\n".join(segments)
     )
+    if drift is not None:
+        body += "\n\n" + compose_drift_block(drift)
+    return body
 
 
 def post_daily_line(
     config: dict, doc: dict, *, date: str,
     transport: Optional[Callable[[dict, str], dict]] = None,
+    drift: Optional[dict] = None,
 ) -> dict:
     """Post the daily line to #custodian via the broker's posting identity.
 
     `transport` defaults to brokerd's `_sdk_transport` (the exact mechanism
-    file-proposal uses); tests inject a stub so nothing hits the network."""
-    body = compose_daily_line(doc, config, date)
+    file-proposal uses); tests inject a stub so nothing hits the network.
+
+    The GATE DRIFT block is computed here unless one is passed in. It is not
+    optional and it is not skippable on error: `gate_drift` never raises, and
+    an unconfigured or unreachable detector produces a block that SAYS SO. An
+    empty drift block and a disarmed detector must not read alike (G3)."""
+    if drift is None:
+        drift = gate_drift(config, date=date)
+    body = compose_daily_line(doc, config, date, drift=drift)
     if transport is None:
         transport = _default_transport()
     return transport(config.get("disjorn", {}), body)

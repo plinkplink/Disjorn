@@ -178,6 +178,52 @@ metrics_json = "/var/lib/disjorn-broker/metrics.json"
 # /etc/disjorn-broker/ (root:plink 0640, resident-unreachable) and point here.
 protected_paths = "/etc/disjorn-broker/protected-paths.toml"
 
+[gate]
+# KEYBOARD-LANE GATE (Plan Room Phase 0) — what the DAILY DIGEST needs to read
+# in order to report on the pre-receive hook. The hook itself reads NONE of
+# this: it is a git hook, it takes its git-dir from git, and it must keep
+# working whether or not this file is even present. This block only arms the
+# DETECTOR (harness/metrics/metrics.py, the GATE DRIFT block).
+#
+# WITH THIS BLOCK ABSENT the digest still posts a drift block, and that block
+# says DETECTOR NOT CONFIGURED. That is deliberate: an empty drift block and a
+# disarmed detector must never read alike (seq 1428, G3). Install is hand-made,
+# and committed-isn't-installed went four-for-four on 08-19/20.
+
+# The canonical repo the hook is installed on. `hook_link` and `push_log`
+# default to <canonical_repo>/hooks/pre-receive and
+# <canonical_repo>/hooks/disjorn-push-log — set them only if you moved either
+# (and if you set DISJORN_PUSH_LOG for the hook, you MUST set push_log here to
+# match, or the detector goes blind; it will say so on its liveness line).
+canonical_repo = "/var/lib/disjorn-broker/gatehouse/disjorn.git"
+# hook_link = "/var/lib/disjorn-broker/gatehouse/disjorn.git/hooks/pre-receive"
+# push_log  = "/var/lib/disjorn-broker/gatehouse/disjorn.git/hooks/disjorn-push-log"
+
+# The read-only mirror, same one `refresh-mirror` maintains and board.py reads.
+# Commit history, the override count, and the committed sha of
+# harness/gatehouse/hooks/pre-receive-main-review all come from here.
+mirror = "/srv/disjorn-ro"
+# mirror_branch = "main"    # default
+
+# Prod's running tree — the deploy-drift half. Since prod deploys from the
+# mirror the hook already sits on the deploy path, so this line is
+# belt-and-braces, except for the one thing nothing else catches: a DIRTY
+# working tree here is code that is running and was never published.
+deploy_tree = "/home/plink/Disjorn/Disjorn"
+
+# The message store, for resolving cited seqs (G2: the seq must exist and live
+# in #custodian) and for reading the digest's own previous post back — that
+# post is where the floor-motion baseline lives, outside the git-dir, which is
+# why it survives a log delete. Defaults to <deploy_tree>/server/data/disjorn.db.
+# message_db = "/home/plink/Disjorn/Disjorn/server/data/disjorn.db"
+
+# [gate.author_aliases]
+# Git identities that belong to a #custodian author under another name, for the
+# self-cited check. `keyboard = ["plink"]` and `broker = ["disjorn-broker"]` are
+# built in; add a line only if a resident's git identity does not contain their
+# #custodian name.
+# keyboard = ["plink"]
+
 [budgets]
 # WP-H12 daily per-resident action budget on broker verbs. DEFAULT OFF:
 # with nothing set here the broker never denies on budget. Instrument first
