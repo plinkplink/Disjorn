@@ -125,6 +125,10 @@ successors BL-D7..D11 / H13-D7..D11. The highest-value single follow-up is
   backfill; the first connect of a fresh client performs no backfill at all
   (documented — use `get_messages()` for boot-time catch-up).
 
+## build efficiency
+  VERIFICATION DEPTH IS A TRUST LADDER (gable, 2026-08-22, from #1489/#1494). First build through a lane gets maximal verification: banner distrusted, suites re-run in the reviewer's own seat, artifacts exercised end-to-end. Each build whose banner survives verification buys the next a shallower check; any lie resets the lane to the floor. The GATE DRIFT digest is the replacement machinery — as its lines stay boring, resident verification shrinks toward "read the digest." Spec-ripe when it names: the depth tiers (what each level re-checks), the promotion rule (how many truthful builds buy a tier), and the reset rule. plink watching against emerging industry patterns.
+
+
 ## bot ingest / summon path
 
 > **Authored by Gable**, in his own volume, 2026-07-21/22 — found uncommitted
