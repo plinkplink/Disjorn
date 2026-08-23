@@ -1,9 +1,9 @@
 # Spec: Plan Room Phase II slice A — /backlog lifecycle verbs, `duplicate` status, reject button
 
 ## Request
-- **Verbatim**: "every non-chat action that I need to take currently can be done via the UI" (item 5 of the Phase II list); "`/backlog reject` needs a butt>
+- **Verbatim**: "every non-chat action that I need to take currently can be done via the UI" (item 5 of the Phase II list); "`/backlog reject` needs a button, too"
 - **Requester**: plink
-- **Origin**: #custodian seq 1604 (Phase II kickoff), rulings seq 1609; carried items from seqs 1589/1592/1596 (`duplicate` value, reject|spec'd|built verb>
+- **Origin**: #custodian seq 1604 (Phase II kickoff), rulings seq 1609; carried items from seqs 1589/1592/1596 (`duplicate` value, reject|spec'd|built verbs)
 
 ## Agreed UX
 - `/backlog reject|duplicate|spec'd|built <id>` — subcommands on the
