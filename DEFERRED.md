@@ -190,6 +190,39 @@ first-run line instead of as a fault.
   the sentence (checked at filing).
 
 
+## Plan Room deploy-night cards (2026-08-23, filed at the keyboard from #1571/#1572/#1575)
+
+- **Board writes are attributed to a constant, not an author (Gable #1572,
+  reproduced + sharpened by Claudette #1575).** Both residents' `board-comment`
+  rows record `author_id: 3` (the broker's posting identity); the real caller
+  survives only in the composed label string ("res-claudette (via broker)").
+  `author_id` is not an identity column — any query grouping by it merges all
+  residents into one author, and a label-format change orphans history
+  retroactively. Fix shape (Claudette): caller identity arrives as DATA the
+  router stores, not prose it formats — schema change to `card_comments`,
+  Phase II or its own small spec. plink owes the backlog row (residents can't
+  cut one; cards derive from artifacts by design).
+
+- **`claudette-update.sh` restart and resident-image load have an ordering
+  dependency nobody enforces (2026-08-23 live, the fifth
+  committed-isn't-installed).** The update script restarts `resident-cc` onto
+  whatever image exists at that instant; an image rebuild finishing later
+  silently un-deploys itself until the next bounce. Tonight's cost: one stale
+  poke and one extra bounce, caught in 90 seconds because the rebuild log
+  flags it — but the flag is a NOTE in a log, not a gate. Fix direction:
+  07-resident-image.sh restarts (or offers to restart) running resident units
+  after load, or claudette-update.sh refuses to run while an image build is
+  in flight.
+
+- **`test_verb_surface` carries a stale premise about core.py (found #1564,
+  ruled follow-up #1565).** `test_the_static_scan_finds_the_adapter_tools_...`
+  asserts `"start_build" in declared` — broker verbs were declared inline in
+  Claudette's core.py when it was written, but they moved into the generated
+  `broker_tools.py` import. Skips silently unless `DISJORN_ADAPTER_CORE`
+  points at her real core.py (its path guesses don't include
+  `/home/plink/bots/claudette/core.py` — add that to the guess list while
+  fixing). Test fix only; the drift machinery itself is correct.
+
 ## bot ingest / summon path
 
 > **Authored by Gable**, in his own volume, 2026-07-21/22 — found uncommitted
