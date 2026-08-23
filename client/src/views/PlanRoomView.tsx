@@ -146,7 +146,9 @@ function Card({
           </span>
         ))}
         {card.comment_count > 0 && (
-          <span className="plan-chip">{card.comment_count} 💬</span>
+          <span className="plan-chip">
+            {card.comment_count} {card.comment_count === 1 ? "comment" : "comments"}
+          </span>
         )}
       </span>
       {card.blocked && (
