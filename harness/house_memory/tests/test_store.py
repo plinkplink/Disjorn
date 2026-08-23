@@ -159,19 +159,48 @@ def test_strip_keeps_body_tags_and_the_rumor_warning():
 # 164 memories their tags before anyone looked.
 # ==========================================================================
 
-def test_bare_string_tag_is_not_shredded():
-    """`for t in "agenthood"` iterates letters. De-dupe collapses repeats,
-    the cap keeps six, and you get ["a","g","e","n","t","h"] — silent,
-    plausible-looking, irreversible."""
+def test_bare_string_tag_is_refused_not_coerced():
+    """`for t in "agenthood"` iterates letters — the 2026-08-04 shredder.
+    The 08-04 fix coerced the string to ONE tag instead, and that minted 29
+    mega-tags from comma-separated lists ('communication, review-style, …'
+    → 'communication-review-style-…') because normalize_tag strips commas
+    (spec 2026-08-23-claudette-remember-bugfix, Part 2; #custodian 1611).
+    Neither guess is right, so neither survives: a bare string is a typed
+    refusal that names the field and the type it got."""
+    import pytest
     from house_memory import normalize_tags
-    assert normalize_tags("agenthood") == ["agenthood"]
+    with pytest.raises(TypeError, match=r"tags must be an array.*str"):
+        normalize_tags("agenthood")
 
 
-def test_bare_string_tag_survives_through_memory():
+def test_comma_list_string_is_refused_not_megatagged():
+    """The exact payload shape that minted mega-tags in the wild."""
+    import pytest
+    from house_memory import normalize_tags
+    with pytest.raises(TypeError, match=r"tags must be an array"):
+        normalize_tags("communication, review-style, plink-feedback")
+
+
+def test_bare_string_tag_is_refused_through_memory():
+    import pytest
     from house_memory import Memory
-    m = Memory(content="x", subject="plink", source_author="plink",
+    with pytest.raises(TypeError, match=r"tags must be an array"):
+        Memory(content="x", subject="plink", source_author="plink",
                tags="agenthood")
-    assert m.tags == ["agenthood"]
+
+
+def test_non_list_tags_is_refused_with_its_type_named():
+    import pytest
+    from house_memory import normalize_tags
+    with pytest.raises(TypeError, match=r"tags must be an array.*int"):
+        normalize_tags(7)
+
+
+def test_non_string_tag_item_is_refused_with_its_type_named():
+    import pytest
+    from house_memory import normalize_tags
+    with pytest.raises(TypeError, match=r"tags\[1\].*int"):
+        normalize_tags(["fine", 3])
 
 
 def test_none_tags_is_empty_not_a_crash():
