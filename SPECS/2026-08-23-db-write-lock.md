@@ -142,6 +142,7 @@ branch); this file therefore describes the complete fix, not a delta.
      db-write-lock revision"). -->
 
 ## Status
-built@loop/2026-08-23-db-write-lock
+merged
 <!-- set by the broker on 2026-08-23 18:44Z (start-build, 2026-08-23-db-write-lock): build published: disjorn.git 4384cf9e57a8646ca1780a0a298da29ee8ba36c3 — on the branch for review, nothing merged. `board --mark-merged` advances this to `merged` once the merge lands. -->
+<!-- advanced to merged at the keyboard 2026-08-23: plink rebased+merged as 3ffd401 (blobs byte-identical to reviewed 4384cf9); review Claudette #custodian 1707; deployed by the disjorn restart recorded in #custodian (post-1733). -->
 <!-- set by the broker on 2026-08-23 18:38Z (start-build, 2026-08-23-db-write-lock): build running as disjorn-build-2026-08-23-db-write-lock.service -> loop/2026-08-23-db-write-lock, launched by gable (confirmed by plink, #custodian seq 1668). Not buildable again until this line moves. -->
