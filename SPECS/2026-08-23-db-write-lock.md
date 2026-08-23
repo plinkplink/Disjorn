@@ -142,4 +142,5 @@ branch); this file therefore describes the complete fix, not a delta.
      db-write-lock revision"). -->
 
 ## Status
-`confirmed`
+building
+<!-- set by the broker on 2026-08-23 18:38Z (start-build, 2026-08-23-db-write-lock): build running as disjorn-build-2026-08-23-db-write-lock.service -> loop/2026-08-23-db-write-lock, launched by gable (confirmed by plink, #custodian seq 1668). Not buildable again until this line moves. -->
