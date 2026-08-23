@@ -52,10 +52,10 @@ About one slot. `strict: true` and the refuse path are small; the repair sweep a
 `strict: true` is a one-line revert. The sweep is covered by the pre-write backup of the chroma store. The coercion path is not restored under any circumstances — it is the defect.
 
 ## Confirm record
-- **Confirmed by**: <pending>
-- **#custodian seq**: <pending>
-- **Confirmed at**: <pending>
+- **Confirmed by**: plink
+- **#custodian seq**: 1672
+- **Confirmed at**: 2026-08-23
 <!-- No Confirm record → no build. This is the gate. -->
 
 ## Status
-`draft`
+`confirmed`

@@ -108,7 +108,10 @@ mis-inherit) and fails exactly on the round-1 bool guard (cd6b43d, which
 the build seat cannot see — single-branch clone, by design). Its job is
 to pin the sentinel semantics so any future refactor back to a bare bool
 fails loudly; fail-first discipline for it is against round 1, on the
-record here, not something the rebuild can rerun.
+record here, not something the rebuild can rerun. Round 1 survives as
+`loop/2026-08-23-db-write-lock-r1` in the gatehouse, so this is
+reproducible, not merely attested: check out `-r1`, run test 4, watch it
+fail (Claudette, #1659).
 
 ## Lane → Review owner (DETERMINISTIC — filled from the lane, never preference)
 - **Lane**: custodian — `server/app/` is Claudette's surface.
@@ -130,11 +133,13 @@ re-implements the whole spec from `main` (it cannot see round 1's
 branch); this file therefore describes the complete fix, not a delta.
 
 ## Confirm record
-- **Confirmed by**: <pending>
-- **#custodian seq**: <pending>
-- **Confirmed at**: <pending>
+- **Confirmed by**: plink
+- **#custodian seq**: 1668
+- **Confirmed at**: 2026-08-23
 <!-- No Confirm record → no build. This is the gate. Revision 2 needs a
-     fresh seq; round 1's seq 1625 confirmed different bytes. -->
+     fresh seq; round 1's seq 1625 confirmed different bytes. Seq 1668
+     confirms revision-2 bytes ("this message is the confirm ... for the
+     db-write-lock revision"). -->
 
 ## Status
-`draft`
+`confirmed`
