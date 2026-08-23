@@ -90,27 +90,36 @@ def clip_content(content: str, cap: int = CONTENT_HARD_CAP) -> str:
 
 
 def normalize_tags(tags) -> list[str]:
-    """Normalize, de-duplicate and cap a tag list.
+    """Normalize, de-duplicate and cap a tag list. Wrong TYPES are refused
+    with a TypeError naming the field and the type received — never guessed
+    at (spec 2026-08-23-claudette-remember-bugfix, Part 2).
 
-    DEFENSIVE ON PURPOSE — a bare string used to be shredded per character.
-    `for t in "agenthood"` iterates letters, the de-dupe collapses repeats,
-    and the cap keeps six: `["a","g","e","n","t","h"]`. Silent, plausible-
-    looking, and the real tag is gone. It cost 75 of Claudette's 164 memories
-    their tags before anyone noticed (found 2026-08-04 — she spotted it from
-    inside her own surfaced block).
-
-    The input is model-authored tool arguments, so "the schema says array"
-    is not a guarantee; a model emitting `"tags": "agenthood"` is a normal
-    Tuesday. Coerce it to the single tag the caller obviously meant. Never
-    iterate a str here again."""
+    Two guesses have already failed here. Iterating a bare string shredded it
+    per character (`["a","g","e","n","t","h"]` — cost 75 of Claudette's 164
+    memories their tags, found 2026-08-04). The 08-04 fix coerced the string
+    to ONE tag instead, but the strings in the wild are comma-separated lists
+    of the intended tags, so normalize_tag stripped the commas and minted a
+    single garbage mega-tag — 29 of them before #custodian 1611 caught it.
+    The input is model-authored and arrives malformed when the emission
+    corrupts, so the only honest move is a loud refusal the caller can turn
+    into an is_error tool_result and a retry."""
     if tags is None:
         return []
     if isinstance(tags, str):
-        logger.warning(
-            "[Memory] tags arrived as a bare string (%r) — coerced to one tag. "
-            "Iterating it would shred it into characters.", tags[:60]
+        raise TypeError(
+            f"tags must be an array of strings, got the string {tags[:60]!r}. "
+            'Send ["tag", ...] — a bare string is refused, never split or '
+            "coerced."
         )
-        tags = [tags]
+    if not isinstance(tags, (list, tuple)):
+        raise TypeError(
+            f"tags must be an array of strings, got {type(tags).__name__}."
+        )
+    for i, t in enumerate(tags):
+        if not isinstance(t, str):
+            raise TypeError(
+                f"tags[{i}] must be a string, got {type(t).__name__} ({t!r})."
+            )
     seen: list[str] = []
     for t in tags:
         n = normalize_tag(t)
