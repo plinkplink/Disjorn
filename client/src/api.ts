@@ -13,6 +13,9 @@ import type {
   Message,
   NotifyPrefs,
   PickerItem,
+  PlanBoard,
+  PlanCard,
+  PlanCardDetail,
   SearchResult,
   SettableStatus,
   SummarizeResponse,
@@ -525,6 +528,89 @@ export function putNotifyPrefs(prefs: NotifyPrefs): Promise<NotifyPrefs> {
    VIEWER changed their own avatar, which left a bot repainted through the
    admin surface showing its old face until the 300s max-age expired. A null
    `avatar_url` is the "no avatar, don't ask" signal; see components/Avatar. */
+
+/* ---- plan room (SPECS/2026-08-20-plan-room.md) ---- */
+
+/** GET /planroom/board. Every card, in column order, plus the board's face.
+ *
+ * The face carries when the board was derived and from which mirror head, and
+ * the view always shows both — the board cannot go stale relative to the mirror
+ * because it is not a copy of it, but the mirror itself can lag, and staleness
+ * in this house is declared rather than denied. `face.available === false` is
+ * not an error: it means the derived index is missing or unreadable, which must
+ * not read like an empty board. */
+export function planBoard(filters?: {
+  column?: string;
+  lane?: string;
+  owner?: string;
+  blocked?: boolean;
+}): Promise<PlanBoard> {
+  const qs = new URLSearchParams();
+  if (filters?.column !== undefined) qs.set("column", filters.column);
+  if (filters?.lane !== undefined) qs.set("lane", filters.lane);
+  if (filters?.owner !== undefined) qs.set("owner", filters.owner);
+  if (filters?.blocked !== undefined) qs.set("blocked", String(filters.blocked));
+  const q = qs.toString();
+  return request<PlanBoard>("GET", `/planroom/board${q ? `?${q}` : ""}`);
+}
+
+/** GET /planroom/cards/{slug} — the card, everything on it, comments included. */
+export function planCard(slug: string): Promise<PlanCardDetail> {
+  return request<PlanCardDetail>(
+    "GET",
+    `/planroom/cards/${encodeURIComponent(slug)}`,
+  );
+}
+
+/** POST a comment. ADMIN OR BOT server-side (403 otherwise) — this client only
+    offers the affordance to an admin, but the refusal, not the hidden control,
+    is the wall. */
+export function planComment(
+  slug: string,
+  text: string,
+): Promise<{ comment: unknown }> {
+  return request("POST", `/planroom/cards/${encodeURIComponent(slug)}/comment`, {
+    text,
+  });
+}
+
+/** Block or unblock a card. Blocked is a FLAG WITH A REASON, NEVER A COLUMN:
+    the card does not move, so everyone can see where it re-enters. A reason is
+    required to block — the server refuses without one. */
+export function planFlag(
+  slug: string,
+  blocked: boolean,
+  reason?: string,
+): Promise<{ card: PlanCard }> {
+  return request("POST", `/planroom/cards/${encodeURIComponent(slug)}/flag`, {
+    blocked,
+    reason: reason ?? null,
+  });
+}
+
+/** Archive a merged card. ADMIN ONLY in Phase I. */
+export function planArchive(
+  slug: string,
+  archived: boolean,
+): Promise<{ card: PlanCard }> {
+  return request("POST", `/planroom/cards/${encodeURIComponent(slug)}/archive`, {
+    archived,
+  });
+}
+
+/** Set a card's position WITHIN its column. ADMIN ONLY in Phase I.
+ *
+ * This is not drag-to-column and cannot become it by accident: there is no
+ * endpoint that takes a column. A card changes columns only because reality
+ * moved. `null` hands the card back to the derived whose-move-first order. */
+export function planOrder(
+  slug: string,
+  sortOrder: number | null,
+): Promise<{ card: PlanCard }> {
+  return request("POST", `/planroom/cards/${encodeURIComponent(slug)}/order`, {
+    sort_order: sortOrder,
+  });
+}
 
 /** POST /me/avatar (multipart). Server converts to 256px WebP. The response's
     `url` is the newly versioned avatar_url — put it on the session user. */

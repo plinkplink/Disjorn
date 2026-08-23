@@ -73,12 +73,21 @@ def _broker():
     `confirmed`, and reported "nothing waiting on you" while the broker's gate
     was refusing the same spec for a confirm record whose bold was one word
     off. Two parsers of one file will disagree exactly when it matters. So the
-    board asks the gate what the gate would say."""
+    board asks the gate what the gate would say.
+
+    Reuses an already-imported `brokerd` when there is one. The Plan Room's
+    derivation service (harness/planroom/planroom.py) imports both this module
+    and brokerd, and runs inside the broker itself; loading a second copy of
+    the daemon module there would be two parsers again, by another route."""
     import importlib.util
+    existing = sys.modules.get("brokerd")
+    if existing is not None and hasattr(existing, "parse_spec_status"):
+        return existing
     spec = importlib.util.spec_from_file_location(
         "brokerd", REPO / "harness" / "broker" / "brokerd.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    sys.modules.setdefault("brokerd", mod)
     return mod
 
 
@@ -178,11 +187,16 @@ def collect_specs() -> list:
     return out
 
 
-def collect_branches() -> list:
+def collect_branches(gatehouse: Path = None) -> list:
     """Build branches on the shelf, and — the load-bearing bit — whether each is
-    already merged. The shelf showed 7 rows on 2026-08-14 when 6 were merged."""
+    already merged. The shelf showed 7 rows on 2026-08-14 when 6 were merged.
+
+    `gatehouse` defaults to this host's shelf. It is a parameter because the
+    Plan Room's derivation service calls this same collector broker-side (one
+    aggregation, no forked truths) and its tests point it at a scratch dir."""
+    gatehouse = GATEHOUSE if gatehouse is None else Path(gatehouse)
     out = []
-    for repo in sorted(GATEHOUSE.glob("*.git")):
+    for repo in sorted(gatehouse.glob("*.git")):
         head = (_git_bare(repo, "symbolic-ref", "--quiet", "--short", "HEAD").strip()
                 or "main")
         for ref in _git_bare(repo, "for-each-ref", "--format=%(refname:short)",
@@ -204,27 +218,35 @@ def collect_branches() -> list:
     return out
 
 
-def merged_slugs() -> dict:
+def merged_slugs(repo: Path = None, gatehouse: Path = None) -> dict:
     """slug -> merge commit (short) for every spec whose build has landed on
     main. Two witnesses, either suffices:
       * a merge commit on main whose message names the slug (the merge ritual
         writes `merge: <slug> (SPECS/<slug>.md, confirmed seq N)`), or
       * a gatehouse `loop/<slug>` branch that is an ancestor of main.
     The second catches builds merged by hand without the ritual; the first
-    catches builds whose branch was already deleted from the shelf."""
+    catches builds whose branch was already deleted from the shelf.
+
+    `repo`/`gatehouse` default to this checkout and this host's shelf. They are
+    parameters because the Plan Room derives broker-side, where the repo of
+    record is the read-only MIRROR rather than a keyboard checkout — and both
+    renderers must agree about what "merged" means or one of them is telling a
+    human that finished work is not finished."""
+    repo_path = REPO if repo is None else Path(repo)
+    gatehouse = GATEHOUSE if gatehouse is None else Path(gatehouse)
     out: dict = {}
-    for ln in _run("git", "-C", str(REPO), "log", "--merges", "--format=%h %s",
-                   "main").splitlines():
+    for ln in _run("git", "-C", str(repo_path), "log", "--merges",
+                   "--format=%h %s", "main").splitlines():
         sha, _, msg = ln.partition(" ")
         for m in re.findall(r"(20\d\d-\d\d-\d\d-[a-z0-9][a-z0-9-]{0,50})", msg):
             out.setdefault(m, sha)
-    for repo in sorted(GATEHOUSE.glob("*.git")):
-        head = (_git_bare(repo, "symbolic-ref", "--quiet", "--short", "HEAD").strip()
+    for bare in sorted(gatehouse.glob("*.git")):
+        head = (_git_bare(bare, "symbolic-ref", "--quiet", "--short", "HEAD").strip()
                 or "main")
-        for ref in _git_bare(repo, "branch", "--merged", head).split():
+        for ref in _git_bare(bare, "branch", "--merged", head).split():
             if ref.startswith("loop/"):
                 out.setdefault(ref[len("loop/"):],
-                               _git_bare(repo, "rev-parse", "--short", ref).strip())
+                               _git_bare(bare, "rev-parse", "--short", ref).strip())
     return out
 
 

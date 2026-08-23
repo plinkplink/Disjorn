@@ -79,6 +79,22 @@ MAX_LOG_LINES = 500
 MAX_AUDIT_ENTRIES = 500
 MAX_GREP_CHARS = 200
 MAX_GATES_JSON = 8192
+# Plan Room (SPECS/2026-08-20-plan-room.md). Skim is the default and detail is
+# opt-in: `board-list` returns ONE LINE per card and `board-card` returns the
+# whole thing, because the request that started this feature named the context
+# window as the problem — "so that your entire context window isn't swallowed
+# by reading the whole thing all the time".
+MAX_BOARD_CARDS = 200
+MAX_BOARD_COMMENT_CHARS = 4000
+MAX_BOARD_REASON_CHARS = 500
+MAX_BOARD_SEARCH_CHARS = 200
+# A card slug, anchored. The two prefixed forms are the derivation's cards for
+# things with no spec file yet (a backlog row, a keyboard commit).
+BOARD_SLUG_RE = re.compile(r"^(?:\d{4}-\d{2}-\d{2}-[a-z0-9][a-z0-9-]{0,50}"
+                           r"|backlog-\d{1,12}|keyboard-[0-9a-f]{7,40})$")
+PLANROOM_HTTP_TIMEOUT = 20
+# How often the daemon re-derives the board when nothing else has triggered it.
+DEFAULT_PLANROOM_TIMER_SEC = 900
 SUBPROCESS_TIMEOUTS = {  # seconds, per verb
     "restart-disjorn": 60,
     "run-server-tests": 900,
@@ -490,6 +506,154 @@ def _sdk_transport(disjorn_cfg: dict, body: str) -> dict:
         return {"seq": msg.get("seq"), "message_id": msg.get("id")}
 
     return asyncio.run(_post())
+
+
+# --------------------------------------------------------------------------
+# Plan Room API transport (SPECS/2026-08-20-plan-room.md). Kept behind a
+# callable so tests stub it, exactly like _sdk_transport above.
+# --------------------------------------------------------------------------
+
+def _planroom_http(disjorn_cfg: dict, method: str, path: str,
+                   payload: Optional[dict] = None) -> dict:
+    """One JSON call to the Disjorn server's /planroom surface, as the broker's
+    own bot identity.
+
+    WHY THE BOARD VERBS GO THROUGH THE SERVER RATHER THAN READING TWO FILES.
+    A card is derived state plus board-native state — the derived half is in
+    the broker-written index, the native half (comments, order, blocked,
+    archived) is authoritative and lives in the server's own tables. Composing
+    them is exactly one job, and the server already does it for the tab. A
+    second composer here would be a second answer to "is this card blocked",
+    which is the forked-truth failure this whole spec is built to avoid. So the
+    broker asks the server the same question the tab asks.
+
+    The WRITES have a second reason: those tables are the server's, and the
+    resident-facing wall on them is the server's `admin or bot` check. Writing
+    them from here would be the broker granting itself an exemption from the
+    rule it exists to enforce."""
+    import urllib.error
+    import urllib.request
+
+    base = str(disjorn_cfg.get("url") or "").rstrip("/")
+    if not base:
+        raise VerbError("internal", "no [disjorn].url configured")
+    try:
+        with open(disjorn_cfg["api_key_path"], "r", encoding="utf-8") as fh:
+            api_key = fh.read().strip()
+    except (KeyError, OSError) as exc:
+        raise VerbError("internal", f"broker API key unreadable: {exc}") from None
+
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    headers = {"X-Api-Key": api_key, "Accept": "application/json"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(base + path, data=data, method=method,
+                                 headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=PLANROOM_HTTP_TIMEOUT) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = str(json.loads(exc.read().decode("utf-8")).get("detail", ""))
+        except Exception:  # noqa: BLE001 — a non-JSON error body is still a refusal
+            pass
+        # The server's refusal is carried through verbatim. A resident who is
+        # told "the Plan Room index is unavailable" can act; one told "HTTP
+        # 503" has to go find someone.
+        raise VerbError("exec-failure",
+                        detail or f"plan room API returned {exc.code}") from None
+    except Exception as exc:  # noqa: BLE001 — network, DNS, timeout, bad JSON
+        raise VerbError("exec-failure",
+                        f"plan room API unreachable: {exc}") from None
+
+
+def _urlq(value: str) -> str:
+    import urllib.parse
+    return urllib.parse.quote(value, safe="")
+
+
+_PLANROOM_MODULE = None
+
+
+def _load_planroom_module():
+    """`harness/planroom/planroom.py` — the derivation service.
+
+    Imported LAZILY, and only when a rebuild actually runs. Two reasons, both
+    load-bearing:
+
+      * It imports this module back (for `parse_spec_status` and
+        `parse_confirm_record` — the gate's own parsers, always, per seq 1428
+        P3). A top-level import here would be a cycle. Lazily, it finds this
+        module already in `sys.modules` and reuses it, which is also how there
+        stays exactly one copy of the parsers in the process.
+      * It reaches for host paths (the gatehouse, the message store) at import
+        time, and none of that belongs in the daemon's import graph or in test
+        collection."""
+    global _PLANROOM_MODULE
+    if _PLANROOM_MODULE is not None:
+        return _PLANROOM_MODULE
+    import importlib.util
+    # Hand the derivation service THIS module as `brokerd`. Run as a daemon
+    # this file is `__main__`, so without this line planroom's parser lookup
+    # would miss it and load a second copy of the broker — two parsers of one
+    # Status line again, by the one route the P3 rule did not name.
+    sys.modules.setdefault("brokerd", sys.modules[__name__])
+    here = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(os.path.dirname(here), "planroom", "planroom.py")
+    spec = importlib.util.spec_from_file_location("disjorn_planroom", path)
+    if spec is None or spec.loader is None:
+        raise VerbError("internal", f"plan room module not found at {path}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    _PLANROOM_MODULE = mod
+    return mod
+
+
+def format_board_line(card: dict) -> str:
+    """One card, one line. brief's rule, inherited: NEVER PRINT A BARE
+    IDENTIFIER — every row says what the thing is and where it lives, because
+    an item you have to go look up is an item that gets deferred."""
+    bits = [f"[{card.get('column', '?')}]", str(card.get("slug", "?"))]
+    title = card.get("title")
+    if title and title != card.get("slug"):
+        bits.append(f"— {title}")
+    tail = []
+    if card.get("tier"):
+        tail.append(str(card["tier"]))
+    if card.get("review_owner"):
+        tail.append(f"review {card['review_owner']}")
+    if card.get("builder"):
+        tail.append(f"builder {card['builder']}")
+    if card.get("confirm_seq"):
+        tail.append(f"seq {card['confirm_seq']}")
+    if card.get("comment_count"):
+        tail.append(f"{card['comment_count']} comment(s)")
+    for flag in card.get("flags") or []:
+        tail.append(f"!{flag}")
+    if (card.get("deploy") or {}).get("badge"):
+        tail.append(f"deploy {card['deploy']['badge']}")
+    if card.get("blocked"):
+        tail.append(f"BLOCKED: {card.get('blocked_reason') or 'no reason given'}")
+    line = " ".join(bits)
+    return f"{line}  ·  {' · '.join(tail)}" if tail else line
+
+
+def format_board_face(face: dict) -> str:
+    """The board's own staleness, said out loud.
+
+    The board cannot go stale relative to the mirror — it is not a copy of it —
+    but the MIRROR can lag, so every renderer says which mirror head it derived
+    from and when. Staleness in this house is declared, never denied."""
+    if face.get("available") is False:
+        return f"UNAVAILABLE — {face.get('unavailable_reason', 'no reason given')}"
+    head = str(face.get("mirror_head") or "?")[:12]
+    badge = (face.get("deploy") or {}).get("badge", "unknown")
+    out = (f"derived {face.get('derived_at', '?')} from mirror {head}; "
+           f"deploy {badge}")
+    for note in face.get("notes") or []:
+        out += f"\nnote: {note}"
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -1144,10 +1308,14 @@ class Broker:
         *,
         transport: Optional[Callable[[dict, str], dict]] = None,
         build_spawn: Optional[Callable[[list[str]], Any]] = None,
+        planroom_api: Optional[Callable[..., dict]] = None,
     ) -> None:
         self.config = config
         self.verbs_path = verbs_path
         self.transport = transport or _sdk_transport
+        # How the board verbs reach the Disjorn server's /planroom surface.
+        # Injected in tests, exactly like `transport`.
+        self.planroom_api = planroom_api or _planroom_http
         # How a detached build session is launched. Injected in tests (mock the
         # exec); prod uses _default_build_spawn (a detached, un-waited Popen).
         self._build_spawn = build_spawn or self._default_build_spawn
@@ -1162,6 +1330,16 @@ class Broker:
         self.commands: dict[str, Any] = config.get("commands", {})
         self.paths: dict[str, str] = config.get("paths", {})
         self.disjorn: dict[str, Any] = config.get("disjorn", {})
+        # Plan Room. `index` is the derived card cache this daemon WRITES and
+        # the server reads; everything else here is about when to rebuild it.
+        # Absent config means the board is simply not wired up on this host:
+        # the verbs still work (they ask the server, which will say the index
+        # is unavailable — an honest answer), and nothing rebuilds.
+        self.planroom: dict[str, Any] = (
+            config.get("planroom", {})
+            if isinstance(config.get("planroom"), dict) else {})
+        self._planroom_lock = threading.Lock()
+        self._planroom_thread: Optional[threading.Thread] = None
         # Daily per-resident action budget (WP-H12). Loaded at construction;
         # a cap change needs a broker restart (unlike verbs.toml kill switches,
         # which are re-read live). Default: no cap == OFF. Instrument first.
@@ -1249,6 +1427,16 @@ class Broker:
             "read-metrics": self._verb_read_metrics,
             "file-proposal": self._verb_file_proposal,
             "query-own-audit": self._verb_query_own_audit,
+            # Plan Room (SPECS/2026-08-20-plan-room.md). Three read, two write.
+            # The two writes touch BOARD-NATIVE STATE ONLY — comments and the
+            # blocked flag — and they are structurally unable to touch anything
+            # derived, because derived state has no write path anywhere in this
+            # house (seq 1428 P1). Not a check here: an absence there.
+            "board-list": self._verb_board_list,
+            "board-card": self._verb_board_card,
+            "board-search": self._verb_board_search,
+            "board-flag": self._verb_board_flag,
+            "board-comment": self._verb_board_comment,
         }
 
     # ------------------------------------------------------------- audit
@@ -1685,6 +1873,15 @@ class Broker:
         before = _head()
         self._ff_mirror_main(timeout)
         gatehouse = self._fetch_gatehouse_into_mirror(timeout)
+        # The mirror has just moved, so every card derived from it may have
+        # moved with it. Rebuilding HERE is the first of the Plan Room's three
+        # triggers (seq 1428 P4). Best-effort by construction: a refresh that
+        # fetched everything correctly and then failed to rewrite a cache has
+        # still refreshed the mirror, and saying otherwise would teach
+        # residents that a red refresh-mirror means nothing.
+        planroom = ({"rebuilt": False, "reason": "disabled by config"}
+                    if not self.planroom.get("rebuild_on_refresh", True)
+                    else self._planroom_rebuild("refresh-mirror"))
         head = _head()
         summary = f"mirror at {head}" + ("" if head == before
                                          else f" (was {before})")
@@ -1694,8 +1891,13 @@ class Broker:
             for rec in gatehouse if rec["arrived"] or rec["vanished"])
         if moved:
             summary = f"{summary}; gatehouse {moved}"
+        if planroom.get("transitions"):
+            summary = f"{summary}; plan room {planroom['transitions']} move(s)"
+        elif planroom.get("rebuilt") is False and planroom.get("reason") \
+                not in ("no [planroom].index configured", "disabled by config"):
+            summary = f"{summary}; PLAN ROOM REBUILD FAILED: {planroom['reason']}"
         return ({"head": head, "before": before, "updated": head != before,
-                 "gatehouse": gatehouse}, summary[:300])
+                 "gatehouse": gatehouse, "planroom": planroom}, summary[:300])
 
     def _ff_mirror_main(self, timeout: int) -> None:
         """Fetch origin into the read-only mirror and fast-forward it to
@@ -2280,6 +2482,15 @@ class Broker:
                                         expect=("building",))
         self._narrate(format_build_outcome(**kwargs)
                       + format_spec_status_note(stamp))
+        # A build's terminal banner is the loudest column transition the house
+        # has — `building` -> Review, or `building` -> back to Ready on a
+        # failure — and the mirror was just refreshed two lines above. This is
+        # the Plan Room's second rebuild trigger (seq 1428 P4): the board moves
+        # WITH the build rather than a quarter-hour behind it. It posts its own
+        # transition lines only if the columns actually changed, so a build
+        # never costs #custodian two banners about the same event unless two
+        # things really happened.
+        self._planroom_rebuild("build-outcome")
 
     def _reap_build(self, proc: Any, spec_bytes: bytes, meta: dict,
                     timeout: int, out_path: str, err_path: str) -> None:
@@ -2882,6 +3093,224 @@ class Broker:
                  "truncated": len(entries) > limit},
                 f"{len(tail)} audit entries")
 
+    # ---------------------------------------------------------- plan room
+    #
+    # Five verbs. Three read, two write, and the two writes touch BOARD-NATIVE
+    # STATE ONLY: comments and the blocked flag + its reason. They are
+    # structurally unable to touch derived state — not because anything here
+    # checks, but because derived state has no write path anywhere in this
+    # house (seq 1428 P1). Nothing a resident can send through this socket can
+    # move a card between columns; a card changes columns only because reality
+    # moved. Phase II's write-through is a separate spec.
+
+    def _board_slug(self, args: dict) -> str:
+        slug = _check_str(args, "slug", required=True, max_len=80)
+        assert slug is not None
+        if not BOARD_SLUG_RE.match(slug):
+            raise _bad("slug must be a spec slug (YYYY-MM-DD-name), a "
+                       "`backlog-<n>`, or a `keyboard-<sha>`")
+        return slug
+
+    def _board_get(self, path: str) -> dict:
+        return self.planroom_api(self.disjorn, "GET", path)
+
+    def _board_post(self, path: str, payload: dict) -> dict:
+        return self.planroom_api(self.disjorn, "POST", path, payload)
+
+    def _verb_board_list(self, resident: str, args: dict) -> tuple[dict, str]:
+        """The board, ONE LINE PER CARD. Filters by column, lane, owner, blocked.
+
+        Skim is the default and detail is opt-in — the context-budget answer to
+        the tricky part of the request that started this feature: "so that your
+        entire context window isn't swallowed by reading the whole thing all
+        the time". `board-card` is where the whole thing lives."""
+        _reject_unknown(args, {"column", "lane", "owner", "blocked", "limit"})
+        query: list[str] = []
+        for key in ("column", "lane", "owner"):
+            val = _check_str(args, key, max_len=100)
+            if val is not None:
+                query.append(f"{key}={_urlq(val)}")
+        blocked = _check_str(args, "blocked", max_len=8)
+        if blocked is not None:
+            if blocked not in ("yes", "no"):
+                raise _bad("blocked must be 'yes' or 'no'")
+            query.append(f"blocked={'true' if blocked == 'yes' else 'false'}")
+        limit = _check_int(args, "limit", 80, 1, MAX_BOARD_CARDS)
+        qs = ("?" + "&".join(query)) if query else ""
+        body = self._board_get("/planroom/board" + qs)
+        cards = body.get("cards") or []
+        lines = [format_board_line(c) for c in cards[:limit]]
+        return ({"face": format_board_face(body.get("face") or {}),
+                 "counts": body.get("counts") or {},
+                 "cards": lines, "count": len(lines),
+                 "truncated": len(cards) > limit},
+                f"{len(lines)} of {len(cards)} cards")
+
+    def _verb_board_card(self, resident: str, args: dict) -> tuple[dict, str]:
+        """Everything on one card, comments included."""
+        _reject_unknown(args, {"slug"})
+        slug = self._board_slug(args)
+        body = self._board_get(f"/planroom/cards/{slug}")
+        comments = body.get("comments") or []
+        return ({"face": format_board_face(body.get("face") or {}),
+                 "card": body.get("card"), "comments": comments,
+                 "note": body.get("note")},
+                f"card {slug} ({len(comments)} comment(s))")
+
+    def _verb_board_search(self, resident: str, args: dict) -> tuple[dict, str]:
+        """Substring search across card text and comments, one line per hit."""
+        _reject_unknown(args, {"text", "limit"})
+        text = _check_str(args, "text", required=True,
+                          max_len=MAX_BOARD_SEARCH_CHARS)
+        assert text is not None
+        limit = _check_int(args, "limit", 40, 1, MAX_BOARD_CARDS)
+        body = self._board_get(
+            f"/planroom/search?q={_urlq(text)}&limit={limit}")
+        cards = body.get("cards") or []
+        return ({"face": format_board_face(body.get("face") or {}),
+                 "cards": [format_board_line(c) for c in cards],
+                 "count": len(cards), "truncated": bool(body.get("truncated"))},
+                f"{len(cards)} hits for {text!r}")
+
+    def _verb_board_flag(self, resident: str, args: dict) -> tuple[dict, str]:
+        """Block or unblock a card, with a reason. BOARD-NATIVE STATE ONLY.
+
+        Blocked is a FLAG WITH A REASON, NEVER A COLUMN: the card does not move,
+        so everyone can see where it re-enters. A reason is required to block —
+        a card blocked for no stated reason is one nobody can unblock, because
+        nobody can tell what would have to change.
+
+        The resident's name is stamped HERE, from the broker's own
+        SO_PEERCRED-derived identity, never from the caller's arguments. Same
+        rule `file-proposal` has always run under: the resident supplies data,
+        the broker supplies the authority and the attribution."""
+        _reject_unknown(args, {"slug", "action", "reason"})
+        slug = self._board_slug(args)
+        action = _check_str(args, "action", required=True, max_len=20)
+        if action not in ("blocked", "unblock"):
+            raise _bad("action must be 'blocked' or 'unblock'")
+        reason = _check_str(args, "reason", max_len=MAX_BOARD_REASON_CHARS)
+        blocked = action == "blocked"
+        if blocked and not (reason or "").strip():
+            raise _bad("blocking a card needs a reason — a card blocked for no "
+                       "stated reason is one nobody can unblock")
+        body = self._board_post(f"/planroom/cards/{slug}/flag",
+                                {"blocked": blocked, "reason": reason,
+                                 "author": resident})
+        card = body.get("card") or {}
+        return ({"slug": slug, "blocked": bool(card.get("blocked")),
+                 "reason": card.get("blocked_reason"),
+                 "column": card.get("column"),
+                 "card": format_board_line(card) if card else None},
+                f"{slug} {'blocked' if blocked else 'unblocked'}"
+                + (f": {reason[:120]}" if blocked and reason else ""))
+
+    def _verb_board_comment(self, resident: str, args: dict) -> tuple[dict, str]:
+        """Add a comment to a card. BOARD-NATIVE STATE ONLY.
+
+        This and `board-flag` are what keeps "residents triage" a sentence about
+        something residents can actually do."""
+        _reject_unknown(args, {"slug", "text"})
+        slug = self._board_slug(args)
+        text = _check_str(args, "text", required=True,
+                          max_len=MAX_BOARD_COMMENT_CHARS)
+        assert text is not None
+        body = self._board_post(f"/planroom/cards/{slug}/comment",
+                                {"text": text, "author": resident})
+        comment = body.get("comment") or {}
+        return ({"slug": slug, "comment": comment},
+                f"comment on {slug} ({len(text)} chars)")
+
+    # ------------------------------------------------- plan room: rebuilds
+
+    def _planroom_index_path(self) -> Optional[str]:
+        path = self.planroom.get("index")
+        return path if isinstance(path, str) and path else None
+
+    def _planroom_rebuild(self, why: str) -> dict:
+        """Re-derive the board and rewrite the index. BEST EFFORT, ALWAYS.
+
+        Called from `refresh-mirror`, from a build's terminal banner, and from
+        the daemon's own timer (seq 1428 P4) — a trigger nobody has to
+        remember, so the index refreshes when `main` moves and not only when a
+        resident happens to call a verb.
+
+        It never raises and it never turns its caller's success into a failure.
+        A refresh-mirror that fetched everything correctly and then failed to
+        rebuild a cache has still refreshed the mirror; reporting otherwise
+        would teach residents that a red refresh-mirror means nothing. The
+        outcome is carried in the return value and lands in the audit line
+        instead.
+
+        Serialised under a lock: the timer and a verb can fire at the same
+        moment, and two concurrent rebuilds racing on one temp file is how a
+        cache becomes a corrupt file nobody can explain."""
+        index_path = self._planroom_index_path()
+        if not index_path:
+            return {"rebuilt": False, "reason": "no [planroom].index configured"}
+        if not self._planroom_lock.acquire(blocking=False):
+            # Another rebuild is already in flight and will see the same world.
+            return {"rebuilt": False, "reason": "a rebuild is already running"}
+        try:
+            planroom = _load_planroom_module()
+            data = planroom.derive_cards(
+                self.config, lane_owners=self.planroom.get("lane_owners"))
+            lines = planroom.rebuild(index_path, data)
+        except Exception as exc:  # noqa: BLE001 — never let a cache take the
+            # daemon, or a verb, down with it.
+            return {"rebuilt": False, "reason": f"{type(exc).__name__}: {exc}"}
+        finally:
+            self._planroom_lock.release()
+        if lines and self.planroom.get("announce", True):
+            # ONE SYSTEM LINE PER COLUMN TRANSITION, NEVER PER EDIT. Residents
+            # are event-driven, so this stream is their trigger; and because it
+            # lands in #custodian it doubles as a witnessable seq trail of the
+            # whole lifecycle, for free. A rebuild that moved nothing says
+            # nothing — a detector that narrates every tick teaches everyone to
+            # stop reading it.
+            self._narrate("\n".join(lines[:20]))
+        return {"rebuilt": True, "cards": len(data["cards"]),
+                "transitions": len(lines), "why": why}
+
+    def _planroom_timer(self) -> None:
+        """The daemon's own rebuild tick.
+
+        In the daemon rather than in a systemd unit on purpose: P4 asks for a
+        trigger nobody has to remember, and this week's install record argues
+        hard against trusting a hand step. A `.timer` file is one more thing
+        that can be committed and not installed, and a second process writing
+        the index is one more thing that can race the first."""
+        interval = self.planroom.get("timer_sec", DEFAULT_PLANROOM_TIMER_SEC)
+        try:
+            interval = float(interval)
+        except (TypeError, ValueError):
+            interval = DEFAULT_PLANROOM_TIMER_SEC
+        if interval <= 0:
+            return
+        while not self._closed:
+            # Sleep first: startup already rebuilds nothing in particular, and
+            # a daemon that re-derives the whole repo the instant it comes up
+            # makes a restart the most expensive thing on the host.
+            slept = 0.0
+            while slept < interval and not self._closed:
+                time.sleep(min(1.0, interval - slept))
+                slept += 1.0
+            if self._closed:
+                return
+            try:
+                self._planroom_rebuild("timer")
+            except Exception:  # noqa: BLE001 — belt and braces; _planroom_rebuild
+                # already swallows, and a dead timer thread is a board that
+                # silently stops moving.
+                pass
+
+    def _start_planroom_timer(self) -> None:
+        if not self._planroom_index_path() or self._planroom_thread is not None:
+            return
+        t = threading.Thread(target=self._planroom_timer, daemon=True)
+        self._planroom_thread = t
+        t.start()
+
     # ------------------------------------------------------------- server
 
     def serve_forever(self) -> None:
@@ -2905,6 +3334,10 @@ class Broker:
         # with a short timeout; shutdown() additionally pokes the socket.
         listener.settimeout(1.0)
         self._listener = listener
+        # The Plan Room's third rebuild trigger (seq 1428 P4). Started here
+        # rather than in __init__ so constructing a Broker — which tests and
+        # tooling do — never spawns a thread that re-derives the whole repo.
+        self._start_planroom_timer()
         while not self._closed:
             try:
                 conn, _ = listener.accept()

@@ -45,6 +45,11 @@
 "read-metrics" = false
 "file-proposal" = false
 "query-own-audit" = false
+"board-list" = false
+"board-card" = false
+"board-search" = false
+"board-flag" = false
+"board-comment" = false
 
 [res-gable]
 "restart-disjorn" = false
@@ -57,3 +62,8 @@
 "read-metrics" = false
 "file-proposal" = false
 "query-own-audit" = false
+"board-list" = false
+"board-card" = false
+"board-search" = false
+"board-flag" = false
+"board-comment" = false

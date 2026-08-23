@@ -405,6 +405,70 @@ All verbs are per-resident toggleable in `verbs.toml` and default OFF.
 - Filtered to the CALLER's own entries by the broker-assigned resident name —
   a resident can never read another's trail.
 
+### The Plan Room verbs — `board-list`, `board-card`, `board-search`, `board-flag`, `board-comment`
+
+SPECS/2026-08-20-plan-room.md (confirmed by plink, #custodian seq 1434). Five
+verbs: three read, two write.
+
+**The rule that shapes all five: the board owns no authoritative state.** Every
+card is a rendering of an artifact that already exists — a `SPECS/` file's
+Status line, a confirm seq, a gatehouse branch, a backlog row, deploy
+provenance. What the board owns natively is comments, card order, the blocked
+flag + its reason, and archived — that list is complete. **The two write verbs
+are structurally unable to touch anything else, because derived state has no
+write path anywhere in this house** (seq 1428 P1). Nothing a resident sends
+through this socket can move a card between columns; changing the underlying
+artifact does that. Phase II's write-through is a separate spec.
+
+All five go through the Disjorn server's `/planroom` surface as the broker's own
+bot identity. A card is derived state plus board-native state, composing them is
+exactly one job, and the server already does it for the tab — a second composer
+in the broker would be a second answer to "is this card blocked". The server's
+refusal text is carried back verbatim, so a resident told "the Plan Room index
+is unavailable" can act, where one told "HTTP 503" has to go find someone.
+
+Every read returns a `face` string first: when the board was derived and from
+which mirror head. The board cannot go stale relative to the mirror — it is not
+a copy of it — but the mirror can lag, so staleness is declared, never denied.
+
+- **`board-list`** — args `{"column": str, "lane": str, "owner": str,
+  "blocked": "yes"|"no", "limit": int}`, all optional; `limit` 1..200 default
+  80. Result `{"face": str, "counts": {column: n}, "cards": [str, ...],
+  "count": int, "truncated": bool}` — ONE LINE PER CARD. Skim is the default
+  and detail is opt-in; that is the context-budget answer to the request that
+  started the feature. `counts` describes the whole board, never the filter.
+- **`board-card`** — args `{"slug": str}` required. Result `{"face": str,
+  "card": {...}, "comments": [...], "note": str?}` — everything, comments
+  included. Comments outlive the card leaving the board, so a slug with
+  comments and no card returns the comments and a note saying so.
+- **`board-search`** — args `{"text": str, "limit": int}`; `text` required,
+  1..200 chars, plain case-insensitive substring across card text AND comments.
+  Result is `board-list`'s shape.
+- **`board-flag`** — args `{"slug": str, "action": "blocked"|"unblock",
+  "reason": str}`. A reason is REQUIRED to block (≤500 chars) and a card
+  blocked without one is `bad-args`: a card held for no stated reason is one
+  nobody can unblock. **The card does not move** — blocked is a flag, never a
+  column, so a held card keeps its place and everyone can see where it
+  re-enters. Attribution is the broker's, stamped from the caller's
+  SO_PEERCRED-derived resident name, never from `args`.
+- **`board-comment`** — args `{"slug": str, "text": str}`, both required, text
+  1..4000 chars. Same attribution rule.
+
+A `slug` is a spec slug (`YYYY-MM-DD-name` — the spec filename without `.md`,
+because a card's identity IS its spec file), or one of the two forms for cards
+with no spec yet: `backlog-<n>` and `keyboard-<sha>`. Anything else is
+`bad-args` before it reaches the network.
+
+The broker also WRITES the derived index these verbs read, from
+`harness/planroom/planroom.py`, on three triggers (seq 1428 P4): after
+`refresh-mirror` moves the mirror, after a build's terminal banner, and on its
+own timer. All three are best-effort — a rebuild failure never turns a
+successful verb into a failed one, and lands in that call's audit summary
+instead. Each rebuild posts one #custodian line per COLUMN TRANSITION, never per
+edit; a rebuild that moved nothing says nothing, and a cold start says nothing
+at all. Configured under `[planroom]` in broker.toml; with that block absent
+nothing rebuilds and the verbs still answer honestly.
+
 ## Daily action budget (WP-H12)
 
 Additive to the verb table above; changes no existing verb contract. An

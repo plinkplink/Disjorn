@@ -192,12 +192,20 @@ def test_refresh_mirror_runs_fixed_argv_sequence(harness):
     2026-08-14 file vision adds one pruned fetch per ENTITLED repo after the
     ff-only update, and an unconfigured deployment keeps exactly this
     behaviour. The gatehouse half has its own file:
-    tests/test_broker_file_vision.py."""
+    tests/test_broker_file_vision.py.
+
+    `planroom` says the Plan Room index was not rebuilt because this config has
+    no [planroom] block — the same "unconfigured is a stated fact, not silence"
+    shape as `gatehouse` above. A refresh with no board configured is still a
+    refresh, and the argv sequence below is unchanged by the board's arrival."""
     harness.set_verbs(**{"refresh-mirror": True})
     resp = harness.call("refresh-mirror", {})
     assert resp["ok"] is True
-    assert resp["result"] == {"head": "abc1234", "before": "abc1234",
-                              "updated": False, "gatehouse": []}
+    assert resp["result"] == {
+        "head": "abc1234", "before": "abc1234", "updated": False,
+        "gatehouse": [],
+        "planroom": {"rebuilt": False,
+                     "reason": "no [planroom].index configured"}}
     assert harness.recorded_argv() == [
         ["rev-parse", "--short", "HEAD"],
         ["fetch", "origin"],

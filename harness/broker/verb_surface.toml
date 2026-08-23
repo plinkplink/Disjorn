@@ -276,6 +276,186 @@ diff, or a branch somebody just named in channel; a stale mirror is the usual \
 reason a file looks unchanged.\
 """
 
+# ── board-list ───────────────────────────────────────────────────────────
+[verbs.board-list]
+tool_name = "board_list"
+cli_help = "the Plan Room board, one line per card"
+announce_preface = false
+description = """\
+The Plan Room board, ONE LINE PER CARD, via the house broker. This is the \
+house's work in flight — every spec, backlog row and unreviewed keyboard commit \
+— in the columns Backlog / Proposed / Ready / Building / Review / Merged / \
+Archived.\n\nEvery card is DERIVED from something that already exists: a SPECS/ \
+file's Status line, a confirm seq, a gatehouse branch, a backlog row, deploy \
+provenance. Nothing you do moves a card; changing the underlying thing does. \
+The board's first line says when it was derived and from which mirror head, so \
+you can see how fresh it is rather than assuming.\n\nSkim first. Filter with \
+column/lane/owner/blocked, then open exactly the card you need with board_card \
+— reading the whole board into your context every time is the thing this verb \
+exists to stop.\
+"""
+
+[verbs.board-list.args.column]
+type = "string"
+max_len = 40
+no_leading_dash = true
+description = """\
+One of Backlog, Proposed, Ready, Building, Review, Merged, Archived. Ready means \
+confirmed and pressable; Review's resting state is empty and anything in it is \
+waiting to be read.\
+"""
+
+[verbs.board-list.args.lane]
+type = "string"
+max_len = 100
+no_leading_dash = true
+description = "Substring match on the card's lane."
+
+[verbs.board-list.args.owner]
+type = "string"
+max_len = 100
+no_leading_dash = true
+description = "Substring match on the card's review owner."
+
+[verbs.board-list.args.blocked]
+type = "string"
+pattern = "^(yes|no)$"
+description = """\
+'yes' for only blocked cards, 'no' for only unblocked; omit for all. Blocked is a \
+flag with a reason, never a column: a held card keeps its place so everyone can \
+see where it re-enters.\
+"""
+
+[verbs.board-list.args.limit]
+type = "integer"
+minimum = 1
+maximum = 200
+description = "Max cards, 1-200. Default 80."
+
+# ── board-card ───────────────────────────────────────────────────────────
+[verbs.board-card]
+tool_name = "board_card"
+cli_help = "one Plan Room card, in full, comments included"
+announce_preface = false
+description = """\
+Everything on one Plan Room card — spec path, tier, lane, review owner, builder, \
+confirm seq, blocked flag and reason, deploy badge, and every comment — via the \
+house broker. Use it after board_list or board_search has told you which card \
+you want; this is the detail half of a deliberately two-step surface.\
+"""
+
+[verbs.board-card.args.slug]
+type = "string"
+required = true
+min_len = 1
+max_len = 80
+no_leading_dash = true
+no_nul = true
+description = """\
+The card's slug: a spec slug like '2026-08-20-plan-room' (the spec filename \
+without .md — a card's identity IS its spec file), or one of the two forms for \
+cards with no spec yet, 'backlog-<n>' and 'keyboard-<sha>'.\
+"""
+
+# ── board-search ─────────────────────────────────────────────────────────
+[verbs.board-search]
+tool_name = "board_search"
+cli_help = "search the Plan Room"
+announce_preface = false
+description = """\
+Search the Plan Room by substring — across card titles, slugs, notes, lanes, \
+owners, flags and comments — via the house broker. Returns one line per hit, the \
+same shape board_list returns, so you can go straight from a hit to board_card.\
+"""
+
+[verbs.board-search.args.text]
+type = "string"
+required = true
+min_len = 1
+max_len = 200
+no_leading_dash = true
+no_nul = true
+description = "What to look for. Plain substring, case-insensitive."
+
+[verbs.board-search.args.limit]
+type = "integer"
+minimum = 1
+maximum = 200
+description = "Max hits, 1-200. Default 40."
+
+# ── board-flag ───────────────────────────────────────────────────────────
+[verbs.board-flag]
+tool_name = "board_flag"
+cli_help = "block or unblock a Plan Room card, with a reason"
+announce_preface = false
+description = """\
+Block or unblock a Plan Room card, with a reason, via the house broker. This is \
+one of only two things you can change about the board, and it is BOARD-NATIVE \
+state: blocking a card does not move it and cannot move it. A card changes \
+columns only because reality moved — a Status line changed, a confirm landed, a \
+merge happened — and there is no way to move one from here, by design.\n\nA \
+reason is required to block: a card blocked for no stated reason is one nobody \
+can unblock, because nobody can tell what would have to change. The block is \
+attributed to you by the broker, from your own identity, not from anything you \
+send.\
+"""
+
+[verbs.board-flag.args.slug]
+type = "string"
+required = true
+min_len = 1
+max_len = 80
+no_leading_dash = true
+no_nul = true
+description = "The card's slug, as board_list prints it."
+
+[verbs.board-flag.args.action]
+type = "string"
+required = true
+pattern = "^(blocked|unblock)$"
+description = "'blocked' to hold the card, 'unblock' to release it."
+
+[verbs.board-flag.args.reason]
+type = "string"
+max_len = 500
+no_nul = true
+description = """\
+Why it is held. REQUIRED when action is 'blocked'; ignored on 'unblock'. Say what \
+would have to change, not just that something is wrong.\
+"""
+
+# ── board-comment ────────────────────────────────────────────────────────
+[verbs.board-comment]
+tool_name = "board_comment"
+cli_help = "add a comment to a Plan Room card"
+announce_preface = false
+description = """\
+Add a comment to a Plan Room card, via the house broker. This and board_flag are \
+the only two things you can change about the board, and both are BOARD-NATIVE \
+state — comments and the blocked flag. Nothing you write here can move a card, \
+change a spec's Status, or alter a confirm seq; those are derived from the repo \
+and have no write path anywhere.\n\nUse it to triage: say what you found reading \
+a spec, what a card is actually waiting on, what you would need to build it. The \
+comment is attributed to you by the broker.\
+"""
+
+[verbs.board-comment.args.slug]
+type = "string"
+required = true
+min_len = 1
+max_len = 80
+no_leading_dash = true
+no_nul = true
+description = "The card's slug, as board_list prints it."
+
+[verbs.board-comment.args.text]
+type = "string"
+required = true
+min_len = 1
+max_len = 4000
+no_nul = true
+description = "The comment, 1-4000 chars."
+
 
 # ══ ADAPTER TOOLS ═════════════════════════════════════════════════════════
 #

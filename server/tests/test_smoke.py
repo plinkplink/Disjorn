@@ -14,6 +14,8 @@ EXPECTED_TABLES = {
     "push_subscriptions",
     "messages_fts",
     "schema_migrations",
+    "card_meta",
+    "card_comments",
 }
 
 

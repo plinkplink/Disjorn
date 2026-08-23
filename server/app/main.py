@@ -33,6 +33,7 @@ from .routers import (
     media,
     messages,
     notifications,
+    planroom,
     slash,
     stt,
     summarize,
@@ -72,6 +73,7 @@ API_PREFIXES = frozenset(
         "healthz",
         "ws",
         "bots",
+        "planroom",
     }
 )
 
@@ -351,6 +353,7 @@ def create_app() -> FastAPI:
     app.include_router(media.router)
     app.include_router(notifications.router)
     app.include_router(bots_admin.router)
+    app.include_router(planroom.router)
     app.include_router(slash.router)
     app.include_router(stt.router)
     app.include_router(summarize.router)

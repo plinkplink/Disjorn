@@ -333,3 +333,116 @@ export interface PushPayload {
   message_id: number;
   url: string; // e.g. "/channels/3"
 }
+
+/* ---- plan room (SPECS/2026-08-20-plan-room.md) ---- */
+
+/* Ruled #custodian seq 1391 item 1. Left-to-right, and the order is
+   load-bearing: it is the board. */
+export const PLAN_COLUMNS = [
+  "Backlog",
+  "Proposed",
+  "Ready",
+  "Building",
+  "Review",
+  "Merged",
+  "Archived",
+] as const;
+
+export type PlanColumn = (typeof PLAN_COLUMNS)[number];
+
+/* green = prod matches the mirror; amber = merged, not deployed; red = LIVE,
+   NOT MERGED — the dangerous one, meaning code is running that the mirror has
+   never seen. Computed once, broker-side, by metrics.deploy_state(). */
+export type DeployBadge = "green" | "amber" | "red" | "unknown";
+
+export interface PlanDeploy {
+  badge: DeployBadge;
+  detail: string;
+  state?: string;
+  ahead?: number;
+  behind?: number;
+}
+
+/* The board's own staleness, said out loud. The board cannot go stale relative
+   to the mirror — it is not a copy of it — but the mirror can lag, so every
+   render says which mirror head it derived from and when. Declared, never
+   denied. */
+export interface PlanFace {
+  available: boolean;
+  unavailable_reason?: string;
+  derived_at?: string;
+  mirror_head?: string | null;
+  mirror?: string;
+  deploy?: PlanDeploy;
+  gate_configured?: boolean;
+  notes?: string[];
+  columns?: string[];
+  column_blurbs?: Record<string, string>;
+}
+
+/* A card is a RENDERING of an artifact that already exists. The derived half
+   comes from the broker-written index; the four board-native fields (blocked,
+   blocked_reason, archived, sort_order) plus comment_count are the server's,
+   and are the only things anything in this client can change. */
+export interface PlanCard {
+  slug: string;
+  kind: "spec" | "backlog" | "keyboard";
+  title: string;
+  column: string;
+  spec_path: string | null;
+  status: string | null;
+  status_word: string | null;
+  tier: string | null;
+  tier_note?: string | null;
+  lane: string | null;
+  review_owner: string | null;
+  builder: string | null;
+  requester?: string | null;
+  cross_lane?: boolean;
+  confirm_seq: number | null;
+  branch?: string | null;
+  shas?: string[];
+  flags: string[];
+  deploy: PlanDeploy | null;
+  whose_move: "plink" | "residents" | "nobody";
+  opened_at: string | null;
+  updated_at: string | null;
+  note: string;
+  where: string;
+  merge_commit?: string | null;
+  shortstat?: string;
+  guarded_paths?: string[];
+  body?: string;
+  position?: number;
+  /* board-native — the complete list of what the board owns */
+  blocked: boolean;
+  blocked_reason: string | null;
+  blocked_by: string | null;
+  blocked_at: string | null;
+  archived: boolean;
+  sort_order: number | null;
+  comment_count: number;
+}
+
+export interface PlanComment {
+  id: number;
+  slug: string;
+  author_type: MemberType;
+  author_id: number;
+  author_label: string;
+  text: string;
+  created_at: string;
+}
+
+export interface PlanBoard {
+  face: PlanFace;
+  cards: PlanCard[];
+  counts: Record<string, number>;
+}
+
+export interface PlanCardDetail {
+  card: PlanCard | null;
+  comments: PlanComment[];
+  face: PlanFace;
+  note?: string;
+}
