@@ -97,5 +97,6 @@ after D.
 <!-- No Confirm record → no build. This is the gate. -->
 
 ## Status
-building
+built@loop/2026-08-23-plan-room-phase2-slice-a
+<!-- set by the broker on 2026-08-23 23:57Z (start-build, 2026-08-23-plan-room-phase2-slice-a): build published: disjorn.git 9b3f6796a7ad60fad32196cbfe3d2e54e9b04409 — on the branch for review, nothing merged. `board --mark-merged` advances this to `merged` once the merge lands. -->
 <!-- set by the broker on 2026-08-23 23:41Z (start-build, 2026-08-23-plan-room-phase2-slice-a): build running as disjorn-build-2026-08-23-plan-room-phase2-slice-a.service -> loop/2026-08-23-plan-room-phase2-slice-a, launched by gable (confirmed by plink, #custodian seq 1625). Not buildable again until this line moves. -->
