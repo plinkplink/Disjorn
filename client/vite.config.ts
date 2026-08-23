@@ -25,6 +25,7 @@ const API_PREFIXES = [
   "/vapid-public-key",
   "/notify-prefs",
   "/healthz",
+  "/planroom",
 ];
 
 const proxy: Record<string, object> = Object.fromEntries(

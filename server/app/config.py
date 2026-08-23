@@ -42,9 +42,21 @@ class Settings(BaseSettings):
     STT_ENGINE: str = "faster_whisper"      # key into services.stt.ENGINES
     SUMMARIZE_ENGINE: str = "ollama"        # key into services.summarize.ENGINES
 
+    # Plan Room (SPECS/2026-08-20-plan-room.md). The derived card index, written
+    # BROKER-SIDE by harness/planroom/planroom.py and opened READ-ONLY here.
+    # Derivation needs gatehouse access (`sudo git --git-dir`) and brokerd
+    # imports; this process has neither and must not grow them (seq 1428 P2).
+    # Empty means the tab reports itself unavailable, which is the honest
+    # answer — an absent index and an empty board must not read alike.
+    PLANROOM_INDEX: str = ""
+
     @property
     def db_path(self) -> Path:
         return Path(self.DB_PATH)
+
+    @property
+    def planroom_index(self) -> Path | None:
+        return Path(self.PLANROOM_INDEX) if self.PLANROOM_INDEX else None
 
     @property
     def data_dir(self) -> Path:

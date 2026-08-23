@@ -224,6 +224,42 @@ deploy_tree = "/home/plink/Disjorn/Disjorn"
 # #custodian name.
 # keyboard = ["plink"]
 
+[planroom]
+# THE PLAN ROOM (SPECS/2026-08-20-plan-room.md, confirmed seq 1434). The board
+# tab, the `board-*` verbs, and the CLI all render one derivation, and this
+# block is where that derivation is aimed.
+#
+# `index` is the DERIVED CARD CACHE this daemon writes and the Disjorn server
+# reads. It is a CACHE, NEVER A SOURCE: git wins every disagreement and the
+# index rebuilds from zero. Delete the file and the next rebuild restores it
+# whole; there is no path by which it teaches git anything. Point the server's
+# PLANROOM_INDEX at the same file (read-only) — derivation needs gatehouse
+# access and brokerd imports, and the server process has neither and must not
+# grow them (seq 1428 P2).
+#
+# WITH THIS BLOCK ABSENT nothing rebuilds and the board verbs still answer:
+# they ask the server, which says the index is unavailable and why. An absent
+# index and an empty board must not read alike.
+index = "/var/lib/disjorn-broker/planroom-index.db"
+
+# When to rebuild (seq 1428 P4 — a trigger nobody has to remember).
+rebuild_on_refresh = true   # after `refresh-mirror` moves the mirror
+timer_sec = 900             # the daemon's own tick; 0 disables it
+# Post ONE #custodian line per COLUMN TRANSITION, never per edit. A rebuild
+# that moved nothing says nothing, and a cold start (no prior index) announces
+# nothing at all.
+announce = true
+
+# Review owner for a card that has no spec file — an uncited `main` commit —
+# by path prefix, first match wins. THERE IS NO DEFAULT MAP IN THE CODE, on
+# purpose: a lane -> owner table is house policy, ruled in #custodian, and a
+# guess compiled into a harness module is exactly the hand-written layer the
+# Plan Room exists to delete. An unmapped path reads `unassigned`, which is
+# true.
+[planroom.lane_owners]
+"server/" = "Claudette"
+"client/" = "Claudette"
+
 [budgets]
 # WP-H12 daily per-resident action budget on broker verbs. DEFAULT OFF:
 # with nothing set here the broker never denies on budget. Instrument first

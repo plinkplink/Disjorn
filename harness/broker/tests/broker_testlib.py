@@ -23,13 +23,14 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from brokerd import Broker, load_config  # noqa: E402
+from brokerd import Broker, VerbError, load_config  # noqa: E402
 
 PY = sys.executable
 ALL_VERBS = [
     "restart-disjorn", "run-server-tests", "refresh-mirror", "start-build",
     "classify-diff", "read-prod-logs", "read-own-log", "read-metrics",
     "file-proposal", "query-own-audit",
+    "board-list", "board-card", "board-search", "board-flag", "board-comment",
 ]
 
 RECORD_STUB = textwrap.dedent("""\
@@ -320,8 +321,13 @@ class BrokerHarness:
                  stub_dir: Path | None = None,
                  unit_state_file: Path | None = None,
                  stop_record: Path | None = None,
-                 spec_repo: Path | None = None) -> None:
+                 spec_repo: Path | None = None,
+                 planroom_calls: list | None = None,
+                 planroom_state: dict | None = None) -> None:
         self.spec_repo = spec_repo
+        # Every /planroom call the broker made, and the fake board it talked to.
+        self.planroom_calls = planroom_calls if planroom_calls is not None else []
+        self.planroom_state = planroom_state if planroom_state is not None else {}
         self.broker = broker
         self.verbs_path = verbs_path
         self.record_file = record_file
@@ -602,13 +608,54 @@ def harness(tmp_path: Path):
         proposals.append({"cfg": dict(disjorn_cfg), "body": body})
         return {"seq": 99, "message_id": 1234}
 
+    planroom_calls: list = []
+    planroom_state: dict = {"face": {"available": True,
+                                     "derived_at": "2026-08-23T00:00:00+00:00",
+                                     "mirror_head": "abc1234deadbeef",
+                                     "deploy": {"badge": "green"}, "notes": []},
+                            "cards": [], "comments": {}, "http_error": None}
+
+    def stub_planroom(disjorn_cfg: dict, method: str, path: str,
+                      payload: dict | None = None) -> dict:
+        """A fake /planroom surface. Records every call, so tests can assert
+        that a WRITE verb only ever hits a board-native endpoint."""
+        planroom_calls.append({"method": method, "path": path,
+                               "payload": payload, "cfg": dict(disjorn_cfg)})
+        if planroom_state.get("http_error"):
+            raise VerbError("exec-failure", planroom_state["http_error"])
+        cards = planroom_state["cards"]
+        by_slug = {c["slug"]: c for c in cards}
+        face = planroom_state["face"]
+        if path.startswith("/planroom/board"):
+            return {"face": face, "cards": cards,
+                    "counts": {c["column"]: 1 for c in cards}}
+        if path.startswith("/planroom/search"):
+            return {"face": face, "cards": cards, "truncated": False}
+        if path.startswith("/planroom/cards/"):
+            rest = path[len("/planroom/cards/"):]
+            slug = rest.split("/")[0]
+            if path.endswith("/comment"):
+                planroom_state["comments"].setdefault(slug, []).append(payload)
+                return {"comment": {"id": 1, "slug": slug, "text": payload["text"],
+                                    "author_label": payload.get("author")}}
+            if path.endswith("/flag"):
+                card = by_slug.get(slug, {"slug": slug, "column": "Ready"})
+                card["blocked"] = bool(payload["blocked"])
+                card["blocked_reason"] = payload.get("reason")
+                return {"card": card}
+            return {"face": face, "card": by_slug.get(slug),
+                    "comments": planroom_state["comments"].get(slug, [])}
+        raise VerbError("exec-failure", f"unstubbed plan room path {path}")
+
     config = load_config(str(broker_toml))
-    broker = Broker(config, str(verbs_path), transport=stub_transport)
+    broker = Broker(config, str(verbs_path), transport=stub_transport,
+                    planroom_api=stub_planroom)
     h = BrokerHarness(broker, verbs_path, record_file, proposals,
                       specs_dir=specs_dir, build_record=build_record,
                       build_log_dir=build_logs, stub_dir=stub_dir,
                       unit_state_file=unit_state_file, stop_record=stop_record,
-                      spec_repo=spec_repo)
+                      spec_repo=spec_repo, planroom_calls=planroom_calls,
+                      planroom_state=planroom_state)
     h.set_verbs()  # everything explicitly OFF to start
 
     t = threading.Thread(target=broker.serve_forever, daemon=True)

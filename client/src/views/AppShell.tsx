@@ -26,9 +26,26 @@ import type { ChannelListItem, SettableStatus, UserStatus } from "../types";
 import { isChannelMember, isPrivateChannel } from "../types";
 import { socket } from "../ws";
 import { ChatView } from "./ChatView";
+import PlanRoomView from "./PlanRoomView";
 import { SettingsView } from "./SettingsView";
 
 const SETTINGS_HASH = "#/settings";
+const PLANROOM_HASH = "#/planroom";
+
+/* Which full-panel view is covering the chat, if any. A discriminated value
+   rather than one boolean per view: the shell has three "am I in a channel?"
+   decisions (server-side focus, window refocus, the sidebar's active row) and
+   every one of them means "no overlay", not "not settings". A second boolean
+   would have had to be added to all three by hand, and the one that got missed
+   would be a silent bug — the server going on believing you are reading a
+   channel you are not looking at. */
+type Overlay = "none" | "settings" | "planroom";
+
+function overlayFromHash(hash: string = location.hash): Overlay {
+  if (hash === SETTINGS_HASH) return "settings";
+  if (hash === PLANROOM_HASH) return "planroom";
+  return "none";
+}
 
 /* Channels the house cannot lose — the server refuses to delete these (400;
    PROTECTED_CHANNEL_NAMES in server/app/routers/channels.py is the authority),
@@ -276,9 +293,9 @@ export function AppShell() {
   const activeChannelId = useChannels((s) => s.activeChannelId);
   const loaded = useChannels((s) => s.loaded);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [showSettings, setShowSettings] = useState(
-    () => location.hash === SETTINGS_HASH,
-  );
+  const [overlay, setOverlay] = useState<Overlay>(() => overlayFromHash());
+  const showSettings = overlay === "settings";
+  const showPlanRoom = overlay === "planroom";
   const [membersOpen, setMembersOpen] = useState(
     () => window.innerWidth >= 1024,
   );
@@ -288,22 +305,20 @@ export function AppShell() {
   const [deletingChannel, setDeletingChannel] = useState(false);
   const [channelMenuOpen, setChannelMenuOpen] = useState(false);
   const me = useSession((s) => s.user);
-  const showSettingsRef = useRef(showSettings);
-  showSettingsRef.current = showSettings;
+  const overlayRef = useRef(overlay);
+  overlayRef.current = overlay;
 
   // Boot: load the sidebar, open the socket, adopt a deep-linked route.
   useEffect(() => {
     const st = useChannels.getState();
     void st.refresh();
-    if (location.hash !== SETTINGS_HASH) st.setActive(channelIdFromHash());
+    if (overlayFromHash() === "none") st.setActive(channelIdFromHash());
     socket.connect();
     // Route changes from outside (notification deep-links, back button).
     const onHash = () => {
-      if (location.hash === SETTINGS_HASH) {
-        setShowSettings(true);
-        return;
-      }
-      setShowSettings(false);
+      const next = overlayFromHash();
+      setOverlay(next);
+      if (next !== "none") return;
       const id = channelIdFromHash();
       if (id !== null) useChannels.getState().setActive(id);
     };
@@ -350,7 +365,7 @@ export function AppShell() {
   // Channel switch: sync hash, tell the server our focus (push suppression),
   // load history, clear the unread badge.
   useEffect(() => {
-    if (!showSettingsRef.current) {
+    if (overlayRef.current === "none") {
       writeChannelHash(activeChannelId);
       socket.sendFocus(activeChannelId);
     }
@@ -393,22 +408,23 @@ export function AppShell() {
       });
   }, [activeChannelId, loaded]);
 
-  // Settings open/close: while in settings the user is not reading the
-  // channel, so drop server-side focus (pushes for it resume).
+  // Overlay open/close: while a full-panel view (settings, the Plan Room) is
+  // up the user is not reading the channel, so drop server-side focus (pushes
+  // for it resume).
   useEffect(() => {
-    if (showSettings) {
+    if (overlay !== "none") {
       socket.sendFocus(null);
     } else {
       socket.sendFocus(useChannels.getState().activeChannelId);
     }
-  }, [showSettings]);
+  }, [overlay]);
 
   // Window blur/focus: keep server-side focus accurate — notification
   // suppression depends on it (spec: send on EVERY blur/focus).
   useEffect(() => {
     const onBlur = () => socket.sendFocus(null);
     const onFocus = () => {
-      if (showSettingsRef.current) return; // settings = no channel focused
+      if (overlayRef.current !== "none") return; // overlay = no channel focused
       const st = useChannels.getState();
       socket.sendFocus(st.activeChannelId);
       // Returning to the window reads the visible channel.
@@ -439,23 +455,31 @@ export function AppShell() {
     document.title = totalUnread > 0 ? `(${totalUnread}) Disjorn` : "Disjorn";
   }, [totalUnread]);
 
-  const openSettings = () => {
+  const openOverlay = (next: Exclude<Overlay, "none">) => {
     setSidebarOpen(false);
-    setShowSettings(true);
-    history.replaceState(null, "", SETTINGS_HASH);
+    setOverlay(next);
+    // replaceState, not pushState: this app deliberately never grows history
+    // entries for its own navigation.
+    history.replaceState(
+      null,
+      "",
+      next === "settings" ? SETTINGS_HASH : PLANROOM_HASH,
+    );
   };
-  const closeSettings = () => {
-    setShowSettings(false);
+  const closeOverlay = () => {
+    setOverlay("none");
     writeChannelHash(useChannels.getState().activeChannelId);
   };
+  const openSettings = () => openOverlay("settings");
+  const openPlanRoom = () => openOverlay("planroom");
 
   const active = channels.find((c) => c.id === activeChannelId);
   const dms = channels.filter((c) => c.type === "dm_1to1");
   const mains = channels.filter((c) => c.type !== "dm_1to1"); // main_feed + text
   const select = (id: number) => {
-    if (showSettingsRef.current) closeSettings();
+    if (overlayRef.current !== "none") closeOverlay();
     useChannels.getState().setActive(id);
-    // Same channel clicked while in settings: the effect won't re-fire.
+    // Same channel clicked from an overlay: the effect won't re-fire.
     writeChannelHash(id);
     setSidebarOpen(false);
   };
@@ -515,6 +539,20 @@ export function AppShell() {
       <nav className={`sidebar${sidebarOpen ? " open" : ""}`}>
         <div className="sidebar-header">Disjorn</div>
         <div className="channel-list">
+          {/* The Plan Room sits above the channels: it is the house's work, not
+              one of its rooms. Everyone may read it — the write controls
+              inside are gated, and the server's refusal is the wall. */}
+          <button
+            className={`channel-item plan-room-item${
+              showPlanRoom ? " active" : ""
+            }`}
+            onClick={openPlanRoom}
+          >
+            <span className="hash">▤</span>
+            <span className="channel-item-text">
+              <span className="name">Plan Room</span>
+            </span>
+          </button>
           <div className="channel-section channel-section-row">
             <span>Channels</span>
             <button
@@ -530,7 +568,7 @@ export function AppShell() {
             <ChannelRow
               key={c.id}
               channel={c}
-              active={c.id === activeChannelId && !showSettings}
+              active={c.id === activeChannelId && overlay === "none"}
               onSelect={select}
             />
           ))}
@@ -544,7 +582,7 @@ export function AppShell() {
             <ChannelRow
               key={c.id}
               channel={c}
-              active={c.id === activeChannelId && !showSettings}
+              active={c.id === activeChannelId && overlay === "none"}
               onSelect={select}
             />
           ))}
@@ -552,8 +590,10 @@ export function AppShell() {
         <UserFooter onOpenSettings={openSettings} />
       </nav>
       <main className="main-panel">
-        {showSettings ? (
-          <SettingsView onClose={closeSettings} />
+        {showPlanRoom ? (
+          <PlanRoomView onClose={closeOverlay} />
+        ) : showSettings ? (
+          <SettingsView onClose={closeOverlay} />
         ) : (
           <>
             <header className="topbar">
