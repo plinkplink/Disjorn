@@ -424,6 +424,30 @@ export interface PlanCard {
   comment_count: number;
 }
 
+/* A backlog row — the artifact a `kind: "backlog"` card renders. The four
+   settable statuses are the four triage verbs; `open` is the filed state and
+   has no verb that returns to it. `spec_ref` is the spec SLUG, never a path. */
+export type BacklogStatus =
+  | "open"
+  | "spec'd"
+  | "built"
+  | "rejected"
+  | "duplicate";
+
+export interface BacklogItem {
+  id: number;
+  text: string;
+  author: string;
+  created_at: string;
+  status: BacklogStatus;
+  spec_ref: string | null;
+  /* Who changed the status and when — typed, the same shape a message author
+     has. Null on a row nobody has triaged. */
+  status_by_type: MemberType | null;
+  status_by_id: number | null;
+  status_at: string | null;
+}
+
 export interface PlanComment {
   id: number;
   slug: string;

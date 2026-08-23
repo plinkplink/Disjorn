@@ -16,7 +16,10 @@ ChannelType = Literal["main_feed", "dm_1to1", "text"]
 # 'private': channel_members is the wall — non-members read nothing.
 ChannelVisibility = Literal["public", "private"]
 UserStatus = Literal["online", "idle", "dnd", "offline"]
-BacklogStatus = Literal["open", "spec'd", "built", "rejected"]
+# 'duplicate' is the honest word for a row filed twice by UI error — distinct
+# from 'rejected', which is a decision about the request rather than about the
+# row. Row 3 took 'rejected' on 2026-08-23 for want of it (migration 010).
+BacklogStatus = Literal["open", "spec'd", "built", "rejected", "duplicate"]
 
 
 # ---------------------------------------------------------------------------
@@ -89,8 +92,18 @@ class BacklogItem(BaseModel):
     """A feature request filed via `/backlog <text>` (WP-L2).
 
     `text` is stored verbatim; `author` is the poster's label (username or bot
-    name). Residents triage `open` items into specs later, setting `status` and
-    `spec_ref` — triage is not part of WP-L2.
+    name). Triage happens through `/backlog reject|duplicate|spec'd|built <id>`
+    or the Plan Room's reject button, which are the same write reached two ways
+    (services/backlog.py).
+
+    `spec_ref` is the spec SLUG, not a path — the path is derivable from the
+    slug, and a stored path is wrong the day `SPECS/` is reorganised.
+
+    `status_by_type` / `status_by_id` / `status_at` are who changed the status
+    and when, TYPED — the same shape `messages` uses for an author, not a prose
+    label. `author` above is already prose and one prose channel is enough. All
+    three are None on a row nobody has triaged, and on every row filed before
+    migration 010, which is the truthful answer rather than an invented one.
     """
 
     id: int
@@ -99,6 +112,9 @@ class BacklogItem(BaseModel):
     created_at: str
     status: BacklogStatus = "open"
     spec_ref: Optional[str] = None
+    status_by_type: Optional[MemberType] = None
+    status_by_id: Optional[int] = None
+    status_at: Optional[str] = None
 
 
 class Bot(BaseModel):

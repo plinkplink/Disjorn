@@ -11,6 +11,7 @@ SPECS/2026-08-20-plan-room.md (confirmed by plink, #custodian seq 1434).
 | POST   | /planroom/cards/{slug}/flag       | admin, bot |
 | POST   | /planroom/cards/{slug}/archive    | admin      |
 | POST   | /planroom/cards/{slug}/order      | admin      |
+| POST   | /planroom/cards/{slug}/status     | human      | backlog cards only
 
 THIS ROUTER DOES NOT DERIVE ANYTHING, AND MUST NEVER LEARN HOW. Every card is
 a rendering of an artifact that already exists — a `SPECS/` file's Status line,
@@ -30,14 +31,25 @@ index and an empty board must not read alike.
 WHAT THIS ROUTER DOES OWN — comments, card order, the blocked flag + its
 reason, archived. That is the complete list. It is authoritative, it lives in
 `card_meta` / `card_comments` (migration 009), it is keyed on the spec slug
-(P5), and it survives every rebuild. Every write endpoint below touches only
-those four things; **derived state has no write path anywhere in this house**,
-which is what makes "residents can only edit board-native state" a structural
-fact rather than a promise.
+(P5), and it survives every rebuild. **Derived state has no write path anywhere
+in this house**, which is what makes "residents can only edit board-native
+state" a structural fact rather than a promise.
 
-PHASE I HAS NO DRAG-TO-COLUMN. A card changes columns only because reality
-moved. Write-through (confirm/witness/ratify buttons, diff view, merge, review
-stamps) is Phase II and a separate spec; nothing here should grow toward it.
+THE ONE ENDPOINT THAT IS NEITHER (Phase II slice A, seq 1625) —
+`POST /cards/{slug}/status` writes a BACKLOG ROW, which is not board-native
+state and is not derived state: it is the artifact itself. For a backlog card
+the DB row IS what the card renders, so the button writes through to it exactly
+as `/backlog reject <id>` in chat does — the same function in
+services/backlog.py, which is where the human-only gate lives. It still writes
+no card, no column and no index; the Backlog column is derived from
+`status = 'open'` broker-side, and it notices at the next tick. Read that as the
+rule holding, not bending: the write goes to the artifact and the derivation
+stays the only thing that moves a card.
+
+NO DRAG-TO-COLUMN. A card changes columns only because reality moved — a write
+through to an artifact is how reality moves, and it is still not a hand on the
+card. The rest of Phase II (spec lifecycle, diff view, review stamps, merge and
+deploy buttons) is separate specs; nothing here should grow toward them.
 """
 
 import logging
@@ -51,6 +63,7 @@ from pydantic import BaseModel, Field
 from .. import db
 from ..config import get_settings
 from ..models import User
+from ..services import backlog as backlog_service
 from .auth import Actor, get_actor, get_admin_user
 
 logger = logging.getLogger(__name__)
@@ -74,6 +87,13 @@ SLUG_RE = re.compile(r"^(?:\d{4}-\d{2}-\d{2}-[a-z0-9][a-z0-9-]{0,50}"
 
 MAX_COMMENT_CHARS = 4000
 MAX_REASON_CHARS = 500
+
+# A backlog card's slug carries the row id it was derived from — the broker
+# mints it as BACKLOG_PREFIX + id in harness/planroom/planroom.py. This is the
+# only card kind whose artifact is a row in THIS database, and so the only one
+# this router can write through to. Reading the id back out of the slug is not
+# derivation: the broker put it there to be read.
+BACKLOG_SLUG_RE = re.compile(r"^backlog-(\d{1,12})$")
 
 
 # ── the index (read-only, per request) ──────────────────────────────────────
@@ -313,6 +333,21 @@ class OrderIn(BaseModel):
     sort_order: Optional[int] = Field(default=None, ge=0, le=100000)
 
 
+class StatusIn(BaseModel):
+    """A backlog row's new status, and the spec slug a `spec'd` write implies.
+
+    The field is the status, not a fixed verb, even though the only button
+    shipping today is Reject: this endpoint IS the slash command's write path
+    reached from the UI, and narrowing it to one value here would make the two
+    callers different write paths that merely look alike. Which values are
+    settable, and what `spec'd` requires, is decided once in
+    services/backlog.py — this model does not get its own opinion.
+    """
+
+    status: str = Field(max_length=40)
+    spec_ref: Optional[str] = Field(default=None, max_length=100)
+
+
 async def _require_card(slug: str) -> dict:
     """A write must name a card that is actually on the board.
 
@@ -443,6 +478,57 @@ async def set_order(slug: str, admin: AdminUser,
     await _require_card(slug)
     await _upsert_meta(slug, sort_order=body.sort_order)
     return {"card": await _card_state(slug)}
+
+
+@router.post("/planroom/cards/{slug}/status")
+async def set_backlog_status(slug: str, actor: CurrentActor,
+                             body: StatusIn = Body(...)) -> dict:
+    """Write a backlog card's status through to its row. Signed-in humans only.
+
+    THE SAME WRITE AS `/backlog reject <id>` IN CHAT — literally the same
+    function (services/backlog.py), not a parallel implementation of it. One
+    write path, two callers, so the human-only gate cannot be true on one and
+    stale on the other. This handler's whole job is to turn a card slug back
+    into the row id it was derived from and to render the refusal; it decides
+    nothing about who may write or what may be written.
+
+    BACKLOG CARDS ONLY, and the refusal below is the doctrine rather than a
+    convenience. A spec card's status lives in a `SPECS/` file's Status line, in
+    git — there is no endpoint that writes it because there is no such thing
+    anywhere in this house. A backlog row is different in kind: it is the
+    artifact, it lives in this database, and the Backlog column is derived from
+    it. So this writes the artifact and stops.
+
+    The card in the response is DELIBERATELY THE OLD ONE — the board still shows
+    the row where it was, because the column is derived and derivation runs on
+    the broker's own timer. The client says so instead of pretending the card
+    moved. A UI that asserted the move would be the forked truth the Plan Room
+    spec exists to prevent, arriving as an optimistic update.
+    """
+    _check_slug(slug)
+    match = BACKLOG_SLUG_RE.match(slug)
+    if match is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Only a backlog card has a status this board can write. A "
+                   "spec's Status line lives in its SPECS/ file, in git, and "
+                   "nothing here writes it.")
+    card = await _require_card(slug)
+    if card.get("kind") != "backlog":
+        raise HTTPException(
+            status_code=400,
+            detail="That card is not a backlog row, so it has no status here "
+                   "to write.")
+    try:
+        item = await backlog_service.set_status(
+            int(match.group(1)), body.status,
+            actor_type=actor.type, actor_id=actor.id, spec_ref=body.spec_ref)
+    except backlog_service.BacklogStatusError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return {"item": item, "card": card,
+            "note": "The row is updated. The card leaves the Backlog column at "
+                    "the next derivation tick, and the broker announces it "
+                    "like every other transition."}
 
 
 async def _card_state(slug: str) -> Optional[dict]:

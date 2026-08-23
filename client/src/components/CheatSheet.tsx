@@ -26,6 +26,10 @@ const COMMANDS: Section[] = [
     items: [
       { label: "List the backlog", cmd: "/backlog" },
       { label: "File a backlog item", cmd: "/backlog <your request>" },
+      { label: "Reject a backlog item", cmd: "/backlog reject <id>" },
+      { label: "Mark a backlog item a duplicate", cmd: "/backlog duplicate <id>" },
+      { label: "Point a backlog item at its spec", cmd: "/backlog spec'd <id> <spec-slug>" },
+      { label: "Mark a backlog item built", cmd: "/backlog built <id>" },
       { label: "Un-brick a resident (Claude Code)", cmd: "/unbrick-resident" },
     ],
   },

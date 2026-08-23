@@ -325,12 +325,24 @@ class DisjornClient:
     ) -> list[dict[str, Any]]:
         """Read the feature-request backlog (WP-L2), oldest first.
 
-        Returns ``[{id, text, author, created_at, status, spec_ref}, ...]`` —
-        the same items users file with ``/backlog <text>`` in chat. This is the
-        resident's triage read surface: get the table straight from the server
-        instead of scraping the server-rendered ``/backlog`` chat listing.
-        ``status`` is one of ``open``/``spec'd``/``built``/``rejected``;
-        ``spec_ref`` is null until an item is triaged into a spec.
+        Returns ``[{id, text, author, created_at, status, spec_ref,
+        status_by_type, status_by_id, status_at}, ...]`` — the same items users
+        file with ``/backlog <text>`` in chat. This is the resident's triage
+        read surface: get the table straight from the server instead of
+        scraping the server-rendered ``/backlog`` chat listing.
+
+        ``status`` is one of
+        ``open``/``spec'd``/``built``/``rejected``/``duplicate``.
+        ``spec_ref`` is the spec SLUG (never a path) and is null until an item
+        is triaged into a spec. ``status_by_type``/``status_by_id``/
+        ``status_at`` are who last changed the status and when — typed, the
+        same shape a message author has — and are null on a row nobody has
+        triaged.
+
+        This helper READS. Changing a status is an authenticated-HUMAN act and
+        bots are refused server-side: the verbs are ``/backlog reject|duplicate|
+        spec'd|built <id>`` in chat, or the Plan Room's reject button, which are
+        the same server write reached two ways.
 
         ``GET /backlog`` is paginated with the same cursor idiom as the messages
         endpoints: ``from_id`` is an inclusive lower bound on the item id and

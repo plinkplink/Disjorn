@@ -16,7 +16,24 @@ to post; returning None posts nothing.
                             no bot summon), compact: id, short text, author, status.
                             Bounded to the most recent _LIST_MAX_ITEMS.
     /backlog <text>      -> files <text> VERBATIM as a new 'open' item, author =
-                            poster. Resident triage happens later (not this WP).
+                            poster.
+    /backlog reject <id>            -> status 'rejected'
+    /backlog duplicate <id>         -> status 'duplicate'
+    /backlog built <id>             -> status 'built'
+    /backlog spec'd <id> <slug>     -> status "spec'd" + spec_ref = <slug>
+
+The four triage verbs are RESERVED FIRST WORDS. `/backlog reject the login
+flow` files nothing and says so, rather than guessing which of the two things
+you meant. The alternative — treat it as a subcommand only when the rest
+happens to parse as an id — turns `/backlog reject 5 please` into a filed item
+reading "reject 5 please" while the person who typed it believes #5 is
+rejected. A refusal you can read beats a silent wrong turn; that is the same
+reason `duplicate` exists at all.
+
+The verbs are authenticated-HUMAN-only and bots are refused server-side, in
+services/backlog.py rather than here — one write path, one gate, reached both
+from chat and from the Plan Room's reject button. Nothing in this file decides
+who may write; it decides what was typed.
 
 Filing is refused (never echoing the text) when the request is not fit for a
 public, bot-readable table:
@@ -47,6 +64,7 @@ from fastapi import APIRouter, Depends, Query
 
 from .. import db, privacy
 from ..models import BacklogItem
+from ..services import backlog as backlog_service
 from .auth import Actor, get_actor
 from .messages import deliver_message
 
@@ -289,7 +307,8 @@ async def _system_bot_id() -> int:
 async def _items_page(from_id: int = 0, limit: int = BACKLOG_PAGE_MAX) -> list[dict[str, Any]]:
     """Backlog rows with id >= from_id, oldest first, at most `limit` of them."""
     return await db.fetch_all(
-        """SELECT id, text, author, created_at, status, spec_ref FROM backlog
+        """SELECT id, text, author, created_at, status, spec_ref,
+                  status_by_type, status_by_id, status_at FROM backlog
            WHERE id >= ? ORDER BY id LIMIT ?""",
         (from_id, limit),
     )
@@ -335,11 +354,87 @@ def _render_list(items: list[dict[str, Any]], total: int, open_count: int) -> st
     return "\n".join([header, *lines])
 
 
+# ---------------------------------------------------------------------------
+# /backlog <verb> <id> — triage. See the module docstring for why the verbs are
+# reserved words rather than a shape match.
+# ---------------------------------------------------------------------------
+
+def _normalize_verb(word: str) -> str:
+    """Lowercase, and treat a curly apostrophe as the straight one.
+
+    A phone keyboard turns `spec'd` into `spec’d` without being asked. Without
+    this the verb would miss, the reserved-word check would miss with it, and
+    the message would be FILED as a backlog item reading "spec’d 6 <slug>" —
+    the exact silent wrong turn the reserved words exist to prevent.
+    """
+    return word.replace("’", "'").lower()
+
+
+def _usage(verb: str) -> str:
+    if verb == "spec'd":
+        return ("Usage: `/backlog spec'd <id> <spec-slug>` — e.g. "
+                "`/backlog spec'd 6 2026-08-23-db-write-lock`. The slug, not a "
+                "path: the path is derivable from it.")
+    return f"Usage: `/backlog {verb} <id>` — e.g. `/backlog {verb} 3`."
+
+
+async def _backlog_triage(ctx: Ctx, verb: str, status: str, rest: str) -> str:
+    """Parse `<id>` (and `<slug>` for spec'd), then make the one write.
+
+    Every refusal below names the reserved word, because from the typist's side
+    the surprising outcome is not "that was rejected" — it is "I typed a
+    sentence and nothing was filed". Saying which word was reserved is what
+    makes that recoverable.
+    """
+    parts = rest.split()
+    if not parts:
+        return f"`{verb}` is a `/backlog` subcommand and needs an item id. {_usage(verb)}"
+    if not parts[0].isdigit():
+        return (
+            f"`{verb}` is a reserved `/backlog` subcommand, so nothing was "
+            f"filed and nothing was changed — `{parts[0]}` is not an item id. "
+            f"{_usage(verb)} To file a request whose first word is `{verb}`, "
+            "reword it."
+        )
+    item_id = int(parts[0])
+    spec_ref = parts[1] if len(parts) > 1 else None
+    if status == "spec'd" and len(parts) > 2:
+        return ("A spec slug is one word — no spaces. " + _usage(verb))
+    if status != "spec'd" and len(parts) > 1:
+        return (f"`/backlog {verb}` takes only an item id. {_usage(verb)}")
+
+    try:
+        item = await backlog_service.set_status(
+            item_id, status,
+            actor_type=ctx.actor.type, actor_id=ctx.actor.id, spec_ref=spec_ref)
+    except backlog_service.BacklogStatusError as exc:
+        return str(exc)
+
+    ref = f", spec `{item['spec_ref']}`" if item["spec_ref"] else ""
+    # The board is NOT told. It derives from this row on its own timer and
+    # announces the move itself — saying "the card moved" here would be this
+    # command asserting something it did not do and cannot see.
+    return (f"Backlog #{item_id} → {item['status']}{ref} (by {ctx.poster}). "
+            "The Plan Room card follows at the next derivation tick.")
+
+
 @command("backlog")
 async def _backlog(ctx: Ctx) -> str:
     if not ctx.args.strip():
         items, total, open_count = await _tail_items(_LIST_MAX_ITEMS)
         return _render_list(items, total, open_count)
+
+    # A reserved first word is a subcommand, always — checked BEFORE the filing
+    # walls below, because a triage verb copies no text anywhere. It moves a
+    # status and stamps an actor id; there is nothing in the carrying message
+    # for the privacy wall or the DM wall to protect, and refusing a `reject`
+    # in a DM would be a wall around nothing.
+    words = ctx.args.strip().split(None, 1)
+    head = _normalize_verb(words[0])
+    status = backlog_service.STATUS_VERBS.get(head)
+    if status is not None:
+        return await _backlog_triage(ctx, head, status,
+                                     words[1] if len(words) > 1 else "")
 
     # ------------------------------------------------------------------ walls
     # Each refusal below returns WITHOUT echoing ctx.args: the whole point is
