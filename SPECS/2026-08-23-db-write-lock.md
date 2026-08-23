@@ -142,6 +142,4 @@ branch); this file therefore describes the complete fix, not a delta.
      db-write-lock revision"). -->
 
 ## Status
-failed
-<!-- set by the broker on 2026-08-23 17:08Z (start-build, 2026-08-23-db-write-lock): build failed: exit 1: Running as unit: disjorn-build-2026-08-23-db-write-lock.service; invocation ID: 8cde1c5ad0ba4bcfa02965bd47b926a9 warning: You appear to have cloned an empty repository. run-build: auth: CLAUDE_CODE_OAUTH_TOKEN from /srv/disjorn-build-config/gable/env run-build: container exited 1 — not publi. To allow another build, set this back to `confirmed` (the confirm record above still stands). -->
-<!-- set by the broker on 2026-08-23 17:07Z (start-build, 2026-08-23-db-write-lock): build running as disjorn-build-2026-08-23-db-write-lock.service -> loop/2026-08-23-db-write-lock, launched by gable (confirmed by plink, #custodian seq 1668). Not buildable again until this line moves. -->
+`confirmed`
