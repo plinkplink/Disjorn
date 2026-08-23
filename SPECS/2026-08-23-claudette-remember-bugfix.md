@@ -58,4 +58,4 @@ About one slot. `strict: true` and the refuse path are small; the repair sweep a
 <!-- No Confirm record → no build. This is the gate. -->
 
 ## Status
-`confirmed`
+`building`
