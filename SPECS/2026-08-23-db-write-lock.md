@@ -98,4 +98,5 @@ lines, plus three regression tests and the call-site audit.
 <!-- No Confirm record → no build. This is the gate. -->
 
 ## Status
-`confirmed`
+building
+<!-- set by the broker on 2026-08-23 16:12Z (start-build, 2026-08-23-db-write-lock): build running as disjorn-build-2026-08-23-db-write-lock.service -> loop/2026-08-23-db-write-lock, launched by gable (confirmed by plink, #custodian seq 1625). Not buildable again until this line moves. -->
