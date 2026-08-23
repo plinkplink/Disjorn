@@ -58,4 +58,4 @@ About one slot. `strict: true` and the refuse path are small; the repair sweep a
 <!-- No Confirm record → no build. This is the gate. -->
 
 ## Status
-`built@loop/2026-08-23-claudette-remember-bugfix` (disjorn 6e637f7 + claudette a5e3fa3)
+`merged` (disjorn 6e637f7 merged to main; claudette 70d567a merged to disjorn-port; review #custodian 1730)
