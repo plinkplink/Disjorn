@@ -41,6 +41,20 @@ Per Claudette's #1605 + #1615, all in `server/app/db.py`:
     joining the enclosing block instead of committing it out from under
     itself. That is the semantics every such caller meant, and it fails
     soft instead of hanging.
+  - **The ContextVar resets with its token in a `finally`**
+    (`var.reset(token)`) when the block exits (Claudette #1619).
+    Task-local isolation is free — child tasks copy the context, so no
+    cross-task leak — but within the *same* task the flag persists after
+    the block unless reset, and then every subsequent
+    `execute(commit=True)` in that request silently declines to commit:
+    a data-loss bug wearing the costume of the fix.
+- **Stated behavior change (Claudette #1619), recorded as intent:** a
+  nested `execute(commit=True)` now rolls back with the enclosing block.
+  A write that used to become durable on its own (by committing the
+  enclosing block early — the defect) now joins the block and dies if
+  the outer block fails. That is what every such caller meant; it is
+  stated here so a future diff-reader finds it as intent rather than
+  inferring it from a ContextVar.
 - `run_migrations` untouched (startup-only, single task).
 - `busy_timeout=5000` stays but is irrelevant to this bug: one connection in
   one process, SQLite never sees the contention — the race is entirely ours.
@@ -54,7 +68,9 @@ Regression tests (the part that makes it real), three cases:
 3. Nested case: `execute(commit=True)` called from inside a
    `transaction()` block completes without deadlock and does NOT commit
    the enclosing block early — the write becomes durable only when the
-   block commits.
+   block commits. After the block exits, a subsequent
+   `execute(commit=True)` in the same task commits normally — this half
+   of the test is what proves the `finally` reset.
 Tests 1–2 must fail before the lock lands — if they pass on unpatched
 code, the test is wrong.
 
@@ -76,9 +92,9 @@ Small fraction of a slot — the lock plus the ContextVar guard is ~25
 lines, plus three regression tests and the call-site audit.
 
 ## Confirm record
-- **Confirmed by**: <pending>
+- **Confirmed by**: plink
 - **#custodian seq**: 1625
-- **Confirmed at**: 8/23/2026
+- **Confirmed at**: 2026-08-23
 <!-- No Confirm record → no build. This is the gate. -->
 
 ## Status

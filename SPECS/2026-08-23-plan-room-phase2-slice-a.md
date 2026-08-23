@@ -7,8 +7,11 @@
 
 ## Agreed UX
 - `/backlog reject|duplicate|spec'd|built <id>` — subcommands on the
-  existing `/backlog` command (`spec'd` additionally takes the spec path:
-  `/backlog spec'd <id> <spec-file>` — see `spec_ref` note below). Same
+  existing `/backlog` command (`spec'd` additionally takes the spec
+  **slug**, not a path: `/backlog spec'd 6 2026-08-23-db-write-lock` —
+  Claudette #1619: a card's identity is already its spec slug, the path
+  is derivable, and a stored path breaks the day `SPECS/` is
+  reorganized; see `spec_ref` note below). Same
   authenticated-human guard as `/build`; bots refused server-side. The row's status changes; the card leaves or
   moves the board at the next 900s derivation tick, announced by the broker
   like every other transition — the command edits the artifact and the
@@ -44,7 +47,9 @@
   same status-change function as the slash path.
 - A `spec'd` write sets `spec_ref` in the same statement (Claudette #1615)
   — the status implies the pointer; shipping the verb without the field
-  leaves a status with no referent.
+  leaves a status with no referent. `spec_ref` stores the **slug**;
+  resolution to a path happens at read time (Claudette #1619 — same
+  reasoning as not minting a second card ID).
 - `client/` — reject button on backlog cards; the greyed render mirrors the
   server gate, never replaces it.
 - Board owns no state: for backlog cards the DB row is the artifact; the
@@ -86,9 +91,9 @@ heartbeat/ripe-tag) dropped per seq 1609, revisited in its own session
 after D.
 
 ## Confirm record
-- **Confirmed by**: <pending>
+- **Confirmed by**: plink
 - **#custodian seq**: 1625
-- **Confirmed at**: 8/23/2026
+- **Confirmed at**: 2026-08-23
 <!-- No Confirm record → no build. This is the gate. -->
 
 ## Status
