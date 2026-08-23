@@ -98,5 +98,6 @@ lines, plus three regression tests and the call-site audit.
 <!-- No Confirm record → no build. This is the gate. -->
 
 ## Status
-building
+built@loop/2026-08-23-db-write-lock
+<!-- set by the broker on 2026-08-23 16:19Z (start-build, 2026-08-23-db-write-lock): build published: disjorn.git cd6b43dc4ddabc0ab1fdfd9400b65620ed74194d — on the branch for review, nothing merged. `board --mark-merged` advances this to `merged` once the merge lands. -->
 <!-- set by the broker on 2026-08-23 16:12Z (start-build, 2026-08-23-db-write-lock): build running as disjorn-build-2026-08-23-db-write-lock.service -> loop/2026-08-23-db-write-lock, launched by gable (confirmed by plink, #custodian seq 1625). Not buildable again until this line moves. -->
