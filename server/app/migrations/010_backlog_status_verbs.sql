@@ -39,6 +39,14 @@
 -- series). Ids are load-bearing off-table: the Plan Room cards a backlog row as
 -- slug `backlog-<id>`, and the reject button posts to that slug.
 
+-- Explicit transaction: run_migrations applies files via executescript, which
+-- runs statements in autocommit — without this wrap, a crash between DROP and
+-- RENAME leaves no backlog table. The IF EXISTS makes a retry after a
+-- crash-after-COMMIT-before-record safe (review seq 1785, block 1).
+BEGIN;
+
+DROP TABLE IF EXISTS backlog_new;
+
 CREATE TABLE backlog_new (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     text       TEXT    NOT NULL,
@@ -62,3 +70,5 @@ SELECT id, text, author, created_at, status, spec_ref FROM backlog;
 DROP TABLE backlog;
 
 ALTER TABLE backlog_new RENAME TO backlog;
+
+COMMIT;
