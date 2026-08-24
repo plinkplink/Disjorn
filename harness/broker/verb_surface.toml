@@ -457,6 +457,54 @@ no_nul = true
 description = "The comment, 1-4000 chars."
 
 
+# ── summon-hop ───────────────────────────────────────────────────────────
+[verbs.summon-hop]
+tool_name = "summon_hop"
+cli_help = "ask the shared bot-to-bot hop wall about a work item"
+announce_preface = false
+description = """\
+The bot-to-bot summon wall, kept by the house broker so both residents' summon \
+adapters spend against ONE counter. The summon adapters call this; a session \
+almost never needs to.\n\nBy default a bot-triggered summon's reply does not \
+re-trigger any bot (depth 1). `spend` asks whether a chain may continue past \
+that: it may, on a live work item — a board card in Review — for up to 8 bot \
+hops, after which the item PARKS FOR A HUMAN and every further hop is refused \
+until a human posts in #custodian about it. Midnight does not unpark anything; \
+a second ceiling of 24 hops per work item per UTC day bounds the resets. \
+`unpark` reports that human post.\n\nNothing here widens anything: the caps are \
+plink-owned config and the columns are the board's. An argument only chooses \
+which bucket is charged.\
+"""
+
+[verbs.summon-hop.args.action]
+type = "string"
+required = true
+min_len = 1
+max_len = 10
+pattern = "^(spend|unpark)$"
+description = "'spend' to charge one bot-to-bot hop, 'unpark' to report the human post that resets a parked work item."
+
+[verbs.summon-hop.args.work_item]
+type = "string"
+min_len = 1
+max_len = 80
+no_leading_dash = true
+no_nul = true
+description = "The work item the chain is running on: a spec slug, backlog-<n>, or keyboard-<sha>. Omitted on spend means no bucket, which is depth-1 only. Required for unpark."
+
+[verbs.summon-hop.args.summoner]
+type = "string"
+min_len = 1
+max_len = 100
+no_nul = true
+description = "Who asked — the summoning bot's name, or the human whose post unparks. Audit trail only; it authorizes nothing."
+
+[verbs.summon-hop.args.seq]
+type = "integer"
+minimum = 0
+description = "The #custodian seq of the human post being reported, so the same post reported by both adapters resets the counter once."
+
+
 # ══ ADAPTER TOOLS ═════════════════════════════════════════════════════════
 #
 # Everything above this line is a BROKER VERB. Everything below it is not.

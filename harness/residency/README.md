@@ -5,7 +5,9 @@ resident of Disjorn. Gable is an expensive instantiation — not a participant i
 every conversation. A summon (an @mention, a configured wake-pattern, or any
 message in a configured trigger channel) spins up one headless Claude Code
 session in his container, posts its reply, and logs a legible one-line summary
-to #custodian.
+to #custodian. In #custodian only, an explicit `@gable` is the ONLY thing that
+summons: patterns and trigger channels are off there and a bare name is inert
+data (spec 2026-08-24-custodian-mention-summons).
 
 This package is a **consumer** of the WP-H5 contracts (run-resident.sh,
 resident-cc.service, the /config kill-switch surface) and the disjorn_sdk
@@ -14,11 +16,16 @@ client. It modifies none of them.
 ## Flow
 
 ```
-DisjornClient.events()  ──▶  SummonDetector.is_summon?
-                                     │ yes
+DisjornClient.events()  ──▶  SummonDetector.detect  ──▶  Trigger(mode, depth)
+                                     │ summon
                                      ▼
                          BudgetLedger.can_spend?  ──no──▶ refuse in-channel + #custodian line
                                      │ yes
+                                     ▼
+              bot-chain?  ──▶  peer allowlist, then the broker's hop wall
+                                     │ served: chain granted, else depth-1
+                                     │         (a depth-1 reply's @mentions of
+                                     │          peer bots are demoted)
                                      ▼
                     get_messages() backfill  ──▶  assemble_prompt() (chat wrapped in [[CHAT]])
                                      │
@@ -35,7 +42,8 @@ DisjornClient.events()  ──▶  SummonDetector.is_summon?
 | File | Role |
 |------|------|
 | `config.py` | TOML config model; the adapter's only control surface. |
-| `detector.py` | Summon detection (mention context / trigger channel / wake regex). |
+| `detector.py` | Summon detection (mention context / trigger channel / wake regex / bot chain / digest) + the `Trigger` the session is told about. |
+| `hops.py` | Client for the broker's shared bot-to-bot hop counter. |
 | `budget.py` | Persisted daily session counter (survives restart). |
 | `cursor.py` | Persisted per-channel seq cursor; reconnect-from-seq across restarts. |
 | `launcher.py` | The container-launch contract (argv is config, prompt is stdin) + the BL-G1 pre-act model gate. |

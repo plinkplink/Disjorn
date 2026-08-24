@@ -26,6 +26,7 @@ __all__ = [
     "BackfillConfig",
     "ContainerConfig",
     "BudgetConfig",
+    "HopConfig",
     "CursorConfig",
     "TextConfig",
     "AdapterConfig",
@@ -72,6 +73,24 @@ class SummonConfig:
     typing_interval_sec: float = 2.5
     # Optional pretty names for #custodian summary legibility.
     channel_names: dict[int, str] = field(default_factory=dict)
+    # 2026-08-24: #custodian wakes a bot ONLY on an explicit @name that the
+    # server also attested. Patterns and trigger channels are off there and a
+    # bare name is inert data. Other channels are untouched.
+    custodian_mention_only: bool = True
+    # May other bots summon this seat? OFF ships today's wall (a bot author
+    # never summons). ON opens the bot-chain path, under the broker's hop
+    # counter and the allowlist below.
+    bot_summon: bool = False
+    # The other bots in the house, by author name: who may summon this seat,
+    # AND whose @mentions are demoted out of a depth-1 reply so it cannot
+    # re-trigger anyone (detector.demote_mentions).
+    peer_bots: list[str] = field(default_factory=list)
+    # Broker daily digests wake Claudette only (her #1803 cond. 3 carve-out);
+    # Gable is summon-mostly by design and leaves this off. Nothing else
+    # unaddressed wakes anyone.
+    wake_on_digest: bool = False
+    digest_author_ids: list[int] = field(default_factory=list)
+    digest_pattern: str = r"^\[custodian daily "
 
 
 @dataclass
@@ -117,6 +136,19 @@ class BudgetConfig:
     daily_session_cap: int = 12
     # Persisted counter file — survives daemon restarts.
     state_path: str = "/home/resident/.summon-budget.json"
+
+
+@dataclass
+class HopConfig:
+    """How this adapter reaches the bot-to-bot hop arbiter (the broker).
+
+    The counter is broker-side so both adapters spend against ONE wall, not one
+    each. No socket path configured = no arbiter = rule 1 (depth-1 only), which
+    is today's behaviour — the chain simply never continues.
+    """
+
+    socket_path: Optional[str] = None
+    timeout_sec: float = 5.0
 
 
 @dataclass
@@ -222,6 +254,7 @@ class AdapterConfig:
     backfill: BackfillConfig = field(default_factory=BackfillConfig)
     container: ContainerConfig = field(default_factory=ContainerConfig)
     budget: BudgetConfig = field(default_factory=BudgetConfig)
+    hops: HopConfig = field(default_factory=HopConfig)
     cursor: CursorConfig = field(default_factory=CursorConfig)
     text: TextConfig = field(default_factory=TextConfig)
 
@@ -234,6 +267,7 @@ class AdapterConfig:
         bf = data.get("backfill", {}) or {}
         cn = data.get("container", {}) or {}
         bg = data.get("budget", {}) or {}
+        hp = data.get("hops", {}) or {}
         cu = data.get("cursor", {}) or {}
         tx = data.get("text", {}) or {}
 
@@ -260,6 +294,21 @@ class AdapterConfig:
                     int(k): str(v)
                     for k, v in (sm.get("channel_names", {}) or {}).items()
                 },
+                custodian_mention_only=bool(
+                    sm.get("custodian_mention_only",
+                           SummonConfig.custodian_mention_only)
+                ),
+                bot_summon=bool(sm.get("bot_summon", SummonConfig.bot_summon)),
+                peer_bots=[str(b) for b in sm.get("peer_bots", [])],
+                wake_on_digest=bool(
+                    sm.get("wake_on_digest", SummonConfig.wake_on_digest)
+                ),
+                digest_author_ids=[
+                    int(b) for b in sm.get("digest_author_ids", [])
+                ],
+                digest_pattern=str(
+                    sm.get("digest_pattern", SummonConfig.digest_pattern)
+                ),
             ),
             backfill=BackfillConfig(
                 count=int(bf.get("count", BackfillConfig.count)),
@@ -282,6 +331,10 @@ class AdapterConfig:
                     bg.get("daily_session_cap", BudgetConfig.daily_session_cap)
                 ),
                 state_path=str(bg.get("state_path", BudgetConfig.state_path)),
+            ),
+            hops=HopConfig(
+                socket_path=hp.get("socket_path"),
+                timeout_sec=float(hp.get("timeout_sec", HopConfig.timeout_sec)),
             ),
             cursor=CursorConfig(
                 state_path=str(cu.get("state_path", CursorConfig.state_path)),

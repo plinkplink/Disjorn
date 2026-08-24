@@ -13,6 +13,8 @@ __all__ = [
     "format_summary",
     "format_refusal_summary",
     "format_reply_suffix",
+    "format_refusal_suffix",
+    "format_chain_refusal_summary",
     "format_drift_alert",
     "format_gate_refusal_alert",
 ]
@@ -54,7 +56,26 @@ def format_refusal_summary(*, summoner: str, where: str, cap: int) -> str:
     )
 
 
-def format_reply_suffix(bot_name: str, model: str, *, verified: bool = True) -> str:
+def format_chain_refusal_summary(
+    *, summoner: str, where: str, reason: str
+) -> str:
+    """One-line #custodian audit of a bot-to-bot summon that was refused."""
+    return f"summon refused | {summoner} in {where} | {reason}"
+
+
+def format_refusal_suffix(bot_name: str, summoner: str, *, by: str) -> str:
+    """Attribution on a refusal (Gable #1804 ruling 2: never silence).
+
+    A refusal says who was asking, who is not answering, and WHO REFUSED —
+    the broker's wall and this seat's own guards read the same from the
+    channel otherwise, and they are unparked by different things.
+    """
+    return f"— {bot_name} · summoned by {summoner} · refused by {by}"
+
+
+def format_reply_suffix(bot_name: str, model: Optional[str] = None, *,
+                        verified: bool = True,
+                        summoner: Optional[str] = None) -> str:
     """Identity suffix appended to a summon reply (WP-L5 VISIBLE).
 
     Every reply shows what's actually running — the platform-suffix idiom, so
@@ -64,10 +85,21 @@ def format_reply_suffix(bot_name: str, model: str, *, verified: bool = True) -> 
     ``model`` is the *pin*, not a confirmed fact). We must not stamp an
     unconfirmed pin as if it ran — that would invert the whole point of the
     suffix. Mark it explicitly instead.
+
+    ``summoner`` names who spent this seat's budget (2026-08-24 guard 4). It
+    matters most when the summoner is another bot: the reply is then the only
+    place in the channel that says whose turn this was — which is why the
+    suffix can now be built without a model at all, for the unpinned
+    deployment that would otherwise carry no attribution.
     """
-    if verified:
-        return f"— {bot_name} · {model}"
-    return f"— {bot_name} · {model} (pinned; actual unverified)"
+    line = f"— {bot_name}"
+    if model:
+        line += f" · {model}"
+        if not verified:
+            line += " (pinned; actual unverified)"
+    if summoner:
+        line += f" · summoned by {summoner}"
+    return line
 
 
 def format_drift_alert(*, expected: str, actual: str, summoner: str, where: str) -> str:

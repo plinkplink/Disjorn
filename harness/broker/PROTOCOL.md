@@ -469,6 +469,31 @@ edit; a rebuild that moved nothing says nothing, and a cold start says nothing
 at all. Configured under `[planroom]` in broker.toml; with that block absent
 nothing rebuilds and the verbs still answer honestly.
 
+### `summon-hop`
+
+SPECS/2026-08-24-custodian-mention-summons.md. The bot-to-bot summon wall, kept
+broker-side so both residents' summon adapters spend against ONE counter. The
+adapters are the callers; a session has no reason to press it.
+
+- args: `{"action": "spend"|"unpark", "work_item": str, "summoner": str,
+  "seq": int}` — `action` required; `work_item` required for `unpark`.
+- `spend` result: `{"allowed": bool, "chain": bool, "work_item": str|null,
+  "reason": str, "count": int, "cap": int, "refusal": str}`.
+  - `chain: false` is NOT a refusal: it means serve the summon but do not let
+    the reply re-trigger anyone (depth 1, the default since WP-H9). It is the
+    answer whenever no live work item is cited — an unknown slug, a card
+    outside Review, or a board that cannot be reached.
+  - `allowed: false` carries `refusal`, the fixed in-channel line the adapter
+    posts verbatim: `summon refused: <slug> at 8/8 bot hops — parked until a
+    human posts on it`.
+- `unpark` result: `{"reset": bool, "count": int, "cap": int}`. Idempotent per
+  `seq`, because both adapters see the same human post and both report it.
+- Caps live in `broker.toml`; with `[summon_hops]` absent there is no wall and
+  every `spend` answers `chain: false`.
+
+The clock never unparks a chain: midnight rolls the 24-per-UTC-day ceiling and
+nothing else. A parked work item stays parked until a human posts about it.
+
 ## Daily action budget (WP-H12)
 
 Additive to the verb table above; changes no existing verb contract. An

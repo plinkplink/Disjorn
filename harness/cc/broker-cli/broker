@@ -366,6 +366,46 @@ VERB_SURFACE = {
             },
         },
     },
+    "summon-hop": {
+        "help": "ask the shared bot-to-bot hop wall about a work item",
+        "args": {
+            "action": {
+                "flag": "--action",
+                "type": "string",
+                "required": True,
+                "help": "'spend' to charge one bot-to-bot hop, 'unpark' to report the human post that resets a parked work item.",
+                "min_len": 1,
+                "max_len": 10,
+                "pattern": "^(spend|unpark)$",
+            },
+            "work_item": {
+                "flag": "--work-item",
+                "type": "string",
+                "required": False,
+                "help": "The work item the chain is running on: a spec slug, backlog-<n>, or keyboard-<sha>. Omitted on spend means no bucket, which is depth-1 only. Required for unpark.",
+                "min_len": 1,
+                "max_len": 80,
+                "no_leading_dash": True,
+                "no_nul": True,
+            },
+            "summoner": {
+                "flag": "--summoner",
+                "type": "string",
+                "required": False,
+                "help": "Who asked — the summoning bot's name, or the human whose post unparks. Audit trail only; it authorizes nothing.",
+                "min_len": 1,
+                "max_len": 100,
+                "no_nul": True,
+            },
+            "seq": {
+                "flag": "--seq",
+                "type": "integer",
+                "required": False,
+                "help": "The #custodian seq of the human post being reported, so the same post reported by both adapters resets the counter once.",
+                "minimum": 0,
+            },
+        },
+    },
 }
 # ── END GENERATED VERB SURFACE ──────────────────────────────────────────
 
