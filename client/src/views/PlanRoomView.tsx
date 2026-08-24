@@ -7,15 +7,29 @@
    Every card is a rendering of an artifact that already exists — a SPECS/
    file's Status line, a confirm seq, a gatehouse branch, a backlog row, deploy
    provenance. So THERE IS NO DRAG-TO-COLUMN HERE, and its absence is the
-   feature: a card changes columns only because reality moved. Phase II's
-   write-through (confirm / witness / ratify / diff / merge) is a separate spec;
-   nothing in this file should grow toward it.
+   feature: a card changes columns only because reality moved.
 
    What this view can change is what the board owns: comments, order within a
-   column, the blocked flag + its reason, archived. That list is complete. The
+   column, the blocked flag + its reason, archived. That list is complete. Those
    controls are shown only to an admin, and — the house's rule, stated at every
    such site — the client hiding a control is never the wall; the server's
    refusal is.
+
+   THE REJECT BUTTON (Phase II slice A, seq 1625) is the one control that
+   changes something the board does not own, and it is not an exception to the
+   rule above. For a backlog card the DB ROW IS THE ARTIFACT, so the button
+   writes through to it — the same server write as `/backlog reject <id>` in
+   chat, one write path with two callers. It does not move the card. The
+   Backlog column is derived from the row on the broker's timer, so the card
+   sits where it is until the next tick and this view SAYS SO rather than
+   optimistically moving it. A UI that asserted the move would be exactly the
+   forked truth the Plan Room exists to prevent.
+
+   Its gate is signed-in-human, matching the server, which is why it is not
+   behind `isAdmin` — mirroring the server's rule is the job; inventing a
+   stricter or looser one here would make the button lie about what will
+   happen. The rest of Phase II (spec lifecycle, diff view, review stamps,
+   merge and deploy buttons) is separate specs; nothing here grows toward them.
 
    The header always says when the board was derived and from which mirror
    head. The board cannot go stale relative to the mirror because it is not a
@@ -26,6 +40,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ApiError,
   planArchive,
+  planBacklogStatus,
   planBoard,
   planCard,
   planComment,
@@ -211,6 +226,10 @@ function CardModal({
   const [comment, setComment] = useState("");
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
+  /* Set after a write-through whose effect the board cannot show yet. Reload
+     does not clear it, because a reload is exactly when the card looks
+     unchanged and the person needs telling why. */
+  const [notice, setNotice] = useState<string | null>(null);
 
   const load = useCallback(() => {
     void planCard(slug)
@@ -228,6 +247,7 @@ function CardModal({
   const act = (run: () => Promise<unknown>) => {
     setBusy(true);
     setError(null);
+    setNotice(null);
     void run()
       .then(() => {
         load();
@@ -251,6 +271,7 @@ function CardModal({
         </header>
 
         {error !== null && <p className="plan-error">{error}</p>}
+        {notice !== null && <p className="plan-modal-note">{notice}</p>}
         {detail?.note !== undefined && (
           <p className="plan-modal-note">{detail.note}</p>
         )}
@@ -366,6 +387,37 @@ function CardModal({
             </li>
           ))}
         </ul>
+
+        {/* Write-through to the artifact, for the one card kind whose artifact
+            is a row in this database. Not gated on isAdmin: the server's gate
+            is signed-in-human, and a client control that is stricter than the
+            server tells the person something untrue about what would happen.
+            The refusal is still the wall — this is only the shape of it. */}
+        {card !== null && card.kind === "backlog" && (
+          <div className="plan-modal-actions">
+            <div className="plan-action-row">
+              <button
+                className="btn btn-danger"
+                disabled={busy}
+                title="Mark the backlog row rejected. Same write as `/backlog reject <id>` in chat."
+                onClick={() =>
+                  act(() =>
+                    planBacklogStatus(card.slug, "rejected").then((r) =>
+                      setNotice(r.note),
+                    ),
+                  )
+                }
+              >
+                Reject
+              </button>
+            </div>
+            <p className="plan-modal-hint">
+              Rejecting edits the backlog row, which is the artifact this card
+              renders. The card stays put until the next derivation tick moves
+              it — the board reports reality, it does not assert it.
+            </p>
+          </div>
+        )}
 
         {/* Board-native controls only. There is deliberately no control here
             that moves a card between columns — no such endpoint exists. */}

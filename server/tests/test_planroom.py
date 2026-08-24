@@ -410,9 +410,13 @@ async def test_a_human_cannot_label_a_comment_with_someone_elses_name(
 
 async def test_there_is_no_write_path_to_derived_state(client, app, index):
     """Not a check — an absence. Every route this router exposes writes
-    card_meta or card_comments; there is no endpoint that could move a card's
-    column, change a Status line, or set a deploy badge, because no such
-    endpoint exists to be authorized."""
+    card_meta, card_comments, or (slice A) a BACKLOG ROW, which is the artifact
+    a backlog card renders rather than anything derived. There is still no
+    endpoint that could move a card's column, change a SPECS/ Status line, or
+    set a deploy badge, because no such endpoint exists to be authorized.
+
+    This list is a canary. A route added here is a route that has to justify
+    which of those three things it writes."""
     from app.routers import planroom
     writes = {r.path for r in planroom.router.routes
               if getattr(r, "methods", set()) & {"POST", "PUT", "PATCH",
@@ -422,6 +426,7 @@ async def test_there_is_no_write_path_to_derived_state(client, app, index):
         "/planroom/cards/{slug}/flag",
         "/planroom/cards/{slug}/archive",
         "/planroom/cards/{slug}/order",
+        "/planroom/cards/{slug}/status",
     }
 
 
@@ -576,3 +581,170 @@ async def test_card_meta_is_keyed_on_slug_alone(app):
     rows = await db.fetch_all("PRAGMA table_info(card_meta)")
     pk = [r["name"] for r in rows if r["pk"]]
     assert pk == ["slug"]
+
+
+# ── the reject button (Phase II slice A, seq 1625) ──────────────────────────
+#
+# The button and `/backlog reject <id>` are ONE write reached two ways. These
+# tests are about the second way: that the slug resolves to the right row, that
+# the gate is the same gate, and that the board does not pretend the card moved.
+
+BACKLOG_CARD = dict(slug="backlog-1", kind="backlog", column="Backlog",
+                    title="add a gif picker", spec_path=None, status=None,
+                    where="backlog row 1, filed by alice")
+
+
+async def file_backlog_row(text: str = "add a gif picker") -> int:
+    cur = await db.execute(
+        "INSERT INTO backlog (text, author, created_at) VALUES (?, ?, ?)",
+        (text, "alice", db.utc_now()))
+    return cur.lastrowid
+
+
+async def backlog_row(item_id: int = 1) -> dict:
+    got = await db.fetch_one("SELECT * FROM backlog WHERE id = ?", (item_id,))
+    assert got is not None
+    return got
+
+
+async def test_the_button_writes_the_row_through(client, app, index):
+    index([card(**BACKLOG_CARD)])
+    await file_backlog_row()
+    alice = await make_user("alice")
+    await login(client, "alice")
+
+    r = await client.post("/planroom/cards/backlog-1/status",
+                          json={"status": "rejected"})
+    assert r.status_code == 200, r.text
+
+    row = await backlog_row()
+    assert row["status"] == "rejected"
+    assert row["status_by_type"] == "user" and row["status_by_id"] == alice
+    assert row["status_at"] is not None
+    assert r.json()["item"]["status"] == "rejected"
+
+
+async def test_the_button_does_not_move_the_card(client, app, index):
+    """The Backlog column is DERIVED. The response returns the card as it still
+    stands and says the tick will move it — a UI that asserted the move would be
+    the forked truth this whole feature exists to prevent."""
+    index([card(**BACKLOG_CARD)])
+    await file_backlog_row()
+    await make_user("alice")
+    await login(client, "alice")
+
+    r = await client.post("/planroom/cards/backlog-1/status",
+                          json={"status": "rejected"})
+    assert r.json()["card"]["column"] == "Backlog"
+    assert "derivation tick" in r.json()["note"]
+
+    # And the board still shows it, because nothing has re-derived yet.
+    board = (await client.get("/planroom/board")).json()
+    assert [c["slug"] for c in board["cards"]] == ["backlog-1"]
+
+
+async def test_the_button_and_the_slash_command_are_one_write_path(
+        client, app, index):
+    """Same function, so the same refusal — checked by making the service raise
+    and watching the endpoint carry it, rather than by reimplementing it."""
+    index([card(**BACKLOG_CARD)])
+    await file_backlog_row()
+    await make_user("alice")
+    await login(client, "alice")
+
+    r = await client.post("/planroom/cards/backlog-1/status",
+                          json={"status": "spec'd"})
+    assert r.status_code == 400
+    assert "needs the spec slug" in r.json()["detail"]
+    assert (await backlog_row())["status"] == "open"
+
+    r = await client.post("/planroom/cards/backlog-1/status",
+                          json={"status": "spec'd",
+                                "spec_ref": "2026-08-23-db-write-lock"})
+    assert r.status_code == 200, r.text
+    assert (await backlog_row())["spec_ref"] == "2026-08-23-db-write-lock"
+
+
+async def test_a_bot_is_refused_by_the_button_too(client, app, index):
+    """The gate is server-side and lives in the write path, so it cannot be
+    true for chat and stale for the UI. Note this is the opposite of the other
+    write endpoints here, where a bot IS a legitimate writer — because triage is
+    a human act and board-native state is not."""
+    index([card(**BACKLOG_CARD)])
+    await file_backlog_row()
+    await make_bot()
+
+    r = await client.post("/planroom/cards/backlog-1/status",
+                          json={"status": "rejected"},
+                          headers={"X-Api-Key": BOT_KEY})
+    assert r.status_code == 403, r.text
+    assert (await backlog_row())["status"] == "open"
+
+
+async def test_a_non_admin_human_may_reject(client, app, index):
+    """The gate is signed-in-human, not admin — the client greys nothing the
+    server would have allowed."""
+    index([card(**BACKLOG_CARD)])
+    await file_backlog_row()
+    await make_user("bob")  # not an admin
+    await login(client, "bob")
+
+    r = await client.post("/planroom/cards/backlog-1/status",
+                          json={"status": "rejected"})
+    assert r.status_code == 200, r.text
+
+
+async def test_the_button_refuses_a_spec_card(client, app, index):
+    """A spec's Status line lives in git and has no write path anywhere. The
+    endpoint refuses rather than inventing one."""
+    await make_user("admin", admin=True)
+    await login(client, "admin")
+    r = await client.post("/planroom/cards/2026-08-20-plan-room/status",
+                          json={"status": "rejected"})
+    assert r.status_code == 400
+    assert "SPECS/" in r.json()["detail"]
+
+
+async def test_the_button_refuses_a_keyboard_card(client, app, index):
+    index([card(slug="keyboard-abc1234def0", kind="keyboard", column="Review")])
+    await make_user("admin", admin=True)
+    await login(client, "admin")
+    r = await client.post("/planroom/cards/keyboard-abc1234def0/status",
+                          json={"status": "rejected"})
+    assert r.status_code == 400
+
+
+async def test_the_button_refuses_a_card_not_on_the_board(client, app, index):
+    """A slug whose row exists but whose card does not: you cannot press a
+    button on a card that is not there."""
+    await file_backlog_row()
+    await make_user("alice")
+    await login(client, "alice")
+    r = await client.post("/planroom/cards/backlog-1/status",
+                          json={"status": "rejected"})
+    assert r.status_code == 404
+    assert (await backlog_row())["status"] == "open"
+
+
+async def test_the_button_refuses_a_missing_row(client, app, index):
+    """The card is on the board but the row is gone — the index is a cache and
+    may be a tick out of date. The write path is the one that decides."""
+    index([card(**BACKLOG_CARD)])
+    await make_user("alice")
+    await login(client, "alice")
+    r = await client.post("/planroom/cards/backlog-1/status",
+                          json={"status": "rejected"})
+    assert r.status_code == 404
+    assert "no backlog #1" in r.json()["detail"]
+
+
+async def test_the_button_refuses_an_invented_status(client, app, index):
+    index([card(**BACKLOG_CARD)])
+    await file_backlog_row()
+    await make_user("alice")
+    await login(client, "alice")
+    for bad in ("open", "merged", ""):
+        r = await client.post("/planroom/cards/backlog-1/status",
+                              json={"status": bad})
+        assert r.status_code == 400, (bad, r.text)
+    assert (await backlog_row())["status"] == "open"

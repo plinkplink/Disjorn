@@ -5,6 +5,8 @@
 import type {
   AvatarUploadResponse,
   BackfillItem,
+  BacklogItem,
+  BacklogStatus,
   Bot,
   ChannelListItem,
   ChannelMemberOut,
@@ -609,6 +611,27 @@ export function planOrder(
 ): Promise<{ card: PlanCard }> {
   return request("POST", `/planroom/cards/${encodeURIComponent(slug)}/order`, {
     sort_order: sortOrder,
+  });
+}
+
+/** Write a BACKLOG card's status through to its row (Phase II slice A).
+ *
+ * The same server write as `/backlog reject <id>` in chat — one write path,
+ * two callers. Signed-in humans only; bots are refused server-side, and that
+ * refusal is the enforcement. Greying a button here is only UX.
+ *
+ * Backlog cards only: a spec's Status line lives in its SPECS/ file, in git,
+ * and no endpoint writes it. The returned `card` is the card AS IT STILL IS —
+ * the Backlog column is derived, so it moves at the next derivation tick and
+ * not before. Say that; do not fake it. */
+export function planBacklogStatus(
+  slug: string,
+  status: BacklogStatus,
+  specRef?: string,
+): Promise<{ item: BacklogItem; card: PlanCard; note: string }> {
+  return request("POST", `/planroom/cards/${encodeURIComponent(slug)}/status`, {
+    status,
+    spec_ref: specRef ?? null,
   });
 }
 
