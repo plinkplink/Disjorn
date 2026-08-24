@@ -95,9 +95,9 @@ human-post unpark, midnight non-unpark, depth-1 non-retrigger). One build
 slot.
 
 ## Confirm record
-- **Confirmed by**: <pending>
-- **#custodian seq**: <pending>
-- **Confirmed at**: <pending>
+- **Confirmed by**: plink
+- **#custodian seq**: 1816
+- **Confirmed at**: 8/24/2026
 
 ## Status
-`draft`
+`confirmed`
