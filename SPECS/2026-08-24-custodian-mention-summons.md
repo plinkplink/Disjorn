@@ -100,4 +100,5 @@ slot.
 - **Confirmed at**: 8/24/2026
 
 ## Status
-`confirmed`
+building
+<!-- set by the broker on 2026-08-24 22:25Z (start-build, 2026-08-24-custodian-mention-summons): build running as disjorn-build-2026-08-24-custodian-mention-summons.service -> loop/2026-08-24-custodian-mention-summons, launched by gable (confirmed by plink, #custodian seq 1816). Not buildable again until this line moves. -->
