@@ -12,6 +12,9 @@ physically unable to leak into the Review-owner box. Do not merge, reorder,
 or cross-reference them. If you find yourself writing a name into Review owner
 because someone asked for it, stop — that is the leak the split exists to
 prevent.
+
+Style: COMMS.md binds this file's prose — and when a spec closes,
+superseded narrative is pruned, not appended around.
 -->
 
 ## Request

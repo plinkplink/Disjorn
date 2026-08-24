@@ -94,8 +94,8 @@ executable changes; no restart, no migration.
   - COMMS.md (binds Claudette's conduct) → review owner Claudette
   - COMMS.md (binds Gable's conduct) + this draft → review owner Gable
   - TEMPLATE.md, build-kernel.md (keyboard/build harness) → review owner plink
-- **Split agreed in #custodian**: <seq of the confirm — the split is stated in
-  this spec posted before confirm>
+- **Split agreed in #custodian**: 1821 (the split was stated in this spec as
+  posted before confirm; the confirm covers it)
 
 ## Expected diff tier
 Tier 0/1 — inert docs; posted diff suffices.
@@ -109,4 +109,9 @@ Near zero — transcription, no build loop.
 - **Confirmed at**: 8/24/2026
 
 ## Status
-`confirm`
+`merged`
+<!-- transcribed at the keyboard 2026-08-24 per the Builder line (doc-only):
+COMMS.md created; TEMPLATE.md + build-kernel.md insertions landed; kernel
+rule count refs (build-kernel header, BUILD-SEAT-CONTRACT x2) updated
+five->six per this spec's own "rule 5 of six"; deployed kernel copy at
+/usr/local/lib/disjorn/build-kernel.md refreshed. -->

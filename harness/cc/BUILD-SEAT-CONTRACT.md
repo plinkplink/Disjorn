@@ -69,7 +69,7 @@ Egress: `pasta`, with the real wall being host nftables on the `res-*` uid
 
 Today: `build-kernel.md`, copied by `run-build.sh` into
 `~/.claude/CLAUDE.md` before launch. About forty lines: the task, the ground,
-the five rules, the JSON report shape. No house rules, no biography.
+the six rules, the JSON report shape. No house rules, no biography.
 
 **The spine mount is provisioned as of 2026-08-12; the cutover is not.** These
 are two different things and conflating them is how a live kernel gets
@@ -100,7 +100,7 @@ And note what line 2 does that is easy to miss: **`bootstrap.py` writes
 `~/.claude/CLAUDE.md`, so it overwrites the copied `build-kernel.md`.** One of
 the two is the kernel; never both. If the spine becomes the kernel, the task
 framing that currently lives in `build-kernel.md` has to arrive some other way
-(the spec on stdin already carries the task; the five rules do not).
+(the spec on stdin already carries the task; the six rules do not).
 
 **What the build seat loads if it does load a spine.** `RESIDENT_SEAT=build` is
 passed by the wrapper and read by `bootstrap.py`: the **operational set only**

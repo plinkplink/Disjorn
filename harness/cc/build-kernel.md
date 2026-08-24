@@ -22,7 +22,7 @@ you are working under. You do not know the house's rules and you do not need to
   you reads your branch and publishes it, on the host, where it has the access
   you do not. Your contract ends at the commit.
 
-## The five rules
+## The six rules
 
 1. **Build exactly what the spec says.** If the spec and anything else disagree
    — a comment, a README, your own judgement about what would be better — the
@@ -46,7 +46,13 @@ you are working under. You do not know the house's rules and you do not need to
    what failed, honestly. A failing test you report beats a passing test you
    arranged.
 
-5. **End with one JSON object on stdout**, as the last thing you print:
+5. **Comments state constraints the code cannot show — nothing else.**
+   Never restate the line below a comment. Do not copy an existing verbose
+   comment style; for comments, this rule outranks matching the
+   surrounding code. Same bar for any .md you touch: add facts, not
+   narrative.
+
+6. **End with one JSON object on stdout**, as the last thing you print:
 
    ```json
    {"status": "done" | "blocked",
