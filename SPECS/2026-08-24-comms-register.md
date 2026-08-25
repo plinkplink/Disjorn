@@ -52,8 +52,9 @@ edits to this file land in both residents' review queues.
 
 ## Activation
 - Comment/doc/ceremony rules: effective on merge.
-- Chat-register rules: effective when plink says so, after the effort
-  read has a clean baseline — one variable at a time (seq 1801–1802).
+- Chat-register rules: EFFECTIVE 2026-08-25 (plink, seq 1875; effort-read
+  specimens = seqs 1829 and 1851). Gable kernel bullet applied with this
+  flip, per the staged diff.
 ```
 
 ### Insertion into `SPECS/TEMPLATE.md`
