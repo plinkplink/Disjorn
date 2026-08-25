@@ -6,6 +6,7 @@ import asyncio
 import pytest
 
 from config import AdapterConfig
+from detector import MODE_MENTION, Trigger
 from prompt import CHAT_CLOSE, CHAT_OPEN, assemble_prompt
 from residency_testlib import FakeClient, make_config, make_event, make_message
 
@@ -52,7 +53,7 @@ def test_adapter_fetches_backfill_before_trigger_seq(tmp_path):
     event = make_event(channel_id=7, seq=50, author_name="carol",
                        content="summon", context={"awake_users": []})
 
-    prompt = asyncio.run(adapter._assemble(event, "carol", "channel 7"))
+    prompt = asyncio.run(adapter._assemble(event, Trigger(mode=MODE_MENTION, summoner="carol"), "channel 7"))
 
     call = client.get_messages_calls[0]
     assert call["before_seq"] == 50
@@ -102,10 +103,10 @@ def test_adapter_uses_custodian_depth_for_custodian_channel(tmp_path):
 
     custodian = make_event(channel_id=4, seq=140, author_name="carol",
                            content="design thread", context={"awake_users": []})
-    asyncio.run(adapter._assemble(custodian, "carol", "#custodian"))
+    asyncio.run(adapter._assemble(custodian, Trigger(mode=MODE_MENTION, summoner="carol"), "#custodian"))
     assert client.get_messages_calls[-1]["limit"] == 100
 
     main = make_event(channel_id=7, seq=50, author_name="carol",
                       content="quick q", context={"awake_users": []})
-    asyncio.run(adapter._assemble(main, "carol", "channel 7"))
+    asyncio.run(adapter._assemble(main, Trigger(mode=MODE_MENTION, summoner="carol"), "channel 7"))
     assert client.get_messages_calls[-1]["limit"] == 30

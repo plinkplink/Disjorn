@@ -272,6 +272,25 @@ announce = true
 # [budgets.res-gable]
 # daily_action_cap = 2000
 
+[summon_hops]
+# The bot-to-bot summon wall (SPECS/2026-08-24-custodian-mention-summons.md).
+# COMMENTED OUT = no wall: summon-hop answers "no bucket" to everything, which
+# is rule 1 (a bot-triggered summon's reply cannot re-trigger anyone) and is
+# exactly the behaviour that shipped with WP-H9. Uncomment to allow work loops.
+#
+# state_path is MANDATORY once this section exists and the broker refuses to
+# start without it: a counter that cannot persist would unpark every parked
+# chain on every restart. Use the daemon's StateDirectory, not /run.
+#
+# state_path = "/var/lib/disjorn-broker/summon-hops.json"
+# hop_cap = 8            # ~4 review/fix round-trips (the 08-21 churn ceiling).
+#                        # At the cap the work item PARKS FOR A HUMAN: further
+#                        # bot-to-bot hops on it are refused until a human posts
+#                        # in #custodian about it. Midnight does NOT unpark it.
+# daily_hop_cap = 24     # hops per work item per UTC day, RESETS INCLUDED — so
+#                        # repeated human nudges cannot compound into an all-day
+#                        # burn. This one does roll over at 00:00 UTC.
+
 [start_build]
 # WP-L4 start-build: launch a DETACHED build of a CONFIRMED spec to a
 # `loop/<slug>` branch. Like the WP-H9 summon launcher, argv is ENTIRELY

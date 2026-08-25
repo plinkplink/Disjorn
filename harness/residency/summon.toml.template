@@ -29,6 +29,27 @@ trigger_on_context = true         # @mention / name-match (server-attested)
 trigger_channels = []             # channel ids where every user msg summons
 extra_patterns = []               # extra wake-word regexes, e.g. ["\\bhey gable\\b"]
 typing_interval_sec = 2.5         # server rate-limits typing to 1/3s
+# 2026-08-24: in #custodian ONLY, a bare name is inert data — the message must
+# carry an explicit @gable AND the server's own mention context. trigger_channels
+# and extra_patterns do not apply there. Other channels are unchanged. This is
+# what lets a human type "gable" mid-sentence without summoning anyone.
+custodian_mention_only = true
+# May other bots summon this seat? Gable's chain wall, in order: this switch,
+# then peer_bots, then the broker's hop counter ([hops] below). OFF ships the
+# WP-H9 behaviour exactly — a bot author never summons.
+bot_summon = false
+# The other bots in the house, by author name. Two jobs, one list: who may
+# summon this seat, and whose @mentions are demoted to bare names in a
+# depth-1 reply so it cannot re-trigger anyone (guard 1).
+peer_bots = ["claudette"]
+# The broker's daily digest is the ONE unaddressed message that may wake a
+# seat, and it wakes Claudette only (her #1803 cond. 3 carve-out). Gable is
+# summon-mostly by design and stays off here; plink summons him when a digest
+# smells wrong. Author id AND marker must both match — content alone would let
+# anything in the channel type the header and ring the bell.
+wake_on_digest = false
+digest_author_ids = [3]           # the broker's own bot id
+digest_pattern = "^\\[custodian daily "
 # Optional pretty names for #custodian summary lines:
 # [summon.channel_names]
 # 4 = "#custodian"
@@ -147,6 +168,18 @@ timeout_sec = 600              # 10 min. Was 300; a real summon died at 300.7s
 [budget]
 daily_session_cap = 12
 state_path = "/home/resident/.summon-budget.json"   # persisted, survives restart
+
+[hops]
+# The bot-to-bot hop wall lives in the BROKER, not here, so both residents'
+# adapters spend against one counter instead of one each. This is only how this
+# daemon reaches it: the host-side socket path, authenticated by SO_PEERCRED
+# (the daemon runs as its own res-* uid) and authorized by verbs.toml's
+# summon-hop switch. Unset — or unreachable, or switched off — means no chain
+# ever continues past depth 1, which is the safe direction and today's
+# behaviour. The caps themselves are in broker.toml, out of reach of both
+# residents and of anything chat can say.
+# socket_path = "/run/disjorn-broker/broker.sock"
+timeout_sec = 5.0
 
 [cursor]
 state_path = "/home/resident/.summon-cursor.json"   # persisted seq high-water mark

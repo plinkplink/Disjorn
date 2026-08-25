@@ -26,6 +26,7 @@ STUB_LAUNCH = TESTS_DIR / "stub_launch.py"
 __all__ = [
     "FakeClient",
     "FakeLauncher",
+    "FakeArbiter",
     "make_message",
     "make_event",
     "make_ready",
@@ -207,6 +208,33 @@ class FakeLauncher:
         if self.delay:
             await asyncio.sleep(self.delay)
         return self.result
+
+
+# --------------------------------------------------------------------------- arbiter
+
+
+@dataclass
+class FakeArbiter:
+    """Stand-in for the broker's hop wall (hops.HopArbiter).
+
+    Default answer is the one an absent/unreachable broker gives: serve the
+    summon, do not let the reply re-trigger anyone.
+    """
+
+    decision: Any = None
+    configured: bool = True
+    spends: list = field(default_factory=list)
+    unparks: list = field(default_factory=list)
+
+    def spend(self, *, work_item, summoner):
+        from hops import HopDecision
+
+        self.spends.append({"work_item": work_item, "summoner": summoner})
+        return self.decision or HopDecision(work_item=work_item)
+
+    def unpark(self, *, work_item, by, seq):
+        self.unparks.append({"work_item": work_item, "by": by, "seq": seq})
+        return True
 
 
 # --------------------------------------------------------------------------- builders

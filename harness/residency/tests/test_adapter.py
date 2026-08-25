@@ -100,7 +100,9 @@ def test_budget_exhaustion_refuses_politely(tmp_path):
     replies = client.replies_to(7)
     # first: real reply; second: refusal line
     assert replies[0].content == "Hello from Gable."
-    assert replies[1].content == "budget reached, ask a human."
+    # ...now with the summoner named in the refusal's attribution (guard 4).
+    assert replies[1].content.startswith("budget reached, ask a human.")
+    assert "summoned by bob" in replies[1].content
     # #custodian sees a served summary then a refusal summary
     custodian = [s.content for s in client.replies_to(4)]
     assert any(c.startswith("summon | alice") for c in custodian)
@@ -120,7 +122,8 @@ def test_budget_persists_across_restart(tmp_path):
     launcher = FakeLauncher()
     _run(SummonAdapter(client, config, launcher=launcher))
     assert launcher.prompts == []  # over budget from the persisted counter
-    assert client.replies_to(7)[0].content == "budget reached, ask a human."
+    assert client.replies_to(7)[0].content.startswith(
+        "budget reached, ask a human.")
 
 
 def test_reconnect_from_seq_handoff_reseeds_on_boot(tmp_path):

@@ -1288,6 +1288,160 @@ def format_build_outcome(*, slug: str, branch: str, publish: dict,
 
 
 # --------------------------------------------------------------------------
+# Bot-to-bot summon hops (SPECS/2026-08-24-custodian-mention-summons.md).
+#
+# The wall a work loop runs against. Guard 1 is the default and lives in the
+# adapters: a bot-triggered summon's reply does not re-trigger any bot. Guard 2
+# is the exception, and it lives HERE because it needs one arbiter — plink's
+# #1625 third-party option. Both residents' adapters spend against this one
+# counter, so a review -> revision -> fix loop cannot buy itself twice the
+# rounds by alternating who asks.
+#
+# Two ceilings, and they are NOT the same ceiling twice:
+#
+#   hop_cap (8)        ~4 review/fix round-trips, the 08-21 churn ceiling. At
+#                      the cap the work item PARKS FOR A HUMAN: every further
+#                      bot-to-bot hop on it is refused until a human posts in
+#                      #custodian about it, which resets this counter to 0.
+#   daily_hop_cap (24) hops on one work item in one UTC day, RESETS INCLUDED.
+#                      The unpark is a report from an adapter — nothing else
+#                      watches the channel — so this is what bounds that trust:
+#                      repeated nudges, real or invented, cannot compound into
+#                      an all-day burn.
+#
+# THE CLOCK NEVER UNPARKS ANYTHING (Claudette #1811). Midnight rolls the DAY
+# counter and only the day counter; a chain parked at 23:59 is still parked at
+# 00:01 and stays parked until a human has looked. A ledger that reset both at
+# midnight would turn "parked for a human" into "parked until tomorrow", which
+# is the same sentence with the human removed.
+# --------------------------------------------------------------------------
+
+DEFAULT_HOP_CAP = 8
+DEFAULT_DAILY_HOP_CAP = 24
+
+
+def format_hop_refusal(*, work_item: str, count: int, cap: int,
+                       daily: bool = False) -> str:
+    """The refusal line, fixed format (Claudette #1811).
+
+    Broker-attributed, in-channel, and it names all three things the summoner
+    needs: WHICH work item, HOW far it has gone, and WHAT would let it resume.
+    A refusal missing the last one is a wall with no door, and the summoner
+    retries against it.
+    """
+    if daily:
+        return (f"summon refused: {work_item} at {count}/{cap} bot hops today "
+                f"— the daily ceiling, which clears at 00:00 UTC")
+    return (f"summon refused: {work_item} at {count}/{cap} bot hops "
+            f"— parked until a human posts on it")
+
+
+class HopLedger:
+    """The per-work-item hop counter, persisted and restart-proof.
+
+    State file shape::
+
+        {"<work item>": {"hops": 8, "day": "2026-08-24", "day_hops": 11,
+                         "unpark_seq": 1811}}
+
+    ``hops`` is the parkable counter and survives every rollover; ``day_hops``
+    is the daily ceiling and is the ONLY field the date touches.
+    """
+
+    def __init__(self, path: str, *, hop_cap: int = DEFAULT_HOP_CAP,
+                 daily_hop_cap: int = DEFAULT_DAILY_HOP_CAP,
+                 today_fn: Optional[Callable[[], str]] = None) -> None:
+        self.path = path
+        self.hop_cap = hop_cap
+        self.daily_hop_cap = daily_hop_cap
+        self._today_fn = today_fn or (
+            lambda: _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d"))
+        self._lock = threading.Lock()
+
+    # ------------------------------------------------------------- state io
+
+    def _load(self) -> dict:
+        try:
+            with open(self.path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _save(self, state: dict) -> None:
+        parent = os.path.dirname(self.path) or "."
+        os.makedirs(parent, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=parent, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(state, fh)
+            os.replace(tmp, self.path)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+
+    def _record(self, state: dict, work_item: str) -> dict:
+        rec = state.get(work_item)
+        if not isinstance(rec, dict):
+            rec = {}
+        today = self._today_fn()
+        if rec.get("day") != today:
+            rec["day"] = today
+            rec["day_hops"] = 0
+        rec.setdefault("hops", 0)
+        rec.setdefault("unpark_seq", 0)
+        state[work_item] = rec
+        return rec
+
+    # -------------------------------------------------------------- public
+
+    def spend(self, work_item: str) -> dict:
+        """Charge one hop. Returns the decision; never raises."""
+        with self._lock:
+            state = self._load()
+            rec = self._record(state, work_item)
+            hops, day_hops = int(rec["hops"]), int(rec["day_hops"])
+            if day_hops >= self.daily_hop_cap:
+                return {"allowed": False, "reason": "daily-ceiling",
+                        "count": day_hops, "cap": self.daily_hop_cap,
+                        "refusal": format_hop_refusal(
+                            work_item=work_item, count=day_hops,
+                            cap=self.daily_hop_cap, daily=True)}
+            if hops >= self.hop_cap:
+                return {"allowed": False, "reason": "parked",
+                        "count": hops, "cap": self.hop_cap,
+                        "refusal": format_hop_refusal(
+                            work_item=work_item, count=hops, cap=self.hop_cap)}
+            rec["hops"] = hops + 1
+            rec["day_hops"] = day_hops + 1
+            self._save(state)
+            return {"allowed": True, "reason": "hop", "count": rec["hops"],
+                    "cap": self.hop_cap, "day_count": rec["day_hops"],
+                    "day_cap": self.daily_hop_cap}
+
+    def unpark(self, work_item: str, seq: Optional[int] = None) -> dict:
+        """A human posted on this work item: the chain resumes at 0/cap.
+
+        Idempotent per seq, because BOTH adapters see the same post and both
+        report it; without this the second report would be a second reset and
+        the day ceiling would be the only counter left doing any work.
+        """
+        with self._lock:
+            state = self._load()
+            rec = self._record(state, work_item)
+            if seq is not None and seq <= int(rec["unpark_seq"]):
+                return {"reset": False, "count": int(rec["hops"]),
+                        "cap": self.hop_cap}
+            rec["hops"] = 0
+            if seq is not None:
+                rec["unpark_seq"] = int(seq)
+            self._save(state)
+            return {"reset": True, "count": 0, "cap": self.hop_cap,
+                    "day_count": int(rec["day_hops"]),
+                    "day_cap": self.daily_hop_cap}
+
+
+# --------------------------------------------------------------------------
 # The broker.
 # --------------------------------------------------------------------------
 
@@ -1348,6 +1502,26 @@ class Broker:
         # (command + session_argv + model pin), the SPECS/ dir the confirm gate
         # reads, the wall-clock cap, and the per-day build budget.
         self.start_build: dict[str, Any] = config.get("start_build", {})
+        # The bot-to-bot hop wall (2026-08-24). Absent section = no wall = the
+        # summon-hop verb answers "no bucket" to everything, which is rule 1
+        # and is exactly today's behaviour. Present section without a
+        # state_path is config drift and fatal: a counter that cannot persist
+        # would unpark every parked chain on every broker restart, which is the
+        # one thing the human gate exists to prevent.
+        self.summon_hops: dict[str, Any] = config.get("summon_hops", {}) or {}
+        self.hops: Optional[HopLedger] = None
+        if self.summon_hops:
+            state_path = self.summon_hops.get("state_path")
+            if not isinstance(state_path, str) or not state_path:
+                raise ConfigError(
+                    "[summon_hops] is configured but summon_hops.state_path is "
+                    "missing; refusing to start (a hop counter that cannot "
+                    "persist unparks every parked chain on restart)")
+            self.hops = HopLedger(
+                state_path,
+                hop_cap=int(self.summon_hops.get("hop_cap", DEFAULT_HOP_CAP)),
+                daily_hop_cap=int(self.summon_hops.get(
+                    "daily_hop_cap", DEFAULT_DAILY_HOP_CAP)))
         # BR-1 (2026-08-14): the build identity is derived from the CALLER —
         # build_identity_from_caller — and [start_build].resident is dead. Warn
         # rather than ignore silently: a config line that still parses but no
@@ -1427,6 +1601,7 @@ class Broker:
             "read-metrics": self._verb_read_metrics,
             "file-proposal": self._verb_file_proposal,
             "query-own-audit": self._verb_query_own_audit,
+            "summon-hop": self._verb_summon_hop,
             # Plan Room (SPECS/2026-08-20-plan-room.md). Three read, two write.
             # The two writes touch BOARD-NATIVE STATE ONLY — comments and the
             # blocked flag — and they are structurally unable to touch anything
@@ -3092,6 +3267,74 @@ class Broker:
         return ({"entries": tail, "count": len(tail),
                  "truncated": len(entries) > limit},
                 f"{len(tail)} audit entries")
+
+    # ------------------------------------------------------- summon hops
+
+    def _work_item_bucket(self, work_item: Optional[str]) -> Optional[str]:
+        """The work item this chain spends against, or None for no bucket.
+
+        A chain may continue past depth 1 only on a LIVE work item: a card the
+        board knows, sitting in Review. Chat data selects the bucket — a slug
+        in the summoning message — and plink-owned config owns the wall, so
+        naming a slug buys a bucket and nothing else. A slug the board does not
+        know, a card in any other column, or a board that cannot be reached at
+        all: no bucket, and rule 1 applies.
+        """
+        if not work_item or self.hops is None:
+            return None
+        if not BOARD_SLUG_RE.match(work_item):
+            return None
+        try:
+            body = self._board_get(f"/planroom/cards/{work_item}")
+        except VerbError:
+            return None
+        card = body.get("card") or {}
+        return work_item if card.get("column") == "Review" else None
+
+    def _verb_summon_hop(self, resident: str, args: dict) -> tuple[dict, str]:
+        """The bot-to-bot hop wall, for the summon adapters (2026-08-24).
+
+        `spend` asks whether one bot-to-bot summon may continue the chain past
+        depth 1; `unpark` reports the human post that resumes a parked one.
+        Neither can widen anything: the caps are broker.toml's, the columns are
+        the board's, and the only thing an argument decides is WHICH bucket is
+        charged. The answer `chain: false` is not a refusal — it means "serve
+        this summon, but your reply must not re-trigger anyone", which is the
+        depth-1 default every summon has run under since WP-H9.
+        """
+        _reject_unknown(args, {"action", "work_item", "summoner", "seq"})
+        action = _check_str(args, "action", required=True, max_len=10)
+        if action not in ("spend", "unpark"):
+            raise _bad("action must be 'spend' or 'unpark'")
+        work_item = _check_str(args, "work_item", max_len=80)
+        summoner = _check_str(args, "summoner", max_len=100) or "someone"
+        seq = args.get("seq")
+        if seq is not None:
+            seq = _check_int(args, "seq", 0, 0, 2**53)
+
+        if action == "unpark":
+            if not work_item:
+                raise _bad("unpark needs a work_item")
+            if self.hops is None:
+                return ({"reset": False, "reason": "no-wall"},
+                        "no hop wall configured")
+            out = self.hops.unpark(work_item, seq)
+            verb = ("unparked by" if out["reset"]
+                    else "already unparked, reported again by")
+            return ({"work_item": work_item, **out},
+                    f"{work_item} {verb} {summoner}")
+
+        bucket = self._work_item_bucket(work_item)
+        if bucket is None:
+            return ({"allowed": True, "chain": False, "work_item": work_item,
+                     "reason": "no-bucket"},
+                    f"depth-1 only for {summoner} (no live work item)")
+        out = self.hops.spend(bucket)
+        result = {"chain": bool(out["allowed"]), "work_item": bucket, **out}
+        summary = (f"hop {out['count']}/{out['cap']} on {bucket} for {summoner}"
+                   if out["allowed"] else
+                   f"REFUSED {out['reason']} {out['count']}/{out['cap']} on {bucket}")
+        return (result, summary)
 
     # ---------------------------------------------------------- plan room
     #

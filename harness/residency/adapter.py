@@ -23,6 +23,9 @@ Design invariants:
 * One summon at a time — sessions are expensive; the daemon serves them
   sequentially, so the typing keepalive and subprocess share the loop without
   racing other summons.
+* No summon is ever refused in silence (2026-08-24): allowlist, hop cap and
+  budget refusals all land in the summoning channel, attributed, because a
+  silent drop reads exactly like a lost mention and gets retried.
 
 The daemon depends only on a duck-typed client (the SDK's DisjornClient, or a
 fake in tests): ``events()``, ``send()``, ``get_messages()``, ``typing()``,
@@ -40,13 +43,22 @@ from disjorn_sdk import MessageCreate, Ready
 from budget import BudgetLedger
 from config import AdapterConfig
 from cursor import CursorStore
-from detector import SummonDetector
+from detector import (
+    MODE_BOT_CHAIN,
+    SummonDetector,
+    Trigger,
+    demote_mentions,
+    find_work_item,
+)
+from hops import HopArbiter
 from launcher import ContainerLauncher
 from prompt import assemble_prompt
 from summary import (
+    format_chain_refusal_summary,
     format_drift_alert,
     format_gate_refusal_alert,
     format_refusal_summary,
+    format_refusal_suffix,
     format_reply_suffix,
     format_summary,
 )
@@ -65,6 +77,7 @@ class SummonAdapter:
         launcher: Optional[ContainerLauncher] = None,
         budget: Optional[BudgetLedger] = None,
         cursor: Optional[CursorStore] = None,
+        hops: Optional[HopArbiter] = None,
     ) -> None:
         self.client = client
         self.config = config
@@ -74,6 +87,7 @@ class SummonAdapter:
             config.budget.state_path, config.budget.daily_session_cap
         )
         self.cursor = cursor or CursorStore(config.cursor.state_path)
+        self.hops = hops or HopArbiter(config.hops)
 
     # --------------------------------------------------------------- run loop
 
@@ -111,11 +125,41 @@ class SummonAdapter:
             )
             return
         if isinstance(event, MessageCreate):
-            if self.detector.is_summon(event):
-                await self._handle_summon(event)
+            # Unpark first, and for EVERY user message: a human summon of
+            # either bot on the work item counts as the human having looked,
+            # so the reset must not be reachable only through the not-a-summon
+            # branch.
+            await self._maybe_unpark(event)
+            trigger = self.detector.detect(event)
+            if trigger is not None:
+                await self._handle_summon(event, trigger)
             # Persist the cursor whether or not we acted, so a restart resumes
             # from the right place regardless of summon activity.
             self._persist_cursor()
+
+    async def _maybe_unpark(self, event: MessageCreate) -> None:
+        """A human posting on a parked work item is what resumes its chain.
+
+        Only a human post does, and only ever the counter — never the day
+        ceiling. The clock does not unpark anything: a chain parked at 23:59
+        is still parked at 00:01, and stays parked until a human has looked
+        (Claudette #1811).
+        """
+        msg = event.message or {}
+        if msg.get("author_type") != "user" or event.backfilled:
+            return
+        if not (self.config.summon.bot_summon and self.hops.configured):
+            return
+        if not self.detector.mention_only(event.channel_id):
+            return
+        work_item = find_work_item(msg.get("content") or "")
+        if not work_item:
+            return
+        who = self.detector.summoner_name(event)
+        if await asyncio.to_thread(
+            self.hops.unpark, work_item=work_item, by=who, seq=event.seq
+        ):
+            logger.info("hop counter unparked for %s by %s", work_item, who)
 
     # --------------------------------------------------------------- summon
 
@@ -123,18 +167,83 @@ class SummonAdapter:
         name = self.config.summon.channel_names.get(channel_id)
         return name if name else f"channel {channel_id}"
 
-    async def _handle_summon(self, event: MessageCreate) -> None:
+    async def _refuse(self, event: MessageCreate, trigger: Trigger, *,
+                      line: str, by: str, summary: str) -> None:
+        """Post a refusal in-channel, attributed, and audit it in #custodian.
+
+        Never a silent drop (Gable #1804 ruling 2, Claudette #1811): silence is
+        indistinguishable from the detector having eaten the mention, so the
+        summoner retries — which is the loop the refusal exists to stop.
+        """
+        channel_id = event.channel_id
+        where = self._where(channel_id)
+        logger.info("summon refused: %s in %s (%s)", trigger.summoner, where,
+                    summary)
+        suffix = format_refusal_suffix(
+            self.config.summon.bot_name, trigger.summoner, by=by)
+        await self._safe_send(channel_id, f"{line}\n\n{suffix}",
+                              reply_to=(event.message or {}).get("id"))
+        await self._safe_send(
+            self.config.summon.custodian_channel_id,
+            format_chain_refusal_summary(
+                summoner=trigger.summoner, where=where, reason=summary),
+        )
+
+    async def _clear_the_hop_wall(self, event: MessageCreate,
+                                  trigger: Trigger) -> bool:
+        """Guards 1-3 for a bot-triggered summon. True = serve it.
+
+        Two walls, in order. The allowlist is this seat's own config: a bot
+        nobody named cannot spend this seat at all. The hop counter is the
+        broker's, shared by both adapters, and it is what decides whether the
+        chain may continue PAST depth 1 — a live work item under the cap, or
+        rule 1 and a reply that cannot re-trigger anyone.
+        """
+        peers = {p.lower() for p in self.config.summon.peer_bots}
+        if trigger.summoner.lower() not in peers:
+            await self._refuse(
+                event, trigger,
+                line=(f"summon refused: {trigger.summoner} is not on this "
+                      f"seat's bot allowlist — a human can summon me instead"),
+                by=f"{self.config.summon.bot_name}'s adapter",
+                summary=f"{trigger.summoner} is not an allowlisted bot")
+            return False
+
+        decision = await asyncio.to_thread(
+            self.hops.spend, work_item=trigger.work_item,
+            summoner=trigger.summoner)
+        if not decision.allowed:
+            await self._refuse(
+                event, trigger,
+                line=decision.refusal or (
+                    f"summon refused: {decision.work_item or 'this chain'} — "
+                    f"{decision.reason or 'the broker refused the hop'}"),
+                by="the house broker",
+                summary=f"{decision.reason} ({decision.count}/{decision.cap})")
+            return False
+        trigger.chain = decision.chain
+        trigger.chain_cap = decision.cap
+        if decision.chain:
+            trigger.depth = decision.count
+        return True
+
+    async def _handle_summon(self, event: MessageCreate,
+                             trigger: Trigger) -> None:
         msg = event.message or {}
         channel_id = event.channel_id
         trigger_id = msg.get("id")
-        trigger_seq = event.seq
-        summoner = self.detector.summoner_name(event)
+        summoner = trigger.summoner
         where = self._where(channel_id)
 
         if not self.budget.can_spend():
             logger.info("summon over budget: %s in %s", summoner, where)
             await self._safe_send(
-                channel_id, self.config.text.refusal_line, reply_to=trigger_id
+                channel_id,
+                f"{self.config.text.refusal_line}\n\n"
+                + format_refusal_suffix(self.config.summon.bot_name, summoner,
+                                        by=f"{self.config.summon.bot_name}'s "
+                                           "daily budget"),
+                reply_to=trigger_id,
             )
             await self._safe_send(
                 self.config.summon.custodian_channel_id,
@@ -145,6 +254,12 @@ class SummonAdapter:
             )
             return
 
+        # Budget first, hop wall second: a summon this seat cannot afford must
+        # not spend a hop off the shared counter on its way to being refused.
+        if trigger.mode == MODE_BOT_CHAIN:
+            if not await self._clear_the_hop_wall(event, trigger):
+                return
+
         count = self.budget.spend()
         logger.info(
             "summon %d/%d: %s in %s (model pin %s)",
@@ -152,7 +267,7 @@ class SummonAdapter:
             self.config.container.model or "unpinned",
         )
 
-        prompt = await self._assemble(event, summoner, where)
+        prompt = await self._assemble(event, trigger, where)
 
         keepalive = asyncio.ensure_future(self._typing_keepalive(channel_id))
         try:
@@ -236,8 +351,12 @@ class SummonAdapter:
 
         reply = result.reply.strip() if result.ok else ""
         text = reply if reply else self.config.text.error_line
-        if display_model:
-            text = f"{text}\n\n{format_reply_suffix(self.config.summon.bot_name, display_model, verified=verified)}"
+        text = self._end_the_chain(text, trigger)
+        # An unpinned deployment has no identity line to hang the attribution
+        # off; a bot summon needs one anyway, because the reply is then the
+        # only thing in the channel that says whose turn this was.
+        if display_model or trigger.summoner_type == "bot":
+            text = f"{text}\n\n{format_reply_suffix(self.config.summon.bot_name, display_model, verified=verified, summoner=summoner)}"
         await self._safe_send(channel_id, text, reply_to=trigger_id)
 
         # Fail-loud, never fail-over: on drift the reply still went out above;
@@ -260,7 +379,20 @@ class SummonAdapter:
             ),
         )
 
-    async def _assemble(self, event: MessageCreate, summoner: str, where: str) -> str:
+    def _end_the_chain(self, text: str, trigger: Trigger) -> str:
+        """GUARD 1: a bot-triggered summon's reply does not re-trigger any bot.
+
+        Hard and adapter-enforced, because this adapter is the only thing that
+        can enforce it — it owns the reply. The exception is the work-loop
+        provision: a chain the broker granted keeps its mentions, so the
+        review -> revision -> fix round-trip can actually run.
+        """
+        if trigger.mode != MODE_BOT_CHAIN or trigger.chain:
+            return text
+        return demote_mentions(text, self.config.summon.peer_bots)
+
+    async def _assemble(self, event: MessageCreate, trigger: Trigger,
+                        where: str) -> str:
         channel_id = event.channel_id
         trigger_seq = event.seq
         try:
@@ -276,7 +408,8 @@ class SummonAdapter:
         # before_seq mode returns newest-first; make it chronological.
         backfill = list(reversed(recent))
         return assemble_prompt(
-            backfill, event.message or {}, summoner=summoner, where=where
+            backfill, event.message or {}, summoner=trigger.summoner,
+            where=where, how=trigger.describe(),
         )
 
     # --------------------------------------------------------------- helpers

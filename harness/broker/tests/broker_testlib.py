@@ -31,6 +31,7 @@ ALL_VERBS = [
     "classify-diff", "read-prod-logs", "read-own-log", "read-metrics",
     "file-proposal", "query-own-audit",
     "board-list", "board-card", "board-search", "board-flag", "board-comment",
+    "summon-hop",
 ]
 
 RECORD_STUB = textwrap.dedent("""\
@@ -591,6 +592,11 @@ def harness(tmp_path: Path):
         daily_build_cap = 2
         stop_command = ["{PY}", "{stub_dir / 'buildstop.py'}", "{stop_record}", "{unit_state_file}", "stop"]
         unit_state_command = ["{PY}", "{stub_dir / 'unitstate.py'}", "{unit_state_file}"]
+
+        [summon_hops]
+        state_path = "{tmp_path / 'summon-hops.json'}"
+        hop_cap = 8
+        daily_hop_cap = 24
 
         [paths]
         metrics_json = "{metrics}"

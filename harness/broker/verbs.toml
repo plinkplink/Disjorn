@@ -50,6 +50,7 @@
 "board-search" = false
 "board-flag" = false
 "board-comment" = false
+"summon-hop" = false
 
 [res-gable]
 "restart-disjorn" = false
@@ -67,3 +68,4 @@
 "board-search" = false
 "board-flag" = false
 "board-comment" = false
+"summon-hop" = false
