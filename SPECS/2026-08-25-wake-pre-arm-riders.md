@@ -64,5 +64,6 @@ tests. Well under the parent build.
 <!-- No Confirm record → no build. This is the gate. -->
 
 ## Status
-building
+built@loop/2026-08-25-wake-pre-arm-riders
+<!-- set by the broker on 2026-08-25 22:25Z (start-build, 2026-08-25-wake-pre-arm-riders): build published: disjorn.git 55e87aa20d841876d63f0aee6c23123a8251473d — on the branch for review, nothing merged. `board --mark-merged` advances this to `merged` once the merge lands. -->
 <!-- set by the broker on 2026-08-25 22:09Z (start-build, 2026-08-25-wake-pre-arm-riders): build running as disjorn-build-2026-08-25-wake-pre-arm-riders.service -> loop/2026-08-25-wake-pre-arm-riders, launched by gable (confirmed by plink, #custodian seq 1968). Not buildable again until this line moves. -->
