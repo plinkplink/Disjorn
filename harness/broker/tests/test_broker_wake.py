@@ -150,6 +150,7 @@ def build_broker(tmp_path: Path, *, me: str = "plink", wake: bool = True,
                  callers: list[str] | None = None,
                  seats: list[str] | None = None,
                  spool_dir: Path | None = None,
+                 daily_wake_cap: int | None = None,
                  extra_uids: dict[int, str] | None = None) -> WakeHarness:
     stub_dir = tmp_path / "stubs"
     stub_dir.mkdir(exist_ok=True)
@@ -175,6 +176,8 @@ def build_broker(tmp_path: Path, *, me: str = "plink", wake: bool = True,
             session_cap_sec = {CAP_SEC}
             grace_sec = {GRACE_SEC}
         """)
+        if daily_wake_cap is not None:
+            wake_block += f"daily_wake_cap = {daily_wake_cap}\n"
 
     broker_toml = tmp_path / "broker.toml"
     broker_toml.write_text(textwrap.dedent(f"""\
@@ -366,6 +369,100 @@ def test_the_spool_is_pruned_on_a_retention_horizon_not_on_the_window(plink):
                                "task": "x"})["result"]["wake_id"]
     ids = {r["wake_id"] for r in plink.records()}
     assert ids == {live, "wake-20260101T000000Z-000001"}
+
+
+# ---------------------------------------------------------- the daily cap
+# 2026-08-25 wake-pre-arm-riders item 1: a wake is a 5400s account-billed
+# session behind one button, so the count is capped by DEFAULT and the refusal
+# is a wall — no record, nothing queued for later.
+
+
+def test_a_fourth_wake_in_a_day_is_refused(plink):
+    """Three is the shipped default, in force with no cap line in config."""
+    for i in range(3):
+        assert plink.call("wake", {"resident": "res-gable",
+                                   "task": f"task {i}"})["ok"] is True
+
+    resp = plink.call("wake", {"resident": "res-gable", "task": "one more"})
+
+    assert resp["ok"] is False
+    assert resp["error"]["code"] == "over-budget"
+    assert "3/3 wakes" in resp["error"]["message"]
+    assert "of session time today" in resp["error"]["message"]
+    assert len(plink.records()) == 3, "a refused wake writes no record"
+
+
+def test_the_refusal_is_a_denial_on_the_audit_line(plink):
+    for i in range(3):
+        plink.call("wake", {"resident": "res-gable", "task": f"task {i}"})
+    plink.call("wake", {"resident": "res-gable", "task": "one more"})
+
+    last = plink.audit_lines()[-1]
+    assert last["verb"] == "wake"
+    assert last["allowed"] is False
+    assert "daily wake cap reached" in last["result_summary"]
+
+
+def test_the_refusal_reports_the_days_wall_clock(plink):
+    """The count is the speed bump; the minutes are the cost. Three wakes an
+    hour apart, each granted a 120s cap, have spent all of it."""
+    for i in range(3):
+        plink.write_wake_record(f"wake-20260825T12000{i}Z-aaa11{i}",
+                                age_sec=3600 * (i + 1))
+
+    resp = plink.call("wake", {"resident": "res-gable", "task": "one more"})
+
+    assert resp["ok"] is False
+    assert f"3/3 wakes, {3 * CAP_SEC // 60}m of session time today" in \
+        resp["error"]["message"]
+
+
+def test_the_cap_is_config_and_bites_at_the_configured_number(tmp_path):
+    h = build_broker(tmp_path, daily_wake_cap=1,
+                     extra_uids={OTHER_UID: "res-gable"})
+    try:
+        assert h.call("wake", {"resident": "res-gable", "task": "x"})["ok"] is True
+        resp = h.call("wake", {"resident": "res-gable", "task": "y"})
+        assert resp["error"]["code"] == "over-budget"
+        assert "1/1 wakes" in resp["error"]["message"]
+    finally:
+        h.broker.shutdown()
+        h._thread.join(timeout=5)
+
+
+def test_the_cap_is_a_day_not_a_lifetime(plink):
+    """Yesterday's wakes are still in the spool (a week of retention) and must
+    not spend today's budget."""
+    for i in range(5):
+        plink.write_wake_record(f"wake-20260824T12000{i}Z-bbb22{i}",
+                                age_sec=26 * 3600 + i)
+
+    assert plink.call("wake", {"resident": "res-gable",
+                               "task": "today"})["ok"] is True
+
+
+def test_the_cap_is_per_seat(plink):
+    """Another seat's wakes are another seat's sessions."""
+    for i in range(3):
+        plink.write_wake_record(f"wake-20260825T13000{i}Z-ccc33{i}",
+                                resident="res-claudette", age_sec=60)
+
+    assert plink.call("wake", {"resident": "res-gable",
+                               "task": "mine"})["ok"] is True
+
+
+def test_the_wall_clock_is_read_as_a_ceiling_not_a_guess():
+    """A wake counts for what it was granted, bounded by what has elapsed —
+    the broker never learns when a session actually stopped, and the number it
+    prints must not be able to understate the day."""
+    from brokerd import format_session_time, format_wake_refusal
+
+    assert format_session_time(0) == "0m"
+    assert format_session_time(50 * 60) == "50m"
+    assert format_session_time(4 * 3600 + 10 * 60) == "4h10m"
+    assert format_session_time(2 * 3600 + 59) == "2h00m"
+    assert "3/3 wakes, 4h10m of session time today" in format_wake_refusal(
+        seat="res-gable", count=3, cap=3, spent_sec=4 * 3600 + 10 * 60)
 
 
 # ------------------------------------------------------- refusing to start

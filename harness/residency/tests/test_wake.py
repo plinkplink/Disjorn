@@ -342,6 +342,20 @@ def test_a_wake_the_runner_was_down_for_is_posted_not_run(tmp_path):
     assert posts(client)[0].startswith("WAKE MISSED")
 
 
+def test_a_missed_wake_claims_no_cause_it_cannot_know(tmp_path):
+    """2026-08-25 wake-pre-arm-riders item 4: a wake can expire queued behind a
+    live session, so "the runner was not running" is a claim this process has
+    no standing to make. It reports the expiry, not the reason."""
+    runner, client, config = runner_for(tmp_path, launcher=FakeLauncher())
+    write_record(Path(config.wake.spool_dir), "wake-20260825T120000Z-999888")
+
+    asyncio.run(runner.poll_once(now=REQUESTED_EPOCH + 86400))
+
+    post = posts(client)[0]
+    assert "window expired before serving" in post
+    assert "was not running" not in post
+
+
 # --------------------------------------------------------------- the substrate
 
 
@@ -430,22 +444,35 @@ def test_a_wake_that_never_ends_leaves_a_start_with_no_end(tmp_path):
     assert [ln["event"] for ln in lines] == ["wake-start"]
 
 
-def test_the_action_count_is_the_wrappers_measurement(tmp_path):
-    """Not the session's `num_turns`: the lines the container appended to the
-    house action log while it ran. The wake-start line is written first and is
-    not counted."""
-    log = tmp_path / "action-log"
+def _log_actions(log: Path, session_id: str, n: int) -> None:
+    with open(log, "a", encoding="utf-8") as fh:
+        for i in range(n):
+            fh.write(json.dumps({"ts": "2026-08-25T12:00:0%dZ" % i,
+                                 "session_id": session_id,
+                                 "tool_name": "Bash", "ok": True}) + "\n")
 
+
+def _counting_launcher(log: Path, *, own: int, other: int = 0,
+                       session_id: str | None = "sess-wake"):
+    """A launcher that leaves `own` action lines of its own session in the log,
+    plus `other` lines from a session that is not this wake's."""
     class Counting(FakeLauncher):
         async def run(self, prompt):
-            with open(log, "a", encoding="utf-8") as fh:
-                for i in range(5):
-                    fh.write(json.dumps({"ts": "2026-08-25T12:00:0%dZ" % i,
-                                         "tool_name": "Bash", "ok": True}) + "\n")
+            _log_actions(log, session_id or "sess-anon", own)
+            if other:
+                _log_actions(log, "sess-summon", other)
             return await super().run(prompt)
 
-    launcher = Counting(result=SessionResult(
-        ok=True, reply="done", action_count=2, duration_sec=1.0, exit_code=0))
+    return Counting(result=SessionResult(
+        ok=True, reply="done", action_count=2, duration_sec=1.0, exit_code=0,
+        session_id=session_id))
+
+
+def test_the_action_count_is_the_wrappers_measurement(tmp_path):
+    """Not the session's `num_turns`: the lines the container appended to the
+    house action log while it ran. The wake-start line is written first and
+    carries no session id, so it is not counted."""
+    launcher = _counting_launcher(tmp_path / "action-log", own=5)
     runner, client, config = runner_for(tmp_path, launcher=launcher)
     write_record(Path(config.wake.spool_dir), "wake-20260825T120000Z-aaa333")
 
@@ -454,6 +481,34 @@ def test_the_action_count_is_the_wrappers_measurement(tmp_path):
     assert outcomes[0].action_count == 5
     assert "5 actions" in posts(client)[0]
     assert action_lines(config)[-1]["action_count"] == 5
+
+
+def test_a_concurrent_summon_does_not_inflate_the_count(tmp_path):
+    """The 2026-08-25 rider: the action log is shared with the summon lane, so
+    a line delta over it is an upper bound, not a measurement. Filtered on the
+    session id the counter hook already stamps."""
+    launcher = _counting_launcher(tmp_path / "action-log", own=5, other=40)
+    runner, client, config = runner_for(tmp_path, launcher=launcher)
+    write_record(Path(config.wake.spool_dir), "wake-20260825T120000Z-aaa335")
+
+    outcomes = asyncio.run(runner.poll_once(now=REQUESTED_EPOCH + 100))
+
+    assert outcomes[0].action_count == 5
+    assert "5 actions" in posts(client)[0]
+
+
+def test_a_session_that_named_no_id_reports_unknown_not_a_delta(tmp_path):
+    """No session id = no way to tell this session's lines from anyone else's.
+    That is reported as unknown, never as the delta it would have been."""
+    launcher = _counting_launcher(tmp_path / "action-log", own=5,
+                                  session_id=None)
+    runner, client, config = runner_for(tmp_path, launcher=launcher)
+    write_record(Path(config.wake.spool_dir), "wake-20260825T120000Z-aaa336")
+
+    outcomes = asyncio.run(runner.poll_once(now=REQUESTED_EPOCH + 100))
+
+    assert outcomes[0].action_count is None
+    assert "actions n/a" in posts(client)[0]
 
 
 def test_an_unreadable_action_log_is_reported_as_unknown_never_zero(tmp_path):
@@ -621,6 +676,56 @@ def test_the_runner_refuses_to_exist_without_a_spool(tmp_path):
     config = make_config(tmp_path)
     with pytest.raises(ValueError, match="spool_dir"):
         WakeRunner(FakeClient(), config)
+
+
+# ------------------------------------------------------- the served cursor
+# 2026-08-25 wake-pre-arm-riders item 2. This file answers "has this wake
+# already run?"; a woken session that can write it can re-run its own wake or
+# bury one. The refusal is on the PATH, never on the current mode.
+
+
+@pytest.mark.parametrize("state_path", [
+    "/home/resident/.wake-served.json",          # the container's own view
+    "/home/resident/state/served.json",
+    "/home/res-gable/resident-home/.wake-served.json",   # the host's view
+    "/home/res-gable/resident-home/nested/served.json",
+])
+def test_a_served_cursor_inside_the_volume_refuses_to_start(tmp_path, state_path):
+    config = wake_config(tmp_path, state_path=state_path)
+    with pytest.raises(ValueError, match="state_path"):
+        WakeRunner(FakeClient(), config, watch=GatehouseWatch(None))
+
+
+def test_the_seats_own_home_beside_the_volume_is_accepted(tmp_path):
+    """The shape the template ships: res-gable's home, outside the one
+    directory inside it that the container mounts."""
+    config = wake_config(tmp_path, state_path="/home/res-gable/.wake-served.json")
+    runner = WakeRunner(FakeClient(), config, watch=GatehouseWatch(None))
+    assert runner.spool.state_path.endswith("/home/res-gable/.wake-served.json")
+
+
+def test_the_launch_environments_home_volume_is_refused_too(tmp_path):
+    """A deployment that mounts a volume from somewhere else names it in
+    RESIDENT_HOME_VOL; the check reads the same value the launcher does."""
+    vol = tmp_path / "elsewhere" / "resident-home"
+    config = wake_config(tmp_path, state_path=str(vol / "served.json"))
+    config.container.env["RESIDENT_HOME_VOL"] = str(vol)
+    with pytest.raises(ValueError, match="RESIDENT_HOME_VOL"):
+        WakeRunner(FakeClient(), config, watch=GatehouseWatch(None))
+
+
+def test_the_refusal_is_on_the_path_not_on_the_mode(tmp_path):
+    """Permissions drift; a wrong path is wrong forever. A file in the volume
+    that is not even writable right now is refused all the same."""
+    vol = tmp_path / "vol"
+    vol.mkdir()
+    served = vol / "served.json"
+    served.write_text("{}")
+    served.chmod(0o444)
+    config = wake_config(tmp_path, state_path=str(served))
+    config.container.env["RESIDENT_HOME_VOL"] = str(vol)
+    with pytest.raises(ValueError, match="state_path"):
+        WakeRunner(FakeClient(), config, watch=GatehouseWatch(None))
 
 
 def test_the_accounting_is_a_noop_without_a_log_and_says_so(tmp_path, caplog):

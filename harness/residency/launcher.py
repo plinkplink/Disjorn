@@ -41,6 +41,8 @@ Either way the assembled SessionResult means the same thing:
 * model id    <- the init event's ``model`` (authoritative, pre-act) when
                  streaming, else the last main-loop ``assistant`` model, else
                  the legacy best-effort ``parse_model`` of the result envelope.
+* session id  <- the first event that names one, else the legacy envelope's
+                 ``session_id``. The action log is keyed on it.
 
 Non-JSON stdout is taken verbatim as the reply (action count / model unknown).
 
@@ -84,6 +86,7 @@ __all__ = [
     "parse_model",
     "parse_output",
     "parse_event_model",
+    "parse_session_id",
 ]
 
 _REPLY_KEYS = ("reply", "result", "text", "content")
@@ -158,6 +161,11 @@ class SessionResult:
     # first appearance. Length > 1 means the model changed mid-session (the
     # sticky-safeguard-switch shape). Empty for the legacy json path.
     models_seen: list[str] = field(default_factory=list)
+    # Claude Code's own id for this session — the same string its PostToolUse
+    # hook stamps on every action-log line. It is what lets a caller count the
+    # actions THIS session took out of a log every session in the seat appends
+    # to. None when the output named none (the session never got that far).
+    session_id: Optional[str] = None
 
 
 def _first_int(data: dict) -> Optional[int]:
@@ -242,6 +250,24 @@ def parse_event_model(event: dict) -> Optional[str]:
     return None
 
 
+def parse_session_id(stdout: str) -> Optional[str]:
+    """The ``session_id`` a legacy single-envelope result carries, if any.
+
+    The stream path reads it off the events as they arrive (StreamGate); this is
+    the same field on the ``--output-format json`` envelope, for a deployment
+    still on that shape.
+    """
+    text = stdout.strip()
+    if not text:
+        return None
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    sid = data.get("session_id") if isinstance(data, dict) else None
+    return sid.strip() if isinstance(sid, str) and sid.strip() else None
+
+
 def parse_output(stdout: str) -> tuple[str, Optional[int], Optional[str]]:
     """(reply, action_count, model) from a launched session's stdout.
 
@@ -289,6 +315,10 @@ class StreamGate:
         self.saw_events = False
         self.init_model: Optional[str] = None
         self.saw_init = False
+        # Every stream event carries the session id; the first one that does
+        # settles it, so a session killed mid-stream is still identifiable in
+        # the action log.
+        self.session_id: Optional[str] = None
         self.models_seen: list[str] = []
         self.result_event: Optional[dict] = None
         # Recorded for the caller/logs in alert mode (refuse mode returns a
@@ -345,6 +375,10 @@ class StreamGate:
         if not isinstance(event, dict) or not isinstance(event.get("type"), str):
             return None
         self.saw_events = True
+        if self.session_id is None:
+            sid = event.get("session_id")
+            if isinstance(sid, str) and sid.strip():
+                self.session_id = sid.strip()
 
         etype = event["type"]
         if etype == "result":
@@ -546,6 +580,7 @@ class ContainerLauncher:
                 gate_actual=verdict.actual,
                 model=verdict.actual,
                 models_seen=list(gate.models_seen),
+                session_id=gate.session_id,
             )
 
         if timed_out:
@@ -563,6 +598,7 @@ class ContainerLauncher:
                 error=f"session timed out after {self.config.timeout_sec}s",
                 model=gate.model,
                 models_seen=list(gate.models_seen),
+                session_id=gate.session_id,
                 timed_out=True,
             )
 
@@ -574,6 +610,7 @@ class ContainerLauncher:
                 duration_sec=duration,
                 error=f"session exit {exit_code}: {stderr.strip()[:500]}",
                 models_seen=list(gate.models_seen),
+                session_id=gate.session_id,
             )
 
         # End-of-stream rule (missing/model-less init). Only reachable when the
@@ -590,12 +627,14 @@ class ContainerLauncher:
                 gate_expected=verdict.expected,
                 gate_actual=verdict.actual,
                 models_seen=list(gate.models_seen),
+                session_id=gate.session_id,
             )
 
         if gate.saw_events:
             reply = gate.reply
             actions = gate.action_count
             model = gate.model
+            session_id = gate.session_id
             if reply is None:
                 # A stream that parsed as events but never produced a result
                 # event: take the raw stdout verbatim rather than invent a
@@ -603,6 +642,7 @@ class ContainerLauncher:
                 reply = stdout.strip()
         else:
             reply, actions, model = parse_output(stdout)
+            session_id = parse_session_id(stdout)
 
         if gate.switched_mid_session:
             logger.warning(
@@ -618,6 +658,7 @@ class ContainerLauncher:
             exit_code=exit_code,
             duration_sec=duration,
             models_seen=list(gate.models_seen),
+            session_id=session_id,
         )
 
     # ------------------------------------------------------------------ pump

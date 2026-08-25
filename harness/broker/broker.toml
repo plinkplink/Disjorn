@@ -441,6 +441,14 @@ daily_build_cap = 10
 # grace_sec = 600                 # harvest + post margin. A wake with a start
 #                                 # and no end in the seat's action log after
 #                                 # cap+grace is an incident.
+# WAKES PER SEAT PER UTC DAY. Capped by DEFAULT at 3, like start_build's
+# daily_build_cap and unlike the action budget: omitting this line does not
+# remove the cap, it accepts it. At the cap the broker REFUSES the verb — no
+# record is written and nothing is queued for later — and the refusal names the
+# day's session wall clock next to the count, because three wakes at the cap
+# above is most of an afternoon of billed session and the count is only the
+# speed bump.
+# daily_wake_cap = 3
 # The per-session ACTION cap is not here: a woken session runs on the same
 # /config/budget.json the summon seat does (harness/cc/config-template), which
 # is the spec's "same per-session action cap" and needs no second knob.

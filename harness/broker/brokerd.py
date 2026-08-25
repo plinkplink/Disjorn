@@ -237,6 +237,11 @@ DEFAULT_WAKE_GRACE_SEC = 600
 # on silence. Pruning on the window would delete that evidence out from under
 # the runner, so the spool holds a week and the runner decides what is stale.
 WAKE_RETENTION_SEC = 7 * 86400
+# Wakes per seat per UTC day, CAPPED BY DEFAULT — an unset cap is not "no
+# policy", it is an unbounded number of 5400s account-billed sessions behind one
+# button. Same shape as start_build's daily_build_cap, and widened only by a
+# witnessed edit to plink-owned config.
+DEFAULT_DAILY_WAKE_CAP = 3
 _WAKE_ID_RE = re.compile(r"^wake-\d{8}T\d{6}Z-[0-9a-f]{6}$")
 
 
@@ -1376,6 +1381,27 @@ def new_wake_id(now: Optional[_dt.datetime] = None,
     return f"wake-{stamp}-{entropy or os.urandom(3).hex()}"
 
 
+def format_session_time(seconds: float) -> str:
+    """`4h10m` / `50m` — a day's wake wall clock, for a human reading a refusal."""
+    total = max(0, int(seconds))
+    hours, minutes = divmod(total // 60, 60)
+    return f"{hours}h{minutes:02d}m" if hours else f"{minutes}m"
+
+
+def format_wake_refusal(*, seat: str, count: int, cap: int,
+                        spent_sec: float) -> str:
+    """The wall a wake past the daily cap hits.
+
+    The wall clock rides next to the count because the minutes are the cost and
+    the count is only the speed bump: three wakes at a 5400s cap is most of an
+    afternoon of billed session, and a reader who sees `3/3` alone learns the
+    smaller of the two numbers."""
+    return (f"daily wake cap reached for {seat}: {count}/{cap} wakes, "
+            f"{format_session_time(spent_sec)} of session time today. Next "
+            f"wake is tomorrow (UTC), or a witnessed edit to "
+            f"[wake].daily_wake_cap in broker.toml.")
+
+
 def parse_review_owner(text: str) -> Optional[str]:
     """The `- **Review owner**: …` bullet's value, or None if the spec has no
     such bullet.
@@ -1719,6 +1745,11 @@ class Broker:
         # so two concurrent start-builds can NEVER both slip past the cap — the
         # check-then-act race the red-team flagged is closed here.
         self._build_lock = threading.Lock()
+        # Wake-budget lock: the day's count is read from the spool and the new
+        # record is written under this one lock, so two wakes pressed at once
+        # cannot both read the same pre-cap count. The spool IS the ledger here
+        # — there is no in-memory reservation to drift from it.
+        self._wake_lock = threading.Lock()
         # Action-budget lock (H13-D4, extended to EVERY numeric budget): same
         # count-with-reservation discipline as builds. The daily action cap used
         # to be a check-then-act against the audit file, so N concurrent
@@ -3468,6 +3499,50 @@ class Broker:
                 pass
         return removed
 
+    def _daily_wake_cap(self) -> int:
+        """`[wake].daily_wake_cap`, else DEFAULT_DAILY_WAKE_CAP.
+
+        A non-int reads as the default rather than as no cap: config drift must
+        never be the thing that removes a wall."""
+        cap = self.wake.get("daily_wake_cap", DEFAULT_DAILY_WAKE_CAP)
+        if isinstance(cap, bool) or not isinstance(cap, int):
+            return DEFAULT_DAILY_WAKE_CAP
+        return cap
+
+    def _wake_spend_today(self, seat: str, now: float) -> tuple[int, float]:
+        """(wakes, session seconds) recorded for this seat so far today (UTC).
+
+        Counted from the spool rather than the audit log, because the record is
+        written under the same lock as this count — the two cannot disagree the
+        way a build's audit-log seeding can, and the spool's week of retention
+        covers any day this asks about.
+
+        THE SECONDS ARE A CEILING, not a measurement. From here the broker knows
+        when a wake started and what wall clock it granted the runner; it never
+        learns when the session actually stopped (the runner posts that). So a
+        wake counts for what it was granted, bounded by how much of that has
+        elapsed — an in-flight wake grows toward its cap instead of claiming it
+        up front."""
+        count = 0
+        spent = 0.0
+        today = _dt.datetime.fromtimestamp(
+            now, _dt.timezone.utc).strftime("%Y-%m-%d")
+        for rec in self._read_wake_records():
+            if rec.get("resident") != seat:
+                continue
+            started = self._wake_requested_epoch(rec)
+            if started is None:
+                continue
+            if _dt.datetime.fromtimestamp(
+                    started, _dt.timezone.utc).strftime("%Y-%m-%d") != today:
+                continue
+            granted = rec.get("session_cap_sec")
+            if isinstance(granted, bool) or not isinstance(granted, int):
+                granted = 0
+            count += 1
+            spent += max(0.0, min(float(granted), now - started))
+        return count, spent
+
     def _active_wake(self, resident: str) -> Optional[dict]:
         """The most recent wake still in flight for this seat, if any.
 
@@ -3540,7 +3615,11 @@ class Broker:
 
         The caps ride ON the record rather than living in the runner's config,
         so the wall-clock a woken session runs against is plink-owned and
-        singular. Widening it is a witnessed edit to broker.toml."""
+        singular. Widening it is a witnessed edit to broker.toml.
+
+        The DAILY cap is enforced here and nowhere else: the seat's runner sees
+        one record at a time and cannot count a day, and a wake refused here
+        never becomes a record, so nothing downstream has to know about it."""
         _reject_unknown(args, {"resident", "task"})
         seat = _check_str(args, "resident", required=True, max_len=64)
         task = _check_str(args, "task", required=True,
@@ -3553,6 +3632,7 @@ class Broker:
             raise _bad("task must not be empty — a wake names the work")
 
         now = _dt.datetime.now(_dt.timezone.utc)
+        cap = self._daily_wake_cap()
         record = {
             "schema": WAKE_SPOOL_SCHEMA,
             "wake_id": new_wake_id(now),
@@ -3563,11 +3643,16 @@ class Broker:
             "grace_sec": self._wake_grace(),
             "task": task,
         }
-        try:
-            self._write_wake_record(record)
-        except OSError as exc:
-            raise VerbError("exec-failure",
-                            f"cannot record the wake: {exc}") from None
+        with self._wake_lock:
+            count, spent = self._wake_spend_today(seat, now.timestamp())
+            if count >= cap:
+                raise VerbError("over-budget", format_wake_refusal(
+                    seat=seat, count=count, cap=cap, spent_sec=spent))
+            try:
+                self._write_wake_record(record)
+            except OSError as exc:
+                raise VerbError("exec-failure",
+                                f"cannot record the wake: {exc}") from None
         self._prune_wake_spool()
 
         return (

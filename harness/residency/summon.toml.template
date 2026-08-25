@@ -201,9 +201,15 @@ state_path = "/home/resident/.summon-cursor.json"   # persisted seq high-water m
 # broker refuses to start otherwise). This daemon polls it; it can never write
 # a wake into it, which is what "nothing self-wakes" means at this layer.
 # spool_dir = "/var/lib/disjorn-broker/wake-spool"
-# Wake ids already served, so a restart mid-window does not re-run one. Point
-# it at the res-gable-writable volume, like the summon budget and cursor.
-state_path = "/home/resident/.wake-served.json"
+# Wake ids already served, so a restart mid-window does not re-run one. NOT on
+# the home VOLUME the container mounts (unlike the summon budget and cursor
+# above): this file is what says whether a wake already ran, and a woken session
+# that can rewrite it can re-run its own wake or bury it. The runner REFUSES TO
+# START on a path inside that volume — checked on the path, not on the mode,
+# because permissions drift and a wrong path is wrong forever. Default:
+# ~/.wake-served.json for the uid the runner runs as, which is beside the volume
+# rather than in it.
+state_path = "/home/res-gable/.wake-served.json"
 poll_interval_sec = 5.0
 # The bare gatehouse repos this seat pushes loop branches into. The runner
 # reads loop/* heads before and after the session, so a failure post can name

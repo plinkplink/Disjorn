@@ -63,7 +63,15 @@ def main(argv: "list[str] | None" = None) -> int:
     from wake import WakeRunner
 
     client = DisjornClient(config.server.url, api_key=api_key)
-    runner = WakeRunner(client, config)
+    try:
+        runner = WakeRunner(client, config)
+    except ValueError as exc:
+        # Unsafe config refuses to start, and says which line to fix. Restart=
+        # on-failure will retry this forever, which is the intended noise: the
+        # lane stays down until a human edits the config.
+        print(f"run_wake: refusing to start on {ns.config}: {exc}",
+              file=sys.stderr)
+        return 2
 
     async def _run() -> None:
         try:
