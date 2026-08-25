@@ -143,6 +143,11 @@ class SessionResult:
     duration_sec: float = 0.0
     exit_code: Optional[int] = None
     error: Optional[str] = None
+    # The wall-clock cap fired: this session was killed, it did not end. A
+    # caller that has to tell a cap-kill from a crash cannot do it by reading
+    # `error` for a phrase (2026-08-25 wake banners), and the difference is the
+    # whole content of the failure post.
+    timed_out: bool = False
     # BL-G1: set when the pre-act model gate refused this session. The adapter
     # posts NOTHING the session produced when this is true.
     gate_abort: bool = False
@@ -558,6 +563,7 @@ class ContainerLauncher:
                 error=f"session timed out after {self.config.timeout_sec}s",
                 model=gate.model,
                 models_seen=list(gate.models_seen),
+                timed_out=True,
             )
 
         exit_code = proc.returncode

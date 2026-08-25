@@ -391,12 +391,18 @@ TEMPLATE_DIR = Path(__file__).resolve().parent.parent
 
 
 def test_verbs_template_all_off_and_matches_verb_table(harness):
+    """Every SEAT section carries every verb a seat may call — and `wake` is
+    not one of them (2026-08-25): the wake caller is plink's own uid, in its
+    own section, holding that verb alone."""
     import tomllib
     with open(TEMPLATE_DIR / "verbs.toml", "rb") as fh:
         tmpl = tomllib.load(fh)
-    assert set(tmpl) == {"res-claudette", "res-gable"}
+    assert set(tmpl) == {"res-claudette", "res-gable", "plink"}
+    seat_verbs = set(harness.broker.verbs) - {"wake"}
+    for resident in ("res-claudette", "res-gable"):
+        assert set(tmpl[resident]) == seat_verbs, resident
+    assert set(tmpl["plink"]) == {"wake"}
     for resident, flags in tmpl.items():
-        assert set(flags) == set(harness.broker.verbs), resident
         assert all(v is False for v in flags.values()), (
             f"{resident} has a verb enabled in the TEMPLATE — defaults are OFF")
         assert "restart-self" not in flags

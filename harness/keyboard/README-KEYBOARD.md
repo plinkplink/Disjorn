@@ -124,6 +124,32 @@ Rollback: `sudo systemctl disable --now disjorn-broker`; `sudo rm
 
 ---
 
+## Waking a resident (SPECS/2026-08-25-agentic-residents.md)
+
+```sh
+python3 wake.py res-gable "read this morning's digest and open a card for
+what looks wrong"
+```
+
+**As plink, from the keyboard, and never with `sudo -u`.** The wake is a broker
+verb whose caller is the uid the kernel reports at the socket, so running it as
+anyone else is refused and audited — that refusal is the design, not a
+misconfiguration. It prints a wake id; the seat's own runner starts the session,
+and the seat — not this command — posts the result in #custodian.
+
+Arming it is four plink-owned edits, none of which a resident can reach:
+
+1. `[uids]` gains plink's own uid (`"1000" = "plink"`);
+2. `[wake]` in `broker.toml` — callers, wakeable seats, the spool dir, the
+   session cap. The broker REFUSES TO START if the spool is writable by any
+   resident, if a caller has no uid, or if a caller is a seat;
+3. `sudoedit /etc/disjorn-broker/verbs.toml` — `[plink] "wake" = true`;
+4. the seat's own `gable-wake.service` (harness/residency/), which is what
+   actually runs the session and posts.
+
+Stopping any one of the four stops the lane. Nothing self-wakes: there is no
+cron, no chat surface, and no verb a resident can press to reach this.
+
 ## After the session
 
 - Flip individual switches with `sudoedit /etc/disjorn-broker/verbs.toml` —

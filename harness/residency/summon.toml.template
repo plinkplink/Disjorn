@@ -184,6 +184,42 @@ timeout_sec = 5.0
 [cursor]
 state_path = "/home/resident/.summon-cursor.json"   # persisted seq high-water mark
 
+[wake]
+# THE WAKE LANE (SPECS/2026-08-25-agentic-residents.md, confirmed seq 1913).
+# Read by run_wake.py — a SEPARATE daemon from the summon adapter, which
+# ignores this section entirely. Unset spool_dir = no wake lane, which is what
+# ships.
+#
+# WHAT IS NOT HERE, and must not be: who may wake this seat, and how long a
+# woken session may run. Both are the BROKER's ([wake] in broker.toml). The
+# caller is authenticated by uid at the socket and the wall-clock cap rides on
+# each wake record, so this file — which sits in the config dir the container
+# mounts — cannot widen either. What is here is only where to look and what to
+# read back.
+#
+# The broker's spool. Plink-owned, resident-readable, resident-UNWRITABLE (the
+# broker refuses to start otherwise). This daemon polls it; it can never write
+# a wake into it, which is what "nothing self-wakes" means at this layer.
+# spool_dir = "/var/lib/disjorn-broker/wake-spool"
+# Wake ids already served, so a restart mid-window does not re-run one. Point
+# it at the res-gable-writable volume, like the summon budget and cursor.
+state_path = "/home/resident/.wake-served.json"
+poll_interval_sec = 5.0
+# The bare gatehouse repos this seat pushes loop branches into. The runner
+# reads loop/* heads before and after the session, so a failure post can name
+# the branch, its head sha, and quote the head subject — which is how a `wip:`
+# head says "partial" without anyone reading chat or memory. Unset = no branch
+# observation, and the post says "not observed" rather than "none".
+# gatehouse_dir = "/var/lib/disjorn-broker/gatehouse"
+# The house action log this seat's container writes (WP-H5 ~/.action-log), as
+# the HOST sees it. The runner appends the wake-start/wake-end accounting pair
+# here and counts the session's tool calls as the delta between them — a number
+# it measured, not one the session reported.
+# action_log = "/home/res-gable/resident-home/.action-log"
+# How much of a finished session's closing words ride along in the result post,
+# labelled as its own account. Failure posts carry none.
+reply_chars = 600
+
 [text]
 refusal_line = "I'm at my summon budget for today — flag a human in #custodian if this can't wait."
 error_line = "Something went wrong running that on my end; a human can check #custodian for the details."

@@ -14,6 +14,11 @@ Governance rules encoded here (AGENTHOOD.md / HARNESS-PLAN.md WP-H3):
   restart.
 * Chat is data, never authorization: nothing in a request body can widen what
   a caller may do. Identity = uid via SO_PEERCRED; permission = verbs.toml.
+* One caller is not a resident: `wake` (2026-08-25 agentic residents) is
+  called by plink's own uid from the keyboard and by nothing else. A seat may
+  never call it and a wake caller may call nothing else — both in code
+  (_check_wake_identity), on top of the kill switch. That is what makes a
+  wake's origin connection data rather than something a message could say.
 * No self-restart: there is deliberately NO `restart-self` verb, and no verb
   whose argv a caller can redirect at the broker or a resident's own process.
 * No free-form shell, ever: every subprocess runs a fixed argv list
@@ -202,6 +207,38 @@ MAX_PUBLISH_LINES = 8
 MAX_PUBLISH_ERR_CHARS = 200
 MAX_QUARANTINE_PATH_CHARS = 160
 
+# ---------------------------------------------------------------------- wake
+# SPECS/2026-08-25-agentic-residents.md. A wake starts a headless work session
+# in a resident's seat. It is the ONE verb whose caller is not a resident, and
+# the reason it is a verb at all is authentication: the broker resolves the
+# caller from SO_PEERCRED, so a wake's origin is connection data and no text in
+# any channel can constitute one.
+WAKE_VERB = "wake"
+MAX_WAKE_TASK_CHARS = 4000
+# One record per wake, in the plink-owned spool. The seat's wake runner reads
+# them; it cannot write the directory, which is what makes "nothing self-wakes"
+# a placement property rather than a promise (same wall as start_build's
+# specs_dir — see assert_dir_resident_unwritable).
+WAKE_SPOOL_SUFFIX = ".wake.json"
+WAKE_SPOOL_SCHEMA = 1
+# Wall-clock cap for a woken session, in seconds. Longer than a summon (600s in
+# the shipped summon.toml) because a wake is a work session, not a chat turn.
+# It lives HERE, in plink-owned broker config, and rides on the wake record —
+# so the seat's runner enforces a cap it cannot widen, and there is one value,
+# not two that can drift.
+DEFAULT_WAKE_SESSION_CAP_SEC = 5400
+# How long after the cap a wake is still considered in flight. Covers the
+# runner's own harvest + post, and is the margin after which a wake with a
+# start and no end in the action log is an incident.
+DEFAULT_WAKE_GRACE_SEC = 600
+# How long a record stays in the spool after its window closes. NOT the window:
+# a record whose window has passed is exactly what lets a runner that was DOWN
+# come back and post "this wake was missed" instead of leaving a human waiting
+# on silence. Pruning on the window would delete that evidence out from under
+# the runner, so the spool holds a week and the runner decides what is stale.
+WAKE_RETENTION_SEC = 7 * 86400
+_WAKE_ID_RE = re.compile(r"^wake-\d{8}T\d{6}Z-[0-9a-f]{6}$")
+
 
 def build_unit_name(slug: str) -> str:
     """`2026-07-21-gif-picker` -> `disjorn-build-2026-07-21-gif-picker.service`.
@@ -347,14 +384,47 @@ def assert_specs_dir_resident_unwritable(
     """Enforce the BL-D1 invariant (see the block comment above) or raise
     ConfigError naming the offending path. Returns realpath(specs_dir), which
     the caller should use from then on — the checked path and the used path
-    must be the same string.
+    must be the same string."""
+    return assert_dir_resident_unwritable(
+        specs_dir,
+        label="start_build.specs_dir",
+        remedy=("The confirm gate is only meaningful when SPECS/ is the "
+                "plink-gated read-only mirror; point specs_dir there (e.g. "
+                "/srv/disjorn-ro/SPECS)."),
+        stake=("A resident that can write any component of SPECS/ can forge "
+               "its own confirm record and self-authorize a build."),
+        uid_map=uid_map, residents=residents, broker_uid=broker_uid,
+        gids_for_uid=gids_for_uid)
+
+
+def assert_dir_resident_unwritable(
+    directory: str,
+    *,
+    label: str,
+    remedy: str,
+    stake: str,
+    uid_map: dict[int, str],
+    residents: dict[str, dict],
+    broker_uid: Optional[int] = None,
+    gids_for_uid: Callable[[int], set[int]] = _resident_gids,
+) -> str:
+    """Prove a directory is unwritable by every resident, or raise ConfigError
+    naming the offending path. Returns realpath(directory), which the caller
+    should use from then on — the checked path and the used path must be the
+    same string.
+
+    Two authorization surfaces rest on this: start_build's SPECS/ (BL-D1, the
+    confirm record) and the wake spool (2026-08-25, "nothing self-wakes"). Both
+    are presence checks on text that only mean anything because the resident
+    cannot write the text; `label`, `remedy` and `stake` are what each caller
+    tells the reader about its own.
 
     Pure with respect to broker state: it takes the uid map, the residents
     table and (injectably) the uid->gids resolver, so every adversarial case
     is testable without creating real users."""
     if broker_uid is None:
         broker_uid = os.geteuid()
-    real = os.path.realpath(specs_dir)
+    real = os.path.realpath(directory)
 
     # Resident identities. Names come from BOTH tables so a half-configured
     # deployment still contributes its home root (fail closed on omission).
@@ -395,25 +465,22 @@ def assert_specs_dir_resident_unwritable(
     for root, why in sorted(home_roots.items()):
         if _is_within(real, root):
             raise ConfigError(
-                f"start_build.specs_dir is resident-writable: {specs_dir!r} "
-                f"resolves to {real!r}, which is inside {why}. The confirm "
-                f"gate is only meaningful when SPECS/ is the plink-gated "
-                f"read-only mirror; point specs_dir there (e.g. "
-                f"/srv/disjorn-ro/SPECS).")
+                f"{label} is resident-writable: {directory!r} "
+                f"resolves to {real!r}, which is inside {why}. {remedy}")
 
     # ---- RULE 2: not writable by any resident, leaf or parent -------------
     if not os.path.isdir(real):
         raise ConfigError(
-            f"start_build.specs_dir does not exist or is not a directory: "
-            f"{specs_dir!r} (resolved {real!r}). Refusing to start rather than "
-            f"guess — an absent specs dir cannot be verified unwritable.")
+            f"{label} does not exist or is not a directory: "
+            f"{directory!r} (resolved {real!r}). Refusing to start rather than "
+            f"guess — an absent directory cannot be verified unwritable.")
     for i, component in enumerate(_path_components(real)):
         is_leaf = i == 0
         try:
             st = os.stat(component)
         except OSError as exc:
             raise ConfigError(
-                f"start_build.specs_dir path component {component!r} cannot be "
+                f"{label} path component {component!r} cannot be "
                 f"stat()ed ({exc}); refusing to start (cannot verify it is "
                 f"resident-unwritable)") from None
         mode = st.st_mode
@@ -428,10 +495,9 @@ def assert_specs_dir_resident_unwritable(
             why = "world-writable"
         if why is not None:
             raise ConfigError(
-                f"start_build.specs_dir is resident-writable: path component "
-                f"{component!r} (of {real!r}) is {why}. A resident that can "
-                f"write any component of SPECS/ can forge its own confirm "
-                f"record and self-authorize a build. Refusing to start.")
+                f"{label} is resident-writable: path component "
+                f"{component!r} (of {real!r}) is {why}. {stake} "
+                f"Refusing to start.")
     return real
 
 
@@ -1288,6 +1354,65 @@ def format_build_outcome(*, slug: str, branch: str, publish: dict,
 
 
 # --------------------------------------------------------------------------
+# Wake (SPECS/2026-08-25-agentic-residents.md).
+#
+# plink wakes a seat with a task; the seat's runner works it in one headless
+# session and posts the result. Everything the broker contributes is here: an
+# id, the record the runner reads, and the two parsers behind the no-self-review
+# rule a woken session inherits.
+# --------------------------------------------------------------------------
+
+
+def new_wake_id(now: Optional[_dt.datetime] = None,
+                entropy: Optional[str] = None) -> str:
+    """`wake-20260825T142310Z-9f3a1c` — sortable, greppable, collision-safe.
+
+    The timestamp is what a human reads in #custodian and in the action log;
+    the suffix is what keeps two wakes in the same second apart. Both halves
+    are needed: the id is the only string that ties a broker audit line, an
+    action-log start/end pair and a #custodian post to one another."""
+    now = now or _dt.datetime.now(_dt.timezone.utc)
+    stamp = now.astimezone(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"wake-{stamp}-{entropy or os.urandom(3).hex()}"
+
+
+def parse_review_owner(text: str) -> Optional[str]:
+    """The `- **Review owner**: …` bullet's value, or None if the spec has no
+    such bullet.
+
+    Emphasis is stripped before matching, for the reason parse_confirm_record
+    strips it: the gate's job is to read a field, never to grade markdown.
+    None means the spec does not state a review owner — which is NOT the same
+    as stating one that is nobody, and the woken-build check treats the two
+    differently."""
+    for line in text.splitlines():
+        plain = re.sub(r"[*_`]", "", line)
+        m = re.match(r"\s*-\s*Review owner\s*:\s*(.*)$", plain, re.I)
+        if m:
+            return _clean_field(m.group(1))
+    return None
+
+
+def review_owner_seat(raw: Optional[str],
+                      known_seats: "set[str] | frozenset[str]") -> Optional[str]:
+    """The SEAT a review-owner line names (`Claudette` -> `res-claudette`), or
+    None when it names nobody this house runs as.
+
+    Only the first name-shaped token is considered: the line is prose after the
+    name in every spec that has one ("Claudette. The builder cannot
+    self-review, and…"). A line naming a human (`plink`) resolves to no seat,
+    and correctly so — a human review owner is the case the no-self-review rule
+    exists to protect, not a case it should refuse."""
+    if not raw:
+        return None
+    m = re.match(r"[\s*_`]*([A-Za-z][A-Za-z0-9_-]{0,30})", raw)
+    if not m:
+        return None
+    seat = f"res-{m.group(1).lower()}"
+    return seat if seat in known_seats else None
+
+
+# --------------------------------------------------------------------------
 # Bot-to-bot summon hops (SPECS/2026-08-24-custodian-mention-summons.md).
 #
 # The wall a work loop runs against. Guard 1 is the default and lives in the
@@ -1559,6 +1684,36 @@ class Broker:
                     "trustworthy source)")
             self.specs_dir_real = assert_specs_dir_resident_unwritable(
                 specs_dir, uid_map=self.uid_map, residents=self.residents)
+        # Wake (2026-08-25). Absent section = no wake surface at all: the verb
+        # exists, every caller is refused as not-a-waker, and the refusal is
+        # audited. Present section = plink means to wake seats, and then every
+        # field below is mandatory and checked here, once, loudly.
+        self.wake: dict[str, Any] = config.get("wake", {}) or {}
+        self.wake_callers: frozenset[str] = frozenset()
+        self.wake_seats: frozenset[str] = frozenset()
+        self.wake_spool_real: Optional[str] = None
+        self.seat_names: frozenset[str] = frozenset(
+            n for n in ({v for v in self.uid_map.values() if isinstance(v, str)}
+                        | {n for n in self.residents if isinstance(n, str)})
+            if _BUILD_CALLER_RE.match(n))
+        if self.wake:
+            self.wake_callers = self._parse_wake_callers()
+            self.wake_seats = self._parse_wake_seats()
+            spool = self.wake.get("spool_dir")
+            if not isinstance(spool, str) or not spool:
+                raise ConfigError(
+                    "[wake] is configured but wake.spool_dir is missing; "
+                    "refusing to start (a wake with nowhere to land is a wake "
+                    "the seat never hears about)")
+            self.wake_spool_real = assert_dir_resident_unwritable(
+                spool,
+                label="wake.spool_dir",
+                remedy=("Keep the spool somewhere plink owns and no resident "
+                        "mounts (e.g. /var/lib/disjorn-broker/wake-spool); the "
+                        "seat's runner only ever READS it."),
+                stake=("A resident that can write the spool can write itself a "
+                       "wake, and nothing self-wakes."),
+                uid_map=self.uid_map, residents=self.residents)
         self._audit_lock = threading.Lock()
         # Build-budget lock (H13-D4): count-with-reservation is held under this,
         # so two concurrent start-builds can NEVER both slip past the cap — the
@@ -1602,6 +1757,10 @@ class Broker:
             "file-proposal": self._verb_file_proposal,
             "query-own-audit": self._verb_query_own_audit,
             "summon-hop": self._verb_summon_hop,
+            # The one verb no seat may call: dispatch refuses it to every
+            # resident identity before verbs.toml is even read, and refuses
+            # every other verb to a wake caller. See _check_wake_identity.
+            WAKE_VERB: self._verb_wake,
             # Plan Room (SPECS/2026-08-20-plan-room.md). Three read, two write.
             # The two writes touch BOARD-NATIVE STATE ONLY — comments and the
             # blocked flag — and they are structurally unable to touch anything
@@ -1613,6 +1772,65 @@ class Broker:
             "board-flag": self._verb_board_flag,
             "board-comment": self._verb_board_comment,
         }
+
+    # -------------------------------------------------------- wake config
+
+    def _parse_wake_callers(self) -> frozenset[str]:
+        """`[wake].callers` — the identities that may wake a seat.
+
+        Two refusals, both at startup and both fatal, because a wake surface
+        that looks armed and is not is worse than one that is down:
+
+        * a caller with no `[uids]` line can never be authenticated, so listing
+          it grants nothing while reading as a grant;
+        * a caller that is a SEAT is a self-wake with extra steps. The spec's
+          wall is that origin arrives as connection data from a human's uid;
+          a res-* name here would delete it in one config line."""
+        callers = self.wake.get("callers")
+        if not isinstance(callers, list) or not callers or not all(
+                isinstance(c, str) and c for c in callers):
+            raise ConfigError(
+                "[wake] is configured but wake.callers is missing or is not a "
+                "non-empty list of identity names; refusing to start")
+        mapped = {v for v in self.uid_map.values() if isinstance(v, str)}
+        for caller in callers:
+            if _BUILD_CALLER_RE.match(caller):
+                raise ConfigError(
+                    f"wake.callers names the resident seat {caller!r}: a seat "
+                    "may never wake anyone (nothing self-wakes). Refusing to "
+                    "start.")
+            if caller not in mapped:
+                raise ConfigError(
+                    f"wake.callers names {caller!r}, which has no uid in "
+                    "[uids]: it could never be authenticated at the socket, so "
+                    "the wake surface would read as armed while refusing every "
+                    "call. Add the uid or drop the name.")
+        return frozenset(callers)
+
+    def _parse_wake_seats(self) -> frozenset[str]:
+        """`[wake].residents` — the seats that may BE woken. Config, never
+        caller input: the verb's `resident` argument is checked against this,
+        so a wake can only ever reach a seat plink has named here."""
+        seats = self.wake.get("residents")
+        if not isinstance(seats, list) or not seats or not all(
+                isinstance(s, str) and s for s in seats):
+            raise ConfigError(
+                "[wake] is configured but wake.residents is missing or is not "
+                "a non-empty list of seat names; refusing to start")
+        for seat in seats:
+            if seat not in self.seat_names:
+                raise ConfigError(
+                    f"wake.residents names {seat!r}, which is not a resident "
+                    "of this house ([uids] / [residents]); refusing to start")
+        return frozenset(seats)
+
+    def _wake_session_cap(self) -> int:
+        cap = self.wake.get("session_cap_sec", DEFAULT_WAKE_SESSION_CAP_SEC)
+        return cap if isinstance(cap, int) and cap > 0 else DEFAULT_WAKE_SESSION_CAP_SEC
+
+    def _wake_grace(self) -> int:
+        grace = self.wake.get("grace_sec", DEFAULT_WAKE_GRACE_SEC)
+        return grace if isinstance(grace, int) and grace >= 0 else DEFAULT_WAKE_GRACE_SEC
 
     # ------------------------------------------------------------- audit
 
@@ -1821,6 +2039,16 @@ class Broker:
         if verb not in self.verbs:
             self._audit(caller, verb, args, False, "denied: unknown verb")
             return self._err("unknown-verb", f"no such verb: {verb}")
+
+        # Wake identity, BEFORE the kill switch and before any handler: the
+        # wake verb is the one verb whose caller is not a seat, and the two
+        # halves of that are enforced here rather than left to verbs.toml.
+        # A misedit there can widen a verb; it can never hand a resident the
+        # wake, and it can never hand a waker anything else.
+        refusal = self._check_wake_identity(resident, verb)
+        if refusal is not None:
+            self._audit(caller, verb, args, False, f"denied: {refusal}")
+            return self._err("verb-disabled", refusal)
 
         # Kill switch: fresh read of verbs.toml on every request; missing file,
         # missing resident section or missing key all mean OFF (fail closed).
@@ -2973,6 +3201,8 @@ class Broker:
           1. the spec path resolves inside SPECS/ (no `..`, no symlink escape);
           2. the spec's status is 'confirmed' with a real confirm record
              (Confirmed by + #custodian seq) — else refuse, fail-loud;
+          2b. if a wake is in flight for this seat, the woken session's
+             no-self-review rule (_assert_woken_build_allowed);
           3. no build of this slug is already in flight (BL-D4) and the per-day
              build budget has a free slot — both claimed under one lock.
         On accept it posts a 'started' line to #custodian, spawns the build
@@ -2985,6 +3215,15 @@ class Broker:
         assert spec_arg is not None
         spec_path = self._resolve_spec_path(spec_arg)
         meta = self._read_confirmed_spec(spec_path)
+
+        # 2b. If this seat is awake on a wake right now, the woken session's
+        #    extra rule applies: no build whose review owner is this seat (or
+        #    the seat that woke it). The confirm gate above is what makes the
+        #    inherited verb safe at all; this is what keeps waking from being a
+        #    route around the review owner.
+        wake = self._active_wake(resident)
+        if wake is not None:
+            self._assert_woken_build_allowed(resident, wake, meta["text"])
 
         # Build the argv (pure config + validated slug) BEFORE reserving, so a
         # misconfiguration refuses without burning a budget slot.
@@ -3100,6 +3339,249 @@ class Broker:
                 f"build {meta['slug']} -> {meta['branch']} launched "
                 f"(budget {budget_str})",
                 {"build_started": True})
+
+    # ---------------------------------------------------------------- wake
+
+    def _check_wake_identity(self, resident: str, verb: str) -> Optional[str]:
+        """None if this identity may attempt this verb, else the refusal text.
+
+        Two rules, symmetric, both in code rather than in verbs.toml:
+
+        * only a configured wake caller may call `wake`, so a wake from any
+          resident, build or adapter uid is refused and audit-logged. The
+          caller arrives as an SO_PEERCRED uid, so this is the sentence that
+          makes "no text in any channel can constitute a wake" true;
+        * a wake caller may call nothing ELSE. The identity exists to press one
+          button; plink has better routes to every other verb than a socket
+          that answers as the broker.
+
+        With no `[wake]` section there are no callers, so the first rule
+        refuses everyone: the verb is present and inert, which is the same
+        fail-closed shape as an unflipped kill switch."""
+        is_waker = resident in self.wake_callers
+        if verb == WAKE_VERB and not is_waker:
+            return (f"{resident} may not wake anyone — the wake caller is "
+                    "authenticated by uid at the socket, and no seat is one")
+        if is_waker and verb != WAKE_VERB:
+            return (f"{resident} is a wake caller and may call only "
+                    f"{WAKE_VERB!r}")
+        return None
+
+    def _wake_spool_dir(self) -> str:
+        """The spool realpath VERIFIED resident-unwritable at construction —
+        never the raw config string, for the reason _specs_dir prefers its
+        verified path: the directory written must be the directory proven."""
+        if not self.wake_spool_real:
+            raise VerbError("internal", "wake.spool_dir is not configured")
+        return self.wake_spool_real
+
+    def _write_wake_record(self, record: dict) -> str:
+        """One 0644 JSON record per wake, written atomically.
+
+        Atomic because the seat's runner POLLS this directory: a reader that
+        catches a half-written file would see a wake with no task, and the
+        rename means it either sees the whole record or no file at all. 0644
+        because the runner must read it and must not write it."""
+        path = os.path.join(self._wake_spool_dir(),
+                            record["wake_id"] + WAKE_SPOOL_SUFFIX)
+        fd, tmp = tempfile.mkstemp(dir=self._wake_spool_dir(),
+                                   prefix=".wake-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(record, fh, ensure_ascii=False)
+                fh.write("\n")
+            os.chmod(tmp, 0o644)
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        return path
+
+    def _read_wake_records(self) -> list[dict]:
+        """Every parseable record in the spool. A record the broker cannot
+        parse is skipped rather than fatal: the spool is plink-owned, so a bad
+        file is an operator's mistake, and refusing every future wake over it
+        would be the wrong blast radius."""
+        try:
+            names = sorted(os.listdir(self._wake_spool_dir()))
+        except (OSError, VerbError):
+            return []
+        out: list[dict] = []
+        for name in names:
+            if not name.endswith(WAKE_SPOOL_SUFFIX):
+                continue
+            try:
+                with open(os.path.join(self._wake_spool_dir(), name), "r",
+                          encoding="utf-8") as fh:
+                    rec = json.load(fh)
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(rec, dict) and _WAKE_ID_RE.match(str(rec.get("wake_id"))):
+                out.append(rec)
+        return out
+
+    @staticmethod
+    def _wake_requested_epoch(record: dict) -> Optional[float]:
+        """When the wake was asked for. None when the record carries no
+        readable time — such a record is treated as neither in flight nor
+        worth keeping, never as forever-live."""
+        try:
+            started = _dt.datetime.fromisoformat(str(record.get("requested_at")))
+        except (TypeError, ValueError):
+            return None
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=_dt.timezone.utc)
+        return started.timestamp()
+
+    @classmethod
+    def _wake_window_ends(cls, record: dict) -> Optional[float]:
+        """When this wake stops being in flight: requested_at + the session cap
+        + the grace margin."""
+        started = cls._wake_requested_epoch(record)
+        if started is None:
+            return None
+        cap = record.get("session_cap_sec")
+        grace = record.get("grace_sec")
+        cap = cap if isinstance(cap, int) and cap > 0 else DEFAULT_WAKE_SESSION_CAP_SEC
+        grace = grace if isinstance(grace, int) and grace >= 0 else DEFAULT_WAKE_GRACE_SEC
+        return started + cap + grace
+
+    def _prune_wake_spool(self, now: Optional[float] = None) -> int:
+        """Delete records past the RETENTION horizon (not past their window).
+        Runs on each wake, so the spool cannot grow without bound, while a
+        recently-expired record survives long enough for a runner that was down
+        to find it and post that the wake was missed."""
+        now = now if now is not None else time.time()
+        removed = 0
+        for rec in self._read_wake_records():
+            started = self._wake_requested_epoch(rec)
+            if started is not None and started + WAKE_RETENTION_SEC > now:
+                continue
+            try:
+                os.unlink(os.path.join(self._wake_spool_dir(),
+                                       str(rec["wake_id"]) + WAKE_SPOOL_SUFFIX))
+                removed += 1
+            except OSError:
+                pass
+        return removed
+
+    def _active_wake(self, resident: str) -> Optional[dict]:
+        """The most recent wake still in flight for this seat, if any.
+
+        Read from the spool per request, not from memory, so a broker restart
+        mid-wake does not lose the fact that a seat is awake.
+
+        NOTE what this can and cannot tell apart. From the socket, a call by a
+        woken session and a call by a summoned one are the same uid; the window
+        is the only signal there is. So while a wake is in flight for a seat,
+        EVERY build that seat starts is held to the woken session's rules. That
+        is the safe direction of the imprecision — it can refuse a build a
+        summon could have run, and it can never let a woken session past a rule
+        by mistaking it for a summon."""
+        if not self.wake:
+            return None
+        now = time.time()
+        live = [r for r in self._read_wake_records()
+                if r.get("resident") == resident
+                and (self._wake_window_ends(r) or 0) > now]
+        if not live:
+            return None
+        return max(live, key=lambda r: str(r.get("requested_at", "")))
+
+    def _assert_woken_build_allowed(self, resident: str, wake: dict,
+                                    text: str) -> None:
+        """The no-self-review rule, one level down (2026-08-25 spec).
+
+        A woken session inherits `start-build` from the summon seat, and that
+        is only safe while the confirm gate stays upstream of every build. This
+        is the other half: waking must not become a route to a build the seat
+        would then review itself.
+
+        A spec that states NO review owner is refused, not waved through: the
+        rule is a comparison, and a comparison with nothing to compare cannot
+        be satisfied. A spec that names a human refuses nothing — that is the
+        case the rule protects. The second clause (the waker's own seat) is
+        inert while only humans wake, and is written now so that it is already
+        true on the day a non-human wake lands."""
+        raw = parse_review_owner(text)
+        if raw is None:
+            raise _bad(
+                f"woken session ({wake.get('wake_id')}): this spec states no "
+                "review owner, so it cannot be shown that the review does not "
+                "land in the building seat's own queue — a woken build needs a "
+                "'Review owner' line")
+        owner_seat = review_owner_seat(raw, self.seat_names)
+        if owner_seat is None:
+            return
+        if owner_seat == resident:
+            raise _bad(
+                f"woken session ({wake.get('wake_id')}): this spec's review "
+                f"owner is {raw!r}, which is this seat — a seat may not build "
+                "what it would then review")
+        woken_by = str(wake.get("woken_by") or "")
+        if woken_by in self.seat_names and owner_seat == woken_by:
+            raise _bad(
+                f"woken session ({wake.get('wake_id')}): this spec's review "
+                f"owner is {raw!r}, which is the seat that woke this one — the "
+                "review would land in the waker's queue")
+
+    def _verb_wake(self, caller: str, args: dict) -> tuple[dict, str, dict]:
+        """Wake a seat with a task (SPECS/2026-08-25-agentic-residents.md).
+
+        The broker's whole part is authentication and a record: it resolves the
+        caller from SO_PEERCRED (dispatch has already refused every identity
+        but a configured waker), checks the named seat against config, and
+        drops one record in the plink-owned spool. It launches nothing — the
+        session runs in the seat's own container under the seat's own uid, and
+        the seat's runner is what launches, caps, harvests and posts it.
+
+        The caps ride ON the record rather than living in the runner's config,
+        so the wall-clock a woken session runs against is plink-owned and
+        singular. Widening it is a witnessed edit to broker.toml."""
+        _reject_unknown(args, {"resident", "task"})
+        seat = _check_str(args, "resident", required=True, max_len=64)
+        task = _check_str(args, "task", required=True,
+                          max_len=MAX_WAKE_TASK_CHARS)
+        assert seat is not None and task is not None
+        if seat not in self.wake_seats:
+            raise _bad(f"{seat!r} is not a wakeable seat "
+                       f"({', '.join(sorted(self.wake_seats)) or 'none'} are)")
+        if not task.strip():
+            raise _bad("task must not be empty — a wake names the work")
+
+        now = _dt.datetime.now(_dt.timezone.utc)
+        record = {
+            "schema": WAKE_SPOOL_SCHEMA,
+            "wake_id": new_wake_id(now),
+            "resident": seat,
+            "woken_by": caller,
+            "requested_at": now.isoformat(),
+            "session_cap_sec": self._wake_session_cap(),
+            "grace_sec": self._wake_grace(),
+            "task": task,
+        }
+        try:
+            self._write_wake_record(record)
+        except OSError as exc:
+            raise VerbError("exec-failure",
+                            f"cannot record the wake: {exc}") from None
+        self._prune_wake_spool()
+
+        return (
+            {"wake_id": record["wake_id"], "resident": seat,
+             "session_cap_sec": record["session_cap_sec"],
+             "grace_sec": record["grace_sec"],
+             "requested_at": record["requested_at"]},
+            f"wake {record['wake_id']} recorded for {seat} by {caller} "
+            f"(cap {record['session_cap_sec']}s)",
+            # A FACT field, like start-build's `build_started`: the wake id is
+            # what ties this line to the action log's start/end pair and to the
+            # #custodian post the seat's runner makes.
+            {"wake_id": record["wake_id"]},
+        )
 
     def _verb_classify_diff(self, resident: str, args: dict) -> tuple[dict, str]:
         """Contract with harness/classifier/classify_diff.py (WP-H4):

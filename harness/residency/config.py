@@ -29,6 +29,7 @@ __all__ = [
     "HopConfig",
     "CursorConfig",
     "TextConfig",
+    "WakeConfig",
     "AdapterConfig",
     "load_config",
     "MODEL_GATE_OFF",
@@ -159,6 +160,39 @@ class CursorConfig:
 
 
 @dataclass
+class WakeConfig:
+    """How this seat's wake runner finds its work (2026-08-25 agentic
+    residents). The wake itself is authorized elsewhere — plink's uid at the
+    broker socket — and nothing here can widen it: `spool_dir` is plink-owned
+    and resident-unwritable (the broker refuses to start otherwise), so this
+    daemon can read a wake and can never write one.
+
+    Unset `spool_dir` = no wake lane on this seat, which is what ships.
+    """
+
+    spool_dir: Optional[str] = None
+    # Wake ids this runner has already served, so a restart does not re-run a
+    # wake whose record is still inside its window. Same discipline as the
+    # summon cursor: state on disk, not in memory.
+    state_path: str = "/home/resident/.wake-served.json"
+    poll_interval_sec: float = 5.0
+    # The bare gatehouse repos (RESIDENT_GATEHOUSE, run-resident.sh) — the only
+    # writable path out of the container. The runner reads loop/* heads here
+    # before and after the session, which is how a failure post can name the
+    # branch and quote its head subject without asking the session anything.
+    # Unset = no branch observation; the post says so rather than implying no
+    # branch exists.
+    gatehouse_dir: Optional[str] = None
+    # The house action log this seat's container writes (WP-H5 ~/.action-log),
+    # host-side path. The runner appends the wake-start / wake-end accounting
+    # pair here and counts the session's tool calls as the delta between them.
+    action_log: Optional[str] = None
+    # Ceiling on the session's own closing words carried into the result post.
+    # Enrichment, never evidence — see summary.format_wake_done.
+    reply_chars: int = 600
+
+
+@dataclass
 class TextConfig:
     refusal_line: str = (
         "I'm at my summon budget for today — flag a human in #custodian "
@@ -257,6 +291,7 @@ class AdapterConfig:
     hops: HopConfig = field(default_factory=HopConfig)
     cursor: CursorConfig = field(default_factory=CursorConfig)
     text: TextConfig = field(default_factory=TextConfig)
+    wake: WakeConfig = field(default_factory=WakeConfig)
 
     # ------------------------------------------------------------------ build
 
@@ -270,6 +305,7 @@ class AdapterConfig:
         hp = data.get("hops", {}) or {}
         cu = data.get("cursor", {}) or {}
         tx = data.get("text", {}) or {}
+        wk = data.get("wake", {}) or {}
 
         return cls(
             server=ServerConfig(
@@ -345,6 +381,16 @@ class AdapterConfig:
                 model_gate_line=str(
                     tx.get("model_gate_line", TextConfig.model_gate_line)
                 ),
+            ),
+            wake=WakeConfig(
+                spool_dir=wk.get("spool_dir"),
+                state_path=str(wk.get("state_path", WakeConfig.state_path)),
+                poll_interval_sec=float(
+                    wk.get("poll_interval_sec", WakeConfig.poll_interval_sec)
+                ),
+                gatehouse_dir=wk.get("gatehouse_dir"),
+                action_log=wk.get("action_log"),
+                reply_chars=int(wk.get("reply_chars", WakeConfig.reply_chars)),
             ),
         )
 

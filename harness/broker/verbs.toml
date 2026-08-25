@@ -2,10 +2,14 @@
 # TEMPLATE — copied into place by harness/keyboard/04-broker.sh (never
 # overwriting an existing file). Owned root:plink 0640; edit with sudoedit.
 #
-# One section per resident, one boolean per verb. The broker re-reads this
+# One section per CALLER, one boolean per verb. The broker re-reads this
 # file on EVERY request, so flipping a switch takes effect immediately — no
 # broker restart, no window. Anything missing (file, section, or key) means
 # OFF: the broker fails closed.
+#
+# Every caller but one is a resident seat. The exception is [plink] at the
+# bottom: the wake caller (SPECS/2026-08-25-agentic-residents.md), which holds
+# exactly one verb and which no seat section may ever hold.
 #
 # EVERY verb ships OFF for EVERY resident. plink flips each one on
 # deliberately, one at a time, when he decides that resident gets that power.
@@ -52,6 +56,11 @@
 "board-comment" = false
 "summon-hop" = false
 
+# NOTE there is no `wake` line in either seat section, and adding one grants
+# nothing: the broker refuses `wake` to every resident identity in code, before
+# this file is read (_check_wake_identity). A seat that could wake a seat is a
+# self-wake, and nothing self-wakes.
+
 [res-gable]
 "restart-disjorn" = false
 "run-server-tests" = false
@@ -69,3 +78,15 @@
 "board-flag" = false
 "board-comment" = false
 "summon-hop" = false
+
+# THE WAKE CALLER (SPECS/2026-08-25-agentic-residents.md). plink, at the
+# keyboard, from his own uid — the section name is the identity his uid maps to
+# in broker.toml [uids], and the broker will not start if that mapping is
+# missing. One verb, and the broker refuses this caller every other verb in
+# code, so this section can never grow into a second keyboard.
+#
+# It is NOT a seat section: gen_verb_surface.py reads seat sections only, so
+# `wake` never becomes a button in any resident's CLI or tool list. A verb no
+# seat may call must also be a verb no seat can see.
+[plink]
+"wake" = false

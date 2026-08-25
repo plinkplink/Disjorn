@@ -86,6 +86,11 @@ ADAPTER_KEYS = {"seat", "module", "args", "description"}
 # nothing, which is the failure mode this whole file exists to end.
 SURFACE_TABLES = {"verbs", "adapter_tools"}
 
+# A verbs.toml section that is a SEAT — the sections a generated schema is made
+# from. The kill-switch file also holds the wake caller ([plink]), whose verb no
+# seat may call; see verb_names.
+SEAT_SECTION_RE = re.compile(r"^res-[a-z][a-z0-9-]*$")
+
 
 class SurfaceError(Exception):
     """The catalogue and the verb set disagree, or the catalogue is malformed."""
@@ -94,19 +99,26 @@ class SurfaceError(Exception):
 # ── loading ──────────────────────────────────────────────────────────────
 
 def verb_names(verbs_path: Path = VERBS_TOML) -> list[str]:
-    """The UNION of verb names over every resident section of verbs.toml.
+    """The UNION of verb names over every SEAT section of verbs.toml.
 
     The union, not an intersection: a verb granted to one resident and not the
     other is a normal state of this house (that is what a per-resident kill
-    switch is FOR), and every seat's schema still has to describe it."""
+    switch is FOR), and every seat's schema still has to describe it.
+
+    SEAT sections only (`res-<name>`), because since 2026-08-25 verbs.toml also
+    carries a non-seat caller: [plink], holding the wake verb. A seat may not
+    call `wake` and must not be handed a button for it — a tool in a resident's
+    list that the broker refuses by identity is a button wired to a refusal,
+    which is the failure this generator exists to prevent in the other
+    direction."""
     data = tomllib.loads(verbs_path.read_text(encoding="utf-8"))
     seen: list[str] = []
-    for section in data.values():
-        if not isinstance(section, dict):
+    for name, section in data.items():
+        if not isinstance(section, dict) or not SEAT_SECTION_RE.match(name):
             continue
-        for name in section:
-            if name not in seen:
-                seen.append(name)
+        for verb in section:
+            if verb not in seen:
+                seen.append(verb)
     return seen
 
 

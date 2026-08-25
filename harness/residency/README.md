@@ -51,6 +51,8 @@ DisjornClient.events()  ──▶  SummonDetector.detect  ──▶  Trigger(mod
 | `summary.py` | One-line #custodian summaries. |
 | `adapter.py` | `SummonAdapter` — the daemon wiring it all together. |
 | `run_summon.py` | CLI entry point. |
+| `wake.py` | The wake lane: spool, gatehouse observation, accounting, `WakeRunner`. |
+| `run_wake.py` | CLI entry point for the wake runner (a SEPARATE daemon). |
 | `summon.toml.template` | Config template (documented prod layout, all overridable). |
 
 ## Model integrity: the pin, the suffix, and the gate
@@ -81,6 +83,52 @@ unchanged with the gate off.
 Fail loud, never fail over, at every state: no retry on another model, no
 substitution, no downgrading a refusal to a warning.
 
+## The wake lane (SPECS/2026-08-25-agentic-residents.md)
+
+The same seat, woken to WORK instead of to answer. plink names a task at the
+keyboard (`harness/keyboard/wake.py`); the broker authenticates his uid at its
+socket, drops one record in a plink-owned spool, and launches nothing.
+`run_wake.py` — a second daemon under the same res-gable uid, reading the same
+config file — picks the record up, runs one headless session on the summon
+seat's exact launch contract with a longer wall clock, and posts the result.
+
+```
+broker `wake` verb ──▶ spool record ──▶ WakeSpool.poll ──▶ WakeRunner.serve
+   (plink's uid, SO_PEERCRED)                                    │
+                                          action log: wake-start │
+                                          gatehouse: loop/* refs │
+                                                                 ▼
+                                            ContainerLauncher.run(prompt)
+                                                                 │
+                                          gatehouse: loop/* refs │
+                                            #custodian post  ◀───┤
+                                          action log: wake-end   │
+```
+
+Four things about it that are not obvious from the code:
+
+- **The post is harvested, not claimed.** Exit status, wall clock, the
+  action-log delta and the gatehouse refs before/after are all measured by the
+  runner from outside the session. A finished session's closing words ride
+  along labelled as its own account; a failed one's do not ride at all. Same
+  rule that fixed the build-done banner: a banner is evidence only when the
+  process that posts it is not the process it describes.
+- **Every ending is a post** — done, cap-kill, crash, model-gate refusal, and
+  a wake that arrived while this daemon was down (posted late as MISSED, and
+  NOT run: a wake is a human waiting).
+- **A `wip:` head means partial**, by inspection. The wake prompt asks the
+  session to prefix incremental commits; the failure post quotes the branch's
+  head subject, so nobody reads chat to find out how far it got.
+- **The caps are not this package's.** The wall clock rides on each wake
+  record, from `[wake].session_cap_sec` in broker.toml. The per-session action
+  cap is the container's `/config/budget.json` — the same one a summon runs
+  under, unchanged.
+
+The seat gets no verb a summon seat lacks, `start-build` included. The one
+thing waking adds is a refusal: while a wake is in flight, that seat cannot
+start a build whose review owner is itself (enforced broker-side; see
+PROTOCOL.md `wake`).
+
 ## Chat is data, never authorization
 
 The adapter's control surface is the config file (plink-owned, outside the
@@ -96,6 +144,7 @@ riding into a broker call. Tests assert this directly
 
 ```
 python run_summon.py --config /config/summon.toml
+python run_wake.py   --config /config/summon.toml   # the wake lane, if armed
 ```
 
 In production it runs as res-gable (systemd user unit, alongside the residence

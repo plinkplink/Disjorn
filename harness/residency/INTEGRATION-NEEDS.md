@@ -103,6 +103,35 @@ Same note for the `--model` flag reaching claude: the gate reads what CC
 gate reports it as a mismatch rather than silently running the account
 default. That is the intended failure.
 
+## 7. The wake lane (2026-08-25 agentic residents) — OPEN, keyboard work
+
+`run_wake.py` and `gable-wake.service` ship here; nothing in this package can
+install or arm either. Five keyboard acts, in this order, none of which a
+resident can perform or reach:
+
+1. **broker.toml**: add plink's own uid to `[uids]` (`"1000" = "plink"`) and
+   fill in `[wake]` — `callers`, `residents`, `spool_dir`, `session_cap_sec`,
+   `grace_sec`. The broker REFUSES TO START if the spool is resident-writable,
+   if a listed caller has no uid, or if a listed caller is a `res-*` seat.
+2. **Create the spool**: `/var/lib/disjorn-broker/wake-spool`, plink-owned,
+   0755 (the broker writes it; res-gable must be able to READ it and must not
+   be able to write it). Records land 0644.
+3. **verbs.toml**: `[plink] "wake" = true`. It ships `false`.
+4. **This seat's config** (`summon.toml`): the `[wake]` block — `spool_dir`
+   pointing at the same directory, `state_path` on the res-gable-writable
+   volume, `gatehouse_dir` (the bare repos the seat pushes loop branches into),
+   and `action_log` (the HOST path of this seat's `~/.action-log`, i.e.
+   `/home/res-gable/resident-home/.action-log`).
+5. **Install `gable-wake.service`** under res-gable's user manager, sibling to
+   `gable-summon.service`. Separate unit on purpose: a wake holds a session for
+   up to its cap, and sharing the summon adapter's loop would mean either a
+   summon queued behind an hour-long wake or two sessions racing one container
+   name.
+
+What is NOT wanted and must not be added to make this easier: a cron entry, a
+chat trigger, or a verb that lets a resident enqueue a wake. Human-initiated
+only is the whole of v1 (spec, decision 2).
+
 ## Deferred (not needed for WP-H9)
 
 - Concurrent summons: the daemon serves one summon at a time (expensive, and it
