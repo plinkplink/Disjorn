@@ -64,4 +64,5 @@ tests. Well under the parent build.
 <!-- No Confirm record → no build. This is the gate. -->
 
 ## Status
-`confirmed`
+building
+<!-- set by the broker on 2026-08-25 22:09Z (start-build, 2026-08-25-wake-pre-arm-riders): build running as disjorn-build-2026-08-25-wake-pre-arm-riders.service -> loop/2026-08-25-wake-pre-arm-riders, launched by gable (confirmed by plink, #custodian seq 1968). Not buildable again until this line moves. -->
