@@ -1,0 +1,46 @@
+# gable-wake.service — systemd USER unit for the wake runner
+# (SPECS/2026-08-25-agentic-residents.md).
+#
+# Sibling of gable-summon.service, same uid, same config file, different lane:
+# that one serves summons from the event stream, this one serves wakes from the
+# broker's spool. Two units so a long wake never blocks a summon and a summon
+# never races a wake for the container name.
+#
+# HOST-side as res-gable, like the summon adapter and for the same reason: the
+# session it launches carries the res-gable uid that the broker (SO_PEERCRED)
+# and the nftables wall key on. It reads the wake spool (plink-owned, 0755) and
+# appends to res-gable's own action log; it can write neither wake nor spool.
+#
+# Stopping this unit is plink's kill switch for the wake lane. So is removing
+# [wake] from broker.toml, and so is `wake = false` in verbs.toml — three
+# independent levers, none of which the seat can reach.
+
+[Unit]
+Description=Gable wake runner (Disjorn agentic seat, %u)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+# Same run-resident.sh environment as the summon unit: the woken session is the
+# same seat, in the same container contract, with only the wall clock changed
+# (and that comes from the wake record, not from here).
+Environment=RESIDENT_CONFIG_DIR=/srv/disjorn-resident-config/gable
+Environment=RESIDENT_HOUSE_MEMORY=/usr/local/lib/disjorn/house_memory
+Environment=RESIDENT_DISJORN_RO=/srv/disjorn-ro
+Environment=RESIDENT_STDIN=1
+# The gatehouse the session pushes loop branches into, and that the runner
+# reads back to derive the result post. Same directory of bare repos the
+# resident container mounts rw.
+Environment=RESIDENT_GATEHOUSE=/var/lib/disjorn-broker/gatehouse
+ExecStart=/usr/local/lib/disjorn/residency-venv/bin/python \
+    /usr/local/lib/disjorn/residency/run_wake.py \
+    --config /srv/disjorn-resident-config/res-gable/summon.toml
+StandardOutput=append:/home/res-gable/logs/gable.log
+StandardError=append:/home/res-gable/logs/gable.log
+Restart=on-failure
+RestartSec=15
+MemoryMax=1G
+TasksMax=128
+
+[Install]
+WantedBy=default.target

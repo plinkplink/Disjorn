@@ -25,6 +25,10 @@
 #                            behaviour). Set it to the plink-owned mirror
 #                            /srv/disjorn-spine/<name>; mounted ro at
 #                            /opt/spine. See the spine mount block below.
+#   RESIDENT_CONTAINER_SUFFIX  appended to the container name (unset = today's
+#                            "resident-cc-<name>"). The wake lane sets it so a
+#                            woken session and a summon cannot take each
+#                            other's container name — see the name below.
 #   RESIDENT_PODMAN_EXTRA    extra podman-run flags (word-split; e.g. "-d")
 #   RESIDENT_REAP            1 (default) = a watchdog kills this wrapper's
 #                            container if the wrapper itself is killed, so a
@@ -69,7 +73,14 @@ shift
 IMAGE="${RESIDENT_IMAGE:-localhost/disjorn-resident:latest}"
 # Deterministic, and the single source of truth: --name below and the
 # container reaper block at the bottom must always mean the same container.
-CONTAINER_NAME="resident-cc-$NAME"
+# RESIDENT_CONTAINER_SUFFIX distinguishes two LANES of the same seat. Since
+# 2026-08-25 a seat has two independent daemons — the summon adapter and the
+# wake runner — and `--replace` below means whichever starts second takes the
+# name and KILLS the first. A summon silently killing an hour-long woken
+# session (or the reverse) is exactly the kind of failure that reads as a crash
+# and is not one. The wake runner sets this to "wake"; unset is today's name,
+# byte for byte, so nothing about the summon path changes.
+CONTAINER_NAME="resident-cc-$NAME${RESIDENT_CONTAINER_SUFFIX:+-$RESIDENT_CONTAINER_SUFFIX}"
 HOME_VOL="${RESIDENT_HOME_VOL:-$HOME/resident-home}"
 CONFIG_DIR="${RESIDENT_CONFIG_DIR:-/home/plink/resident-config/$NAME}"
 BROKER_SOCK="${RESIDENT_BROKER_SOCKET:-/run/disjorn-broker/broker.sock}"

@@ -13,9 +13,13 @@ privileged broker. Deliberately dead simple.
   and the broker closes the connection. No framing beyond the newline; max
   request size 64 KiB.
 - **Authentication is SO_PEERCRED only.** The kernel-asserted uid of the
-  connecting process is mapped to a resident name via `broker.toml [uids]`.
+  connecting process is mapped to a caller identity via `broker.toml [uids]`.
   Nothing in the request body identifies the caller; nothing in the request
   body can escalate it. Chat is data, never authorization.
+- Every identity but one is a resident seat. The exception is the **wake
+  caller** (`wake`, 2026-08-25): a human at the keyboard, from their own uid,
+  who may call that verb and nothing else — and whom no seat may impersonate,
+  because the uid is the kernel's word, not the caller's.
 
 ## Request
 
@@ -64,8 +68,9 @@ ran" from "the call was authorized but nothing ever launched" (BL-D3).
 
 ## Verb table
 
-All verbs are per-resident toggleable in `verbs.toml` and default OFF.
-`restart-self` does not exist and never will (plink's ruling #3).
+All verbs are per-caller toggleable in `verbs.toml` and default OFF.
+`restart-self` does not exist and never will (plink's ruling #3). `wake` is in
+the table but in no seat's section — see its entry below.
 
 ### `restart-disjorn`
 - args: none.
@@ -493,6 +498,53 @@ adapters are the callers; a session has no reason to press it.
 
 The clock never unparks a chain: midnight rolls the 24-per-UTC-day ceiling and
 nothing else. A parked work item stays parked until a human posts about it.
+
+### `wake`
+
+SPECS/2026-08-25-agentic-residents.md (confirmed seq 1913). Wake a seat with a
+task: one headless work session, a longer wall clock than a summon, one result
+post in #custodian, then exit.
+
+**This is the one verb no resident may call, and the only verb its caller may
+call.** Both halves are enforced in `dispatch()` before `verbs.toml` is read:
+
+- a `wake` from any resident, build or adapter uid is refused (`verb-disabled`)
+  and audit-logged. Origin arrives as connection data — the SO_PEERCRED uid of
+  the connecting process — so no text in any channel can constitute a wake;
+- a wake caller (`[wake].callers`, a human's identity, never a `res-*` seat)
+  gets the same refusal on every other verb.
+
+- args: `{"resident": str, "task": str}` — the seat to wake (checked against
+  `[wake].residents`; caller input never names an unlisted seat) and the work,
+  ≤4000 chars.
+- result: `{"wake_id": str, "resident": str, "session_cap_sec": int,
+  "grace_sec": int, "requested_at": str}`.
+- The audit line carries `"wake_id"` as a FACT field, like `start-build`'s
+  `build_started`. That id is the join key between this line, the seat's
+  action-log start/end pair, and the #custodian post.
+
+The broker **launches nothing**. It writes one 0644 JSON record into
+`[wake].spool_dir` — plink-owned and verified resident-*unwritable* at startup,
+for the reason `start_build.specs_dir` is (a resident that can write the spool
+can write itself a wake) — and returns. The seat's own runner
+(`harness/residency/run_wake.py`, running as `res-<seat>`) picks the record up,
+runs the session in the seat's container, and is what harvests and posts. The
+session's wall-clock cap rides on the record, so it is plink's value and there
+is only one of it.
+
+With `[wake]` absent there are no callers, so every `wake` is refused: the verb
+is present and inert, the same fail-closed shape as an unflipped kill switch.
+
+**What a wake does NOT get.** No verb a summon seat lacks — including
+`start-build`, which a woken session inherits and which stays safe because the
+confirm gate is upstream of every build. One rule is added for a seat that is
+awake: while a wake is in flight for it, `start-build` also refuses a spec
+whose **Review owner** resolves to that seat (or to the seat that woke it — a
+forward rule, inert while only humans wake), and refuses a spec that states no
+review owner at all. From the socket a woken caller and a summoned one are the
+same uid, so the wake window is the only signal; the imprecision runs in the
+safe direction, refusing builds a summon could have run rather than letting a
+woken session past the rule.
 
 ## Daily action budget (WP-H12)
 

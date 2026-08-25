@@ -40,12 +40,17 @@ audit_log = "/var/log/disjorn-broker/audit.jsonl"
 # build_log_dir = "/var/lib/disjorn-broker/build-logs"
 
 [uids]
-# Kernel uid -> resident identity. THE authentication table: the broker trusts
+# Kernel uid -> caller identity. THE authentication table: the broker trusts
 # SO_PEERCRED, maps the uid here, and denies anything unlisted.
 # Fill in the real uids after harness/keyboard/01-users.sh has run
 # (`id -u res-claudette`). Keys must be quoted (TOML).
 # "998" = "res-claudette"
 # "997" = "res-gable"
+# plink's OWN uid, for the wake verb and nothing else (see [wake] below). The
+# broker refuses this identity every other verb in code, so listing it here
+# widens nothing: it only makes a human at the keyboard nameable at the socket.
+# Without this line the wake surface cannot start.
+# "1000" = "plink"
 
 [residents.res-claudette]
 # The ONLY file read-own-log will serve to res-claudette. No other path is
@@ -394,6 +399,51 @@ daily_build_cap = 10
 # Optional per-resident override:
 # [start_build.per_resident.res-gable]
 # daily_build_cap = 2
+
+[wake]
+# AGENTIC RESIDENTS v1 (SPECS/2026-08-25-agentic-residents.md, confirmed seq
+# 1913). plink wakes a seat with a task; the seat works it in one headless
+# session and posts the result to #custodian. Nothing self-wakes: there is no
+# cron here, no anomaly trigger, and no chat surface — those are later specs.
+#
+# COMMENTED OUT = no wake surface. The verb exists and refuses every caller
+# (audited), which is the same fail-closed shape as an unflipped kill switch.
+#
+# WHAT THIS SECTION IS. The broker's whole part in a wake is authentication and
+# a record: it resolves the caller from SO_PEERCRED, checks the seat against
+# `residents` below, and drops one 0644 JSON record in `spool_dir`. It launches
+# nothing. The session runs in the seat's own container, under the seat's own
+# uid, started and harvested by that seat's wake runner
+# (harness/residency/run_wake.py) — which is also the only thing that posts.
+#
+# callers = who may wake. A name here must have a uid in [uids] (a caller that
+# cannot be authenticated would read as a grant while refusing every call) and
+# must NOT be a res-* seat (that would be a self-wake in one config line). The
+# broker refuses to start on either, and refuses this identity every verb but
+# `wake` at the socket. Flipping [plink] "wake" = true in verbs.toml is the
+# live kill switch on top.
+# callers = ["plink"]
+# residents = who may BE woken. Caller input is checked against this list, so a
+# wake can only ever reach a seat named here.
+# residents = ["res-gable"]
+# WHERE THE RECORDS LAND. Plink-owned, resident-READABLE, resident-UNWRITABLE —
+# verified at startup exactly like start_build.specs_dir, with the same
+# refusal-to-start, because it rests on the same kind of authorization: a
+# resident that can write this directory can write itself a wake. Do not point
+# it at a resident home, a declared writable root, or anything world-writable.
+# spool_dir = "/var/lib/disjorn-broker/wake-spool"
+# THE SESSION CAPS, and they live HERE rather than in the seat's config so that
+# there is ONE value and it is plink's. Both ride on the wake record; the
+# runner enforces a cap it cannot widen. Longer than the 600s summon — a wake
+# is a work session, not a chat turn — and shorter than the 3600s build cap is
+# NOT required; tune from observed wakes.
+# session_cap_sec = 5400          # 90 min wall clock for the woken session
+# grace_sec = 600                 # harvest + post margin. A wake with a start
+#                                 # and no end in the seat's action log after
+#                                 # cap+grace is an incident.
+# The per-session ACTION cap is not here: a woken session runs on the same
+# /config/budget.json the summon seat does (harness/cc/config-template), which
+# is the spec's "same per-session action cap" and needs no second knob.
 
 [disjorn]
 # file-proposal posts to #custodian AS THE BROKER'S OWN bot identity — the
