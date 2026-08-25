@@ -132,6 +132,7 @@ slot.
 <!-- No Confirm record → no build. This is the gate. -->
 
 ## Status
-built@loop/2026-08-25-agentic-residents
+merged
+<!-- advanced from `built@loop/2026-08-25-agentic-residents` by `board --mark-merged` on 2026-08-25: build merged as 935215b. The word `built@loop/2026-08-25-agentic-residents` on a merged spec made it indistinguishable from a buildable one. -->
 <!-- set by the broker on 2026-08-25 18:44Z (start-build, 2026-08-25-agentic-residents): build published: disjorn.git 6cfb8da87293c55c3c9f815b8ced9f9e3b4304be — on the branch for review, nothing merged. `board --mark-merged` advances this to `merged` once the merge lands. -->
 <!-- set by the broker on 2026-08-25 17:59Z (start-build, 2026-08-25-agentic-residents): build running as disjorn-build-2026-08-25-agentic-residents.service -> loop/2026-08-25-agentic-residents, launched by gable (confirmed by plink, #custodian seq 1913). Not buildable again until this line moves. -->
