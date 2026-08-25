@@ -94,6 +94,32 @@ refusal plumbing, tests for guards 1–4 (incl. loop-cap refusal text,
 human-post unpark, midnight non-unpark, depth-1 non-retrigger). One build
 slot.
 
+## Activation conditions
+Merged OFF at f6bcf65 (review-seq 1851): "summon-hop" = false for both
+resident seats in harness/broker/verbs.toml, and the [summon_hops] bucket
+commented out in harness/broker/broker.toml — an absent bucket answers
+"no bucket", which is guard 1, so nothing bot-to-bot can fire. plink flips
+these ON only after BOTH conditions below are met (Claudette's review, seq
+1851):
+
+1. Broker-verified unpark. The broker itself verifies an unpark before
+   resetting a hop counter: read the message at the cited seq and require
+   author_type == user AND that it cites the work item — the same re-check
+   the confirm gate does so a bot cannot self-authorize. The adapter's word
+   is not sufficient: the adapter authenticates by SO_PEERCRED as the same
+   res-* uid the resident session uses, so any verb granted to the adapter
+   is granted to the bot it gates. Also set verb-level tool = false so
+   summon-hop never enters a bot seat's generated tool schema
+   (defense-in-depth; the broker-side check is the wall).
+
+2. Claudette-half spec. This spec's architecture note pointed her
+   surface at harness/residency/detector.py, which is Gable's summon
+   adapter end to end — her wake path lives in claudette.git and this
+   build did not touch it. Until a spec lands against her actual adapter
+   (fold into plink's 08-23 per-channel bot-mode backlog row, per her seq
+   1851 note): #custodian is NOT mention-only for her, and Gable-to-
+   Claudette summons are uncounted, so the hop wall is one-directional.
+
 ## Confirm record
 - **Confirmed by**: plink
 - **#custodian seq**: 1816
