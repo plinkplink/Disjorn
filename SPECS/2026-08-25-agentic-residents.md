@@ -132,4 +132,4 @@ slot.
 <!-- No Confirm record → no build. This is the gate. -->
 
 ## Status
-`confirm`
+`confirmed`
