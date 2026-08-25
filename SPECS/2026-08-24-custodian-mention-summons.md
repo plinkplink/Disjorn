@@ -126,6 +126,7 @@ these ON only after BOTH conditions below are met (Claudette's review, seq
 - **Confirmed at**: 8/24/2026
 
 ## Status
-built@loop/2026-08-24-custodian-mention-summons
+merged
+<!-- advanced from `built@loop/2026-08-24-custodian-mention-summons` by `board --mark-merged` on 2026-08-25: build merged as d3b1c06. The word `built@loop/2026-08-24-custodian-mention-summons` on a merged spec made it indistinguishable from a buildable one. -->
 <!-- set by the broker on 2026-08-24 22:49Z (start-build, 2026-08-24-custodian-mention-summons): build published: disjorn.git d3b1c066550939e4458f33096545719f74965eab — on the branch for review, nothing merged. `board --mark-merged` advances this to `merged` once the merge lands. -->
 <!-- set by the broker on 2026-08-24 22:25Z (start-build, 2026-08-24-custodian-mention-summons): build running as disjorn-build-2026-08-24-custodian-mention-summons.service -> loop/2026-08-24-custodian-mention-summons, launched by gable (confirmed by plink, #custodian seq 1816). Not buildable again until this line moves. -->
