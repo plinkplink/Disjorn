@@ -126,10 +126,10 @@ and crash each produce a failure post, `wip:` head detected). One build
 slot.
 
 ## Confirm record
-- **Confirmed by**:
-- **#custodian seq**:
-- **Confirmed at**:
+- **Confirmed by**: plink
+- **#custodian seq**: 1913
+- **Confirmed at**: 8/25/2026
 <!-- No Confirm record → no build. This is the gate. -->
 
 ## Status
-`draft`
+`confirm`
