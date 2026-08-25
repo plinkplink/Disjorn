@@ -4,6 +4,8 @@
 Drafted by Gable from #custodian convergence (seqs 1875 item 5, 1880, 1882,
 1883, 1889). Governing plan: BUILD-LOOP.md. Standing goal from the seq-876
 regroup: agentic residents are the main focus after the build lane.
+Rev 2: Claudette's review (seq 1902) — wake-origin mechanism made normative,
+failure modes added, verb inheritance and wake-logging folded in.
 -->
 
 ## Request
@@ -14,10 +16,12 @@ regroup: agentic residents are the main focus after the build lane.
   (plink's four answers) and seq 1889 ("Current walls are fine for v1").
 
 ## Agreed UX
-plink wakes a resident with an explicit request naming a task — the existing
-summon surface, or a keyboard wake command. The resident works the task in a
-headless session with a longer wall-clock cap than a summon, posts its result
-to #custodian, and exits. Nothing self-wakes.
+plink wakes a resident with an explicit request naming a task, via a keyboard
+wake command from his own uid — not the chat summon surface, because a chat
+mention's origin cannot be authenticated as human (bots mention too; see the
+wake-origin wall below). The resident works the task in a headless session
+with a longer wall-clock cap than a summon, posts its result to #custodian,
+and exits. Nothing self-wakes.
 
 Decisions of record, converged in #custodian:
 
@@ -48,14 +52,60 @@ Decisions of record, converged in #custodian:
   headless CC session with a longer wall-clock cap and the same per-session
   action cap, banner, transcript, and #custodian result post as a summon.
 - The seat's verb allowlist lives in `harness/broker/verbs.toml` as today;
-  the agentic seat gets no verb a summon seat lacks. The wake path itself is
-  invocable only from plink's side — chat remains data, never authorization.
+  the agentic seat gets no verb a summon seat lacks — which explicitly
+  includes `start-build`. That inheritance is safe only because the confirm
+  gate is upstream of every build: no confirm record in the spec file, no
+  build, woken or summoned. The no-self-review rule survives one level down:
+  a woken session may not start a build whose review owner is its own seat,
+  and — forward rule for when non-human wake ever lands — may not start a
+  build whose review owner is the seat that woke it.
+- **Wake origin is enforced, not inferred** (normative, seq 1902 review):
+  the wake is a broker verb, and the broker authenticates every caller by
+  SO_PEERCRED uid on its unix socket — kernel-asserted, never anything the
+  caller says (brokerd.py header contract; unknown uids are denied today).
+  This build adds plink's uid to the broker's identity map as a recognized
+  caller for exactly this one verb; the verb appears in no resident or
+  build-seat allowlist in `verbs.toml`. So a wake from any resident,
+  build, or adapter uid is refused-and-audit-logged, and origin arrives as
+  connection data, never as message content — no text in any channel can
+  constitute a wake. The wall is plink-owned config outside resident reach,
+  enforced by a broker that fails closed.
 - Session caps (wall-clock, actions) are config, not code, so widening comes
   by witnessed config change rather than rebuild.
+- **Wake accounting** (seq 1902 review, item 4): every wake writes start,
+  end, duration, and action count to the house action log, tagged with a
+  wake id. Not a per-seat meter — that stays a design requirement — but a
+  runaway becomes countable from the log instead of anecdotal. Free to
+  implement: the action log and broker audit already exist; this adds two
+  lines per wake.
 - Claudette's seat follows under this same framework via her own spec against
   her actual adapter in claudette.git (her lane); her bootstrap-exemption
   writeup folds in there. This build does not touch claudette.git.
 - No server or client changes in v1.
+
+## Failure modes (normative, seq 1902 review)
+Silence is the defect this section exists to kill: the lane's premise is "a
+human wakes it and waits," so every wake ends in a #custodian post, and the
+poster is the wrapper, not the session.
+
+- **The result post is harvested, not claimed.** The wrapper observes the
+  session's exit host-side and derives the post from what it observed —
+  exit status, wall-clock and actions consumed, branch head if any — never
+  from the session's own account of itself. Same rule that fixed the
+  build-done-banner defect: a banner is evidence only when the process that
+  posts it is not the process it describes.
+- **Cap-kill**: the wrapper posts a failure line naming the wake id, that
+  the wall-clock or action cap fired, time and actions consumed, and the
+  loop branch name + head sha if the session created one.
+- **Crash / abnormal exit**: same post shape, with the exit signal or code
+  in place of the cap line.
+- **Partial work says so in the branch**: sessions commit incrementally with
+  a `wip:` prefix and drop it only in a finishing commit, so a branch whose
+  head is `wip:` is partial by inspection — no memory or chat archaeology
+  required. The wrapper's failure post quotes the head subject line.
+- A wake with no result post within the wall-clock cap plus a grace margin
+  is itself an incident, checkable from the wake-accounting log entry that
+  has a start and no end.
 
 ## Lane → Review owner (DETERMINISTIC — filled from the lane, never preference)
 - **Lane**: gable — residency harness and broker config.
@@ -69,9 +119,11 @@ Decisions of record, converged in #custodian:
 Tier 2 — the residency adapter and broker are protected surfaces.
 
 ## Token estimate
-Medium: wake entry point, session-cap config, banner/transcript reuse, tests
-(wake refuses non-human origin, caps enforced, verb surface identical to
-summon). One build slot.
+Medium: wake entry point, session-cap config, banner/transcript reuse,
+wrapper harvest + failure posts, tests (wake refuses non-plink uid at the
+broker socket, caps enforced, verb surface identical to summon, cap-kill
+and crash each produce a failure post, `wip:` head detected). One build
+slot.
 
 ## Confirm record
 - **Confirmed by**:
