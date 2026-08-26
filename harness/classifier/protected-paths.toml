@@ -106,6 +106,47 @@ patterns = [
 # producing a diff for this classifier to see. Making that directory
 # read-only to the resident is the wall; it is plink's lever, not this
 # file's.
+#
+# THAT WALL NOW EXISTS, and the tier map below is how it decides. The verb is
+# `apply-posted-write` (2026-08-26); the directory going read-only to the
+# resident is still plink's lever, and the verb is what the resident writes
+# through once it has.
+
+# --- THE TIER MAP ----------------------------------------------------------
+# SPECS/2026-08-26-approval-object-and-resident-write-verbs.md (confirmed seq
+# 2022), building the tiers spec's architecture note: "tier assignments live
+# beside the surface map, not in code".
+#
+# WHO READS THIS. Only the broker's `apply-posted-write` verb — the fails-closed
+# Tier-1 wall. classify_diff.py does not read [tiers] and is unchanged by it.
+#
+# A DIFFERENT QUESTION FROM [protected] ABOVE, and the difference is the point.
+# [protected] tiers a DIFF at the merge gate: a spine edit arriving as a patch
+# is Tier 2 there and stays Tier 2 there. [tiers] tiers a SEAT WRITING ITS OWN
+# LIVE SURFACE, which the tiers spec puts at Tier 1 — "self-authored, witnessed
+# apply… an unposted write fails closed". Consulting [protected] on this path
+# would make the surface unreachable rather than safer, so the two lists are
+# deliberately kept apart and this paragraph is the record of that choice.
+#
+# HOW AN ENTRY IS MATCHED: exact repo-relative path, or a directory prefix
+# (`bots/fable/spine` covers everything under it, file creation included). The
+# LOWER tier wins a tie, so a broad entry never widens a narrow one. A path no
+# entry names has NO tier here and the write is refused — absence is a refusal,
+# not a default.
+#
+# BOTH SEATS SHIP EMPTY, which is this file's half of "the surface ships OFF".
+# Filling a row is a witnessed plink edit; so is flipping the verb on in
+# verbs.toml; so is adding that seat's [write_verbs.<seat>] section to
+# broker.toml. A row here whose path falls outside that section's repo_prefix
+# resolves to no host path at all, so no one of the three files can widen the
+# surface alone.
+[tiers.res-claudette]
+tier0 = []
+tier1 = []
+
+[tiers.res-gable]
+tier0 = []
+tier1 = []
 
 [inert]
 # Tier-0 allowlist: paths whose changes are inert (auto-apply when gates

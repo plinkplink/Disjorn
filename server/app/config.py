@@ -50,9 +50,28 @@ class Settings(BaseSettings):
     # answer — an absent index and an empty board must not read alike.
     PLANROOM_INDEX: str = ""
 
+    # Approval object (SPECS/2026-08-26-approval-object-and-resident-write-verbs.md,
+    # confirmed by plink, #custodian seq 2022). The whole surface — reads
+    # included — ships OFF and refuses with 503 until this is flipped. Arming it
+    # is a witnessed plink config change, not something a build or a migration
+    # does. A disarmed surface and an empty one must not read alike, so the
+    # refusal names this setting rather than answering with nothing.
+    APPROVAL_ENABLED: bool = False
+
+    # The principal set a NEW proposal gets state rows for, in this order.
+    # Changing it does not retroactively add rows to existing proposals: those
+    # were answered by the principals in place when they were filed, and
+    # back-filling a `pending` row into a closed record would rewrite what was
+    # asked. Extra principals found in the DB still render, after these.
+    APPROVAL_PRINCIPALS: str = "plink,res-claudette,res-gable"
+
     @property
     def db_path(self) -> Path:
         return Path(self.DB_PATH)
+
+    @property
+    def approval_principals(self) -> list[str]:
+        return [p.strip() for p in self.APPROVAL_PRINCIPALS.split(",") if p.strip()]
 
     @property
     def planroom_index(self) -> Path | None:

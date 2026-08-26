@@ -27,6 +27,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from . import db, ws
 from .config import get_settings
 from .routers import (
+    approval,
     auth,
     bots_admin,
     channels,
@@ -74,6 +75,7 @@ API_PREFIXES = frozenset(
         "ws",
         "bots",
         "planroom",
+        "approval",
     }
 )
 
@@ -354,6 +356,7 @@ def create_app() -> FastAPI:
     app.include_router(notifications.router)
     app.include_router(bots_admin.router)
     app.include_router(planroom.router)
+    app.include_router(approval.router)
     app.include_router(slash.router)
     app.include_router(stt.router)
     app.include_router(summarize.router)

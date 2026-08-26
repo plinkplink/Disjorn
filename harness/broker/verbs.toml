@@ -55,6 +55,10 @@
 "board-flag" = false
 "board-comment" = false
 "summon-hop" = false
+"approval-list" = false
+"approval-show" = false
+"approval-act" = false
+"apply-posted-write" = false
 
 # NOTE there is no `wake` line in either seat section, and adding one grants
 # nothing: the broker refuses `wake` to every resident identity in code, before
@@ -78,6 +82,16 @@
 "board-flag" = false
 "board-comment" = false
 "summon-hop" = false
+"approval-list" = false
+"approval-show" = false
+"approval-act" = false
+# THE FAILS-CLOSED TIER-1 WALL (SPECS/2026-08-26-approval-object-and-resident-
+# write-verbs.md). Flipping this true is only half of arming it: the seat also
+# needs a [write_verbs.<seat>] section in broker.toml and rows in the tier map
+# ([tiers.<seat>] in protected-paths.toml). Three plink-owned files, and the
+# capability appears only where all three agree — which is what makes arming a
+# witnessed change rather than one flipped bit.
+"apply-posted-write" = false
 
 # THE WAKE CALLER (SPECS/2026-08-25-agentic-residents.md). plink, at the
 # keyboard, from his own uid — the section name is the identity his uid maps to

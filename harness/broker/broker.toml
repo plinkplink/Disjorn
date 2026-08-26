@@ -453,6 +453,65 @@ daily_build_cap = 10
 # /config/budget.json the summon seat does (harness/cc/config-template), which
 # is the spec's "same per-session action cap" and needs no second knob.
 
+[write_verbs]
+# THE FAILS-CLOSED TIER-1 WALL (SPECS/2026-08-26-approval-object-and-resident-
+# write-verbs.md, confirmed seq 2022). A seat writes its OWN Tier-0/1 surface by
+# posting the exact content in #custodian and then naming that post's seq to
+# `apply-posted-write`. The verb's argument is the seq and nothing else: the
+# broker reads the post from the ledger, so a caller-supplied copy of the record
+# — or a token standing for one — is never in the path. Same shape as the
+# confirm gate, which reads SPECS/ rather than a resident's claim about it.
+#
+# COMMENTED OUT = no write surface. The verb exists and refuses every caller
+# (audited), the same fail-closed shape as an unflipped kill switch.
+#
+# WHAT THE WALL GUARANTEES, narrowly: nothing is written that was not SHOWN in
+# #custodian first. NOT that anyone said yes — no human sits in this path. A
+# seat authorizes its own Tier-0/1 write by having posted it; approval by
+# another principal is the approval object's job (`approval-act`).
+#
+# ARMING IT TAKES THREE PLINK-OWNED FILES AGREEING, on purpose:
+#   1. this section, per seat (below);
+#   2. rows in the tier map, [tiers.<seat>] in protected-paths.toml (ships
+#      empty for both seats);
+#   3. the kill switch, verbs.toml "apply-posted-write" (ships false).
+# A row in one that the others do not back grants nothing.
+#
+# freshness_sec — how long a posted record stays usable (check (c)). Default
+# 86400. A record older than this is refused and the caller posts a new one.
+# freshness_sec = 86400
+#
+# message_db — the ledger the broker reads the cited seq FROM. Unset here it
+# falls back to [gate].message_db and then to <[gate].deploy_tree>/server/data/
+# disjorn.db — the same resolution metrics.py does, so the two readers of this
+# ledger can never end up aimed at different files. With this section present
+# and no message store resolvable anywhere, the broker refuses to start: the
+# whole verb is "read the record from the ledger".
+# message_db = "/home/plink/Disjorn/Disjorn/server/data/disjorn.db"
+
+# [write_verbs.res-gable]
+# author — the seat's #custodian identity, as the messages table names it (a
+#   bots.name / users.username). Check (a) is a comparison against THIS. Absent
+#   = the broker refuses to start: a section with no author reads as a grant
+#   while refusing every call.
+# author = "Gable"
+# root — the host directory this seat's surface lives in. VERIFIED
+#   resident-UNWRITABLE at startup, exactly like start_build.specs_dir and the
+#   wake spool, and for the same reason: a seat that can already write the
+#   target does not need a record to write it, and the wall would be a promise
+#   again. Point it at the canonical copy plink owns (the tree
+#   [residents.res-gable].spine_dir reads from), never at the seat's own home.
+# root = "/home/plink/bots/fable"
+# repo_prefix — what that root is called in a diff, so the tier map, the
+#   classifier and the posted record all spell one path. A tier-map row outside
+#   this prefix resolves to no host path at all.
+# repo_prefix = "bots/fable"
+
+# [write_verbs.res-claudette]
+# author = "Claudette"
+# root = "/home/plink/bots/claudette"
+# repo_prefix = "bots/claudette"
+
 [disjorn]
 # file-proposal posts to #custodian AS THE BROKER'S OWN bot identity — the
 # proposal text is data; the authority to post is the broker's. Create a
