@@ -14,6 +14,7 @@ overridable, so a scratch/test deployment never touches prod.
 from __future__ import annotations
 
 import logging
+import os
 import tomllib
 from dataclasses import dataclass, field
 from typing import Optional
@@ -159,6 +160,19 @@ class CursorConfig:
     state_path: str = "/home/resident/.summon-cursor.json"
 
 
+def _default_served_path() -> str:
+    """`~/.wake-served.json` for the uid the wake runner runs as.
+
+    The seat's home, NOT the seat's home VOLUME (`~/resident-home`, which
+    run-resident.sh mounts into the container as /home/resident). The two are
+    one path segment apart and the difference is the whole guarantee: a woken
+    session that can write this file can tell the runner it was already served,
+    or that it never was. wake.assert_state_path_outside_volume refuses to start
+    on a configured path inside the volume; this default is outside it.
+    """
+    return os.path.join(os.path.expanduser("~"), ".wake-served.json")
+
+
 @dataclass
 class WakeConfig:
     """How this seat's wake runner finds its work (2026-08-25 agentic
@@ -173,8 +187,9 @@ class WakeConfig:
     spool_dir: Optional[str] = None
     # Wake ids this runner has already served, so a restart does not re-run a
     # wake whose record is still inside its window. Same discipline as the
-    # summon cursor: state on disk, not in memory.
-    state_path: str = "/home/resident/.wake-served.json"
+    # summon cursor: state on disk, not in memory — and unlike the summon
+    # cursor, OFF the volume the container mounts (see _default_served_path).
+    state_path: str = field(default_factory=_default_served_path)
     poll_interval_sec: float = 5.0
     # The bare gatehouse repos (RESIDENT_GATEHOUSE, run-resident.sh) — the only
     # writable path out of the container. The runner reads loop/* heads here
@@ -384,7 +399,7 @@ class AdapterConfig:
             ),
             wake=WakeConfig(
                 spool_dir=wk.get("spool_dir"),
-                state_path=str(wk.get("state_path", WakeConfig.state_path)),
+                state_path=str(wk.get("state_path") or _default_served_path()),
                 poll_interval_sec=float(
                     wk.get("poll_interval_sec", WakeConfig.poll_interval_sec)
                 ),

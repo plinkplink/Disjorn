@@ -237,17 +237,19 @@ def format_wake_failed(
 
 def format_wake_missed(*, wake_id: str, resident: str, woken_by: str,
                        requested_at: str) -> str:
-    """A wake this runner found only after its whole window had passed — the
-    daemon was down when it was asked for.
+    """A wake this runner found only after its whole window had passed.
 
     It is posted late rather than dropped, and the session is NOT run: a wake is
     a human waiting, and starting one hours after the ask is worse than saying
-    plainly that nobody was home."""
+    plainly that nobody was home.
+
+    WHY the wording names no cause: this runner cannot tell "I was down" from "I
+    was busy with the session before this one" — both look like a record whose
+    window closed unserved. It reports what it knows."""
     return (
         f"WAKE MISSED | {wake_id} | {resident} woken by {woken_by} at "
-        f"{requested_at} | the wake runner was not running inside this wake's "
-        f"window, so no session ever started | nothing ran — wake again if it "
-        f"still matters"
+        f"{requested_at} | this wake's window expired before serving, so no "
+        f"session ever started | nothing ran — wake again if it still matters"
     )
 
 

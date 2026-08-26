@@ -116,10 +116,22 @@ resident can perform or reach:
 2. **Create the spool**: `/var/lib/disjorn-broker/wake-spool`, plink-owned,
    0755 (the broker writes it; res-gable must be able to READ it and must not
    be able to write it). Records land 0644.
+
+   **PRE-ARM CHECK (2026-08-25 wake-pre-arm-riders, items 1 and 2), both
+   verified before `[wake]` is uncommented**: the day's wake cap is in force
+   (`[wake].daily_wake_cap` — omitting it accepts the default of 3, it does not
+   remove the cap), and `[wake].state_path` in this seat's `summon.toml` is
+   OUTSIDE the home volume the container mounts (`~/resident-home` on the host,
+   `/home/resident` inside). Both are startup refusals — the broker will not
+   come up on a resident-writable spool, the wake runner will not come up on a
+   state_path in the volume — so the check here is that neither refusal is what
+   tells you on the day you arm it.
 3. **verbs.toml**: `[plink] "wake" = true`. It ships `false`.
 4. **This seat's config** (`summon.toml`): the `[wake]` block — `spool_dir`
-   pointing at the same directory, `state_path` on the res-gable-writable
-   volume, `gatehouse_dir` (the bare repos the seat pushes loop branches into),
+   pointing at the same directory, `state_path` in res-gable's home but NOT in
+   `resident-home/` (e.g. `/home/res-gable/.wake-served.json`; a path inside the
+   volume refuses to start), `gatehouse_dir` (the bare repos the seat pushes
+   loop branches into),
    and `action_log` (the HOST path of this seat's `~/.action-log`, i.e.
    `/home/res-gable/resident-home/.action-log`).
 5. **Install `gable-wake.service`** under res-gable's user manager, sibling to

@@ -5,8 +5,8 @@ the stub script — no podman, no prod."""
 import asyncio
 import json
 
-from launcher import ContainerLauncher, parse_output
-from residency_testlib import make_config
+from launcher import ContainerLauncher, parse_output, parse_session_id
+from residency_testlib import make_config, make_stream_events
 
 
 def test_build_argv_is_config_only(tmp_path):
@@ -66,6 +66,41 @@ def test_extra_env_reaches_subprocess(tmp_path, monkeypatch):
     result = asyncio.run(ContainerLauncher(cfg.container).run("x"))
     assert result.reply == "envd"
     assert result.action_count == 1
+
+
+# The session id is what lets a caller pick this session's lines out of the
+# shared action log (2026-08-25 wake-pre-arm-riders item 3), so it has to
+# survive both output shapes and a session that died mid-stream.
+
+
+def test_the_session_id_rides_off_the_stream(tmp_path):
+    events = make_stream_events(init_model="claude-opus-4-8")
+    cfg = make_config(tmp_path, container={
+        "env": {"RESIDENCY_STUB_STREAM": json.dumps(events)},
+        "model": "claude-opus-4-8",
+    })
+    result = asyncio.run(ContainerLauncher(cfg.container).run("x"))
+    assert result.session_id == events[0]["session_id"]
+
+
+def test_a_session_killed_mid_stream_still_reports_its_id(tmp_path):
+    """Only the init event is emitted, then a non-zero exit: the id is already
+    known, and it is what names the actions the session took before it died."""
+    events = make_stream_events(init_model="claude-opus-4-8")[:1]
+    cfg = make_config(tmp_path, container={
+        "env": {"RESIDENCY_STUB_STREAM": json.dumps(events),
+                "RESIDENCY_STUB_EXIT": "9"},
+    })
+    result = asyncio.run(ContainerLauncher(cfg.container).run("x"))
+    assert result.ok is False
+    assert result.session_id == events[0]["session_id"]
+
+
+def test_the_legacy_envelope_names_its_session_too():
+    assert parse_session_id('{"result": "hi", "session_id": "abc-123"}') == "abc-123"
+    assert parse_session_id('{"result": "hi"}') is None
+    assert parse_session_id("plain text") is None
+    assert parse_session_id("") is None
 
 
 def test_parse_output_variants():

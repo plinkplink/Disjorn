@@ -105,24 +105,33 @@ broker `wake` verb ──▶ spool record ──▶ WakeSpool.poll ──▶ Wak
                                           action log: wake-end   │
 ```
 
-Four things about it that are not obvious from the code:
+Five things about it that are not obvious from the code:
 
-- **The post is harvested, not claimed.** Exit status, wall clock, the
-  action-log delta and the gatehouse refs before/after are all measured by the
-  runner from outside the session. A finished session's closing words ride
-  along labelled as its own account; a failed one's do not ride at all. Same
-  rule that fixed the build-done banner: a banner is evidence only when the
-  process that posts it is not the process it describes.
+- **The post is harvested, not claimed.** Exit status, wall clock, the action
+  count and the gatehouse refs before/after are all measured by the runner from
+  outside the session. The count is of action-log lines carrying THIS session's
+  id, not of lines that arrived while it ran: the log is shared with the summon
+  lane, so a delta over it would count a concurrent summon's tool calls too. A
+  finished session's closing words ride along labelled as its own account; a
+  failed one's do not ride at all. Same rule that fixed the build-done banner: a
+  banner is evidence only when the process that posts it is not the process it
+  describes.
 - **Every ending is a post** — done, cap-kill, crash, model-gate refusal, and
-  a wake that arrived while this daemon was down (posted late as MISSED, and
-  NOT run: a wake is a human waiting).
+  a wake whose window expired unserved (posted late as MISSED, and NOT run: a
+  wake is a human waiting).
 - **A `wip:` head means partial**, by inspection. The wake prompt asks the
   session to prefix incremental commits; the failure post quotes the branch's
   head subject, so nobody reads chat to find out how far it got.
 - **The caps are not this package's.** The wall clock rides on each wake
-  record, from `[wake].session_cap_sec` in broker.toml. The per-session action
-  cap is the container's `/config/budget.json` — the same one a summon runs
-  under, unchanged.
+  record, from `[wake].session_cap_sec` in broker.toml; the wakes-per-day cap is
+  `[wake].daily_wake_cap` there and this daemon never sees a wake refused by it.
+  The per-session action cap is the container's `/config/budget.json` — the same
+  one a summon runs under, unchanged.
+- **`[wake].state_path` lives outside the container's home volume**, and the
+  runner refuses to start on a path inside it. That file says whether a wake has
+  already been served; a woken session able to write it could re-run its own
+  wake or bury one. The check is on the path, not on the mode — permissions
+  drift, a wrong path does not.
 
 The seat gets no verb a summon seat lacks, `start-build` included. The one
 thing waking adds is a refusal: while a wake is in flight, that seat cannot

@@ -522,6 +522,15 @@ call.** Both halves are enforced in `dispatch()` before `verbs.toml` is read:
 - The audit line carries `"wake_id"` as a FACT field, like `start-build`'s
   `build_started`. That id is the join key between this line, the seat's
   action-log start/end pair, and the #custodian post.
+- **Budget**: a per-seat per-UTC-day wake cap (`[wake].daily_wake_cap`, default
+  **3**; CAPPED by default, like the build cap and unlike the action budget).
+  At/over the cap the call is denied `over-budget`, no record is written and
+  nothing is queued for later. The refusal names the day's wall clock beside the
+  count — "3/3 wakes, 4h10m of session time today" — because the minutes are the
+  cost and the count is the speed bump. That clock is a CEILING: the broker sees
+  when each wake started and what cap it granted, never when the session
+  actually stopped. The count is read from the spool under the same lock that
+  writes the new record, so concurrent presses cannot both pass a cap of N.
 
 The broker **launches nothing**. It writes one 0644 JSON record into
 `[wake].spool_dir` — plink-owned and verified resident-*unwritable* at startup,

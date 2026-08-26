@@ -73,6 +73,9 @@ __all__ = [
     "WakeAccounting",
     "WakeRunner",
     "SPOOL_SUFFIX",
+    "assert_state_path_outside_volume",
+    "resident_writable_roots",
+    "seat_name",
 ]
 
 SPOOL_SUFFIX = ".wake.json"
@@ -88,6 +91,84 @@ WAKE_CONTAINER_SUFFIX = "wake"
 # Loop branches are the writable surface a wake may reach (through the
 # gatehouse). Anything else in those repos is not this lane's business to watch.
 LOOP_PREFIX = "refs/heads/loop/"
+# What run-resident.sh mounts and where: $HOME/resident-home (or an explicit
+# RESIDENT_HOME_VOL) appears inside the container as /home/resident, rw. Both
+# spellings name the same bytes and both are writable by the woken session.
+CONTAINER_HOME = "/home/resident"
+HOME_VOLUME_NAME = "resident-home"
+HOME_VOL_ENV = "RESIDENT_HOME_VOL"
+
+
+def seat_name(resident: str) -> str:
+    """`gable` -> `res-gable`; an already-prefixed name is returned unchanged.
+    `[container].resident` is the SHORT name the launch wrapper takes, and the
+    uid identity is the long one."""
+    return resident if resident.startswith("res-") else f"res-{resident}"
+
+
+def _is_within(path: str, root: str) -> bool:
+    root = root.rstrip("/")
+    return bool(root) and (path == root or path.startswith(root + "/"))
+
+
+def resident_writable_roots(container) -> dict[str, str]:
+    """{realpath: what it is} — every root the woken session itself can write.
+
+    One directory under four names, because which name a config file uses
+    depends on where its author was standing: the container's mount point, the
+    volume named in the launcher's environment, the volume under the running
+    daemon's home, and the volume under the configured seat's home. A check that
+    knew only one of them would pass a config that names another.
+    """
+    roots: dict[str, str] = {
+        os.path.realpath(CONTAINER_HOME):
+            f"the container's view of the seat's home volume ({CONTAINER_HOME})",
+    }
+    declared = (getattr(container, "env", None) or {}).get(HOME_VOL_ENV)
+    if declared:
+        roots[os.path.realpath(declared)] = (
+            f"the home volume this seat launches with ({HOME_VOL_ENV}="
+            f"{declared})")
+    own = os.path.join(os.path.expanduser("~"), HOME_VOLUME_NAME)
+    roots.setdefault(os.path.realpath(own),
+                     f"this daemon's own home volume ({own})")
+    seat = seat_name(getattr(container, "resident", "") or "")
+    if seat != "res-":
+        host = os.path.join("/home", seat, HOME_VOLUME_NAME)
+        roots.setdefault(os.path.realpath(host),
+                         f"the seat's home volume on the host ({host})")
+    return roots
+
+
+def assert_state_path_outside_volume(state_path: str, container) -> str:
+    """Prove the served-id file lies outside the seat's home volume, or raise
+    ValueError naming the root it landed in. Returns realpath(state_path).
+
+    THE CHECK IS ON THE PATH, never on whether the file happens to be writable
+    right now. Permissions drift — a mode fixed by hand at the keyboard is one
+    `podman unshare` or one restore-from-backup away from being wrong again —
+    but a path inside the volume is wrong on every day of its life.
+
+    What rests on it: this file is the answer to "has this wake already run?".
+    A woken session that can rewrite it can re-run its own wake by deleting an
+    id, or bury a wake it was asked to do by adding one. The spool being
+    resident-unwritable (the broker refuses to start otherwise) stops a seat
+    writing itself a wake; this stops it rewriting the record of one.
+    """
+    if not state_path:
+        raise ValueError(
+            "[wake].state_path is empty; this runner has nowhere to record "
+            "which wakes it has served")
+    real = os.path.realpath(state_path)
+    for root, what in sorted(resident_writable_roots(container).items()):
+        if _is_within(real, root):
+            raise ValueError(
+                f"[wake].state_path is inside the woken session's own writable "
+                f"volume: {state_path!r} resolves to {real!r}, which is inside "
+                f"{what}. Put it in the seat's home OUTSIDE that volume (e.g. "
+                f"~/.wake-served.json, the default) — a session that can write "
+                f"this file governs whether its own wake counts as served.")
+    return real
 
 
 @dataclass
@@ -334,8 +415,12 @@ class WakeAccounting:
 
     The same file the container's PostToolUse counter appends to, so the wake
     lines sit in order among the tool calls they bracket, and so the action
-    count in the result post is a DELTA THIS PROCESS MEASURED rather than a
-    number the session reported about itself.
+    count in the result post is something THIS PROCESS MEASURED rather than a
+    number the session reported about itself. Measured means filtered: the log
+    is shared with every summon this seat serves, so the count is of lines
+    carrying the woken session's own id, not of lines that arrived while it ran.
+    The wake-start/wake-end lines carry no session id, so they cannot count
+    themselves.
 
     Sharing that file has one honest cost, stated here so nobody rediscovers it
     from a chart: everything counting lines in the action log — the container's
@@ -365,13 +450,45 @@ class WakeAccounting:
                          exc_info=True)
 
     def line_count(self) -> Optional[int]:
-        """Lines in the action log right now, for the before/after delta.
-        None when there is no log to count — reported as such, never as 0."""
+        """Lines in the action log right now — the mark a session's own actions
+        are counted from. None when there is no log to count."""
         if not self.path:
             return None
         try:
             with open(self.path, "r", encoding="utf-8") as fh:
                 return sum(1 for _ in fh)
+        except OSError:
+            return None
+
+    def count_session(self, since_line: Optional[int],
+                      session_id: Optional[str]) -> Optional[int]:
+        """Tool calls THIS session logged: lines after `since_line` whose
+        `session_id` is the woken session's.
+
+        The mark alone is not enough. The action log is shared — every summon
+        this seat serves appends to the same file — so a plain line delta counts
+        a concurrent summon's tool calls as the wake's, which makes the number
+        in the result post an upper bound wearing a measurement's clothes. The
+        hook stamps a session id on every line; this filters on it.
+
+        None when either half is unknown (no log, no mark, or output that never
+        named a session): an unknown count is reported as unknown, never as 0
+        and never as the delta it would have been."""
+        if not self.path or since_line is None or not session_id:
+            return None
+        try:
+            n = 0
+            with open(self.path, "r", encoding="utf-8") as fh:
+                for i, raw in enumerate(fh):
+                    if i < since_line or not raw.strip():
+                        continue
+                    try:
+                        rec = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(rec, dict) and rec.get("session_id") == session_id:
+                        n += 1
+            return n
         except OSError:
             return None
 
@@ -429,12 +546,18 @@ class WakeRunner:
         self.client = client
         self.config = config
         wake = config.wake
+        # Both unsafe-config refusals happen here, before anything is polled: a
+        # runner that comes up on a bad path is a runner that looks armed. No
+        # lane at all is the more fundamental complaint, so it goes first; the
+        # state-path check then runs even when a caller injected a spool.
+        if spool is None and not wake.spool_dir:
+            raise ValueError(
+                "[wake].spool_dir is not configured; this seat has no wake "
+                "lane (see summon.toml.template)")
+        state_path = assert_state_path_outside_volume(
+            wake.state_path, config.container)
         if spool is None:
-            if not wake.spool_dir:
-                raise ValueError(
-                    "[wake].spool_dir is not configured; this seat has no wake "
-                    "lane (see summon.toml.template)")
-            spool = WakeSpool(wake.spool_dir, wake.state_path)
+            spool = WakeSpool(wake.spool_dir, state_path)
         self.spool = spool
         self.watch = watch or GatehouseWatch(wake.gatehouse_dir)
         self.accounting = accounting or WakeAccounting(wake.action_log)
@@ -466,8 +589,7 @@ class WakeRunner:
         is the SHORT name the launch wrapper takes ("gable"); a wake record
         names the uid identity ("res-gable"). One config value, two spellings,
         converted in exactly one place."""
-        name = self.config.container.resident
-        return name if name.startswith("res-") else f"res-{name}"
+        return seat_name(self.config.container.resident)
 
     async def poll_once(self, *, now: Optional[float] = None) -> list[WakeOutcome]:
         """Serve every wake due for this seat, and report every missed one."""
@@ -484,7 +606,10 @@ class WakeRunner:
 
     async def report_missed(self, record: WakeRecord) -> WakeOutcome:
         self.spool.mark_served(record.wake_id)
-        logger.error("wake %s missed: window passed before the runner saw it",
+        # "before serving", not "before the runner saw it": from here the two
+        # are indistinguishable. The runner may have been down, or it may have
+        # been holding a session while this wake's window ran out behind it.
+        logger.error("wake %s missed: window expired before serving",
                      record.wake_id)
         post = format_wake_missed(
             wake_id=record.wake_id, resident=record.resident,
@@ -501,7 +626,7 @@ class WakeRunner:
         with no end for a human to find."""
         self.spool.mark_served(record.wake_id)
         self.accounting.start(record)
-        before_actions = await asyncio.to_thread(self.accounting.line_count)
+        action_mark = await asyncio.to_thread(self.accounting.line_count)
         before_refs = await asyncio.to_thread(self.watch.snapshot)
         logger.info("wake %s: serving %s for %s (cap %ss)", record.wake_id,
                     record.resident, record.woken_by, record.session_cap_sec)
@@ -518,11 +643,11 @@ class WakeRunner:
             return await self._finish(
                 record, outcome="crash",
                 reason=f"the launcher raised {type(exc).__name__}: {exc}",
-                duration_sec=0.0, before_actions=before_actions,
-                before_refs=before_refs)
+                duration_sec=0.0, before_refs=before_refs)
 
-        after_actions = await asyncio.to_thread(self.accounting.line_count)
-        actions = self._actions(before_actions, after_actions)
+        actions = await asyncio.to_thread(
+            self.accounting.count_session, action_mark,
+            getattr(result, "session_id", None))
         model, verified, drift = self._model(result)
         if drift:
             # Fail loud, never fail over — the same treatment a summon's drift
@@ -542,8 +667,8 @@ class WakeRunner:
                 record, outcome="model-gate",
                 reason="the pre-act model gate refused this session; nothing "
                        "it produced was used",
-                duration_sec=result.duration_sec, before_actions=before_actions,
-                before_refs=before_refs, actions=actions, model=model,
+                duration_sec=result.duration_sec, before_refs=before_refs,
+                actions=actions, model=model,
                 model_verified=verified, extra_posts=[extra])
 
         if getattr(result, "timed_out", False):
@@ -551,23 +676,22 @@ class WakeRunner:
                 record, outcome="cap-kill",
                 reason=f"the wall-clock cap fired at {record.session_cap_sec}s "
                        "— the session was killed, finished or not",
-                duration_sec=result.duration_sec, before_actions=before_actions,
-                before_refs=before_refs, actions=actions, model=model,
+                duration_sec=result.duration_sec, before_refs=before_refs,
+                actions=actions, model=model,
                 model_verified=verified)
 
         if not result.ok:
             return await self._finish(
                 record, outcome="crash",
                 reason=self._crash_reason(result),
-                duration_sec=result.duration_sec, before_actions=before_actions,
-                before_refs=before_refs, actions=actions, model=model,
+                duration_sec=result.duration_sec, before_refs=before_refs,
+                actions=actions, model=model,
                 model_verified=verified)
 
         return await self._finish(
             record, outcome="done", reason="", duration_sec=result.duration_sec,
-            before_actions=before_actions, before_refs=before_refs,
-            actions=actions, model=model, model_verified=verified,
-            account=self._account(result))
+            before_refs=before_refs, actions=actions, model=model,
+            model_verified=verified, account=self._account(result))
 
     # ---------------------------------------------------------------- helpers
 
@@ -608,21 +732,8 @@ class WakeRunner:
             return ""
         return reply[:cap] + ("…" if len(reply) > cap else "")
 
-    @staticmethod
-    def _actions(before: Optional[int], after: Optional[int]) -> Optional[int]:
-        """Tool calls the container logged while the session ran.
-
-        None if either count is missing: an unknown number is reported as
-        unknown, never as zero — "0 actions" is a claim about a session that
-        did nothing, and this would be a claim about a file we could not read.
-        The wake-start line is written before `before` is taken, so it is not
-        counted as an action."""
-        if before is None or after is None:
-            return None
-        return max(0, after - before)
-
     async def _finish(self, record: WakeRecord, *, outcome: str, reason: str,
-                      duration_sec: float, before_actions: Optional[int],
+                      duration_sec: float,
                       before_refs: Optional[dict],
                       actions: Optional[int] = None,
                       model: Optional[str] = None,
@@ -630,9 +741,6 @@ class WakeRunner:
                       account: str = "",
                       extra_posts: Optional[list] = None) -> WakeOutcome:
         model = model if model is not None else self.config.container.model
-        if actions is None:
-            actions = self._actions(
-                before_actions, await asyncio.to_thread(self.accounting.line_count))
         after_refs = await asyncio.to_thread(self.watch.snapshot)
         branches = self.watch.changed(before_refs, after_refs)
 
