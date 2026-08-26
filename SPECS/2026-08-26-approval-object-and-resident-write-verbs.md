@@ -116,4 +116,5 @@ Medium per slice; two build slots total.
 <!-- No Confirm record → no build. This is the gate. -->
 
 ## Status
-`confirmed`
+building
+<!-- set by the broker on 2026-08-26 17:23Z (start-build, 2026-08-26-approval-object-and-resident-write-verbs): build running as disjorn-build-2026-08-26-approval-object-and-resident-write-verbs.service -> loop/2026-08-26-approval-object-and-resident-write-verbs, launched by gable (confirmed by plink, #custodian seq 2022). Not buildable again until this line moves. -->
