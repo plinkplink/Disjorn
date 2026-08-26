@@ -83,11 +83,11 @@ and the write path. Governing plan: BUILD-LOOP.md.
   in that resident's queue.
 
 ## Builder (USER PREFERENCE)
-- **Builder**: Gable's lane (proposed; plink's call at confirm).
+- **Builder**: Gable's lane — plink, seq 2023.
 
 ## Cross-lane split
 - **Applies**: yes — surfaces as in Lane above.
-- **Split agreed in #custodian**: fill at confirm.
+- **Split agreed in #custodian**: slice A = server+broker, slice B = client (seq 2023).
 
 ## Expected diff tier
 Tier 2 — broker allowlist and an approval surface fail the tiers spec's own
