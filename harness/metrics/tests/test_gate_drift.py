@@ -182,6 +182,23 @@ class Lane:
              ts=f"{DATE}T09:30:00Z") -> str:
         return f"PUSH {ts} {old}..{new} {trailer} {outcome}"
 
+    # -- the local coverage log ---------------------------------------------
+
+    @property
+    def local_log_path(self) -> Path:
+        return self.canonical / "hooks" / "disjorn-local-log"
+
+    def write_local(self, *lines: str) -> None:
+        self.local_log_path.write_text("".join(ln + "\n" for ln in lines),
+                                       encoding="utf-8")
+
+    def local(self, sha: str, outcome="local-stamp",
+              ts=f"{DATE}T09:15:00Z") -> str:
+        """One record, in the grammar harness/broker/brokerd.py writes. The
+        broker suite asserts the same shape against this module's parser, so
+        the two halves cannot drift apart silently."""
+        return f"LOCAL {ts} {sha} {outcome}"
+
     # -- prod ---------------------------------------------------------------
 
     def deploy(self, ref: str = "main") -> None:
@@ -585,15 +602,16 @@ def test_a_deleted_message_does_not_resolve(lane):
 # --------------------------------------------------------------------------
 
 def test_a_commit_with_no_covering_log_line_is_uncovered(lane):
-    """It entered main while the hook was absent or disarmed."""
+    """`uncovered` is unchanged by the coverage classes: it is still the raw
+    fact — above the floor, inside no logged push range. What changed is what
+    the block SAYS about it, which is now its class and nothing more."""
     floor = lane.head()
     sha = lane.commit("harness/x.py", "x = 1\n", "harness: snuck in")
     lane.write_log(lane.genesis("seeded", floor))  # no push line at all
     d = lane.drift()
     assert d["uncovered"] == [sha]
-    block = lane.block()
-    assert f"UNCOVERED: {sha[:8]}" in block
-    assert "absent or disarmed" in block
+    assert d["coverage"][M.UNEXPLAINED] == [sha]
+    assert f"UNEXPLAINED: {sha[:8]}" in lane.block()
 
 
 def test_below_a_seeded_floor_is_out_of_scope(lane):
@@ -605,7 +623,9 @@ def test_below_a_seeded_floor_is_out_of_scope(lane):
     d = lane.drift()
     assert d["uncovered"] == []
     assert d["unverifiable"] == 0
-    assert "uncovered commits above the floor: 0" in lane.block()
+    assert (f"coverage above floor: {d['above_floor']} commits — covered "
+            f"{d['above_floor']}, local-stamp 0, local-keyboard 0, "
+            f"unexplained 0") in lane.block()
 
 
 def test_below_a_lazy_floor_is_unverifiable_not_clean(lane):
@@ -637,8 +657,9 @@ def test_a_refused_push_is_not_permanent_mirror_drift_noise(lane):
 
 def test_commits_on_main_whose_only_log_line_is_a_refusal_are_uncovered(lane):
     """A refused line attests a refusal, not a landing. If the range's commits
-    are on `main` anyway, they arrived by a path the hook never passed — the
-    absent-or-disarmed case — and reading the refusal as coverage would
+    are on `main` anyway, they arrived by a path this hook never passed, and
+    which path that was is not for this line to guess. Reading the refusal
+    as coverage would
     render exactly that arrival as clean, forever, once it ages out of the
     digest window. (Before the review fix this asserted the opposite:
     refused ranges counted as covered.)"""
@@ -647,6 +668,243 @@ def test_commits_on_main_whose_only_log_line_is_a_refusal_are_uncovered(lane):
     lane.write_log(lane.genesis("seeded", floor),
                    lane.push(floor, sha, "NONE", "refused"))
     assert lane.drift()["uncovered"] == [sha]
+
+
+# --------------------------------------------------------------------------
+# COVERAGE CLASSES above the floor (spec 2026-08-27, seq 2067).
+#
+# A commit with no covering push-log line never met the hook. That is the whole
+# of what the log knows, and the block used to say more: it printed a flat "the
+# hook was absent" for every one of them, two lines under its own hook MATCH,
+# and the count grew by a row per build and per keyboard session forever. The
+# fix is a class per commit and one finding word.
+# --------------------------------------------------------------------------
+
+LOCAL_KEYBOARD_CFG = ["keyboard@example.invalid"]
+
+
+def test_a_stamp_with_a_coverage_record_is_local_stamp_not_a_finding(lane):
+    """The positive record, from the actor, at the moment it committed. No
+    inference is involved and none is needed."""
+    floor = lane.head()
+    sha = lane.commit("SPECS/x.md", "Status: building\n",
+                      "x: Status -> building", who="disjorn-broker")
+    lane.write_log(lane.genesis("seeded", floor))
+    lane.write_local(lane.local(sha))
+    d = lane.drift()
+    assert d["coverage"][M.LOCAL_STAMP] == [sha]
+    assert d["coverage"][M.UNEXPLAINED] == []
+    assert "local-stamp 1" in lane.block()
+
+
+def test_the_record_outranks_the_committer_rule(lane):
+    """Order matters: a sha the broker NAMED is local-stamp on that record's
+    authority, never on a guess about who its committer was. Here the
+    committer would ALSO match the local list, and the class is still the one
+    the record earned — otherwise the strong evidence would be invisible."""
+    floor = lane.head()
+    sha = lane.commit("SPECS/x.md", "s\n", "x: Status -> building")
+    lane.write_log(lane.genesis("seeded", floor))
+    lane.write_local(lane.local(sha))
+    d = lane.drift(local_committers=LOCAL_KEYBOARD_CFG)
+    assert d["coverage"][M.LOCAL_STAMP] == [sha]
+    assert d["coverage"][M.LOCAL_KEYBOARD] == []
+
+
+def test_a_declared_local_committer_with_no_record_is_local_keyboard(lane):
+    """Acceptance 5: no backfill. The commits already on main when this landed
+    have no record and must not become a permanent alarm."""
+    floor = lane.head()
+    sha = lane.commit("harness/x.py", "x = 1\n", "harness: keyboard commit")
+    lane.write_log(lane.genesis("seeded", floor))
+    d = lane.drift(local_committers=LOCAL_KEYBOARD_CFG)
+    assert d["coverage"][M.LOCAL_KEYBOARD] == [sha]
+    assert d["coverage"][M.UNEXPLAINED] == []
+    assert "local-keyboard 1" in M.compose_drift_block(d)
+
+
+def test_an_unrecorded_undeclared_committer_is_unexplained_and_alarms(lane):
+    """Acceptance 3. This is the case the detector exists for, and the only
+    one the section raises its voice about."""
+    floor = lane.head()
+    sha = lane.commit("harness/x.py", "x = 1\n", "harness: snuck in",
+                      who="stranger")
+    lane.write_log(lane.genesis("seeded", floor))
+    d = lane.drift(local_committers=LOCAL_KEYBOARD_CFG)
+    assert d["coverage"][M.UNEXPLAINED] == [sha]
+    block = M.compose_drift_block(d)
+    assert f"UNEXPLAINED: {sha[:8]}" in block
+    assert "unexplained 1" in block
+
+
+def test_a_covered_commit_is_covered_whoever_committed_it(lane):
+    """Push truth first. A commit inside a logged range is covered even when
+    its committer is on the local list — the classes never reach past a
+    measurement to an explanation."""
+    floor = lane.head()
+    sha = lane.commit("harness/x.py", "x = 1\n", "harness: pushed")
+    lane.write_log(lane.genesis("seeded", floor), lane.push(floor, sha))
+    d = lane.drift(local_committers=LOCAL_KEYBOARD_CFG)
+    assert d["coverage"]["covered"] == [sha]
+    assert d["coverage"][M.LOCAL_KEYBOARD] == []
+
+
+def test_a_clean_day_is_one_coverage_line_and_no_commit_rows(lane):
+    """ACCEPTANCE 1, the whole point. A normal day — a broker stamp, keyboard
+    commits, a real push — reads as one line. Twelve known-benign rows every
+    morning is how the row that matters stops being read."""
+    floor = lane.head()
+    pushed = lane.commit("harness/a.py", "a\n", "harness: a")
+    stamp = lane.commit("SPECS/x.md", "s\n", "x: Status -> building")
+    kbd = lane.commit("SPECS/x.md", "s2\n", "x: typo")
+    lane.write_log(lane.genesis("seeded", floor),
+                   lane.push(floor, pushed, "review-seq:1428"))
+    lane.write_local(lane.local(stamp))
+    block = lane.block(local_committers=LOCAL_KEYBOARD_CFG)
+    assert ("coverage above floor: 3 commits — covered 1, local-stamp 1, "
+            "local-keyboard 1, unexplained 0") in block
+    assert "UNEXPLAINED" not in block
+    # Not one per-commit row of any class. (`kbd` still appears once, as the
+    # mirror head — that line is load-bearing, the next digest parses its own
+    # window start back out of it — so the check is on the ROWS, not the text.)
+    assert stamp[:8] not in block
+    assert [ln for ln in block.splitlines()
+            if ln.startswith(("  local-", "  UNEXPLAINED"))] == []
+    assert kbd == lane.head()
+
+
+def test_no_line_contradicts_the_hook_state_measured_above_it(lane):
+    """ACCEPTANCE 2, as a property of the composed block rather than a grep:
+    on a day the hook demonstrably MATCHES, nothing below says otherwise."""
+    floor = lane.head()
+    lane.commit("SPECS/x.md", "s\n", "x: Status -> building")
+    lane.write_log(lane.genesis("seeded", floor))
+    block = lane.block()
+    assert "(MATCH)" in block
+    for word in ("disarmed", "absent"):
+        assert word not in block.split("(MATCH)", 1)[1]
+
+
+def test_the_informational_classes_are_named_once_the_section_alarms(lane):
+    """When there IS something to look at, the neighbouring rows are context
+    worth having — which commits the day's benign local work was."""
+    floor = lane.head()
+    stamp = lane.commit("SPECS/x.md", "s\n", "x: Status -> building")
+    bad = lane.commit("harness/x.py", "x\n", "harness: snuck in", who="stranger")
+    lane.write_log(lane.genesis("seeded", floor))
+    lane.write_local(lane.local(stamp))
+    block = lane.block(local_committers=LOCAL_KEYBOARD_CFG)
+    assert f"UNEXPLAINED: {bad[:8]}" in block
+    assert f"local-stamp: {stamp[:8]}" in block
+
+
+def test_verbose_names_them_on_a_quiet_day_and_the_daily_post_does_not(lane):
+    floor = lane.head()
+    stamp = lane.commit("SPECS/x.md", "s\n", "x: Status -> building")
+    lane.write_log(lane.genesis("seeded", floor))
+    lane.write_local(lane.local(stamp))
+    d = lane.drift(local_committers=LOCAL_KEYBOARD_CFG)
+    assert f"local-stamp: {stamp[:8]}" in M.compose_drift_block(d, verbose=True)
+    assert f"local-stamp: {stamp[:8]}" not in M.compose_drift_block(d)
+
+
+def test_an_absent_local_log_is_not_an_error_and_explains_nothing(lane):
+    """It cannot make an unexplained commit look explained: every rule here
+    only ever ADDS an explanation."""
+    floor = lane.head()
+    sha = lane.commit("harness/x.py", "x\n", "harness: snuck in", who="stranger")
+    lane.write_log(lane.genesis("seeded", floor))
+    assert not lane.local_log_path.exists()
+    d = lane.drift()
+    assert d["local_log"]["present"] is False
+    assert d["local_log"]["error"]
+    assert d["coverage"][M.UNEXPLAINED] == [sha]
+
+
+def test_an_unconfigured_local_committer_list_says_why_it_is_loud(lane):
+    """Empty is not silently benign and not silently damning: everything local
+    reads as unexplained, and the block names the missing config as the cause
+    rather than leaving a reader to hunt for a hook fault."""
+    floor = lane.head()
+    lane.commit("harness/x.py", "x\n", "harness: keyboard commit")
+    lane.write_log(lane.genesis("seeded", floor))
+    block = lane.block()          # no local_committers configured
+    assert "unexplained 1" in block
+    assert "[gate].local_committers is empty" in block
+
+
+def test_a_record_for_a_word_this_reader_does_not_know_explains_nothing(lane):
+    """A newer writer's outcome word is kept in the parse — it is not garbage —
+    but it does not classify. Forward compatibility must not become a way to
+    have a commit explained by a word nobody here understands."""
+    floor = lane.head()
+    sha = lane.commit("harness/x.py", "x\n", "harness: ?", who="stranger")
+    lane.write_log(lane.genesis("seeded", floor))
+    lane.write_local(lane.local(sha, outcome="local-something-else"))
+    d = lane.drift()
+    assert d["local_log"]["records"][sha]["outcome"] == "local-something-else"
+    assert d["local_log"]["malformed"] == 0
+    assert d["coverage"][M.UNEXPLAINED] == [sha]
+
+
+def test_a_malformed_local_line_is_counted_and_said_out_loud(lane):
+    floor = lane.head()
+    sha = lane.commit("harness/x.py", "x\n", "harness: ?", who="stranger")
+    lane.write_log(lane.genesis("seeded", floor))
+    lane.write_local("this is not a LOCAL line", lane.local(sha))
+    d = lane.drift()
+    assert d["local_log"]["malformed"] == 1
+    assert d["coverage"][M.LOCAL_STAMP] == [sha]
+    assert "1 unparseable line(s) in the local coverage log" in lane.block()
+
+
+def test_a_local_record_never_covers_and_never_cites(lane):
+    """The classes are REPORTING. A stamp record must not creep into coverage
+    or citation — a local commit is uncited, and if it touched a gated lane it
+    is a LANE VIOLATION exactly as before."""
+    floor = lane.head()
+    sha = lane.commit("server/app/ws.py", "x = 1\n", "server: local Tier 2")
+    lane.write_log(lane.genesis("seeded", floor))
+    lane.write_local(lane.local(sha))
+    d = lane.drift(local_committers=LOCAL_KEYBOARD_CFG)
+    assert d["uncovered"] == [sha]
+    assert sha in d["uncited"]
+    assert f"LANE VIOLATION: {sha[:8]}" in lane.block(
+        local_committers=LOCAL_KEYBOARD_CFG)
+
+
+def test_no_source_file_still_asserts_the_cause_it_never_measured():
+    """ACCEPTANCE 2, as a grep over the tracked tree. The old line was a fixed
+    string, so it can be checked as one — and the check has to live somewhere
+    or the sentence grows back the next time someone wants a friendlier word
+    for `unexplained`. SPECS/ is exempt: the specs are the record of what was
+    ruled, including the sentence being retired, and rewriting them to pass a
+    grep would delete the reason this test exists.
+
+    The needle is assembled at runtime so this file is not its own hit."""
+    root = Path(__file__).resolve().parents[3]
+    needle = "the hook was " + "absent or disarmed"
+    proc = subprocess.run(["git", "-C", str(root), "grep", "-l", "-F", needle],
+                          capture_output=True, text=True)
+    if proc.returncode > 1:                       # not a git checkout
+        pytest.skip("not a git work tree")
+    hits = [ln for ln in proc.stdout.split() if not ln.startswith("SPECS/")]
+    assert hits == []
+
+
+def test_the_local_log_defaults_beside_the_push_log(lane):
+    """PINNED: brokerd resolves the same two keys by the same rule. Move one
+    without the other and the broker writes records nobody reads."""
+    paths = M.gate_paths(lane.config())
+    assert paths["local_log"] == str(lane.local_log_path)
+    assert paths["local_log"] == str(Path(paths["push_log"]).parent
+                                     / M.LOCAL_LOG_NAME)
+
+
+def test_an_explicit_local_log_path_wins(lane):
+    elsewhere = lane.root / "elsewhere" / "coverage-log"
+    paths = M.gate_paths(lane.config(local_log=str(elsewhere)))
+    assert paths["local_log"] == str(elsewhere)
 
 
 # --------------------------------------------------------------------------
@@ -672,7 +930,7 @@ def test_without_a_log_citation_falls_back_to_strict_trailer_presence(lane):
 def test_without_a_log_the_unknowables_say_unknown(lane):
     block = lane.block()
     assert "fail-open pushes in the log: UNKNOWN (no log)" in block
-    assert "uncovered commits: UNKNOWN" in block
+    assert "coverage above floor: UNKNOWN" in block
 
 
 def test_a_malformed_log_line_is_counted_not_fatal(lane):
@@ -813,6 +1071,6 @@ def test_a_long_flag_list_says_how_many_it_dropped(lane):
     for i in range(M.FLAG_CAP + 3):
         lane.commit(f"harness/u{i}.py", "x\n", f"harness: uncovered {i}")
     lane.write_log(lane.genesis("seeded", floor))
-    block = lane.block()
-    assert f"uncovered commits above the floor: {M.FLAG_CAP + 3}" in block
+    block = lane.block(local_committers=["nobody@example.invalid"])
+    assert f"unexplained {M.FLAG_CAP + 3}" in block
     assert "and 3 more, not named here" in block

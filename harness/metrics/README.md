@@ -102,8 +102,20 @@ order and for this reason:
 
 Then: mirror head, commits since the last digest and how many are uncited,
 `classify_diff` on every uncited commit with an uncited Tier 2 named as a
-**LANE VIOLATION**, the fail-open count, uncovered commits, overrides to date,
-and a deploy-drift line.
+**LANE VIOLATION**, the fail-open count, the coverage classes above the floor,
+overrides to date, and a deploy-drift line.
+
+**Coverage above the floor is classified, and only one class is a finding.**
+Every commit above the floor is `covered` (a logged push range holds it),
+`local-stamp` (the broker left a record naming the sha when it committed),
+`local-keyboard` (no record, but the committer is in `[gate].local_committers`)
+or **unexplained**. A commit with no push-log line did not meet the hook, and
+that is the whole of what the log knows — local commits into the canonical repo
+never push, so they never could have a line. The block used to print "the hook
+was absent" for each of them, two lines under its own hook `MATCH`, and the
+count only ever grew; on a normal day it is now one line with `unexplained 0`
+and no per-commit rows. `compose_drift_block(drift, verbose=True)` names the
+informational classes; the daily post never does.
 
 **Citation is defined once, from push truth.** A commit is cited iff a logged
 push covers it and that push's trailer resolves — the seq exists and lives in

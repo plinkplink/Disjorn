@@ -81,8 +81,14 @@
    catch. Two facts fall out that exist nowhere else: the fail-open count
    (how often the escape hatch actually fired), and **uncovered commits** —
    anything that entered `main` **after the genesis floor** with no
-   covering log line arrived while the hook was absent or disarmed (seq
-   1446 G1c). The scope of "before the floor" bends with the floor's
+   covering log line never met the hook (seq 1446 G1c). [SUPERSEDED
+   2026-08-27, seq 2067: this sentence originally went further and named
+   a cause — a hook absent or disarmed — that the digest never measured,
+   and the block printed that assertion under its own hook MATCH line for
+   two days. A local commit into the canonical repo is never pushed, so
+   it can never have a log line however healthy the hook is. Coverage
+   above the floor is now CLASSIFIED and only `unexplained` is a finding:
+   see SPECS/2026-08-27-push-log-coverage-classes.md.] The scope of "before the floor" bends with the floor's
    provenance (seq 1450 G1d): below a **seeded** floor is out of scope
    by agreement — the gate starts where the log starts, the first
    digest after install flags nothing historical, and the detector

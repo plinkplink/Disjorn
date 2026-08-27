@@ -1,7 +1,29 @@
 # Push-log coverage classes: stop the drift digest asserting an unmeasured cause
 
 ## Status
-draft
+`merged`
+<!-- built at the keyboard 2026-08-27 (Fable's tokens held back), landed as a
+local commit on main — the exact class of commit this spec is about, so it
+will read as `local-keyboard` in tomorrow's digest.
+
+Detector (harness/metrics/metrics.py): parse_local_log + classify_coverage;
+the block prints one `coverage above floor:` tally and names per-commit rows
+only for `unexplained`, or for the informational classes when the section is
+already alarming or verbose=True. Writer (harness/broker/brokerd.py):
+_record_local_commit appends `LOCAL <ts> <sha> local-stamp` beside the push
+log at every Status stamp. Config: [gate].local_log + [gate].local_committers,
+added to the template AND to the live /etc/disjorn-broker/broker.toml.
+
+Verified against live state for 2026-08-26: `coverage above floor: 67 commits
+— covered 62, local-stamp 0, local-keyboard 5, unexplained 0`, no per-commit
+rows, nothing contradicting the hook MATCH above it. Acceptance 4 (a new stamp
+writing its own record) is pinned by the broker suite against the detector's
+OWN reader, both halves of one grammar; the first real build after the broker
+restart is what confirms it in production, and until one runs that is a test
+result and not an observation.
+
+Review owner claudette, unreviewed at the time of writing: not pushed to the
+gatehouse, so no review-seq is claimed. -->
 
 ## Confirm record
 - **Confirmed by**: plink

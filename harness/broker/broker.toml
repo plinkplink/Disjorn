@@ -203,6 +203,41 @@ protected_paths = "/etc/disjorn-broker/protected-paths.toml"
 canonical_repo = "/var/lib/disjorn-broker/gatehouse/disjorn.git"
 # hook_link = "/var/lib/disjorn-broker/gatehouse/disjorn.git/hooks/pre-receive"
 # push_log  = "/var/lib/disjorn-broker/gatehouse/disjorn.git/hooks/disjorn-push-log"
+# local_log = "/var/lib/disjorn-broker/gatehouse/disjorn.git/hooks/disjorn-local-log"
+
+# THE LOCAL COVERAGE LOG (spec 2026-08-27, seq 2067). `local_log` above is the
+# push log's sibling: `LOCAL <ts> <sha> local-stamp`, one line per commit this
+# broker makes straight onto the branch without pushing (the `## Status`
+# stamps). Those commits never meet the hook, so they can never have a
+# push-log line — and until this existed the digest reported them as uncovered
+# and asserted a hook state it had never measured, two lines under its own hook
+# MATCH. brokerd resolves `local_log` / `canonical_repo` by the SAME rule as
+# the detector: set one side only and the records go somewhere nobody reads.
+
+# Git identities with a shell on this box that commit directly into the
+# canonical repo. Substrings, matched case-insensitively against
+# "<committer> <email>|<author> <email>". A commit above the floor with no
+# push-log line and no local-stamp record classifies as `local-keyboard` if it
+# matches one of these, and UNEXPLAINED — the digest's only coverage finding —
+# if it does not.
+#
+# THERE IS NO DEFAULT LIST IN THE CODE, on purpose (the same rule the plan
+# room's lane owners follow): who has a shell here is a house fact, and a
+# built-in list would explain away a commit on a deployment that never made
+# one. Leave this empty and every local commit reads as unexplained; the block
+# says so on the line under the count rather than going quiet.
+#
+# Adding an identity here EXPLAINS a commit, it does not bless it: the class
+# is informational, the hook-state signals (the MATCH line, the fail-open
+# count, the override count) are untouched by it, and a pushed commit that
+# dodged the hook still lands as unexplained whoever committed it.
+local_committers = [
+  "t@t",                    # the keyboard's git identity in this clone
+  "plink@debian.srv",       # Admin, same box
+  "plinkplink@gmail.com",   # plink, same box
+  "broker@disjorn.local",   # disjorn-broker, for stamps made before seq 2067
+  "build@disjorn.local",    # disjorn-build, the build user's local commits
+]
 
 # The read-only mirror, same one `refresh-mirror` maintains and board.py reads.
 # Commit history, the override count, and the committed sha of

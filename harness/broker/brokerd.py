@@ -2393,6 +2393,75 @@ class Broker:
                             f"{(cp.stderr or cp.stdout).strip()[:300]}")
         return cp.stdout
 
+    # -- the local coverage record ------------------------------------------
+    #
+    # THE PUSH LOG'S SIBLING (spec 2026-08-27, confirmed seq 2067). A stamp
+    # commit is made with git plumbing straight onto the canonical repo's
+    # branch: no push, so it never meets the pre-receive hook, so it can never
+    # have a push-log line. The daily digest used to report exactly that as an
+    # uncovered commit and blame a hook fault it had never measured, on the
+    # same morning its own liveness line said that hook MATCHED. Five such
+    # lines on 08-26, two on 08-24, growing by one every build and every
+    # keyboard session: the shape of an alarm nobody will read.
+    #
+    # So the actor writes the record. This daemon is the one process that KNOWS
+    # a local commit happened, at the instant it happens, and a positive record
+    # naming the sha costs one appended line.
+
+    LOCAL_LOG_NAME = "disjorn-local-log"
+    LOCAL_STAMP = "local-stamp"
+
+    def _local_coverage_log(self) -> Optional[str]:
+        """Where the record goes: beside the push log, `[gate].local_log`,
+        defaulting to <[gate].canonical_repo>/hooks/disjorn-local-log.
+
+        PINNED ON BOTH SIDES, the same way DISJORN_PUSH_LOG is: metrics.py's
+        `gate_paths` resolves these two keys by this rule and no other. Move
+        one without the other and this daemon writes records nobody reads while
+        the digest goes on calling its own stamps unexplained. There is a test
+        that reads the resolution out of metrics and compares."""
+        gate = self.config.get("gate")
+        if not isinstance(gate, dict):
+            return None
+        path = gate.get("local_log")
+        if isinstance(path, str) and path:
+            return path
+        canonical = gate.get("canonical_repo")
+        if isinstance(canonical, str) and canonical:
+            return os.path.join(canonical, "hooks", self.LOCAL_LOG_NAME)
+        return None
+
+    def _record_local_commit(self, sha: str,
+                             outcome: str = LOCAL_STAMP) -> str:
+        """Append `LOCAL <ts> <sha> <outcome>`. Returns "" or why it did not.
+
+        NEVER RAISES, on the hook's fail-open reasoning inverted: the commit
+        has already landed, and a coverage record that cannot be written must
+        not turn a stamp that worked into a stamp that reports failure. It
+        hands back a sentence, the caller carries it into the banner, and the
+        next digest reports the commit as UNEXPLAINED — loud, and the correct
+        answer for a record that was never written.
+
+        O_APPEND, one whole line, exactly the hook's writer: two writers
+        interleave as two lines rather than corrupting one."""
+        path = self._local_coverage_log()
+        if not path:
+            return ("no [gate].local_log or [gate].canonical_repo is "
+                    f"configured, so no coverage record names {sha[:7]}; the "
+                    "digest will have to guess what put it on the branch")
+        ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+            try:
+                os.write(fd, f"LOCAL {ts} {sha} {outcome}\n".encode("utf-8"))
+            finally:
+                os.close(fd)
+        except OSError as exc:
+            return (f"coverage record NOT written to {path}: {exc}; the next "
+                    f"digest will report {sha[:7]} as unexplained")
+        return ""
+
     def _stamp_spec_status(self, slug: str, new_status: str, comment: str, *,
                            expect: tuple[str, ...]) -> dict:
         """Move a spec's `## Status` line in the CANONICAL repo and commit it,
@@ -2429,6 +2498,13 @@ class Broker:
         when HEAD is that branch and the file is clean, `checkout HEAD -- path`
         syncs the worktree so `git status` stays quiet. A dirty file is left
         alone and named in the result.
+
+        AND IT LEAVES A COVERAGE RECORD (seq 2067). The commit never meets
+        the pre-receive hook — there is no push — so `_record_local_commit`
+        appends one `local-stamp` line naming the sha, and the daily digest
+        classifies it from that record instead of guessing at a hook state it
+        never measured. A record that cannot be written is a sentence in
+        `why`, never a failed stamp.
 
         WHAT A RESIDENT CONTROLS: nothing here. The slug is the gate-validated
         filename; the words written are this function's own; the one
@@ -2494,6 +2570,13 @@ class Broker:
                     "why": repr(exc)}
         result = {"ok": True, "status": new_status, "commit": commit[:7],
                   "why": ""}
+        notes: list[str] = []
+        # The coverage record comes FIRST of everything after the ref moved: it
+        # names a commit that already exists, and the two steps below it are a
+        # courtesy and a propagation, either of which can take its time or fail.
+        note = self._record_local_commit(commit)
+        if note:
+            notes.append(note)
         # Courtesy sync of the keyboard's worktree, only when it is provably
         # safe: HEAD is this branch and the file has no local edits.
         try:
@@ -2507,22 +2590,21 @@ class Broker:
                          or self._git(repo, "diff", "--quiet", "--cached",
                                       old_sha, "--", relpath).returncode != 0)
                 if dirty:
-                    result["why"] = (f"{relpath} has local edits in the working "
-                                     "tree; the commit landed on the branch but "
-                                     "the worktree was not touched")
+                    notes.append(f"{relpath} has local edits in the working "
+                                 "tree; the commit landed on the branch but "
+                                 "the worktree was not touched")
                 else:
                     self._git_ok(repo, "checkout", "HEAD", "--", relpath)
         except Exception as exc:  # noqa: BLE001 — courtesy only
-            result["why"] = f"worktree not synced: {exc!r}"
+            notes.append(f"worktree not synced: {exc!r}")
         # Carry the word to the mirror the gate and the residents read.
         try:
             self._ff_mirror_main(SUBPROCESS_TIMEOUTS["refresh-mirror"])
         except VerbError as exc:
-            result["why"] = (result["why"] + "; " if result["why"] else "") + \
-                f"mirror NOT refreshed: {exc.message}"
+            notes.append(f"mirror NOT refreshed: {exc.message}")
         except Exception as exc:  # noqa: BLE001
-            result["why"] = (result["why"] + "; " if result["why"] else "") + \
-                f"mirror NOT refreshed: {exc!r}"
+            notes.append(f"mirror NOT refreshed: {exc!r}")
+        result["why"] = "; ".join(notes)
         return result
 
     # ------------------------------------------------------------ start-build

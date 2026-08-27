@@ -21,6 +21,11 @@ claimed. So:
 
 from __future__ import annotations
 
+import importlib.util
+import os
+import sys
+from pathlib import Path
+
 import pytest
 
 from broker_testlib import (STUB_PUBLISHED, STUB_SHA, FakeBuildProc,
@@ -352,3 +357,142 @@ def test_status_after_build_follows_the_banner_ladder(publish, unit_reason, expe
         assert NO_HARVEST_REASON.split(" (")[0][:40] in comment
     if publish.get("published") and unit_reason:
         assert STUB_SHA in comment           # where the work is, even on failure
+
+
+# ======================================================================
+# THE LOCAL COVERAGE RECORD (spec 2026-08-27, confirmed seq 2067)
+#
+# A stamp is git plumbing straight onto the canonical branch. There is no
+# push, so the pre-receive hook never sees it, so it can never have a
+# push-log line. The digest used to report exactly that as an uncovered
+# commit and assert a cause it had not measured — on the same morning its
+# own liveness line said the hook MATCHED, with the count growing by a row
+# per build forever. So the actor leaves a positive record instead.
+# ======================================================================
+
+def _metrics():
+    """The DETECTOR's reader, imported by path. This is the pin that matters:
+    the two halves are a writer and a reader of one grammar in two programs,
+    and a test that only checked this side's own string would let them drift
+    apart the first time either was edited."""
+    path = (Path(__file__).resolve().parents[2] / "metrics" / "metrics.py")
+    spec = importlib.util.spec_from_file_location("_metrics_for_pin", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_a_stamp_leaves_a_local_stamp_record_naming_the_commit(harness):
+    proc = FakeBuildProc(out=build_out(), block=True)
+    resp = _launch(harness, lambda: proc)
+    try:
+        assert resp["ok"] is True
+        sha = harness._git("rev-parse", "main").strip()
+        lines = harness.local_log_lines()
+        assert len(lines) == 1
+        fields = lines[0].split()
+        assert fields[0] == "LOCAL"
+        assert fields[2] == sha          # the FULL sha, not the short one
+        assert fields[3] == "local-stamp"
+        # A record that lands and a stamp that reports trouble are different
+        # things; nothing went wrong here.
+        assert resp["result"]["spec_status"]["why"] == ""
+    finally:
+        proc.release.set()
+        harness.broker.join_builds()
+
+
+def test_the_record_is_exactly_what_the_digest_reads(harness):
+    """One grammar, two programs. The reader must classify the line this
+    writer just wrote, with no adjustment on either side."""
+    M = _metrics()
+    proc = FakeBuildProc(out=build_out(), block=True)
+    _launch(harness, lambda: proc)
+    try:
+        sha = harness._git("rev-parse", "main").strip()
+        doc = M.parse_local_log(str(harness.local_log))
+        assert doc["present"] is True and doc["malformed"] == 0
+        assert doc["records"][sha]["outcome"] == M.LOCAL_STAMP
+        # And the class the digest would give that commit, with no push line
+        # and no declared-local committer to fall back on.
+        cls = M.classify_coverage("", [sha], set(), doc["records"], [])
+        assert cls[M.LOCAL_STAMP] == [sha]
+        assert cls[M.UNEXPLAINED] == []
+    finally:
+        proc.release.set()
+        harness.broker.join_builds()
+
+
+def test_the_writer_and_the_detector_resolve_the_same_path(harness):
+    """PINNED ON BOTH SIDES: `[gate].local_log`, else
+    <[gate].canonical_repo>/hooks/disjorn-local-log. Set one side only and the
+    broker writes records nobody reads while the digest calls its own stamps
+    unexplained."""
+    M = _metrics()
+    gate = dict(harness.broker.config["gate"])
+    detector = M.gate_paths({"gate": {**gate, "mirror": "/nowhere"}})
+    assert harness.broker._local_coverage_log() == detector["local_log"]
+    assert harness.broker._local_coverage_log() == str(harness.local_log)
+
+
+def test_the_log_is_append_only_across_stamps(harness):
+    """building, then built@<branch>: two commits, two lines, in order. A
+    read-modify-write would be a way to lose one."""
+    _launch(harness)
+    harness.broker.join_builds()
+    lines = harness.local_log_lines()
+    assert len(lines) == 2
+    shas = [ln.split()[2] for ln in lines]
+    assert shas[1] == harness._git("rev-parse", "main").strip()
+    assert shas[0] == harness._git("rev-parse", "main~1").strip()
+    assert all(ln.split()[3] == "local-stamp" for ln in lines)
+
+
+def test_a_refused_stamp_records_nothing(harness):
+    """No commit, no record. A record naming a commit that was never made
+    would be a lie of exactly the kind this whole change is against."""
+    harness.write_spec(SPEC, status="merged")
+    out = harness.broker._stamp_spec_status(SLUG, "building", "on with it",
+                                            expect=("confirmed",))
+    assert out["ok"] is False and out["commit"] is None
+    assert "left as is" in out["why"]
+    assert harness.local_log_lines() == []
+
+
+def test_an_unwritable_log_does_not_sink_a_stamp_that_landed(harness):
+    """Fail-open, the hook's reasoning inverted: the commit already exists.
+    The stamp reports ok, `why` says the record is missing, and the next
+    digest will call that commit unexplained — which is the correct answer
+    for a record that was never written."""
+    harness.local_log.parent.mkdir(parents=True, exist_ok=True)
+    harness.local_log.write_text("", encoding="utf-8")
+    harness.local_log.chmod(0o444)
+    proc = FakeBuildProc(out=build_out(), block=True)
+    try:
+        resp = _launch(harness, lambda: proc)
+        st = resp["result"]["spec_status"]
+        assert st["ok"] is True and st["status"] == "building"
+        assert harness.spec_status_on_main(SPEC) == "building"
+        assert "coverage record NOT written" in st["why"]
+        assert "unexplained" in st["why"]
+        assert harness.local_log_lines() == []
+    finally:
+        proc.release.set()
+        harness.broker.join_builds()
+        harness.local_log.chmod(0o644)
+
+
+def test_an_unconfigured_gate_says_so_rather_than_going_quiet(harness):
+    """A deployment with no [gate] block writes no records — and says which
+    commit it did not name, so the silence is never mistaken for a record."""
+    harness.broker.config.pop("gate")
+    proc = FakeBuildProc(out=build_out(), block=True)
+    try:
+        resp = _launch(harness, lambda: proc)
+        st = resp["result"]["spec_status"]
+        assert st["ok"] is True
+        assert "no [gate].local_log" in st["why"]
+        assert harness.local_log_lines() == []
+    finally:
+        proc.release.set()
+        harness.broker.join_builds()

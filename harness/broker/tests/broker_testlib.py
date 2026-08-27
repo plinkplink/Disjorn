@@ -323,9 +323,11 @@ class BrokerHarness:
                  unit_state_file: Path | None = None,
                  stop_record: Path | None = None,
                  spec_repo: Path | None = None,
+                 gatehouse: Path | None = None,
                  planroom_calls: list | None = None,
                  planroom_state: dict | None = None) -> None:
         self.spec_repo = spec_repo
+        self.gatehouse = gatehouse
         # Every /planroom call the broker made, and the fake board it talked to.
         self.planroom_calls = planroom_calls if planroom_calls is not None else []
         self.planroom_state = planroom_state if planroom_state is not None else {}
@@ -466,6 +468,17 @@ class BrokerHarness:
     def main_log(self) -> list[str]:
         return [ln for ln in self._git("log", "--format=%s", "main").splitlines()]
 
+    # -- the local coverage log (spec 2026-08-27) --------------------------
+    @property
+    def local_log(self) -> Path:
+        assert self.gatehouse is not None
+        return self.gatehouse / "hooks" / "disjorn-local-log"
+
+    def local_log_lines(self) -> list[str]:
+        if not self.local_log.exists():
+            return []
+        return self.local_log.read_text(encoding="utf-8").splitlines()
+
     def build_log_files(self) -> list[Path]:
         """Leftover build stdout/stderr temp files (BL-D2 cleanup assertions).
         Must be empty once every reaper has finished."""
@@ -537,6 +550,12 @@ def harness(tmp_path: Path):
     # BL-D2: the detached build's stdout/stderr temp files. In production this
     # is the daemon's PrivateTmp; here it is a scratch dir so the tests can
     # assert they are created 0600 and REMOVED on every exit path.
+    # The GATEHOUSE git-dir stand-in: `hooks/` is where the push log and its
+    # sibling coverage log live. Deliberately NOT created here — the writer
+    # has to make its own way, the way it will on a box where the log has
+    # never been written before.
+    gatehouse = tmp_path / "gatehouse.git"
+
     build_logs = tmp_path / "build-logs"
     build_logs.mkdir()
 
@@ -602,6 +621,14 @@ def harness(tmp_path: Path):
         metrics_json = "{metrics}"
         protected_paths = "{tmp_path / 'protected-paths.toml'}"
 
+        [gate]
+        # Only the two keys brokerd reads. The DETECTOR half of this block
+        # (mirror, deploy_tree, the digest) is exercised in harness/metrics;
+        # what is under test here is the WRITER: a Status stamp leaves a
+        # local-stamp record naming the sha, because that commit never meets
+        # the pre-receive hook and can never have a push-log line.
+        canonical_repo = "{gatehouse}"
+
         [disjorn]
         url = "http://127.0.0.1:1"
         api_key_path = "{tmp_path / 'no-key'}"
@@ -660,7 +687,8 @@ def harness(tmp_path: Path):
                       specs_dir=specs_dir, build_record=build_record,
                       build_log_dir=build_logs, stub_dir=stub_dir,
                       unit_state_file=unit_state_file, stop_record=stop_record,
-                      spec_repo=spec_repo, planroom_calls=planroom_calls,
+                      spec_repo=spec_repo, gatehouse=gatehouse,
+                      planroom_calls=planroom_calls,
                       planroom_state=planroom_state)
     h.set_verbs()  # everything explicitly OFF to start
 

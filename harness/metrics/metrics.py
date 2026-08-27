@@ -449,10 +449,20 @@ def write_metrics(config: dict, doc: dict) -> str:
 #   * SELF-CITATION — a `review-seq` whose author is the person who pushed. The
 #     comfortable failure mode, named so it cannot pass as review. (An
 #     `override-seq` IS the pusher's own line by design; no check there.)
-#   * UNCOVERED commits — anything that entered `main` above the genesis floor
-#     with no covering log line arrived while the hook was absent or disarmed.
-#     Together with the fail-open count, these are the two facts that exist
-#     nowhere else in the house.
+#   * COVERAGE CLASSES above the genesis floor (seq 2067). No covering log
+#     line means the commit never met the hook, and that is ALL the log knows.
+#     It does NOT mean the hook was down: commits made locally in the
+#     canonical repo — the broker's own `## Status` stamps, keyboard commits —
+#     never push, so they never could have a log line, and for two days in
+#     August every one of them printed a flat assertion that the hook was
+#     absent, two lines under the same digest's own hook MATCH. Nothing here
+#     asserts a hook state it did not measure. Each commit above the floor
+#     lands in exactly one class: `covered` (a logged push range holds it),
+#     `local-stamp` (the actor left a positive record naming the sha at the
+#     moment it committed), `local-keyboard` (no record, but the committer is
+#     an identity this deployment declares local), or UNEXPLAINED. Only
+#     unexplained is a finding; together with the fail-open count it is the
+#     fact that exists nowhere else in the house.
 #   * FLOOR MOTION — the floor this digest sees against the floor its own
 #     PREVIOUS post reported. That baseline lives in the message store, outside
 #     the git-dir, beyond the reach of a log delete or a repo re-create, so it
@@ -478,6 +488,27 @@ TRAILER_VALUE_RE = re.compile(r"^(review-seq|override-seq):(\d+)$")
 # derived from `main`'s history, never from the log).
 TRAILER_LINE_RE = re.compile(
     r"^\s*(review-seq|override-seq)\s*:\s*(\d+)\s*$", re.IGNORECASE | re.MULTILINE)
+
+# THE LOCAL COVERAGE LOG — the push log's sibling (seq 2067). Written by the
+# actors that commit into the canonical repo WITHOUT pushing, read here.
+#
+#   LOCAL <ts> <sha> <outcome>
+#
+# A local commit can never have a push-log line, because there was no push. The
+# fix is not a cleverer inference, it is a POSITIVE RECORD from the one process
+# that knows: this sha, this time, this word.
+#
+# A SEPARATE FILE, ON PURPOSE. The push log is the primary record of what the
+# HOOK saw, and its genesis / truncation tells are how a deleted-and-recreated
+# log gets caught. Putting a second writer inside the one file the whole
+# detector's integrity rests on would buy tidiness with the thing that matters.
+# Deleting THIS file costs nothing but explanations: every record it held
+# degrades to local-keyboard or UNEXPLAINED, never to clean.
+LOCAL_LOG_NAME = "disjorn-local-log"
+LOCAL_RE = re.compile(r"^LOCAL\s+(\S+)\s+(\S+)\s+(\S+)\s*$")
+LOCAL_STAMP = "local-stamp"        # the broker's own spec Status commits
+LOCAL_KEYBOARD = "local-keyboard"  # a declared-local committer, no record
+UNEXPLAINED = "unexplained"        # neither — the only class that is a finding
 
 # How many named flags of one kind go on the line before it summarises. NO
 # SILENT CAPS: whenever a list is cut, the line says how many were dropped.
@@ -505,9 +536,11 @@ def gate_paths(config: dict) -> dict:
     deploy_tree = g.get("deploy_tree")
     hook_link = g.get("hook_link")
     push_log = g.get("push_log")
+    local_log = g.get("local_log")
     if canonical:
         hook_link = hook_link or os.path.join(canonical, "hooks", "pre-receive")
         push_log = push_log or os.path.join(canonical, "hooks", "disjorn-push-log")
+        local_log = local_log or os.path.join(canonical, "hooks", LOCAL_LOG_NAME)
     message_db = g.get("message_db")
     if not message_db and deploy_tree:
         message_db = os.path.join(deploy_tree, "server", "data", "disjorn.db")
@@ -520,6 +553,16 @@ def gate_paths(config: dict) -> dict:
         "canonical_repo": canonical,
         "hook_link": hook_link,
         "push_log": push_log,
+        "local_log": local_log,
+        # Git identities that have a shell on this box and commit straight into
+        # the canonical repo. Substrings, matched against "<cn> <ce>|<an> <ae>",
+        # case-insensitively. NO DEFAULT: a house's local uids are house facts,
+        # and a built-in list would quietly explain away a commit on a
+        # deployment that never made it. Empty means nothing classifies as
+        # local-keyboard and local commits read as UNEXPLAINED — loud, and the
+        # block says why it is loud.
+        "local_committers": [str(x) for x in (g.get("local_committers") or [])
+                             if str(x).strip()],
         "mirror": g.get("mirror"),
         "branch": g.get("mirror_branch", "main"),
         "deploy_tree": deploy_tree,
@@ -698,6 +741,39 @@ def genesis_state(log: dict) -> dict:
                           "truncated, not merely young"}
     return {"state": gens[0]["kind"], "floor": floor, "ts": ts,
             "provenance": gens[0]["kind"], "detail": ""}
+
+
+# -- the local coverage log -------------------------------------------------
+
+def parse_local_log(path: Optional[str]) -> dict:
+    """Read the sibling coverage log the local committers write. Never raises.
+
+    ABSENT IS NOT AN ERROR and is not a finding. Before anything wrote this
+    file there were no records to read, and commits that predate it fall
+    through to the committer rule (spec 2026-08-27, acceptance 5). What an
+    absent file must never do is make an unexplained commit look explained —
+    and it cannot: every rule here only ever ADDS an explanation.
+
+    A record whose outcome word this reader does not know explains nothing.
+    Unknown words are kept in the parse (so a newer writer's lines are visible
+    rather than counted as garbage) and ignored by the classifier."""
+    doc = {"path": path, "present": False, "error": None, "records": {},
+           "malformed": 0}
+    data, err = _read_bytes(path)
+    if data is None:
+        doc["error"] = err
+        return doc
+    doc["present"] = True
+    for raw in data.decode("utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        m = LOCAL_RE.match(line)
+        if m:
+            doc["records"][m.group(2)] = {"ts": m.group(1), "outcome": m.group(3)}
+        else:
+            doc["malformed"] += 1
+    return doc
 
 
 # -- liveness (G3) ----------------------------------------------------------
@@ -903,6 +979,44 @@ def push_coverage(paths: dict, log: dict, db) -> dict:
             cited.update(commits)
     return {"covered": covered, "cited": cited, "citations": citations,
             "fail_open": fail_open, "unresolvable": unresolvable}
+
+
+def is_local_committer(identity: Optional[str], patterns: list) -> bool:
+    """Does this commit's identity belong to a uid that commits on this box?
+
+    Deliberately crude, and deliberately WEAKER than a record: it is a fact
+    about the deployment, not about the commit. It cannot prove a commit was
+    made locally — nothing after the fact can, git does not record how a
+    commit arrived — so it is only ever reached second, and only to say
+    "this one has a mundane explanation available", never "this one is fine"."""
+    if not identity or not patterns:
+        return False
+    hay = identity.lower()
+    return any(p and p.lower() in hay for p in patterns)
+
+
+def classify_coverage(mirror: str, above: list, covered: set, records: dict,
+                      local_committers: list) -> dict:
+    """Every commit above the floor into EXACTLY ONE class (seq 2067).
+
+    ORDER IS THE ARGUMENT. Push truth first: a logged range that holds the sha
+    is coverage, measured. Then the positive record, on its writer's
+    authority. Then the committer rule, which is an availability of
+    explanation and nothing more. What none of the three reaches is
+    UNEXPLAINED — the word for `not measured`, which is the honest thing the
+    old fixed string was not."""
+    out = {"above": len(above), "covered": [], LOCAL_STAMP: [],
+           LOCAL_KEYBOARD: [], UNEXPLAINED: []}
+    for sha in above:
+        if sha in covered:
+            out["covered"].append(sha)
+        elif (records.get(sha) or {}).get("outcome") == LOCAL_STAMP:
+            out[LOCAL_STAMP].append(sha)
+        elif is_local_committer(_committer(mirror, sha), local_committers):
+            out[LOCAL_KEYBOARD].append(sha)
+        else:
+            out[UNEXPLAINED].append(sha)
+    return out
 
 
 def override_trailers(mirror: str, branch: str = "main") -> Optional[list]:
@@ -1248,6 +1362,16 @@ def gate_drift(config: dict, *, date: str, now: Optional[_dt.datetime] = None,
         drift["above_floor"] = len(above)
         drift["uncovered"] = ([] if not log.get("present")
                               else [c for c in above if c not in cov["covered"]])
+        # -- and what each of those actually is (seq 2067). `uncovered` stays
+        # exactly what it always was — no covering push line, the raw fact —
+        # and the classes sit beside it. A commit is reported by its class;
+        # only UNEXPLAINED is a finding.
+        local = parse_local_log(paths["local_log"])
+        drift["local_log"] = local
+        drift["coverage"] = (
+            classify_coverage(mirror, above, cov["covered"], local["records"],
+                              paths["local_committers"])
+            if log.get("present") else None)
         # Below a LAZY floor is not out of scope, it is UNVERIFIABLE (G1d).
         drift["unverifiable"] = 0
         if genesis.get("state") == "lazy" and effective_floor:
@@ -1279,8 +1403,13 @@ def _named(items: list, render) -> list:
     return lines
 
 
-def compose_drift_block(drift: dict) -> str:
-    """The drift block, opening with the detector's own liveness (G3)."""
+def compose_drift_block(drift: dict, *, verbose: bool = False) -> str:
+    """The drift block, opening with the detector's own liveness (G3).
+
+    `verbose` names the commits in the INFORMATIONAL coverage classes on a day
+    that is not alarming. The daily post never passes it: a clean day's
+    coverage is one line, because a dozen known-benign rows every morning is
+    precisely how the one row that matters stops being read."""
     L = [f"{DRIFT_HEADER} — keyboard lane, {drift['date']} UTC"]
     if not drift.get("configured"):
         L.append("DETECTOR NOT CONFIGURED: broker.toml has no [gate] block "
@@ -1368,23 +1497,51 @@ def compose_drift_block(drift: dict) -> str:
     fo = drift.get("fail_open")
     L.append(f"fail-open pushes in the log: "
              f"{'UNKNOWN (no log)' if fo is None else fo}")
-    unc = drift.get("uncovered", [])
+    mir = drift["paths"]["mirror"]
     if not drift.get("log", {}).get("present"):
-        L.append("uncovered commits: UNKNOWN — the push log is unreadable, so "
-                 "the one record of what the hook saw is gone")
+        L.append("coverage above floor: UNKNOWN — the push log is unreadable, "
+                 "so the one record of what the hook saw is gone")
     elif not drift.get("floor_resolves", True):
-        L.append(f"uncovered commits: UNKNOWN — the floor "
+        L.append(f"coverage above floor: UNKNOWN — the floor "
                  f"{_short(g['floor'])} does not resolve in the mirror, so "
                  f"'above the floor' cannot be computed")
     else:
-        L.append(f"uncovered commits above the floor: {len(unc)} "
-                 f"of {drift.get('above_floor', 0)}")
-        for line in _named(unc, lambda c: f"  UNCOVERED: {_short(c)} "
-                                          f"{_commit_line(drift['paths']['mirror'], c)} "
-                                          f"— entered main with no push-log "
-                                          f"line; the hook was absent or "
-                                          f"disarmed"):
+        cls = drift.get("coverage") or {}
+        unexplained = cls.get(UNEXPLAINED, [])
+        L.append(f"coverage above floor: {cls.get('above', 0)} commits — "
+                 f"covered {len(cls.get('covered', []))}, "
+                 f"{LOCAL_STAMP} {len(cls.get(LOCAL_STAMP, []))}, "
+                 f"{LOCAL_KEYBOARD} {len(cls.get(LOCAL_KEYBOARD, []))}, "
+                 f"{UNEXPLAINED} {len(unexplained)}")
+        # The finding. It says what was measured — no push-log line, no record,
+        # no declared-local committer — and stops there. It does NOT say the
+        # hook was down: that is the liveness line's job, three lines up, and
+        # for two days this line contradicted it (seq 2067).
+        for line in _named(unexplained,
+                           lambda c: f"  UNEXPLAINED: {_short(c)} "
+                                     f"{_commit_line(mir, c)} — on main above "
+                                     f"the floor with no push-log line, no "
+                                     f"{LOCAL_STAMP} record, and a committer "
+                                     f"this deployment does not declare local. "
+                                     f"How it arrived is not measured here."):
             L.append(line)
+        if unexplained and not drift["paths"].get("local_committers"):
+            L.append("  NOTE: [gate].local_committers is empty, so nothing can "
+                     "classify as local-keyboard and every local commit reads "
+                     "as unexplained. Name this deployment's local identities "
+                     "or this count never falls to zero.")
+        # The informational classes name their commits only when the section is
+        # already alarming, or on demand.
+        if verbose or unexplained:
+            for name in (LOCAL_STAMP, LOCAL_KEYBOARD):
+                for line in _named(cls.get(name, []),
+                                   lambda c, name=name: f"  {name}: {_short(c)}"
+                                                        f" {_commit_line(mir, c)}"):
+                    L.append(line)
+        if (drift.get("local_log") or {}).get("malformed"):
+            L.append(f"  {drift['local_log']['malformed']} unparseable line(s) "
+                     f"in the local coverage log — they explain nothing, and "
+                     f"whatever they were meant to cover fell to another class")
     if drift.get("unverifiable"):
         L.append(f"  UNVERIFIABLE: {drift['unverifiable']} commits below the "
                  f"LAZY floor {_short(g['floor'])} — the window between install "
