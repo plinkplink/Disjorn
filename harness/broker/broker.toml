@@ -387,9 +387,8 @@ unit_state_command = ["systemctl", "show", "--property=ActiveState", "--value"]
 # "$@" forwards to claude. Drop either and the pin stops reaching claude.
 session_argv = ["bash", "-lc", "exec claude -p --output-format json \"$@\"", "build-session"]
 # WP-L5 MODEL PIN — no fallback. A blank/absent pin is config drift and the
-# verb refuses (never rides the account default). ONE-PIN UPGRADE PATH: flip
-# this one value when Fable API access returns on plink's credits.
-model = "claude-opus-4-8"
+# verb refuses (never rides the account default).
+model = "claude-opus-5"
 # The authoritative committed specs the confirm gate reads: the read-only repo
 # mirror's SPECS/ (refreshed by refresh-mirror). A spec must resolve DIRECTLY
 # inside this dir — no `..`, no symlink escape — and be status `confirmed` with
