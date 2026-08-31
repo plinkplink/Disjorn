@@ -73,21 +73,49 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * How long to wait before re-sending a GET whose fetch never reached the
+ * server. A phone waking an installed PWA from background routinely loses its
+ * first request that way — the network stack is not up yet — and the retry
+ * lands well inside a second.
+ */
+const NETWORK_RETRY_DELAY_MS = 300;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function request<T>(
   method: string,
   path: string,
   body?: unknown,
 ): Promise<T> {
-  let res: Response;
-  try {
-    res = await fetch(path, {
+  const send = (): Promise<Response> =>
+    fetch(path, {
       method,
       credentials: "include",
       headers: body !== undefined ? { "Content-Type": "application/json" } : {},
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
+
+  let res: Response;
+  try {
+    res = await send();
   } catch {
-    throw new ApiError(0, "Network error — server unreachable");
+    // A thrown fetch means the request never got an answer, which is NOT the
+    // same as the server saying no. GETs are idempotent, so re-send once
+    // rather than surfacing a wake-from-background hiccup as an error. Writes
+    // are not re-sent: a lost response could still have been a completed
+    // request on the server side.
+    if (method !== "GET") {
+      throw new ApiError(0, "Network error — server unreachable");
+    }
+    await delay(NETWORK_RETRY_DELAY_MS);
+    try {
+      res = await send();
+    } catch {
+      throw new ApiError(0, "Network error — server unreachable");
+    }
   }
   if (!res.ok) {
     let detail = res.statusText || "Request failed";

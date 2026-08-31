@@ -11,10 +11,20 @@ import {
 } from "../api";
 import type { SettableStatus, User } from "../types";
 
+/** Backoff between boot probes when the server cannot be reached at all. */
+const BOOT_RETRY_DELAYS_MS = [400, 1200];
+
 interface SessionState {
   user: User | null;
   /** True while the initial GET /me probe is in flight (app boot). */
   booting: boolean;
+  /**
+   * Boot could not REACH the server — as opposed to being told "not signed
+   * in". The two used to collapse into `user: null`, which meant one lost
+   * request threw a perfectly valid session onto the login form; see
+   * bootstrap() below.
+   */
+  bootUnreachable: boolean;
   /** Last login error (server `detail`), cleared on retry/success. */
   loginError: string | null;
   loggingIn: boolean;
@@ -44,18 +54,53 @@ interface SessionState {
 export const useSession = create<SessionState>()((set, get) => ({
   user: null,
   booting: true,
+  bootUnreachable: false,
   loginError: null,
   loggingIn: false,
   mustChangePassword: false,
   changePasswordError: null,
   changingPassword: false,
 
+  /*
+   * Two failures reach this catch and they are NOT the same event:
+   *
+   *   401  — the server answered; there is no session. Show the login form.
+   *   0    — the request never got an answer. We know nothing about the
+   *          session, and the cookie is very likely still good.
+   *
+   * Treating the second as the first is what made an installed PWA "log you
+   * out" on wake: iOS loses the first fetch after a resume, GET /me threw, and
+   * the app painted the login screen over a live session. The socket layer
+   * already survives this (ws.ts reconnects with backoff); the boot probe was
+   * the one request in the app with no second chance.
+   *
+   * api.ts retries a lost GET once on its own. This ladder is the outer half:
+   * a resume that is still settling gets ~2s of quiet attempts before anyone
+   * is shown anything.
+   */
   bootstrap: async () => {
-    try {
-      const user = await fetchMe();
-      set({ user, booting: false });
-    } catch {
-      set({ user: null, booting: false });
+    set({ booting: true, bootUnreachable: false });
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const user = await fetchMe();
+        set({ user, booting: false, bootUnreachable: false });
+        return;
+      } catch (err) {
+        const unreachable = err instanceof ApiError && err.status === 0;
+        if (!unreachable) {
+          set({ user: null, booting: false, bootUnreachable: false });
+          return;
+        }
+        if (attempt >= BOOT_RETRY_DELAYS_MS.length) {
+          // Out of quiet retries. Say what is actually wrong — the reader can
+          // retry, and App.tsx keeps them off the login form.
+          set({ user: null, booting: false, bootUnreachable: true });
+          return;
+        }
+        await new Promise((resolve) =>
+          setTimeout(resolve, BOOT_RETRY_DELAYS_MS[attempt]),
+        );
+      }
     }
   },
 
