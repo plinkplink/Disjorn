@@ -75,7 +75,7 @@
 FROM docker.io/library/debian:trixie-slim
 
 # Pinned Claude Code release. Bump deliberately, rebuild, re-run tests.
-ARG CLAUDE_CODE_VERSION=2.1.215
+ARG CLAUDE_CODE_VERSION=2.1.259
 
 # Base toolchain: python3 + venv tooling, node/npm (CC runtime), git,
 # ripgrep+jq+procps (CC's own tool usage), CA certs for api.anthropic.com.
