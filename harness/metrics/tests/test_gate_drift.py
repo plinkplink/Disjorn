@@ -269,8 +269,61 @@ def test_the_liveness_line_comes_first(lane):
     lines = lane.block().splitlines()
     assert lines[0].startswith(M.DRIFT_HEADER)
     assert lines[1].startswith("hook:")
-    assert lines[2].startswith("push log:")
-    assert lines[3].startswith("floor:")
+    assert lines[2].startswith("claude-code:")
+    assert lines[3].startswith("push log:")
+    assert lines[4].startswith("floor:")
+
+
+# --------------------------------------------------------------------------
+# Claude Code version — line 1b. Deployed image vs the committed pin.
+# --------------------------------------------------------------------------
+
+def _pin_containerfile(lane, version: str) -> None:
+    cf = lane.mirror / "harness" / "cc" / "Containerfile"
+    cf.parent.mkdir(parents=True, exist_ok=True)
+    cf.write_text(f"FROM debian\nARG CLAUDE_CODE_VERSION={version}\n"
+                  "RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}\n")
+    git(lane.mirror, "add", "-A")
+    git(lane.mirror, "commit", "-q", "-m", f"pin cc {version}")
+
+
+def test_cc_matches_when_the_image_is_the_committed_pin(lane):
+    _pin_containerfile(lane, "2.1.259")
+    cc = M.cc_version(M.gate_paths(lane.config()))
+    assert cc["state"] == "MATCH"
+    assert cc["deployed"] == cc["pinned"] == "2.1.259"
+    assert "claude-code: image 2.1.259 vs mirror pin 2.1.259 (MATCH)" in lane.block()
+
+
+def test_cc_mismatch_when_the_pin_was_bumped_but_never_rebuilt(lane, monkeypatch):
+    """The 2026-09-02 shape: a model needing a newer CLI, the pin bumped,
+    the residents still on the old image."""
+    _pin_containerfile(lane, "2.1.259")
+    monkeypatch.setattr(M, "_image_cc_version", lambda image: ("2.1.215", ""))
+    cc = M.cc_version(M.gate_paths(lane.config()))
+    assert cc["state"] == "MISMATCH"
+    assert "NOT the committed pin" in cc["detail"]
+    assert "image 2.1.215 vs mirror pin 2.1.259 (MISMATCH)" in lane.block()
+
+
+def test_cc_unknown_when_the_mirror_has_no_pin(lane):
+    cc = M.cc_version(M.gate_paths(lane.config()))
+    assert cc["state"] == "UNKNOWN"
+    assert cc["deployed"] == "2.1.259" and cc["pinned"] is None
+    assert "claude-code: image 2.1.259 vs mirror pin ? (UNKNOWN)" in lane.block()
+
+
+def test_cc_unknown_when_the_image_cannot_be_probed(lane, monkeypatch):
+    _pin_containerfile(lane, "2.1.259")
+    monkeypatch.setattr(M, "_image_cc_version", lambda image: (None, "podman: boom"))
+    cc = M.cc_version(M.gate_paths(lane.config()))
+    assert cc["state"] == "UNKNOWN"
+    assert "podman: boom" in cc["detail"]
+
+
+def test_an_old_drift_dict_without_cc_renders_no_cc_line(lane):
+    d = lane.drift(); d.pop("cc")
+    assert "claude-code:" not in M.compose_drift_block(d)
 
 
 # --------------------------------------------------------------------------

@@ -477,6 +477,17 @@ def write_metrics(config: dict, doc: dict) -> str:
 
 GATE_GUARDED_PREFIXES = ("server/", "client/", "sdk/", "harness/")
 HOOK_REPO_PATH = "harness/gatehouse/hooks/pre-receive-main-review"
+
+# The resident image's Claude Code CLI, reported beside the hook sha (Gable's
+# ask, 2026-09-02). Same shape as the hook line: what is DEPLOYED (the built
+# image's `claude --version`) against what is COMMITTED (the ARG pin in the
+# mirror's Containerfile). The day this was added, a stale pin (2.1.215 vs a
+# model needing >= 2.1.251) had killed every Gable summon with an API 400 that
+# the model gate could only report as "<synthetic>". A version line in the
+# digest is how that gets noticed before the next model bump, not after.
+CONTAINERFILE_REPO_PATH = "harness/cc/Containerfile"
+RESIDENT_IMAGE = "localhost/disjorn-resident:latest"
+_CC_PIN_RE = re.compile(r"^ARG\s+CLAUDE_CODE_VERSION=([0-9][0-9A-Za-z.\-]*)", re.M)
 DRIFT_HEADER = "GATE DRIFT"
 
 # The push log's grammar, pinned on both sides: the hook writes it, this reads
@@ -816,6 +827,52 @@ def hook_liveness(paths: dict) -> dict:
         out["state"] = "MISMATCH"
         out["detail"] = ("the installed hook is NOT the committed one — "
                          "committed is not installed")
+    return out
+
+
+def _image_cc_version(image: str) -> tuple[Optional[str], str]:
+    """`claude --version` inside the built image, from THIS uid's podman store
+    (07-resident-image.sh builds there and loads the residents from the same
+    tar). (version, error). Never raises; ~0.4s with --network none."""
+    try:
+        proc = subprocess.run(
+            ["podman", "run", "--rm", "--network", "none", "--entrypoint",
+             "claude", image, "--version"],
+            capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as e:
+        return None, f"podman: {e}"
+    if proc.returncode != 0:
+        return None, (proc.stderr or proc.stdout).strip().splitlines()[-1:][0] \
+            if (proc.stderr or proc.stdout).strip() else f"podman exit {proc.returncode}"
+    m = re.search(r"\d+\.\d+\.\d+", proc.stdout)
+    return (m.group(0) if m else None), ("" if m else f"unparseable: {proc.stdout.strip()!r}")
+
+
+def cc_version(paths: dict, *, image: str = RESIDENT_IMAGE) -> dict:
+    """The resident image's Claude Code, deployed vs committed.
+
+    `deployed` is what the image actually runs; `pinned` is the ARG in the
+    mirror's Containerfile. MISMATCH is either direction: a bumped pin that
+    was never rebuilt (residents on the old CLI), or a rebuilt image whose
+    bump was never committed (the mirror would rebuild the old one)."""
+    out = {"image": image, "deployed": None, "pinned": None,
+           "state": "UNKNOWN", "detail": ""}
+    out["deployed"], err = _image_cc_version(image)
+    text = _git(paths.get("mirror") or "", "show",
+                f"{paths.get('branch', 'main')}:{CONTAINERFILE_REPO_PATH}")
+    m = _CC_PIN_RE.search(text or "")
+    out["pinned"] = m.group(1) if m else None
+    if out["deployed"] is None:
+        out["detail"] = f"cannot read the image's CLI version: {err or 'no version in output'}"
+    elif out["pinned"] is None:
+        out["detail"] = (f"the mirror has no CLAUDE_CODE_VERSION pin in "
+                         f"{CONTAINERFILE_REPO_PATH} to compare against")
+    elif out["deployed"] == out["pinned"]:
+        out["state"] = "MATCH"
+    else:
+        out["state"] = "MISMATCH"
+        out["detail"] = ("the built image is NOT the committed pin — either "
+                         "rebuild (07-resident-image.sh) or commit the bump")
     return out
 
 
@@ -1277,6 +1334,7 @@ def gate_drift(config: dict, *, date: str, now: Optional[_dt.datetime] = None,
     drift["log"] = log
     drift["genesis"] = genesis
     drift["liveness"] = hook_liveness(paths)
+    drift["cc"] = cc_version(paths)
 
     db = _open_db(paths["message_db"])
     try:
@@ -1429,6 +1487,15 @@ def compose_drift_block(drift: dict, *, verbose: bool = False) -> str:
                  f"sha {_short(live['deployed_sha'])} vs mirror "
                  f"{_short(live['mirror_sha'])} ({live['state']})"
                  + (f" — {live['detail']}" if live["detail"] else ""))
+
+    # 1b. the CLI the residents run, same deployed-vs-committed shape. Absent
+    # from a drift dict built before this line existed (post --no-rebuild
+    # from an old metrics file): then say nothing rather than guess.
+    cc = drift.get("cc")
+    if cc is not None:
+        L.append(f"claude-code: image {cc.get('deployed') or '?'} vs mirror pin "
+                 f"{cc.get('pinned') or '?'} ({cc['state']})"
+                 + (f" — {cc['detail']}" if cc.get("detail") else ""))
 
     # 2. the log's genesis
     g = drift["genesis"]
