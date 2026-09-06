@@ -89,7 +89,10 @@ or `detail.no_changes = true` and an empty list when the runner answered,
 refused, or decided nothing needed changing (a turn that ends clean must
 end the bar's wait, not leave the user watching a clock; the five-stage
 vocabulary is a stage-1 CHECK constraint, so "no changes" is a flag on
-`files_written`, not a sixth value); `deployed` after the host copies
+`files_written`, not a sixth value — **which makes `files_written` the
+turn's TERMINAL stage, not literally "files were written"; any reader that
+renders the bar label keys off `detail`, never off the stage name**
+(Claudette #2293)); `deployed` after the host copies
 `/work` to the preview root. A halted turn posts its LAST reached stage
 again with `detail.halted` set (§E). This is the portability wall: a different
 model or a non-Anthropic runner is a different image and a different
@@ -114,7 +117,15 @@ prompt_max_bytes = 65536
 turn_max_sec = 1800
 ```
 `brokerd.py` gains `self.apps = config.get("apps", {})` and a reader with
-defaults; today nothing reads the table (measured, stage-1 mapping). The
+defaults; today nothing reads the table (measured, stage-1 mapping).
+**Boot check on `seat_bots`** (Claudette #2293): at startup the broker reads
+the server's `bots` table (the `[gate].message_db` read-only handle it
+already holds) and asserts each mapped id exists and its name matches the
+seat's suffix case-insensitively (`res-gable` → `Gable`). A mismatch does
+not stop the broker; it disables the `apps-build` verb with an audit line,
+and the verb answers "apps-build is disabled: the seat map failed its boot
+check" — loud and scoped, so a renumbering can never hand one resident's
+session to the other. The
 model is a knob, never a string in code (provenance policy: the chooser
 already prints what the seat runs, and stage 2 extends that: the builder
 card's `model` for a resident builder stays the RESIDENT's pin, because the
@@ -209,8 +220,15 @@ watch `/work` for `scaffolded`. The launcher's harvest, on exit:
 - **exit 0, non-empty diff**: **secret scan** the diff for the seat's key
   value, its base64 and its hex encodings (Gable #2286 BLOCK, Claudette
   #2288); a hit is `halted = "secret"`, NO commit (the value must not enter
-  history), NO copy, working tree left for the next turn to clean, one
-  `FLAG` line to #custodian with the session id; otherwise commit as
+  history), NO copy, and — because the brief tells the next turn to read
+  `/work` first, which would read the injection back in (Claudette #2293)
+  — the dirty files are moved to `/srv/apps-quarantine/<app-id>/<turn>/`
+  (never mounted into any seat), `/work` is reset to `HEAD`, the SESSION is
+  ended by the stage endpoint (lock released, system line "Turn N halted —
+  the build tried to write a credential; this session is closed and an
+  admin has been notified"), and one `FLAG` line goes to #custodian with
+  the session id and the quarantine path. A turn that tried to publish a
+  credential has earned a human before the next one; otherwise commit as
   `turn N`, copy to the preview root EXCLUDING `.git/` and every dotfile at
   the repo root (`.env` is the file a model writes a key into by habit),
   report `files_written` then `deployed`.
@@ -234,26 +252,41 @@ version and SHA-256 in `harness/cc/shelf/MANIFEST.toml`; the builder brief
 lists them with one-line usage each. Candidates (versions pinned at
 vendoring, names then written back here):
 
-| slot | candidate | license | why this one |
-|---|---|---|---|
-| 2D game lib | KAPLAY | MIT | small, batteries-included, one script tag; Phaser is the fallback if KAPLAY proves too thin |
-| chart lib | Chart.js | MIT | the boring default; one UMD file |
-| CSS reset | modern-normalize | MIT | 200 lines, no opinions |
-| fonts | Inter, JetBrains Mono | OFL | one UI face, one mono face, woff2 |
-| icon set | Lucide | ISC | one SVG sprite, `<use href="#name">` |
-| store shim | `house-store.js` (house-written) | house | §G; the only house code on the shelf |
-| CC0 pack | a Kenney subset: one sprite pack, one UI pack, one sound pack | CC0 | modest, curated by hand at vendoring |
+| slot | package @ version (pinned 2026-09-06, npm registry) | file on the shelf | SHA-256 | license |
+|---|---|---|---|---|
+| 2D game lib | `kaplay@3001.0.19` | `dist/kaplay.js` (IIFE, global `kaplay`, 189 KB) | `88a946ea…ef4a4b` | MIT |
+| chart lib | `chart.js@4.5.1` | `dist/chart.umd.min.js` (208 KB) | `48444a82…9f54a` | MIT |
+| CSS reset | `modern-normalize@3.0.1` | `modern-normalize.css` (3.3 KB) | `b4ad31da…f0e110` | MIT |
+| UI font | `@fontsource/inter@5.3.0` | `files/inter-latin-{400,500,600,700}-normal.woff2` | `8909904a…`, `f3779f1e…`, `f9a06e79…`, `6f56409f…` | OFL-1.1 |
+| mono font | `@fontsource/jetbrains-mono@5.3.0` | `files/jetbrains-mono-latin-{400,700}-normal.woff2` | `14425ba9…`, `d0d4e818…` | OFL-1.1 |
+| icon set | `lucide-static@1.41.0` | `sprite.svg` (500 KB, `<use href="#name">`) | `73c75bac…d0325` | ISC |
+| store shim | `house-store.js` (house-written, §G) | — | at build | house |
+| CC0 pack | a Kenney subset: one sprite pack, one UI pack, one sound pack | — | at vendoring | CC0 |
+
+Full 64-hex digests live in `harness/cc/shelf/MANIFEST.toml` at build; the
+prefixes above are the spec's witness. Why these: KAPLAY is one script tag
+with batteries (Phaser is the fallback if it proves too thin); Chart.js is
+the boring default; modern-normalize has no opinions; four Inter weights
+and two JetBrains Mono weights, latin subset only; Lucide is one sprite.
+The Kenney packs are chosen by hand at vendoring (they are zips of
+hundreds of files; the brief indexes them by folder, not by file).
 
 No 3D, no video (parent Round 5). The vendored **ponytail** copy
 (github.com/DietrichGebert/ponytail, MIT — "think like the laziest senior
 dev in the room"; a decision ladder from "does it need to exist" down to
 "minimum viable code"; intensities lite/full/ultra/off; claims ~54% less
 code and ~20% cheaper on its own benchmark) is installed
-instruction-only: its `AGENTS.md` content and the `ponytail` skills are
-copied into the image's `/config` at a pinned commit, no marketplace
-fetch at runtime. `PONYTAIL_DEFAULT_MODE` is an `[apps]` knob
-(default `full`), not the builder's choice (parent Round 5). Gable reviews
-the vendored copy, as he asked.
+instruction-only, **pinned at commit `974d940a` (2026-09-04, source tarball
+SHA-256 `d2677c25…8651a`)**: only `AGENTS.md` (32 lines: the decision
+ladder, the rules, the "not lazy about understanding" clause) and
+`skills/ponytail*/SKILL.md` are copied into the image's `/config`; its
+`hooks/`, `commands/`, `ponytail-mcp/` and the marketplace path are NOT
+vendored — no runtime, no fetch, nothing executable. That narrows Gable's
+review to prose. Intensity: the instruction-only install has no runtime
+mode switch (the tracker is one of the excluded hooks), so `[apps]
+.ponytail_mode` (default `full`) selects which intensity line the image
+writes into the brief's ponytail section, from the skill's own lite / full
+/ ultra table; it is not the builder's choice (parent Round 5).
 
 ### G. The store shim and the builder brief
 `house-store.js` (parent Rounds 4–5): `store(appId).get(scope, key)` /
@@ -367,6 +400,14 @@ spool are its raw material).
     vendored-copy review and his `APP_BUILD_FLOW` wording; Claudette
     writes her persona file before the image (#2269) and takes the
     `origin_wall.py` doc card.
+- **Round 2** (#2293 Claudette: PASS with two nits, both folded): a secret
+  hit ends the session and quarantines the dirty files out of `/work`
+  (§E); `seat_bots` is checked at broker boot against the bots table and
+  a mismatch disables the verb loudly (§B); `files_written` is named as
+  the terminal stage whose label keys off `detail` (§A). Shelf pinned
+  with versions and hashes (§F); ponytail pinned at `974d940a`,
+  instruction files only (§F). Gable's Round 2 pending a human mention
+  (bot posts cannot summon him, by design).
 - Parent spec Round 14 (same commit) corrects Round 13's `APPS_BUILDERS`
   sentence per #2276: that setting names the CHAT seat (keyed resident);
   the BUILD seat is broker.toml `[apps]`; inert was right for the reason in
