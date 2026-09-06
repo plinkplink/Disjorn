@@ -559,12 +559,20 @@ async def test_builders_print_the_model_the_seat_declares(
     env_seat = tmp_path / "seat.env"
     env_seat.write_text("FOO=1\nMODEL=fallback\nCHAT_MODEL=claude-from-an-env-file\n")
     missing = tmp_path / "not-written-yet.toml"
+    # The shape Gable's live seat actually has: the pin under a table, named by
+    # a dotted model_key. A wrong key is "not declared", never a guess.
+    nested = tmp_path / "nested.toml"
+    nested.write_text('[server]\nurl = "x"\n\n[container]\nmodel = "claude-nested"\n')
+    wrong_key = await make_bot("wrongkey")
+    nested_bot = await make_bot("nested")
 
     settings_env(
         APPS_BUILDERS=[
             {"bot_id": gable, "model_source": str(seat_toml)},
             {"bot_id": claudette, "model_source": str(env_seat)},
             {"bot_id": silent, "model_source": str(missing)},
+            {"bot_id": nested_bot, "model_source": str(nested), "model_key": "container.model"},
+            {"bot_id": wrong_key, "model_source": str(nested), "model_key": "container.nope"},
             # Configured but not in the bots table: omitted, not rendered as a
             # card nobody can pick.
             {"bot_id": 9999, "model_source": str(seat_toml)},
@@ -573,10 +581,12 @@ async def test_builders_print_the_model_the_seat_declares(
     await login(client, "alice")
 
     cards = (await client.get("/apps/builders")).json()
-    assert [c["bot_id"] for c in cards] == [gable, claudette, silent]
+    assert [c["bot_id"] for c in cards] == [gable, claudette, silent, nested_bot, wrong_key]
     assert cards[0]["model"] == MODEL_PIN
     assert cards[1]["model"] == "claude-from-an-env-file"
     assert cards[2]["model"] is None  # "model not declared by seat"
+    assert cards[3]["model"] == "claude-nested"
+    assert cards[4]["model"] is None
     assert all(c["builds_total"] == 0 and c["builds_live"] == 0 for c in cards)
 
     # Build stats come off the registry, and `live` is what counts as live.

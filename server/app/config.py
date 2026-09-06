@@ -5,6 +5,7 @@ working directory. Defaults are sane for local dev.
 """
 
 import re
+import tomllib
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -86,9 +87,12 @@ class Settings(BaseSettings):
 
     # The resident seats offered as builders in the chooser, in the order they
     # should be shown. JSON array of objects:
-    #   APPS_BUILDERS=[{"bot_id": 2, "model_source": "/etc/gable/seat.toml"}]
+    #   APPS_BUILDERS=[{"bot_id": 2, "model_source": "/etc/gable/seat.toml",
+    #                   "model_key": "container.model"}]
     # `model_source` is a path READ AT REQUEST TIME to print the model the seat
-    # actually runs (see read_model_pin). Empty is allowed and is not a boot
+    # actually runs (see read_model_pin). For a .toml source, `model_key` is the
+    # dotted path of the key holding the pin (default: top-level `model`); an
+    # env-style source ignores it. Empty is allowed and is not a boot
     # failure — the tab renders an empty state that says so, which is the
     # honest answer for a house that has not configured a build seat yet.
     APPS_BUILDERS: list[dict[str, Any]] = []
@@ -125,11 +129,12 @@ class Settings(BaseSettings):
 # "model not declared by seat". That is a true statement about the seat; a
 # guessed name would not be.
 
-# `model = "..."` at the TOP LEVEL of a .toml — before any [table] header. A
-# `model` key inside `[some.other.table]` belongs to that table and is not the
-# seat's pin.
-_TOML_MODEL_RE = re.compile(r"""^\s*model\s*=\s*(["'])(?P<value>[^"']*)\1\s*(?:#.*)?$""")
-_TOML_TABLE_RE = re.compile(r"^\s*\[")
+# A .toml source is parsed as TOML and the pin is read at `model_key`, a dotted
+# path (default "model", i.e. top level). Gable's live seat keeps it under
+# [container], so his entry says "container.model". Naming the key in config
+# is the point: the card prints exactly the value a person pointed at, never a
+# `model =` line that happened to match somewhere in the file.
+DEFAULT_MODEL_KEY = "model"
 
 # env-style: CHAT_MODEL=… wins over MODEL=… when a file carries both, because
 # a seat that names both means the specific one.
@@ -153,15 +158,17 @@ def _clean_env_value(raw: str) -> str:
     return raw.split("#", 1)[0].strip()
 
 
-def read_model_pin(source: str | Path | None) -> str | None:
+def read_model_pin(source: str | Path | None, model_key: str | None = None) -> str | None:
     """The model a builder seat declares, or None if it declares none.
 
     `source` is a path from APPS_BUILDERS[*]["model_source"]. A `.toml` suffix
-    is read as TOML (top-level `model = "..."`); anything else is read as an
-    env-style file (`CHAT_MODEL=` / `MODEL=`). Every failure mode — no path, no
-    file, no permission, no model line, a value longer than a model name could
-    plausibly be — answers None rather than raising or guessing, because the
-    builder chooser must still render when a seat's config is missing.
+    is parsed as TOML and the string at `model_key` (dotted path, default
+    top-level `model`) is the pin; anything else is read as an env-style file
+    (`CHAT_MODEL=` / `MODEL=`). Every failure mode — no path, no file, no
+    permission, unparsable TOML, no such key, a non-string value, a value
+    longer than a model name could plausibly be — answers None rather than
+    raising or guessing, because the builder chooser must still render when a
+    seat's config is missing.
     """
     if not source:
         return None
@@ -174,14 +181,17 @@ def read_model_pin(source: str | Path | None) -> str | None:
         return None
 
     if path.suffix == ".toml":
-        for line in text.splitlines():
-            if _TOML_TABLE_RE.match(line):
-                break  # past the top level; a later `model =` is not the pin
-            match = _TOML_MODEL_RE.match(line)
-            if match:
-                value = match.group("value").strip()
-                return value[:MODEL_PIN_MAX_CHARS] or None
-        return None
+        try:
+            node: Any = tomllib.loads(text)
+        except tomllib.TOMLDecodeError:
+            return None
+        for part in (model_key or DEFAULT_MODEL_KEY).split("."):
+            if not isinstance(node, dict) or part not in node:
+                return None
+            node = node[part]
+        if not isinstance(node, str):
+            return None
+        return node.strip()[:MODEL_PIN_MAX_CHARS] or None
 
     fallback: str | None = None
     for line in text.splitlines():

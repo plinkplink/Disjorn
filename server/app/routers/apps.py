@@ -366,7 +366,13 @@ def _builder_entries() -> list[dict[str, Any]]:
         bot_id = entry.get("bot_id")
         if not isinstance(bot_id, int) or isinstance(bot_id, bool):
             continue
-        out.append({"bot_id": bot_id, "model_source": entry.get("model_source")})
+        out.append(
+            {
+                "bot_id": bot_id,
+                "model_source": entry.get("model_source"),
+                "model_key": entry.get("model_key"),
+            }
+        )
     return out
 
 
@@ -390,7 +396,7 @@ async def _build_counts(bot_ids: list[int]) -> dict[int, tuple[int, int]]:
 
 
 def _builder_out(
-    bot: dict[str, Any], model_source: Any, counts: tuple[int, int]
+    bot: dict[str, Any], model_source: Any, model_key: Any, counts: tuple[int, int]
 ) -> BuilderOut:
     # Local import: media imports messages imports channels (channels.py's
     # list_members does the same dodge).
@@ -401,7 +407,10 @@ def _builder_out(
         bot_id=bot["id"],
         name=bot["name"],
         avatar_url=bot_avatar_url(bot["id"], bot["avatar_path"]),
-        model=read_model_pin(model_source if isinstance(model_source, str) else None),
+        model=read_model_pin(
+            model_source if isinstance(model_source, str) else None,
+            model_key if isinstance(model_key, str) else None,
+        ),
         builds_total=total,
         builds_live=live,
     )
@@ -421,7 +430,8 @@ async def _builder_for(bot_id: int) -> Optional[BuilderOut]:
         return None
     entry = _builder_entry(bot_id)
     counts = (await _build_counts([bot_id])).get(bot_id, (0, 0))
-    return _builder_out(bot, (entry or {}).get("model_source"), counts)
+    entry = entry or {}
+    return _builder_out(bot, entry.get("model_source"), entry.get("model_key"), counts)
 
 
 # ---------------------------------------------------------------------------
@@ -603,7 +613,10 @@ async def list_builders(user: CurrentUser) -> list[BuilderOut]:
     counts = await _build_counts(bot_ids)
     return [
         _builder_out(
-            bots[e["bot_id"]], e["model_source"], counts.get(e["bot_id"], (0, 0))
+            bots[e["bot_id"]],
+            e["model_source"],
+            e["model_key"],
+            counts.get(e["bot_id"], (0, 0)),
         )
         for e in entries
         if e["bot_id"] in bots
