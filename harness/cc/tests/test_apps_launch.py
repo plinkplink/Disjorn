@@ -104,7 +104,7 @@ def test_valid_run_prints_argv_and_exits_zero(seat):
     argv = accept(seat, "run", *GOOD, str(seat["prompt"]))
     assert argv[0] == "/usr/bin/systemd-run"
     assert argv[-5:] == [str(seat["wrapper"]), "12", "3", "abc234567xyz",
-                         str(seat["prompt"])]
+                         "/srv/apps-turns/12/3/prompt.md"]
 
 
 def test_exact_systemd_run_argv(seat):
@@ -145,7 +145,8 @@ def test_exact_systemd_run_argv(seat):
         "--setenv=APPS_CONFIG_DIR=/srv/disjorn-build-config/appsbuilding",
         "--setenv=APPS_HARVEST=/usr/local/lib/disjorn/apps_harvest.py",
         "--",
-        str(seat["wrapper"]), "12", "3", "abc234567xyz", str(seat["prompt"]),
+        str(seat["wrapper"]), "12", "3", "abc234567xyz",
+        "/srv/apps-turns/12/3/prompt.md",   # the STAGED copy, never a home path
     ]
 
 
@@ -383,8 +384,9 @@ def test_a_symlink_that_stays_inside_is_accepted(seat):
     link = seat["dir"] / "alias.md"
     link.symlink_to(seat["prompt"])
     argv = accept(seat, "run", *GOOD, str(link))
-    # realpath'd on the way through, so the unit sees the real file.
-    assert argv[-1] == str(seat["prompt"].resolve())
+    # realpath'd on the way through for the wall; the unit itself is handed
+    # the STAGED copy in its result directory, never a path into a home.
+    assert argv[-1] == "/srv/apps-turns/%s/%s/prompt.md" % (GOOD[1], GOOD[2])
 
 
 # ─────────────────────────────────────────────────── the config table itself ──

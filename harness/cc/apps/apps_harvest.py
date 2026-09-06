@@ -549,27 +549,30 @@ def harvest(repo: str | os.PathLike, exit_code: int,
         "spool": {"stdout": spool_stdout, "stderr": spool_stderr},
     }
 
+    halted_reason = None
     if exit_code != 0:
-        # HALTED. Commit so the next turn inherits the work; do NOT touch the
-        # preview root — a half-built app must never replace one that worked
-        # (Claudette #2284).
-        sha = commit_all(repo, f"turn {int(turn)} (halted)", git_bin=git_bin)
-        payload["commit"] = sha
-        payload["files"] = commit_files(repo, sha, git_bin=git_bin) if sha else []
-        payload["halted"] = ("timeout"
-                             if timed_out or exit_code in TIMEOUT_EXIT_CODES
-                             else "error")
-        return _finish(result_dir, payload)
+        halted_reason = ("timeout"
+                         if timed_out or exit_code in TIMEOUT_EXIT_CODES
+                         else "error")
 
     if is_clean(repo, git_bin=git_bin):
+        if halted_reason:
+            # Halted before it wrote anything: nothing to keep, nothing to
+            # scan, preview untouched.
+            payload["halted"] = halted_reason
+            return _finish(result_dir, payload)
         # The runner answered, refused, or decided nothing needed changing.
         # This is a TERMINAL, non-error outcome and it must end the bar's wait
         # (§A: `files_written` with detail.no_changes).
         payload["no_changes"] = True
         return _finish(result_dir, payload)
 
-    # Dirty and clean-exited: the scan runs BEFORE anything is committed or
-    # copied, because a commit is what puts the value beyond recall.
+    # Dirty, halted or not: the scan runs BEFORE anything is committed or
+    # copied, because a commit is what puts the value beyond recall — and a
+    # timed-out turn is exactly the one most likely to have been mid-way
+    # through writing something it should not (keyboard fold, 2026-09-06:
+    # the spec's "commit as halted" is subordinate to "the value must not
+    # enter history").
     scan_paths = dirty_paths(repo, ignored=True, git_bin=git_bin)
     patterns = secret_patterns(read_key(key_file)) if key_file else []
     if key_file and not patterns:
@@ -586,6 +589,16 @@ def harvest(repo: str | os.PathLike, exit_code: int,
         _warn(f"SECRET in the turn's output ({found['encoding']} in "
               f"{found['where']}) — {len(moved)} path(s) quarantined at {dest}, "
               f"nothing committed, nothing copied")
+        return _finish(result_dir, payload)
+
+    if halted_reason:
+        # HALTED with clean output: commit so the next turn inherits the
+        # work; do NOT touch the preview root — a half-built app must never
+        # replace one that worked (Claudette #2284).
+        sha = commit_all(repo, f"turn {int(turn)} (halted)", git_bin=git_bin)
+        payload["commit"] = sha
+        payload["files"] = commit_files(repo, sha, git_bin=git_bin) if sha else []
+        payload["halted"] = halted_reason
         return _finish(result_dir, payload)
 
     sha = commit_all(repo, f"turn {int(turn)}", git_bin=git_bin)

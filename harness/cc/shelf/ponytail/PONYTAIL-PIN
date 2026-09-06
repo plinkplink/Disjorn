@@ -18,7 +18,7 @@ nothing else from the checkout:
   5560b8e383dbe2ddfddc873a1e2bf2e586e23e0cd7d995537482b2315331f6d1  skills/ponytail-audit/SKILL.md
   c84fba75f0ca12bfe83f9a78ea02fd125c5dd3f1fbb18124105a489937f284e6  skills/ponytail-debt/SKILL.md
   24e01d1c9715cb136ba1c4f1e52a95940c0193558b876828e537736480d6408b  skills/ponytail-gain/SKILL.md
-  2264d1615117b02b0fd5a69ec84cd2757006471a78e4d6c22eed6d581c1d37a4  skills/ponytail-help/SKILL.md
+  2264d1615117b02b0fd5a69ec84cd2757006471a78e4d6c22eed6d581c1d37a4  skills/ponytail-help/SKILL.md — DROPPED at merge (marketplace/plugin-install prose is dead advice in a sealed seat; keyboard 2026-09-06)
   40df33b58fc6ef889b93585733feb9566b76e9586efa7f376785c1e995197ac0  skills/ponytail-review/SKILL.md
 
 NOT vendored, deliberately: hooks/, commands/, ponytail-mcp/, scripts/,
@@ -34,7 +34,7 @@ line of the lite/full/ultra table in skills/ponytail/SKILL.md ("Intensity")
 the image writes into the builder brief's ponytail section. It is not the
 builder's choice.
 
-Note for review: skills/ponytail-help/SKILL.md is the quick-reference card and
+Note for review: skills/ponytail-help/SKILL.md — DROPPED at merge (marketplace/plugin-install prose is dead advice in a sealed seat; keyboard 2026-09-06)
 its last section describes installing and auto-updating the ponytail plugin
 from a marketplace — dead advice inside a sealed, egress-less seat. It is
 vendored because the spec's file list is `AGENTS.md` +

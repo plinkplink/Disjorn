@@ -265,6 +265,27 @@ def test_a_secret_in_the_output_quarantines_and_halts(ah, turn, encoding):
     assert list(turn["preview"].iterdir()) == []
 
 
+def test_a_halted_turn_is_scanned_before_its_halted_commit(ah, turn):
+    """Keyboard fold, 2026-09-06 (hand A's own observation): a timed-out turn
+    is the one most likely to be mid-way through writing something it should
+    not, and "commit as halted" would put the value beyond recall. The scan
+    runs on any dirty tree, whatever the exit code; a hit wins over the halt
+    reason, quarantines, and commits nothing."""
+    before = head_sha(ah, turn["repo"])
+    (turn["repo"] / "half.js").write_text(
+        f"// partial\nconst k = '{FAKE_KEY}';\n", encoding="utf-8")
+
+    result = do_harvest(ah, turn, exit_code=124)   # the timeout code
+
+    assert result["halted"] == "secret"          # not "timeout"
+    assert result["commit"] is None
+    assert head_sha(ah, turn["repo"]) == before
+    assert log_subjects(ah, turn["repo"]) == ["turn 1"]
+    assert (turn["quarantine"] / "half.js").exists()
+    assert ah.is_clean(turn["repo"])
+    assert list(turn["preview"].iterdir()) == []
+
+
 def test_a_secret_in_a_modification_to_a_tracked_file_is_caught(ah, turn):
     """The diff half of the scan, not the untracked half."""
     (turn["repo"] / "index.html").write_text(

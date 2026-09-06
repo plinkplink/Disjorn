@@ -275,6 +275,62 @@ def check_apps_table(config: dict) -> "tuple":
     return turn_max, mode, image
 
 
+DEFAULT_PROMPT_MAX_BYTES = 65536
+STAGED_PROMPT_NAME = "prompt.md"
+
+
+def staged_prompt_path(session: str, turn: str) -> str:
+    """Where the unit reads the prompt from: inside its own result directory."""
+    return os.path.join(TURNS_ROOT, session, turn, STAGED_PROMPT_NAME)
+
+
+def read_prompt_bounded(real: str, config: dict) -> bytes:
+    """The prompt's bytes, or a refusal. Read HERE, as root, after the path
+    wall — the file lives in a resident's (or plink's) home, which the seat
+    account cannot read and must never be able to. Bounded by
+    [apps].prompt_max_bytes (spec §B) so a prompt is a prompt and not a
+    payload; empty is refused because an empty turn is a wasted slot."""
+    apps = config.get("apps") or {}
+    limit = apps.get("prompt_max_bytes", DEFAULT_PROMPT_MAX_BYTES)
+    if not isinstance(limit, int) or limit <= 0:
+        die("[apps].prompt_max_bytes must be a positive integer")
+    try:
+        size = os.stat(real).st_size
+    except OSError as exc:
+        die(f"cannot stat prompt: {exc}")
+    if size == 0:
+        die("prompt file is empty")
+    if size > limit:
+        die(f"prompt file is {size} bytes, over the {limit}-byte bound")
+    with open(real, "rb") as fh:
+        data = fh.read(limit + 1)
+    if len(data) > limit:
+        die("prompt file grew past the bound while being read")
+    return data
+
+
+def stage_prompt(data: bytes, session: str, turn: str, pw, group: str) -> str:
+    """Write the prompt into the turn's result directory, owned by the seat,
+    0600, so the unit reads a file it owns and nothing in any home. The
+    result directory is created here (root) and handed to the seat; the
+    wrapper's own mkdir -p is then a no-op."""
+    gid = grp.getgrnam(group).gr_gid
+    turn_dir = os.path.join(TURNS_ROOT, session, turn)
+    session_dir = os.path.dirname(turn_dir)
+    for d in (session_dir, turn_dir):
+        os.makedirs(d, mode=0o755, exist_ok=True)
+        os.chown(d, pw.pw_uid, gid)
+        os.chmod(d, 0o755)
+    dest = os.path.join(turn_dir, STAGED_PROMPT_NAME)
+    tmp = dest + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+    os.chown(tmp, pw.pw_uid, gid)
+    os.replace(tmp, dest)
+    return dest
+
+
 def check_seat() -> "tuple":
     """Resolve res-appsbuilding, or refuse. The account must ALREADY EXIST —
     creating one needs root, so passwd membership is a fact this program cannot
@@ -330,6 +386,10 @@ def build_run_argv(principal: str, session: str, turn: str, app_id: str,
     pw, group = seat if seat is not None else check_seat()
 
     unit = f"{UNIT_PREFIX}{session}-{turn}"
+    # The unit gets the STAGED copy (see stage_prompt), never the resident's
+    # file: the seat account cannot read a home and must never need to.
+    del prompt  # validated; the wall was the point
+    staged = staged_prompt_path(session, turn)
     return [
         SYSTEMD_RUN,
         # Deterministic and greppable, and a second launch of the same turn
@@ -382,7 +442,7 @@ def build_run_argv(principal: str, session: str, turn: str, app_id: str,
         f"--setenv=APPS_CONFIG_DIR={CONFIG_DIR}",
         f"--setenv=APPS_HARVEST={harvest}",
         "--",
-        wrapper, session, turn, app_id, prompt,
+        wrapper, session, turn, app_id, staged,
     ]
 
 
@@ -425,6 +485,14 @@ def main(argv: "list") -> int:
     if dry:
         print(json.dumps(out))
         return 0
+    # Validation passed; now, still as root, read the prompt through the
+    # path wall once more and stage it for the seat. Refusals here are still
+    # exit 64 and still precede any privileged action that outlives us.
+    real = check_prompt(argv[2], argv[6], config)
+    data = read_prompt_bounded(real, config)
+    pw, group = check_seat()
+    staged = stage_prompt(data, argv[3], argv[4], pw, group)
+    assert out[-1] == staged
     # Fixed argv, no shell, and exec (not fork): the descriptors the caller
     # handed us pass straight through, and sudo's child IS systemd-run, so the
     # unit's start status comes back to the caller unchanged. A scrubbed
