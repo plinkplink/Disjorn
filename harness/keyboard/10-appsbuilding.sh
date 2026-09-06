@@ -206,7 +206,8 @@ READMEEOF
   # NOT under /tmp or /var/tmp: a rootless podman joins its long-lived pause
   # process's mount namespace, and a caller with a private tmp (a sandboxed
   # shell, a PrivateTmp unit) hands it a path that does not exist there.
-  install -d -m 0755 /var/cache/disjorn-apps
+  # Owned by the build user: podman save writes the tar there as that user.
+  install -d -m 0755 -o "${SUDO_USER:-plink}" -g "${SUDO_USER:-plink}" /var/cache/disjorn-apps
   STAGE="$(mktemp -d /var/cache/disjorn-apps/ctx.XXXXXX)"
   trap 'rm -rf "$STAGE"; rm -f "$TAR"' EXIT
   mkdir -p "$STAGE/shelf" "$STAGE/apps"
