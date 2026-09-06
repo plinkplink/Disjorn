@@ -466,7 +466,7 @@ spool are its raw material).
   - Claudette's area: `disjorn_bot.py` branch + regenerated
     `broker_tools.py` (§I) → review owner Claudette
   - ponytail vendored copy review → Gable (his request, parent Round 5)
-- **Split agreed in #custodian**: <seq — fill at confirm>
+- **Split agreed in #custodian**: 2302 (rounds #2284–#2299 agreed the surfaces; confirm #2302)
 
 ## Expected diff tier
 Tier 2 — new seat, new sudoers-scoped launcher, new broker verb, broker
