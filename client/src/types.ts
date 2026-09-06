@@ -2,7 +2,12 @@
    These are the client-side contract for WP10-12 — extend, don't fork. */
 
 export type MemberType = "user" | "bot";
-export type ChannelType = "main_feed" | "dm_1to1" | "text";
+/* `app_build` is the modal chat behind an app build session: exactly two
+   members (the session owner and the builder resident), created by the server
+   with the session. The sidebar never lists one — AppShell filters the type
+   out of both channel groups — but GET /channels keeps returning it so
+   reconnect resync and unread bookkeeping go on working (brief D9). */
+export type ChannelType = "main_feed" | "dm_1to1" | "text" | "app_build";
 /** Per-channel access mode. Everything created before the membership spec —
     and everything created without asking — is `public`. */
 export type ChannelVisibility = "public" | "private";
@@ -207,6 +212,108 @@ export interface AvatarUploadResponse {
   url: string;
 }
 
+/* ---- apps (SPECS/2026-08-30-apps-tab-v1.md, stage 1) ---- */
+
+/* The stage vocabulary is FIXED and shared with the server's CHECK constraint
+   (brief D7). Order is load-bearing: it is the stage bar, left to right. No
+   percent exists anywhere — a stage is reached or it is not. */
+export const APP_STAGES = [
+  "scoped",
+  "scaffolded",
+  "files_written",
+  "deployed",
+  "live",
+] as const;
+
+export type AppStage = (typeof APP_STAGES)[number];
+
+/** Human label for a stage — the wire word is snake_case, the bar is not. */
+export const APP_STAGE_LABELS: Record<AppStage, string> = {
+  scoped: "Scoped",
+  scaffolded: "Scaffolded",
+  files_written: "Files written",
+  deployed: "Deployed",
+  live: "Live",
+};
+
+export type AppVisibility = "private" | "shared" | "public";
+export type AppStatus = "draft" | "live" | "archived";
+
+/** The live build session on an app, if there is one. `stage` is null until
+    the first stage event lands (nothing publishes them in stage 1). */
+export interface AppOpenSession {
+  id: number;
+  channel_id: number;
+  stage: AppStage | null;
+  locked_until: string;
+}
+
+/** AppOut. `id` is a random 12-char base32 string, never a sequence (D4). */
+export interface App {
+  id: string;
+  name: string;
+  description: string;
+  visibility: AppVisibility;
+  status: AppStatus;
+  owner_user_id: number;
+  builder_bot_id: number;
+  /** Lineage — the app this one was remixed from. Recorded from day one
+      because it cannot be retrofitted (Amendment A edit 3). */
+  parent_app_id: string | null;
+  created_at: string;
+  updated_at: string;
+  /** Is it on MY menu (owned, or added from discover)? */
+  on_menu: boolean;
+  open_session: AppOpenSession | null;
+}
+
+/**
+ * BuilderOut — a resident seat offered as a builder.
+ *
+ * `model` is read from the seat's own config at request time and printed as
+ * given (provenance-printing policy). `null` is a real answer, not an error:
+ * the card says the seat does not declare one. Never substitute a model name.
+ */
+export interface Builder {
+  bot_id: number;
+  name: string;
+  avatar_url?: string | null;
+  model: string | null;
+  builds_total: number;
+  builds_live: number;
+}
+
+/** Quota unit = build sessions started per user per UTC day (D5). */
+export interface Quota {
+  cap: number;
+  used: number;
+  left: number;
+  resets_at: string;
+}
+
+/** StageEventOut. `detail` is a bounded JSON object (filenames and the like). */
+export interface StageEvent {
+  id: number;
+  session_id: number;
+  stage: AppStage;
+  detail: Record<string, unknown>;
+  created_at: string;
+}
+
+/** SessionOut — everything the build modal renders, in one payload. */
+export interface AppSession {
+  id: number;
+  app: App;
+  channel_id: number;
+  builder: Builder;
+  started_at: string;
+  locked_until: string;
+  ended_at: string | null;
+  stage: AppStage | null;
+  stages: StageEvent[];
+  quota: Quota;
+}
+
 /* ---- WebSocket frames (server -> client) ---- */
 
 export interface ReadyFrame {
@@ -312,6 +419,28 @@ export interface MemberRemoveFrame extends MemberEventFrame {
   type: "member_remove";
 }
 
+/**
+ * A build reached a stage. Fanned out to EVERY socket of the session's owner
+ * and to nobody else — not the builder bot, not other users (brief D7).
+ *
+ * The frame carries no row id (the persisted event has one; the frame does
+ * not), so the store synthesizes a local id for the events it appends live.
+ */
+export interface AppStageFrame {
+  type: "app_stage";
+  session_id: number;
+  app_id: string;
+  stage: AppStage;
+  detail: Record<string, unknown>;
+  created_at: string;
+}
+
+/** An app row changed (rename, status). Owner's sockets only. */
+export interface AppUpdateFrame {
+  type: "app_update";
+  app: App;
+}
+
 export type ServerFrame =
   | ReadyFrame
   | MessageCreateFrame
@@ -322,7 +451,9 @@ export type ServerFrame =
   | ChannelCreateFrame
   | ChannelDeleteFrame
   | MemberAddFrame
-  | MemberRemoveFrame;
+  | MemberRemoveFrame
+  | AppStageFrame
+  | AppUpdateFrame;
 
 /* ---- Web Push payload (WP7 shape; consumed by src/sw.ts) ---- */
 

@@ -571,7 +571,11 @@ def test_context_injection_on_mention_only_for_that_bot(wsc):
             {"id": a, "name": "Alice", "status": "online"},
             {"id": b, "name": "Bob", "status": "online"},
         ]
-        assert ctx["channel_state"] == {"name": "main"}
+        # `type` joined `name` when app_build channels arrived: a resident's
+        # behaviour legitimately differs by room, and it should not have to
+        # infer the room from the shape of the traffic. No `app` key outside an
+        # app_build channel.
+        assert ctx["channel_state"] == {"name": "main", "type": "main_feed"}
         assert ctx["privacy_flags_on_current_message"] == {}
 
         ot_frame = wot.receive_json()

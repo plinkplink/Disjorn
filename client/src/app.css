@@ -3176,3 +3176,512 @@
     max-width: 40vw;
   }
 }
+
+/* ---- apps (SPECS/2026-08-30-apps-tab-v1.md, stage 1) ----
+
+   House tokens only, no new palette. The build modal is the one wide panel in
+   the app — it holds a full chat column next to the build's own state — so it
+   gets its own width rather than borrowing the 440px dialog width. */
+
+/* sidebar rows */
+
+.app-row {
+  gap: var(--space-2);
+}
+
+.app-row .avatar {
+  flex-shrink: 0;
+}
+
+.app-building {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  font-size: var(--text-xs);
+  color: var(--text-2);
+}
+
+.app-building-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-round);
+  background: var(--accent);
+  animation: app-building-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes app-building-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.app-status-chip {
+  flex-shrink: 0;
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-round);
+  background: var(--bg-3);
+  color: var(--text-2);
+  font-size: var(--text-xs);
+  text-transform: lowercase;
+}
+
+.app-status-chip.live {
+  background: var(--accent-muted);
+  color: var(--text-0);
+}
+
+/* quota meter — build sessions per UTC day, never tokens or percent-done */
+
+.app-quota {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 132px;
+  margin-left: auto;
+}
+
+.app-quota-label {
+  font-size: var(--text-xs);
+  color: var(--text-1);
+}
+
+.app-quota-track {
+  display: block;
+  height: 4px;
+  border-radius: var(--radius-round);
+  background: var(--bg-3);
+  overflow: hidden;
+}
+
+.app-quota-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 160ms linear;
+}
+
+.app-quota-fill.spent {
+  background: var(--danger);
+}
+
+/* chooser */
+
+.apps-chooser-modal {
+  width: min(94vw, 560px);
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-l);
+  box-shadow: var(--shadow-raised);
+  padding: var(--space-4);
+}
+
+.app-path-grid {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.app-path {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-4);
+  text-align: left;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-m);
+  background: var(--bg-2);
+  color: var(--text-1);
+  cursor: pointer;
+}
+
+.app-path:hover:not(:disabled) {
+  background: var(--bg-3);
+  border-color: var(--accent);
+}
+
+.app-path:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.app-path-title {
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: var(--text-0);
+}
+
+.app-path-note {
+  font-size: var(--text-xs);
+  color: var(--text-2);
+  line-height: 1.45;
+}
+
+.builder-card {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  padding: var(--space-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-m);
+  background: transparent;
+  color: var(--text-1);
+  text-align: left;
+  cursor: pointer;
+}
+
+.builder-card:hover:not(:disabled) {
+  background: var(--bg-3);
+  border-color: var(--border-subtle);
+}
+
+.builder-card:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.builder-card-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.builder-name {
+  font-weight: 600;
+  color: var(--text-0);
+}
+
+.builder-model {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A seat that declares no model says so in prose, not in monospace: it is not
+   a model name, and it must not look like one. */
+.builder-model.undeclared {
+  font-family: var(--font-body);
+  font-style: italic;
+}
+
+.builder-stat {
+  flex-shrink: 0;
+  font-size: var(--text-xs);
+  color: var(--text-2);
+}
+
+.app-discover-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2);
+  border-radius: var(--radius-m);
+}
+
+.app-discover-row:hover {
+  background: var(--bg-3);
+}
+
+.app-discover-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.app-discover-name {
+  font-weight: 600;
+  color: var(--text-0);
+}
+
+.app-discover-desc {
+  font-size: var(--text-xs);
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* read-only app card */
+
+.app-card-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--text-1);
+}
+
+/* build modal */
+
+.app-build-modal {
+  width: min(96vw, 1100px);
+  height: min(88vh, 780px);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-l);
+  box-shadow: var(--shadow-raised);
+  padding: var(--space-4);
+  overflow: hidden;
+}
+
+.app-build-head {
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.app-build-builder {
+  font-weight: 600;
+  color: var(--text-0);
+}
+
+.app-name-button {
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-m);
+  background: transparent;
+  color: var(--text-0);
+  font-size: var(--text-lg);
+  font-weight: 600;
+  cursor: text;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-name-button:hover {
+  border-color: var(--border-subtle);
+  background: var(--bg-2);
+}
+
+.app-name-input {
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-m);
+  background: var(--bg-0);
+  color: var(--text-0);
+  font-size: var(--text-lg);
+  font-weight: 600;
+  outline: none;
+  min-width: 0;
+  flex: 0 1 240px;
+}
+
+/* The mobile chat/preview switch. Only under 768px is there one column to
+   switch; above it both are on screen and the button would be a lie. */
+.app-build-toggle {
+  display: none;
+}
+
+.app-build-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.app-build-chat {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-m);
+  overflow: hidden;
+}
+
+.app-intro-card {
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-1);
+  color: var(--text-1);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.app-build-ended {
+  padding: var(--space-3);
+  border-top: 1px solid var(--border-subtle);
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  text-align: center;
+}
+
+.app-build-preview {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+/* stage bar — five fixed stages, current highlighted, no percent */
+
+.stage-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.stage-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-xs);
+  color: var(--text-2);
+}
+
+.stage-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-round);
+  background: var(--bg-4);
+}
+
+.stage-step.done {
+  color: var(--text-1);
+}
+
+.stage-step.done .stage-dot {
+  background: var(--accent-muted);
+}
+
+.stage-step.current {
+  color: var(--text-0);
+  font-weight: 600;
+}
+
+.stage-step.current .stage-dot {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-muted);
+}
+
+.app-elapsed {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.app-elapsed-label {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-2);
+}
+
+.app-elapsed-clock {
+  font-family: var(--font-mono);
+  font-size: var(--text-md);
+  color: var(--text-0);
+}
+
+/* The frozen preview. There is no iframe in here, in stage 1 or in this
+   stylesheet: nothing is served yet, and a framed blank would read as a
+   broken app rather than an absent one. */
+
+.app-preview-frozen {
+  flex: 1 1 auto;
+  min-height: 160px;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-m);
+  background: var(--bg-2);
+  overflow: hidden;
+}
+
+.app-preview-banner {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-1);
+  color: var(--text-1);
+  font-size: var(--text-xs);
+}
+
+.app-preview-empty {
+  flex: 1;
+  background: repeating-linear-gradient(
+    135deg,
+    var(--bg-2),
+    var(--bg-2) 10px,
+    var(--bg-3) 10px,
+    var(--bg-3) 20px
+  );
+  opacity: 0.5;
+}
+
+.app-preview-actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+@media (min-width: 1024px) {
+  .app-build-body {
+    flex-direction: row;
+  }
+  .app-build-chat {
+    flex: 1 1 58%;
+  }
+  .app-build-preview {
+    flex: 1 1 42%;
+    min-width: 320px;
+  }
+}
+
+@media (max-width: 767.98px) {
+  /* Full-screen: the backdrop's padding goes too, or it is a window, not a
+     screen. Chat first; the preview lives behind the Progress toggle. */
+  .app-build-backdrop {
+    padding: 0;
+  }
+  .app-build-modal {
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
+    max-height: none;
+    border: none;
+    border-radius: 0;
+  }
+  .app-build-toggle {
+    display: inline-block;
+  }
+  .app-build-preview {
+    display: none;
+  }
+  .app-build-body.show-preview .app-build-chat {
+    display: none;
+  }
+  .app-build-body.show-preview .app-build-preview {
+    display: flex;
+    flex: 1 1 auto;
+  }
+  .app-quota {
+    min-width: 108px;
+  }
+}

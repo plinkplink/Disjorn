@@ -45,6 +45,17 @@ Membership semantics (Architecture §4.1 + SPECS/2026-08-08-per-channel-membersh
   intact. The listing is still derived from membership (user_channel_ids), not
   from a second visibility rule, so there is only ever one wall to reason about.
 - DM channels have exactly two user members.
+- `app_build` channels (SPECS/2026-08-30-apps-tab-v1.md) are the modal build
+  chat for one app. Explicit-membership-only, always `private`, and created
+  with exactly two members: the app's owner and the builder bot. They are
+  created by routers/apps.py, never by POST /channels, and every membership
+  verb here (invite, leave, kick, add-bot, remove-bot) refuses them via
+  `_require_not_app_build` — the owner is `created_by` on the room, and
+  without that refusal the private-channel owner rule would let them add any
+  bot in the house to a room where ws.py summons bots without a name match
+  (Claudette's review block, #custodian 2026-09-06). GET /channels lists them for
+  their member (so resync and unread math keep working); the client filters
+  them out of the visible groups and renders APPS from GET /apps instead.
 - Bots are explicit-members-only EVERYWHERE — main_feed (cli.py create-bot
   inserts the row), text channels and DMs via POST .../bots.
 - Text-channel names: unique, lowercase [a-z0-9-], 1-32 chars (displayed as
@@ -79,6 +90,12 @@ CurrentActor = Annotated[Actor, Depends(get_actor)]
 
 SNIPPET_LEN = 80
 
+# Channel types where every USER in the house is a member without a row, given
+# `visibility = 'public'`. The complete list, and a short one on purpose:
+# dm_1to1 and app_build have fixed, explicit member sets, and a type added to
+# this tuple by reflex is a room the whole house walks into.
+IMPLICIT_MEMBER_TYPES = ("main_feed", "text")
+
 
 # ---------------------------------------------------------------------------
 # Access-rule helpers (exported; other WPs import these)
@@ -88,9 +105,17 @@ async def is_member(channel_id: int, member_type: MemberType, member_id: int) ->
     """True if the actor may access the channel.
 
     Users are implicit members of PUBLIC main_feed and text channels (no row
-    required). Everything else — user in a private channel, user in a DM, bot
-    anywhere — requires an explicit channel_members row. Unknown channels are
-    never accessible.
+    required). Everything else — user in a private channel, user in a DM, user
+    or bot in an `app_build` channel, bot anywhere — requires an explicit
+    channel_members row. Unknown channels are never accessible.
+
+    `app_build` (SPECS/2026-08-30-apps-tab-v1.md) is EXPLICIT-MEMBERSHIP-ONLY
+    and is named in IMPLICIT_MEMBER_TYPES' absence on purpose. It falls through
+    to the row check twice over — its type is not in that tuple and it is
+    created `private` — but the intent is written down here rather than left to
+    be inferred, because a build chat has exactly two members (the builder and
+    the person building) and an implicit-membership rule reaching it later
+    would put the whole house in somebody's build.
 
     This is the single wall: every read path (history, seq/read state, search,
     WS fan-out) asks this question, so a private channel is enforced in one
@@ -103,7 +128,7 @@ async def is_member(channel_id: int, member_type: MemberType, member_id: int) ->
         return False
     if (
         member_type == "user"
-        and channel["type"] in ("main_feed", "text")
+        and channel["type"] in IMPLICIT_MEMBER_TYPES
         and channel["visibility"] == "public"
     ):
         return True
@@ -117,8 +142,11 @@ async def is_member(channel_id: int, member_type: MemberType, member_id: int) ->
 
 async def user_channel_ids(user_id: int) -> list[int]:
     """All channel ids the user can access: public main_feed + public text
-    (implicit) + explicit rows (private channels, DMs; lazy read-state rows
-    dedupe via UNION)."""
+    (implicit) + explicit rows (private channels, DMs, app_build; lazy
+    read-state rows dedupe via UNION).
+
+    The literal type list below is IMPLICIT_MEMBER_TYPES spelled into SQL; keep
+    the two in step."""
     rows = await db.fetch_all(
         """SELECT id FROM channels
             WHERE type IN ('main_feed', 'text') AND visibility = 'public'
@@ -268,6 +296,21 @@ async def list_channels(user: CurrentUser) -> list[ChannelListItem]:
            WHERE c.type = 'dm_1to1' AND cm.member_type = 'user' AND cm.member_id = ?""",
         (user.id,),
     )
+    # App build chats the caller is in (SPECS/2026-08-30-apps-tab-v1.md, D9).
+    # They are listed rather than hidden so reconnect resync and unread
+    # bookkeeping keep working on them like any other channel; the CLIENT
+    # filters `type === "app_build"` out of the Channels and Direct messages
+    # groups, because the APPS group lists APPS (GET /apps), not the rooms the
+    # builds were talked through. Never listed for anyone but their members —
+    # an admin gets no bare row here, unlike a private text channel: a build
+    # chat's existence is not house infrastructure anyone has to be able to see.
+    app_builds = await db.fetch_all(
+        """SELECT c.* FROM channels c
+           JOIN channel_members cm ON cm.channel_id = c.id
+           WHERE c.type = 'app_build' AND cm.member_type = 'user'
+             AND cm.member_id = ?""",
+        (user.id,),
+    )
 
     # ONE question, asked once: which channels is this user a member of?
     # user_channel_ids already answers "public main_feed/text implicitly, plus
@@ -277,7 +320,7 @@ async def list_channels(user: CurrentUser) -> list[ChannelListItem]:
     if not user.is_admin:
         texts = [c for c in texts if c["id"] in member_ids]
 
-    chans = ([main] if main is not None else []) + texts + dms
+    chans = ([main] if main is not None else []) + texts + dms + app_builds
     if not chans:
         return []
 
@@ -366,7 +409,16 @@ async def list_channels(user: CurrentUser) -> list[ChannelListItem]:
     # main_feed pinned first; text channels alphabetically; DMs by most
     # recent activity (ISO strings sort).
     dms_sorted = sorted(dms, key=activity_ts, reverse=True)
-    ordered = ([main] if main is not None else []) + texts + dms_sorted
+    # app_build rows ride at the end, also by most recent activity. Position is
+    # cosmetic — the client filters them out of both visible groups — but they
+    # have to be in the payload for resync and unread math to keep working.
+    app_builds_sorted = sorted(app_builds, key=activity_ts, reverse=True)
+    ordered = (
+        ([main] if main is not None else [])
+        + texts
+        + dms_sorted
+        + app_builds_sorted
+    )
     return [build(c) for c in ordered]
 
 
@@ -776,6 +828,7 @@ async def invite_to_channel(
 ) -> dict[str, bool]:
     """Add a user to a private channel. Owner only; idempotent."""
     channel = await _get_channel(channel_id)
+    _require_not_app_build(channel)
     _require_private(channel)
     _require_owner(channel, user)
     target = await db.fetch_one("SELECT id FROM users WHERE id = ?", (body.user_id,))
@@ -820,6 +873,7 @@ async def leave_channel(channel_id: int, user: CurrentUser) -> dict[str, bool]:
     Leaving takes your last_read_seq with it — the row IS the membership.
     """
     channel = await _get_channel(channel_id)
+    _require_not_app_build(channel)
     _require_private(channel)
     cur = await db.execute(
         """DELETE FROM channel_members
@@ -842,6 +896,7 @@ async def kick_from_channel(
     never ends up with an owner it has evicted.
     """
     channel = await _get_channel(channel_id)
+    _require_not_app_build(channel)
     _require_private(channel)
     _require_owner(channel, user)
     if body.user_id == channel["created_by"]:
@@ -876,8 +931,28 @@ async def kick_from_channel(
 # reach exactly its two participants (plus the bot itself, as the subject).
 # ---------------------------------------------------------------------------
 
+def _require_not_app_build(channel: dict[str, Any]) -> None:
+    """Membership of a build chat is fixed at creation: one owner, one builder.
+
+    Every membership verb in this router calls this first for `app_build`
+    channels. The owner IS `created_by` on the room, so the ordinary
+    private-channel owner rule would otherwise let them invite users, evict the
+    builder mid-build, or add any bot in the house — and ws.py attaches the
+    server-attested context block in these rooms without a name match, which
+    would turn "add a bot" into "summon a keyed resident on every line I type".
+    The room's lifecycle belongs to routers/apps.py; nothing here changes who
+    is in it.
+    """
+    if channel["type"] == "app_build":
+        raise HTTPException(
+            status_code=403,
+            detail="A build chat's members are fixed: the app owner and its builder",
+        )
+
+
 async def _require_bot_manage_access(channel_id: int, user: User) -> dict[str, Any]:
     channel = await _get_channel(channel_id)
+    _require_not_app_build(channel)
     if channel["type"] != "main_feed" and not await is_member(
         channel_id, "user", user.id
     ):
