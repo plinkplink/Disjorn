@@ -480,10 +480,10 @@ table, verb, ledger, stage derivation, §H line, §J server/client;
 (iii) §I resident flows, each resident reviewing their own.
 
 ## Confirm record
-- **Confirmed by**: <username>
-- **#custodian seq**: <seq>
-- **Confirmed at**: <timestamp>
+- **Confirmed by**: plink
+- **#custodian seq**: 2302
+- **Confirmed at**: 9/6/2026
 <!-- No Confirm record → no build. This is the gate. -->
 
 ## Status
-`draft`
+`confirm`
