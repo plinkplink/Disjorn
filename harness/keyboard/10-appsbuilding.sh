@@ -218,11 +218,14 @@ READMEEOF
   BUILD_AS="${SUDO_USER:-plink}"
   say "build as $BUILD_AS (the store with registry egress)"
   chmod -R a+rX "$STAGE"
-  sudo -u "$BUILD_AS" podman build -t "$IMAGE" -f "$STAGE/Containerfile.apps" "$STAGE"
-  NEW_ID=$(sudo -u "$BUILD_AS" podman inspect --format '{{.Id}}' "$IMAGE")
+  # cd to the staged context first: a nested sudo keeps the caller's cwd,
+  # and this script is often run from a directory the build user cannot
+  # enter (a scratch worktree), which sudo refuses with "cannot chdir".
+  (cd "$STAGE" && sudo -u "$BUILD_AS" podman build -t "$IMAGE" -f "$STAGE/Containerfile.apps" "$STAGE")
+  NEW_ID=$(cd "$STAGE" && sudo -u "$BUILD_AS" podman inspect --format '{{.Id}}' "$IMAGE")
   say "built ${NEW_ID:0:12}"
 
-  sudo -u "$BUILD_AS" podman save -o "$TAR" "$IMAGE"
+  (cd "$STAGE" && sudo -u "$BUILD_AS" podman save -o "$TAR" "$IMAGE")
   chmod 0644 "$TAR"
   seat_uid=$(id -u "$SEAT")
   (cd / && sudo -u "$SEAT" env XDG_RUNTIME_DIR="/run/user/$seat_uid" \
