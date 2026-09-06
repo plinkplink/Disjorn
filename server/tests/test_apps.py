@@ -434,6 +434,49 @@ async def test_a_third_user_cannot_read_or_post_in_a_build_chat(
     ).status_code == 200
 
 
+async def test_the_owner_cannot_change_who_is_in_a_build_chat(
+    client, app, settings_env, seat_toml
+):
+    """Claim 5b (Claudette's review block). The owner is `created_by` on the
+    room, and the private-channel owner rule would otherwise let them add any
+    bot in the house — where ws.py summons bots without a name match — or evict
+    the builder mid-build. Membership is fixed at creation, full stop."""
+    await make_user("alice", "Alice")
+    carol = await make_user("carol", "Carol")
+    builder = await make_bot("gable", BUILDER_KEY)
+    other_bot = await make_bot("claudette", BROKER_KEY)
+    settings_env(APPS_BUILDERS=[{"bot_id": builder, "model_source": str(seat_toml)}])
+
+    await login(client, "alice")
+    session = (await start_session(client, builder)).json()
+    channel_id = session["channel_id"]
+
+    refusals = [
+        lambda: client.post(f"/channels/{channel_id}/bots", json={"bot_id": other_bot}),
+        lambda: client.delete(f"/channels/{channel_id}/bots/{builder}"),
+        lambda: client.post(f"/channels/{channel_id}/invite", json={"user_id": carol}),
+        lambda: client.post(f"/channels/{channel_id}/kick", json={"user_id": carol}),
+        lambda: client.post(f"/channels/{channel_id}/leave"),
+    ]
+    for call_verb in refusals:
+        r = await call_verb()
+        assert r.status_code == 403, r.text
+        # The build-chat sentence, not the generic "no membership list" one:
+        # the refusal has to say what is true about THIS room.
+        assert "fixed" in r.json()["detail"]
+
+    # Nothing moved: still exactly the owner and the builder.
+    rows = await db.fetch_all(
+        "SELECT member_type, member_id FROM channel_members WHERE channel_id = ? "
+        "ORDER BY member_type",
+        (channel_id,),
+    )
+    assert [(r["member_type"], r["member_id"]) for r in rows] == [
+        ("bot", builder),
+        ("user", session["app"]["owner_user_id"]),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # 8. Menu + discover
 # ---------------------------------------------------------------------------
@@ -802,6 +845,48 @@ def test_context_is_attested_in_a_build_chat_not_name_matched(
         named = wbot.receive_json()
         assert named["context"]["channel_state"]["type"] == "text"
         assert "app" not in named["context"]["channel_state"]
+
+
+def test_only_the_builder_is_summoned_even_if_another_bot_is_in_the_room(
+    wsc, settings_env, seat_toml
+):
+    """Claim 6b (Claudette's review block). channels.py refuses to add a bot to
+    a build chat; this is the second wall for the day that one moves. A bot
+    present by any other path still receives the room's traffic as a member,
+    but the server-attested context — the summons — goes to the session's
+    builder_bot_id and nobody else."""
+    alice = sync_user(wsc, "alice", "Alice")
+    builder = sync_bot(wsc, "gable", BUILDER_KEY)
+    stowaway = sync_bot(wsc, "claudette", BROKER_KEY)
+    settings_env(APPS_BUILDERS=[{"bot_id": builder, "model_source": str(seat_toml)}])
+    token = sync_login(wsc, "alice")
+
+    session = make_session(wsc, token, builder)
+    build_channel = session["channel_id"]
+    # Smuggle a second bot in below the API, the only way left.
+    call(
+        wsc,
+        db.execute,
+        "INSERT INTO channel_members (channel_id, member_type, member_id) "
+        "VALUES (?, 'bot', ?)",
+        (build_channel, stowaway),
+    )
+
+    with ExitStack() as stack:
+        open_user(stack, wsc, token, alice)
+        wbuilder = open_bot(stack, wsc, builder, BUILDER_KEY)
+        wstow = open_bot(stack, wsc, stowaway, BROKER_KEY)
+
+        post_msg(wsc, cookie(token), build_channel, "make me a to-do list")
+
+        summoned = wbuilder.receive_json()
+        assert summoned["type"] == "message_create"
+        assert summoned["context"]["channel_state"]["app"]["builder_bot_id"] == builder
+
+        seen = wstow.receive_json()
+        assert seen["type"] == "message_create"
+        assert seen["channel_id"] == build_channel
+        assert "context" not in seen
 
 
 def test_stage_events_reach_the_owner_alone_and_live_flips_the_app(

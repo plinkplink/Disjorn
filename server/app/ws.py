@@ -589,12 +589,20 @@ async def handle_bus_event(event: dict[str, Any]) -> None:
         if filtered["type"] == "message_create":
             message = filtered["message"]
             if channel["type"] == "app_build":
-                # Server-attested summon: the room has one user and one bot, so
-                # every message the USER writes is addressed to that bot and the
-                # server can say so without a name match. Bot-authored messages
-                # (the system opener included) carry no context — that is what
-                # keeps a two-member room from talking to itself.
-                attach = message.get("author_type") == "user"
+                # Server-attested summon: every message the USER writes is
+                # addressed to the BUILDER, and the server can say so without a
+                # name match. Two guards, both load-bearing: bot-authored
+                # messages (the system opener included) carry no context, which
+                # keeps the room from talking to itself; and only the session's
+                # builder_bot_id gets it, so a bot that reaches the room by any
+                # other path is never summoned by it (channels.py refuses such
+                # additions, and this is the second wall in case that one moves).
+                app = await _app_block(channel["id"])
+                attach = (
+                    message.get("author_type") == "user"
+                    and app is not None
+                    and bot_id == app["builder_bot_id"]
+                )
             else:
                 name = bot_names.get(bot_id)
                 attach = bool(name) and _mentions_bot(
