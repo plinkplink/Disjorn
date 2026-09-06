@@ -221,11 +221,16 @@ READMEEOF
   # cd to the staged context first: a nested sudo keeps the caller's cwd,
   # and this script is often run from a directory the build user cannot
   # enter (a scratch worktree), which sudo refuses with "cannot chdir".
-  (cd "$STAGE" && sudo -u "$BUILD_AS" podman build -t "$IMAGE" -f "$STAGE/Containerfile.apps" "$STAGE")
-  NEW_ID=$(cd "$STAGE" && sudo -u "$BUILD_AS" podman inspect --format '{{.Id}}' "$IMAGE")
+  # Rootless podman under a nested sudo needs its runtime dir and HOME set
+  # explicitly (the same env the load step below already passes), or its
+  # re-exec dies with "cannot chdir".
+  build_uid=$(id -u "$BUILD_AS")
+  as_builder() { (cd "$STAGE" && sudo -u "$BUILD_AS" env XDG_RUNTIME_DIR="/run/user/$build_uid" HOME="/home/$BUILD_AS" "$@"); }
+  as_builder podman build -t "$IMAGE" -f "$STAGE/Containerfile.apps" "$STAGE"
+  NEW_ID=$(as_builder podman inspect --format '{{.Id}}' "$IMAGE")
   say "built ${NEW_ID:0:12}"
 
-  (cd "$STAGE" && sudo -u "$BUILD_AS" podman save -o "$TAR" "$IMAGE")
+  as_builder podman save -o "$TAR" "$IMAGE"
   chmod 0644 "$TAR"
   seat_uid=$(id -u "$SEAT")
   (cd / && sudo -u "$SEAT" env XDG_RUNTIME_DIR="/run/user/$seat_uid" \
