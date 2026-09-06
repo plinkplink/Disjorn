@@ -138,9 +138,9 @@ class Ctx:
         # must honor these — see /backlog.
         self.flags = flags or {}
         # channels.type of the channel the command was posted in ('main_feed',
-        # 'text', 'dm_1to1'). Resolved once by dispatch. None only if the
-        # channel vanished between insert and dispatch — treated as private
-        # (fail closed), see is_private_channel.
+        # 'text', 'dm_1to1', 'app_build'). Resolved once by dispatch. None only
+        # if the channel vanished between insert and dispatch — treated as
+        # private (fail closed), see is_private_channel.
         self.channel_type = channel_type
         # channels.visibility ('public' | 'private'). A private text channel is
         # readable only by its members, so it is private in exactly the sense
@@ -163,11 +163,21 @@ class Ctx:
 
         main_feed and PUBLIC named text channels are house-public
         (Architecture §4.1: every user is an implicit member). Everything else
-        — DMs, private text channels (per-channel membership), any future
-        restricted channel type, and an unresolvable channel — counts as
-        private. Fail closed: a new channel type is private until someone
-        deliberately adds it here.
+        — DMs, private text channels (per-channel membership), `app_build`
+        channels, any future restricted channel type, and an unresolvable
+        channel — counts as private. Fail closed: a new channel type is private
+        until someone deliberately adds it here.
+
+        `app_build` (SPECS/2026-08-30-apps-tab-v1.md) is spelled out rather
+        than left to the fall-through below. It would answer True either way —
+        it is not in the public tuple and it is created `private` — but a build
+        chat is a two-person room whose whole contents are one user thinking
+        out loud, and "/backlog can never file from here" is a rule that should
+        be findable by searching for the type, not only by reasoning about a
+        default.
         """
+        if self.channel_type == "app_build":
+            return True
         if self.channel_type not in ("main_feed", "text"):
             return True
         return self.channel_visibility != "public"
