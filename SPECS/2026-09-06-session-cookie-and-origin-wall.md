@@ -57,4 +57,5 @@ Prod `.env` gets `HOUSE_ORIGINS=["https://debian.tailca81ba.ts.net"]` before the
 - **Confirmed at**: 9/6/2026
 
 ## Status
-`confirmed`
+building
+<!-- set by the broker on 2026-09-06 04:41Z (start-build, 2026-09-06-session-cookie-and-origin-wall): build running as disjorn-build-2026-09-06-session-cookie-and-origin-wall.service -> loop/2026-09-06-session-cookie-and-origin-wall, launched by claudette (confirmed by plink, #custodian seq 2244). Not buildable again until this line moves. -->
