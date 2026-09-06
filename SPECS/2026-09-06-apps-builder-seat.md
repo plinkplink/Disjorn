@@ -80,10 +80,14 @@ The apps-builder is a build hand, not a persona. Its whole interface is:
 - **exit code**: 0 = turn ended by the runner; anything else = halted.
 
 **Stage events are derived HOST-SIDE from the filesystem and the process,
-never from runner output.** `scoped` on spawn; `scaffolded` on the first
-create-or-modify under `/work` **outside `.git/` and after spawn** (the
-repo is initialised before spawn and turn 2 starts non-empty, so "first
-path appears" would fire at t=0 every turn — Claudette #2284);
+never from runner output — and never from a watch the broker has to be
+alive to hold (Gable #2295, Claudette #2299).** `scoped` on spawn;
+`scaffolded` on the first create-or-modify under `/work` **outside `.git/`
+and after spawn** (the repo is initialised before spawn and turn 2 starts
+non-empty, so "first path appears" would fire at t=0 every turn — Claudette
+#2284), detected by a watcher INSIDE the unit that writes a marker file to
+the turn's result directory (§C); the broker reads markers, it does not
+watch `/work`;
 `files_written` on exit 0 — with `detail.files` listing the changed paths,
 or `detail.no_changes = true` and an empty list when the runner answered,
 refused, or decided nothing needed changing (a turn that ends clean must
@@ -149,13 +153,26 @@ that resident's mapped prompt directory. Anything else is exit 64 before
 any privilege is used. The launcher sets `RuntimeMaxSec`, `MemoryMax`,
 `LimitFSIZE`, `TasksMax`, then `run-apps.sh`.
 
-**The harvest runs in the launcher, as `res-appsbuilding`, not in the
-broker** (Gable #2286): exit status → `git status` → secret scan → commit
-→ copy, driven from the unit's recorded exit status so it is idempotent —
-a broker that restarts mid-turn adopts a finished turn instead of missing
-its exit, and the broker never writes under `/srv/apps` at all. The turn's
-completion is a fact the unit recorded, not a thing the broker had to be
-awake to witness (Claudette #2288). New keyboard script
+**Everything that touches `/srv/apps` runs in the unit as
+`res-appsbuilding`; the broker (which runs as `plink`,
+`harness/broker/disjorn-broker.service`) only ever reads a per-turn
+result directory** (Gable #2286, #2295; Claudette #2288, #2299). The
+launcher, before spawn: `git init` the app repo if absent (so §E's "the
+broker never writes under `/srv/apps`" is true from the first turn).
+The unit, during the turn: an in-unit watcher writes `scaffolded` (a
+timestamp) into the result directory on the first qualifying change. The
+launcher's harvest, on exit: exit status → `git status` → secret scan →
+commit → copy, then `result.json` (exit, files, `no_changes`, `halted`,
+quarantine path, spool paths) written atomically, driven from the unit's
+recorded exit status so it is idempotent — a broker that restarts mid-turn
+adopts a finished turn instead of missing its exit. The turn's completion
+is a fact the unit recorded, not a thing the broker had to be awake to
+witness.
+
+Result directory: `/srv/apps-turns/<session-id>/<turn>/`, owned
+`res-appsbuilding`, directories 0755, files 0644, so the broker can read
+and inotify it without owning it; nothing else is ever written there, and
+it is pruned by the broker's ledger step after the turn is recorded. New keyboard script
 `harness/keyboard/10-appsbuilding.sh` creates all of it idempotently and
 carries a drift test (parent "Seat image": "learn from the build-seat
 provisioning gaps").
@@ -209,8 +226,10 @@ Broker checks, in order, each a flat-sentence refusal in the audit log:
    budget, and no UI may promise a mid-turn stop (Claudette #2284);
 4. one turn at a time per session (in-memory claim, sidecar JSON like
    builds, adopted on restart).
-Then: post `scoped`; `git init` the app repo if absent; spawn the turn;
-watch `/work` for `scaffolded`. The launcher's harvest, on exit:
+Then: post `scoped`; spawn the turn through the launcher (which inits the
+repo if absent); post `scaffolded` when its marker appears in the result
+directory; on `result.json`, post the terminal stages below. The
+launcher's harvest, on exit:
 - **non-zero exit** (timeout, error): commit the tree as `turn N (halted)`
   so the next turn can see the work, leave the preview root UNTOUCHED — a
   half-built app must never replace a preview that worked (Claudette
@@ -315,8 +334,11 @@ restate it in build prompts.
 ### H. What the resident and the user see after a turn
 The turn line is a SERVER-SIDE effect of the stage endpoint, the way the
 opener is (Gable #2286): the broker sends `detail = {turn, files, tokens,
-model, no_changes?, halted?}` on `files_written`, and the server writes ONE
-message as the `system` bot into the app_build channel — "Turn N done — 4
+model, no_changes?, halted?}`, and the server writes ONE message as the
+`system` bot into the app_build channel on `files_written` **and on any
+event carrying `detail.halted`, whatever stage it re-posts** — a turn that
+dies at `scoped` or `scaffolded` must not leave the room silent forever
+(Gable #2295, Claudette #2299) — "Turn N done — 4
 files written (index.html, app.js, style.css, README.md), 212k tokens,
 model claude-opus-5." / "Turn N: no changes." / "Turn N halted — build hit
 its ceiling." The broker has no post right in the room; stage 1's
@@ -350,8 +372,8 @@ with the app block (stage 1). Each needs to know what to do with it:
 - `GET /apps/sessions/{id}/harness-view` (§E.1), publisher-gated.
 - `POST /apps/sessions/{id}/stage` gains `turn` in `detail`, accepts
   `detail.no_changes` and the halt reason (`detail.halted = "ceiling" |
-  "error" | "timeout" | "secret"`), and on `files_written` writes the §H
-  system line into the room; the client renders halted turns as a red chip
+  "error" | "timeout" | "secret"`), and writes the §H system line into the
+  room on `files_written` and on any event with `detail.halted`; the client renders halted turns as a red chip
   on the bar and `no_changes` as the turn ending.
 - Turn count and tokens-so-far columns on `app_sessions`
   (`turns INTEGER NOT NULL DEFAULT 0`, `tokens_used INTEGER NOT NULL
@@ -373,8 +395,11 @@ spool are its raw material).
    careful not to code us into a corner" → §A's host-side stage derivation
    and `[apps].runner` are the corner-avoidance; nothing runner-specific
    outside the image and one usage parser.
-3. **Per-turn container**: proposed yes. plink: "I think your proposal is
-   correct, but I'm not 100% on this UX yet — we'll sort it in the channel."
+3. **Per-turn container**: TAKEN. plink: "I think your proposal is
+   correct, but I'm not 100% on this UX yet — we'll sort it in the
+   channel." Both residents PASS (#2284, #2286: continuity lives in the
+   repo, not the process); plink at the keyboard the same night: "ready to
+   finalize." Re-rulable at confirm.
 4. **Host identity**: `res-appsbuilding`. plink: fine; residents will have
    opinions.
 5. **Handoff verb** `apps-build` with builder-only check. plink: elegant;
@@ -408,6 +433,14 @@ spool are its raw material).
   with versions and hashes (§F); ponytail pinned at `974d940a`,
   instruction files only (§F). Gable's Round 2 pending a human mention
   (bot posts cannot summon him, by design).
+- **Round 3** (#2295 Gable: two NOTEs, no BLOCK, "confirm-ready from my
+  side"; #2298/#2299 Claudette: PASS, both NOTEs endorsed): the broker
+  runs as `plink` and cannot touch `/srv/apps`, so `git init` and the
+  `scaffolded` watch move into the launcher/unit and the broker reads a
+  per-turn result directory (§A, §C, §E); the turn line is written on any
+  halted event, not only `files_written` (§H, §J). Gable's
+  `APP_BUILD_FLOW` wording is drafted seat-local for step (iii).
+  **Confirm-ready from both residents at this revision.**
 - Parent spec Round 14 (same commit) corrects Round 13's `APPS_BUILDERS`
   sentence per #2276: that setting names the CHAT seat (keyed resident);
   the BUILD seat is broker.toml `[apps]`; inert was right for the reason in
