@@ -73,9 +73,10 @@ lists.
 
 ## Notes and sharp edges
 
-- `game/kaplay.js` ends with a `//# sourceMappingURL=kaplay.js.map` comment and
-  we do not ship the map. Devtools will log one 404 for it. Harmless; removing
-  the line would break the digest that ties the file to the registry.
+- `game/kaplay.js` and `chart/chart.umd.min.js` end with a
+  `//# sourceMappingURL=` comment and we do not ship the `.map` files.
+  Devtools will log one 404 each. Harmless; editing the line out would break
+  the digest that ties the file to the registry.
 - `icons/sprite.svg` symbols carry no `stroke` presentation attributes, so the
   consuming `<svg>` must set `fill="none" stroke="currentColor"` itself — see
   `INDEX.md` for the exact snippet.
