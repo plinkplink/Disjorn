@@ -134,7 +134,9 @@ args=(
   # A per-turn HOME on tmpfs: Claude Code needs a writable home for its own
   # state (Gable #2286), and it is discarded at exit, so nothing about one turn
   # leaks into the next except through the repo.
-  --tmpfs "/home/resident:rw,size=512m,uid=1000,gid=1000,mode=0700"
+  # --mount, not --tmpfs: podman's --tmpfs takes no uid=/gid= (exit 125,
+  # "unknown mount option"); U=true chowns the tmpfs to the container user.
+  --mount "type=tmpfs,destination=/home/resident,tmpfs-size=512m,tmpfs-mode=0700,U=true"
   --workdir /work
   # The prompt arrives on stdin. podman drops stdin without -i.
   -i

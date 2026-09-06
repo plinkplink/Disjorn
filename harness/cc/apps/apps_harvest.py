@@ -476,13 +476,18 @@ def watch_for_scaffolded(repo: str | os.PathLike, marker_path: str | os.PathLike
 
 
 def _changed_since(repo: Path, started_at: float) -> bool:
-    """Any path under the repo, outside `.git/`, created or modified at or
-    after `started_at`. The repo root itself counts (a file created directly in
-    it bumps the directory's mtime), which is what makes the very first write
-    of a fresh app register."""
-    for dirpath, dirnames, filenames in os.walk(repo):
+    """Any ENTRY under the repo, outside `.git/`, created or modified at or
+    after `started_at`. The repo root's own mtime does NOT count: `git init`
+    creates `.git/` in it moments before the watch starts and would fire the
+    marker at t=0 on turn 1 (measured at the keyboard's proving turn). A file
+    created directly in the root registers through its own timestamps, so
+    nothing is lost by ignoring the directory's."""
+    root = Path(repo)
+    for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d != ".git"]
-        for name in (dirpath, *(os.path.join(dirpath, f) for f in filenames)):
+        entries = [os.path.join(dirpath, d) for d in dirnames]
+        entries += [os.path.join(dirpath, f) for f in filenames]
+        for name in entries:
             try:
                 st = os.lstat(name)
             except OSError:

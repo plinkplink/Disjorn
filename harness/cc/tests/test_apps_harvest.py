@@ -502,6 +502,27 @@ def test_watcher_does_not_fire_on_an_untouched_repo(ah, turn):
     assert not marker.exists()
 
 
+def test_watcher_ignores_the_git_init_that_precedes_the_turn(ah, tmp_path):
+    """Measured at the keyboard's proving turn: `git init` creates `.git/` in
+    the repo root moments before the watch starts, which bumps the ROOT
+    directory's own mtime and fired the marker at t=0 with no file written.
+    The root's timestamps do not count; a fresh repo with nothing in it stays
+    quiet until a real entry appears."""
+    repo = tmp_path / "fresh"
+    repo.mkdir()
+    started = time.time()
+    ah.ensure_repo(repo)                 # git init AFTER `started`, like run-apps.sh
+    marker = tmp_path / "scaffolded"
+    assert ah.watch_for_scaffolded(repo, marker, started,
+                                   deadline=time.time() + 0.3,
+                                   interval=0.05) is None
+    assert not marker.exists()
+    (repo / "index.html").write_text("<h1>hi</h1>\n", encoding="utf-8")
+    assert ah.watch_for_scaffolded(repo, marker, started,
+                                   deadline=time.time() + 0.3,
+                                   interval=0.05) is not None
+
+
 def test_watcher_ignores_changes_inside_dot_git(ah, turn):
     marker = turn["result_dir"] / "scaffolded"
     started = time.time()
