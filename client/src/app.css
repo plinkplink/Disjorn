@@ -181,7 +181,10 @@
   justify-content: space-between;
 }
 
-.add-channel-btn {
+/* Compound selector on purpose: `.icon-btn` is declared later in this file at
+   equal specificity, so a bare `.add-channel-btn` lost its padding to it and
+   the hover background sat off the glyph. */
+.icon-btn.add-channel-btn {
   width: 18px;
   height: 18px;
   padding: 0;
