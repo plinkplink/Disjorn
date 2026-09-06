@@ -5,6 +5,10 @@ channel (idempotent). Includes every router; WP1 ships them as empty stubs
 that later WPs fill in. Search endpoints live in routers/messages.py (WP4),
 so there is no separate search router.
 
+Startup refuses config that would fail silently (see `check_boot_config`), and
+`create_app` installs the Origin wall (see origin_wall.py) as the app's only
+middleware.
+
 Also home to the app-wide 422 handler (see `validation_error_body`): request
 validation failures answer with a flat human-readable `detail` string, the
 same shape every HTTPException already uses, instead of FastAPI's default
@@ -25,7 +29,8 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import db, ws
-from .config import get_settings
+from .config import Settings, get_settings
+from .origin_wall import OriginWall
 from .routers import (
     auth,
     bots_admin,
@@ -304,6 +309,32 @@ def mount_client(app: FastAPI) -> None:
         return await http_exception_handler(request, exc)
 
 
+def check_boot_config(settings: Settings) -> None:
+    """Refuse to boot on security config whose failure mode leaves no trace.
+
+    Both of these break the house silently. A __Host- cookie sent without
+    Secure is dropped by the browser with no request, no log and no error —
+    the symptom is a login loop. An empty HOUSE_ORIGINS 403s every
+    cookie-authenticated write in the house, which reads as the app being
+    broken rather than as a missing config line.
+
+    Called from the lifespan, not from create_app: cli.py imports this module
+    to reach seed_main_feed and must keep working on a box that has not been
+    configured to serve yet.
+    """
+    if not settings.COOKIE_SECURE:
+        raise RuntimeError(
+            "COOKIE_SECURE must be true: the session cookie carries the __Host- "
+            "prefix and a browser silently drops it unless it is Secure."
+        )
+    if not settings.HOUSE_ORIGINS:
+        raise RuntimeError(
+            "HOUSE_ORIGINS must name at least one origin, e.g. "
+            'HOUSE_ORIGINS=["https://debian.tailca81ba.ts.net"] — an empty list '
+            "rejects every cookie-authenticated write."
+        )
+
+
 async def seed_main_feed() -> int:
     """Ensure exactly one main_feed channel exists; return its id. Idempotent."""
     row = await db.fetch_one("SELECT id FROM channels WHERE type = 'main_feed'")
@@ -320,6 +351,7 @@ async def seed_main_feed() -> int:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    check_boot_config(settings)
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     await db.connect()
     applied = await db.run_migrations()
@@ -343,6 +375,10 @@ def create_app() -> FastAPI:
     )
 
     app = FastAPI(title="Disjorn", lifespan=lifespan)
+
+    # Pure ASGI, not BaseHTTPMiddleware: HTTP middleware never sees the
+    # websocket scope, and the /ws handshake is half of what this wall covers.
+    app.add_middleware(OriginWall)
 
     # Flat-string 422 detail for every route (see validation_error_body).
     app.add_exception_handler(RequestValidationError, validation_exception_handler)

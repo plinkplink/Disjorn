@@ -3,8 +3,10 @@
 Endpoint: GET /ws (websocket).
 
 Auth:
-    Humans — `disjorn_session` cookie on the handshake (WP2 session semantics,
-             sliding expiry refresh included).
+    Humans — `__Host-disjorn_session` cookie on the handshake (WP2 session
+             semantics, sliding expiry refresh included). A handshake carrying
+             that cookie is 403'd before it reaches here unless its Origin is
+             a house origin (app/origin_wall.py).
     Bots   — first frame `{"op": "auth", "api_key": "..."}` within AUTH_TIMEOUT
              seconds.
     Anything else -> close 4401.

@@ -1,7 +1,7 @@
 """Auth module (WP2): login/logout, /me, profile update, and auth dependencies.
 
 Exported dependencies for other WPs:
-    get_current_user — `disjorn_session` cookie -> sessions join users -> User.
+    get_current_user — `__Host-disjorn_session` cookie -> sessions join users -> User.
                        Sliding 30-day expiry: expires_at refreshed on every use.
     get_current_bot  — `X-Api-Key` header -> SHA-256 hashed lookup in bots -> Bot.
     get_actor        — either of the above -> Actor (type: "user"|"bot", id, user|bot).
@@ -42,7 +42,12 @@ from ..models import Bot, MemberType, User, UserStatus
 
 router = APIRouter()
 
-COOKIE_NAME = "disjorn_session"
+# The __Host- prefix is enforced by the browser, not by us: it accepts the
+# cookie only when it is Secure, Path=/ and has no Domain, and a write must
+# target that identical slot. Untrusted app JS at :8443 shares this host's
+# cookie jar, so without the prefix it could plant a longer-Path shadow cookie;
+# with it, the only slot it can aim at is the HttpOnly one it cannot touch.
+COOKIE_NAME = "__Host-disjorn_session"
 SESSION_TTL = datetime.timedelta(days=30)
 
 # Password rules, boring on purpose: a floor on length and nothing else. No

@@ -62,10 +62,12 @@ async def login(client, username: str = "alice", password: str = PASSWORD):
 
 
 @pytest.fixture
-async def second_client(app):
+async def second_client(app, house_origin):
     """A second, independent cookie jar against the same app — a second device."""
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+    async with httpx.AsyncClient(
+        transport=transport, base_url=house_origin, headers={"Origin": house_origin}
+    ) as c:
         yield c
 
 
@@ -139,8 +141,8 @@ async def test_change_password_ends_every_other_session(client, second_client):
     await login(client)
     await login(second_client)
 
-    caller_token = client.cookies["disjorn_session"]
-    other_token = second_client.cookies["disjorn_session"]
+    caller_token = client.cookies["__Host-disjorn_session"]
+    other_token = second_client.cookies["__Host-disjorn_session"]
     assert caller_token != other_token
     assert await session_tokens(uid) == {caller_token, other_token}
     assert (await second_client.get("/me")).status_code == 200
