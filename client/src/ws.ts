@@ -13,6 +13,7 @@
      channels, so this must stay accurate. The last focus is re-sent after
      every (re)connect because focus is per-connection server state. */
 
+import { useApps } from "./stores/apps";
 import { useChannelDelete } from "./stores/channelDelete";
 import { useChannels } from "./stores/channels";
 import { useMembership } from "./stores/membership";
@@ -181,12 +182,30 @@ export class DisjornSocket {
       case "member_remove":
         useMembership.getState().onMemberRemove(frame);
         return;
+      /* Apps (SPECS/2026-08-30-apps-tab-v1.md). Both frames reach the app
+         owner's sockets and nobody else's — the server decides that, and
+         this branch neither re-checks it nor widens it. The apps store is
+         the subscriber; adding a second one means subscribing to that store,
+         not adding a case here. */
+      case "app_stage":
+        useApps.getState().onStage(frame);
+        return;
+      case "app_update":
+        useApps.getState().onAppUpdate(frame);
+        return;
     }
   }
 
   /** After a reconnect: refresh the sidebar and close local message gaps. */
   private async resync(): Promise<void> {
     try {
+      // The apps menu resyncs alongside the channel list — a build may have
+      // finished, or a lock lapsed, while we were away. Its own catch: a
+      // stale sidebar row must not cost us the message backfill below.
+      void useApps
+        .getState()
+        .refresh()
+        .catch(() => {});
       await useChannels.getState().refresh();
       // Membership may have changed while we were away: drop anything the
       // fresh list says we can no longer read BEFORE backfilling, so the
