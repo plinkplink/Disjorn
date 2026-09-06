@@ -1,6 +1,8 @@
 /* Realtime client for GET /ws.
 
-   - Cookie auth on the handshake (browser sends `disjorn_session` itself).
+   - Cookie auth on the handshake (browser sends `__Host-disjorn_session`
+     itself). The server 403s that handshake unless its Origin is a house
+     origin, so this only connects when served from the house itself.
    - Server has no heartbeat: liveness = the socket staying open. On close we
      reconnect with exponential backoff (1s -> 30s, +/- jitter).
    - On RECONNECT (any ready after the first): refetch GET /channels and, for

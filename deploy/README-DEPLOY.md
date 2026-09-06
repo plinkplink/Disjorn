@@ -111,12 +111,13 @@ The unit binds `127.0.0.1:8399` by default. Options, best first:
 
   Tailscale terminates HTTPS with a valid cert at
   `https://<machine>.<tailnet>.ts.net/` and proxies to the loopback port.
-  Then set `COOKIE_SECURE=true` in `server/.env` and restart the unit.
+  Then set `COOKIE_SECURE=true` and
+  `HOUSE_ORIGINS=["https://<machine>.<tailnet>.ts.net"]` in `server/.env` and
+  restart the unit. The server refuses to start without both.
 
-- **Plain HTTP on the tailnet:** change `--host` in the unit to the machine's
-  Tailscale IP (`tailscale ip -4`, a `100.x.y.z` address) or to `0.0.0.0`
-  (also exposes it to your LAN — fine on a trusted network, your call). Keep
-  `COOKIE_SECURE=false` or logins will break over plain HTTP.
+- **Plain HTTP on the tailnet:** no longer supported. The session cookie
+  carries the `__Host-` prefix, which browsers honour only on a Secure cookie,
+  so the server refuses to boot with `COOKIE_SECURE=false`.
 
 **Web Push requires HTTPS** (or `localhost`) — browsers refuse service-worker
 push on plain-HTTP origins, so notifications on phones effectively need the
@@ -188,7 +189,11 @@ ones automatically on startup — no manual migration step. Take a
 - **GET / returns JSON 404 instead of the app** — `client/dist` is missing;
   the server logs `client/dist not found — static serving disabled`. Build
   the client (§2) and restart.
-- **Login works but the cookie doesn't stick** — `COOKIE_SECURE=true` on a
-  plain-HTTP origin. Match it to how you actually serve (§6).
+- **Unit fails at start: "COOKIE_SECURE must be true" / "HOUSE_ORIGINS must
+  name at least one origin"** — both are required (§6). Each failure they
+  prevent is silent, which is why they stop the boot instead of warning.
+- **Every write 403s with "Cross-origin request rejected"** — the browser's
+  origin is not in `HOUSE_ORIGINS`. It is an exact string match, so scheme,
+  host and port must all match how the app is actually reached.
 - **Permission errors on `data/`** — the unit's `User=` must own
   `server/data`; also `ReadWritePaths` in the unit must match `DATA_DIR`.

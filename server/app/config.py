@@ -19,7 +19,19 @@ class Settings(BaseSettings):
 
     # Security
     SECRET_KEY: str = "dev-secret-change-me"  # HMAC signing (media URLs etc.)
-    COOKIE_SECURE: bool = False  # set True behind HTTPS in production
+    # The session cookie carries the __Host- prefix, which a browser honours
+    # only on a Secure cookie, so False drops every login silently. main.py
+    # refuses to boot on it.
+    COOKIE_SECURE: bool = False
+
+    # Origins allowed to make a cookie-authenticated write or open a
+    # cookie-authenticated /ws handshake (app/origin_wall.py). Exact string
+    # match, never a suffix test: the apps port :8443 is a different origin and
+    # must stay out of this list. Dev origins go in the list, never into the
+    # code. Empty is a house-wide write lockout, so main.py refuses to boot on
+    # it. Set from the environment as a JSON array:
+    #   HOUSE_ORIGINS=["https://debian.tailca81ba.ts.net"]
+    HOUSE_ORIGINS: list[str] = []
 
     # Web Push (VAPID) — generated via `cli.py gen-vapid` (WP2)
     VAPID_PUBLIC_KEY: str = ""
