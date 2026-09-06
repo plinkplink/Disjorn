@@ -1,0 +1,68 @@
+# /etc/sudoers.d/92-disjorn-apps — the THIRD (and only other) privileged escape
+# hatch of the disjorn-broker daemon. Sibling of 90-disjorn-broker and
+# 91-disjorn-build; read 91's header first, because the reasoning about sudoers
+# wildcards is identical and is not repeated in full here.
+#
+# Installed by harness/keyboard/10-appsbuilding.sh, which visudo -c's it first.
+# By hand:
+#
+#   sudo install -D -o root -g root -m 0755 \
+#       /home/plink/Disjorn/Disjorn/harness/cc/apps/disjorn-apps-launch \
+#       /usr/local/lib/disjorn/disjorn-apps-launch
+#   sudo visudo -cf /home/plink/Disjorn/Disjorn/harness/keyboard/92-disjorn-apps.sudoers
+#   sudo install -o root -g root -m 0440 \
+#       /home/plink/Disjorn/Disjorn/harness/keyboard/92-disjorn-apps.sudoers \
+#       /etc/sudoers.d/92-disjorn-apps
+#
+# Install the helper it names FIRST or every launch simply fails closed.
+#
+# WHAT IT GRANTS
+#   plink — the uid the broker runs as (harness/broker/disjorn-broker.service:
+#   User=plink), and the uid at the keyboard — may run exactly one root
+#   program, disjorn-apps-launch, in exactly one mode, `run`, with five
+#   shape-checked arguments. The helper takes NO path, NO unit name, NO uid and
+#   NO resource limit from its caller: it derives all of them from the five
+#   arguments plus /etc/disjorn-apps/launch.toml (root-owned), and execs a
+#   fixed systemd-run argv that runs the turn AS res-appsbuilding, never as
+#   root.
+#
+#   There is no `stop` mode and no second program. A turn is bounded by the
+#   unit's RuntimeMaxSec, which the helper sets and no caller can widen; if a
+#   human needs a turn dead sooner, that is `systemctl stop
+#   disjorn-apps-<session>-<turn>` at the keyboard, with plink's own sudo, and
+#   it should stay that deliberate.
+#
+# ONE LINE FOR ONE CALLER, ON PURPOSE. Slice (i) has no broker verb: the
+# keyboard proves the seat by running the launcher by hand. Slice (ii)'s
+# `apps-build` verb is called by the broker, which already runs as plink, so
+# this same line serves it and nothing needs widening. If the broker is ever
+# given its own uid, that is a NEW line here with a visible diff — never a
+# wildcard.
+#
+# WHAT AN ATTACKER WHO OWNS THE plink UID GAINS: the ability to run
+# run-apps.sh — and nothing else — as res-appsbuilding, on a prompt file that
+# must already live in a directory /etc/disjorn-apps/launch.toml names. That is
+# a LATERAL step into a contained seat that holds one metered, revocable API
+# key and one app's source. Nothing here can start a root process, set a unit
+# property, or name a program.
+#
+# HOW FAR THE REGEX ACTUALLY GOES: sudo matches the arguments JOINED BY SPACES,
+# so it cannot tell "five arguments" from "one argument containing four
+# spaces". The helper re-validates every one of them and exits 64. Treat the
+# line below as narrowing, and the helper as the boundary.
+#
+#   run <principal> <session> <turn> <app-id> <prompt-path>
+#     principal   res-<name>, or the literal `keyboard` (slice (i)'s proving
+#                 turn — see the deviation note in disjorn-apps-launch's
+#                 header; delete the `keyboard` alternative here AND the
+#                 launch.toml entry once slice (ii) lands)
+#     session     [1-9][0-9]{0,8}
+#     turn        [1-9][0-9]{0,3}
+#     app-id      [a-z2-7]{12}          (stage 1 D4, base32 lower)
+#     prompt-path an absolute path with no spaces; the helper confines it, by
+#                 realpath, to that principal's mapped prompt directory
+
+Cmnd_Alias DISJORN_APPS_LAUNCH = \
+    /usr/local/lib/disjorn/disjorn-apps-launch ^run (res-[a-z]{1,24}|keyboard) [1-9][0-9]{0,8} [1-9][0-9]{0,3} [a-z2-7]{12} /[^ ]{1,4000}$
+
+plink ALL=(root) NOPASSWD: DISJORN_APPS_LAUNCH
