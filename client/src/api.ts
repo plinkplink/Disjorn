@@ -3,11 +3,15 @@
    Errors surface as ApiError with the server's `detail` string. */
 
 import type {
+  App,
+  AppSession,
+  AppStage,
   AvatarUploadResponse,
   BackfillItem,
   BacklogItem,
   BacklogStatus,
   Bot,
+  Builder,
   ChannelListItem,
   ChannelMemberOut,
   ChannelVisibility,
@@ -18,6 +22,7 @@ import type {
   PlanBoard,
   PlanCard,
   PlanCardDetail,
+  Quota,
   SearchResult,
   SettableStatus,
   SummarizeResponse,
@@ -558,6 +563,140 @@ export function putNotifyPrefs(prefs: NotifyPrefs): Promise<NotifyPrefs> {
    VIEWER changed their own avatar, which left a bot repainted through the
    admin surface showing its old face until the 300s max-age expired. A null
    `avatar_url` is the "no avatar, don't ask" signal; see components/Avatar. */
+
+/* ---- apps (SPECS/2026-08-30-apps-tab-v1.md, stage 1) ---- */
+
+/**
+ * The contract pins the envelope for `GET /apps` and for a session, but not
+ * for the two endpoints that hand back a bare app or a bare list. Both
+ * shapes are accepted here, at the one boundary that can absorb the
+ * difference, so the client half does not depend on which one the server
+ * hand chose. Everything above this line reads a plain `App`.
+ */
+function unwrapApp(payload: App | { app: App }): App {
+  return "app" in payload ? payload.app : payload;
+}
+
+function unwrapApps(payload: App[] | { apps: App[] }): App[] {
+  return Array.isArray(payload) ? payload : payload.apps;
+}
+
+/** GET /apps — the apps on my menu (owned or added) plus my quota meter. */
+export function listApps(): Promise<{ apps: App[]; quota: Quota }> {
+  return request<{ apps: App[]; quota: Quota }>("GET", "/apps");
+}
+
+/** GET /apps/discover — public apps and apps shared with me, minus the ones
+    already on my menu. Empty is the normal state for a new user. */
+export async function discoverApps(): Promise<App[]> {
+  return unwrapApps(
+    await request<App[] | { apps: App[] }>("GET", "/apps/discover"),
+  );
+}
+
+/** GET /apps/builders — the resident seats offered as builders. May be empty
+    (no seats configured); that is a state to render, not an error. */
+export function listBuilders(): Promise<Builder[]> {
+  return request<Builder[]>("GET", "/apps/builders");
+}
+
+/** GET /apps/quota — the meter on its own, for a view with no app list. */
+export function fetchQuota(): Promise<Quota> {
+  return request<Quota>("GET", "/apps/quota");
+}
+
+/**
+ * POST /apps/sessions — start a build session, creating the app when no
+ * `appId` is given. Server-side this also creates the app_build channel, its
+ * two members and the system opener.
+ *
+ * 429 = the daily build cap is spent, 409 = that app already has a live
+ * session lock, 400 = unknown builder. All three arrive as ApiError.detail,
+ * one flat sentence written for a human — show it verbatim.
+ */
+export function startAppSession(
+  builderBotId: number,
+  appId?: string,
+): Promise<AppSession> {
+  return request<AppSession>("POST", "/apps/sessions", {
+    builder_bot_id: builderBotId,
+    ...(appId !== undefined ? { app_id: appId } : {}),
+  });
+}
+
+/** GET /apps/sessions/{id} — owner only; carries the stage history. */
+export function fetchAppSession(sessionId: number): Promise<AppSession> {
+  return request<AppSession>("GET", `/apps/sessions/${sessionId}`);
+}
+
+/**
+ * POST /apps/sessions/{id}/heartbeat — extends the session lock by the
+ * server's TTL. 410 means the session has ended or its lock lapsed; the
+ * build modal treats that as final and stops writing.
+ *
+ * The acknowledgement's fields are not pinned by the contract, so no caller
+ * reads them: success or the ApiError is the whole answer.
+ */
+export function heartbeatAppSession(
+  sessionId: number,
+): Promise<Record<string, unknown>> {
+  return request("POST", `/apps/sessions/${sessionId}/heartbeat`);
+}
+
+/** POST /apps/sessions/{id}/end — idempotent; ending an ended session is not
+    an error, which is what lets the modal end on the way out without racing
+    a lapsed lock. */
+export function endAppSession(
+  sessionId: number,
+): Promise<Record<string, unknown>> {
+  return request("POST", `/apps/sessions/${sessionId}/end`);
+}
+
+/**
+ * POST /apps/sessions/{id}/stage — the ONLY stage publisher in stage 1, and
+ * it is not for this client: the server admits the `broker` bot (or an admin
+ * user) and 403s everyone else. Wrapped here so the contract is complete and
+ * so an admin tool has a typed way in; the app never calls it in a user flow.
+ */
+export function publishAppStage(
+  sessionId: number,
+  stage: AppStage,
+  detail?: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  return request("POST", `/apps/sessions/${sessionId}/stage`, {
+    stage,
+    ...(detail !== undefined ? { detail } : {}),
+  });
+}
+
+/** PATCH /apps/{id} — owner only. Name <= 60 chars, description <= 300 (D10);
+    the server is the wall, the maxLength on the input is only courtesy. */
+export async function patchApp(
+  appId: string,
+  patch: { name?: string; description?: string },
+): Promise<App> {
+  return unwrapApp(
+    await request<App | { app: App }>(
+      "PATCH",
+      `/apps/${encodeURIComponent(appId)}`,
+      patch,
+    ),
+  );
+}
+
+/** POST /apps/{id}/menu — add a visible app to my menu. 403 if it is not
+    visible to me; the refusal, not a hidden button, is the wall. */
+export function addAppToMenu(appId: string): Promise<Record<string, unknown>> {
+  return request("POST", `/apps/${encodeURIComponent(appId)}/menu`);
+}
+
+/** DELETE /apps/{id}/menu — take it off my menu. An owner cannot remove their
+    own app (400): the menu is not where an app is deleted. */
+export function removeAppFromMenu(
+  appId: string,
+): Promise<Record<string, unknown>> {
+  return request("DELETE", `/apps/${encodeURIComponent(appId)}/menu`);
+}
 
 /* ---- plan room (SPECS/2026-08-20-plan-room.md) ---- */
 
