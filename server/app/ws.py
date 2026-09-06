@@ -56,6 +56,18 @@ Server -> client frames (Architecture §8.2; ephemeral events carry no seq):
                                             inviter, the kicker, the leaver
                                             themselves, or whoever added the
                                             bot); null only if nobody acted.
+    {"type": "app_stage", "session_id", "app_id", "stage", "detail",
+     "created_at"}
+                                            an app build session reached one of
+                                            the five fixed stages — to every
+                                            socket of the SESSION OWNER and
+                                            nobody else (not the builder bot,
+                                            not other users, not admins). No
+                                            percent, ever.
+    {"type": "app_update", "app": {...}}    an app was renamed, re-described or
+                                            went live — same owner-only
+                                            audience, same reason. `app` is the
+                                            AppOut payload from routers/apps.py.
 
 Fan-out (bus subscriber, registered idempotently by init() from the app
 lifespan): message events go to connected users who are members of the channel
@@ -66,6 +78,16 @@ secret/off_the_record message reaches no bot in any form, not even the
 tombstone of its deletion. When a message_create mentions a receiving bot
 (`@name` or its name as a word, case-insensitive), that bot's copy — and only
 that bot's — gets a "context" block (Architecture §8.3).
+
+CONTEXT IN AN `app_build` CHANNEL IS SERVER-ATTESTED, not name-matched
+(SPECS/2026-08-30-apps-tab-v1.md, stage 1). Such a channel has exactly two
+members — the person building and the builder resident — so "was I addressed"
+has one answer and the server already knows it. Every USER-authored
+message_create there carries the context block to the member bot, whether or
+not the resident's name appears in the text; bot-authored messages (the system
+opener included) never carry it, which is what stops the room talking to
+itself. This IS the resident integration for the APPS feature: a builder
+summons on `context is not None`, and no harness or adapter code changed.
 
 Exports for WP7: `manager` (ConnectionManager singleton) with
 `is_user_connected(user_id)` and `user_focused_channel_ids(user_id)`.
@@ -301,10 +323,44 @@ def _mentions_bot(content: str, bot_name: str) -> bool:
     return pattern.search(content) is not None
 
 
+async def _app_block(channel_id: int) -> Optional[dict[str, Any]]:
+    """The app a build channel is for, as the builder resident needs to see it.
+
+    Named from the session, not from the channel: the channel's `name` is a
+    snapshot taken when the room was made, and the app may have been renamed
+    since. The newest session on the channel wins — there is normally exactly
+    one, and if a channel is ever reused the current build is the one that
+    matters.
+    """
+    row = await db.fetch_one(
+        """SELECT s.id AS session_id, s.builder_bot_id, s.stage,
+                  a.id AS app_id, a.name AS app_name
+             FROM app_sessions s JOIN apps a ON a.id = s.app_id
+            WHERE s.channel_id = ? ORDER BY s.id DESC LIMIT 1""",
+        (channel_id,),
+    )
+    if row is None:
+        return None
+    return {
+        "id": row["app_id"],
+        "name": row["app_name"],
+        "session_id": row["session_id"],
+        "builder_bot_id": row["builder_bot_id"],
+        "stage": row["stage"],
+    }
+
+
 async def _context_block(
     channel: dict[str, Any], message: dict[str, Any]
 ) -> dict[str, Any]:
-    """Structured context injection (§8.3), from already-filtered data."""
+    """Structured context injection (§8.3), from already-filtered data.
+
+    `channel_state` carries the channel's `type` as well as its name, because
+    a resident's behaviour legitimately differs by room and it should not have
+    to infer the room from the shape of the traffic. In an `app_build` channel
+    it also carries an `app` block, which is everything the builder needs to
+    know what it is building without asking the API.
+    """
     awake_users = []
     connected = sorted(manager.connected_user_ids())
     if connected:
@@ -323,9 +379,17 @@ async def _context_block(
             awake_users.append(
                 {"id": uid, "name": names.get(uid, f"user-{uid}"), "status": status}
             )
+    channel_state: dict[str, Any] = {
+        "name": channel["name"],
+        "type": channel["type"],
+    }
+    if channel["type"] == "app_build":
+        app = await _app_block(channel["id"])
+        if app is not None:
+            channel_state["app"] = app
     return {
         "awake_users": awake_users,
-        "channel_state": {"name": channel["name"]},
+        "channel_state": channel_state,
         "privacy_flags_on_current_message": message.get("privacy_flags") or {},
     }
 
@@ -352,6 +416,19 @@ async def _send_to_members(
             continue
         for ws in manager.bot_sockets(bot_id):
             await _send(ws, frame)
+
+
+async def _send_to_user(user_id: Optional[int], frame: dict[str, Any]) -> None:
+    """Every socket of ONE user, and nothing else.
+
+    Used by the app frames, whose audience is the session/app owner alone. A
+    missing owner id delivers to nobody, which is the fail-closed answer: an
+    unroutable owner-only frame must not degrade into a broadcast.
+    """
+    if not isinstance(user_id, int):
+        return
+    for ws in manager.user_sockets(user_id):
+        await _send(ws, frame)
 
 
 async def handle_bus_event(event: dict[str, Any]) -> None:
@@ -409,6 +486,32 @@ async def handle_bus_event(event: dict[str, Any]) -> None:
                 )
                 for ws in sockets:
                     await _send(ws, frame)
+        return
+    if etype == "app_stage":
+        # Owner's sockets only. `owner_user_id` rides on the bus event and is
+        # stripped here — it is routing, not content, and the modal already
+        # knows whose it is. The client store is the subscriber; a second one
+        # (a notifier, a log tail) can be added without the publisher learning
+        # about it.
+        await _send_to_user(
+            event.get("owner_user_id"),
+            {
+                "type": "app_stage",
+                "session_id": event["session_id"],
+                "app_id": event["app_id"],
+                "stage": event["stage"],
+                "detail": event.get("detail") or {},
+                "created_at": event["created_at"],
+            },
+        )
+        return
+    if etype == "app_update":
+        # Same audience, same reason: an owner's draft app name is not news for
+        # the house, and members who merely have it on their menu see the
+        # change on their next GET /apps.
+        await _send_to_user(
+            event.get("owner_user_id"), {"type": "app_update", "app": event["app"]}
+        )
         return
     if etype in _MEMBER_EVENT_TYPES:
         frame = {
@@ -484,9 +587,20 @@ async def handle_bus_event(event: dict[str, Any]) -> None:
             continue
         bot_frame = _frame_for_event(filtered)
         if filtered["type"] == "message_create":
-            name = bot_names.get(bot_id)
             message = filtered["message"]
-            if name and _mentions_bot(message.get("content") or "", name):
+            if channel["type"] == "app_build":
+                # Server-attested summon: the room has one user and one bot, so
+                # every message the USER writes is addressed to that bot and the
+                # server can say so without a name match. Bot-authored messages
+                # (the system opener included) carry no context — that is what
+                # keeps a two-member room from talking to itself.
+                attach = message.get("author_type") == "user"
+            else:
+                name = bot_names.get(bot_id)
+                attach = bool(name) and _mentions_bot(
+                    message.get("content") or "", name
+                )
+            if attach:
                 bot_frame = {
                     **bot_frame,
                     "context": await _context_block(channel, message),
