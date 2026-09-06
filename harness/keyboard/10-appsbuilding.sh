@@ -281,8 +281,13 @@ fi
 # exactly this comparison: a rebuild that never happened is invisible otherwise.
 want_cc=$(sed -n 's/^ARG CLAUDE_CODE_VERSION=\(.*\)$/\1/p' \
           "$REPO/harness/cc/Containerfile.apps" | head -n1)
-have_cc=$(sudo -u "${SUDO_USER:-plink}" podman inspect \
-          --format '{{index .Labels "disjorn.claude-code-version"}}' "$IMAGE" 2>/dev/null || true)
+# Ask the SEAT's store (that is the image that runs), from / (a nested sudo
+# keeps the caller's cwd, which the seat may not be able to enter), with the
+# rootless runtime env set, and read the label off .Config where podman
+# image inspect keeps it.
+seat_uid_d=$(id -u "$SEAT")
+have_cc=$(cd / && sudo -u "$SEAT" env XDG_RUNTIME_DIR="/run/user/$seat_uid_d" HOME="/home/$SEAT" \
+          podman image inspect --format '{{index .Config.Labels "disjorn.claude-code-version"}}' "$IMAGE" 2>/dev/null || true)
 if [ -z "$have_cc" ]; then
   echo "  MISSING  image $IMAGE (or it carries no disjorn.claude-code-version label)"; drift=1
 elif [ "$have_cc" = "$want_cc" ]; then
