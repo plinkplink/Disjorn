@@ -41,7 +41,7 @@ REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 SEAT=res-appsbuilding
 SUBID_BASE=400000                 # 200000 claudette, 300000 gable (02-podman.sh)
 IMAGE=localhost/disjorn-apps-builder:latest
-TAR=/var/tmp/disjorn-apps-builder.tar   # /var/tmp, NOT /tmp: /tmp is tmpfs here
+TAR=/var/cache/disjorn-apps/disjorn-apps-builder.tar   # not /tmp or /var/tmp: see the STAGE note
 LIBDIR=/usr/local/lib/disjorn
 ETCDIR=/etc/disjorn-apps
 CONFIG_DIR=/srv/disjorn-build-config/appsbuilding
@@ -203,7 +203,11 @@ READMEEOF
   # The context is STAGED and small: the shelf, the seat's config, and the
   # Containerfile. The repo root must never be a build context (871MB, and it
   # contains the production database).
-  STAGE="$(mktemp -d /var/tmp/disjorn-apps-ctx.XXXXXX)"
+  # NOT under /tmp or /var/tmp: a rootless podman joins its long-lived pause
+  # process's mount namespace, and a caller with a private tmp (a sandboxed
+  # shell, a PrivateTmp unit) hands it a path that does not exist there.
+  install -d -m 0755 /var/cache/disjorn-apps
+  STAGE="$(mktemp -d /var/cache/disjorn-apps/ctx.XXXXXX)"
   trap 'rm -rf "$STAGE"; rm -f "$TAR"' EXIT
   mkdir -p "$STAGE/shelf" "$STAGE/apps"
   if [ -d "$REPO/harness/cc/shelf" ]; then
