@@ -215,11 +215,24 @@ happened instead of "something went wrong" (Claudette #2284). Chat is
 data; the prompt is data the broker reads, never argv a resident composes.
 
 Broker checks, in order, each a flat-sentence refusal in the audit log:
-1. session exists, is open, lock not lapsed — read through a new
+1. session exists and is OPEN (`ended_at IS NULL`) — read through a new
    broker-only server endpoint `GET /apps/sessions/{id}/harness-view`
    (bot actor whose name is in `APPS_STAGE_PUBLISHER_BOT_NAMES`, i.e. the
    `broker` bot; returns app id, owner id, builder bot id, stage, turn count,
-   tokens so far);
+   tokens so far).
+   **Slice (ii) amendment (keyboard D-A1, Claudette #2345/#2349, Gable
+   #2347): a LAPSED LOCK does not refuse a handoff, and a publisher's stage
+   post is not 410'd on a lapsed lock either.** The lock is the USER's chat
+   exclusivity (the modal's heartbeat, ~15 min), and a turn can run longer
+   than that; a resident handing off seconds after the modal closed, and the
+   record of a turn that ran, both have to land. Only an explicit `end`
+   (or a secret halt, which ends the session server-side) closes the door,
+   at 410. This supersedes this list's earlier "lock not lapsed" and the
+   parent v1 D6 where it read a lapsed lock as a refusal. The concurrent-
+   writer hole a lapsed lock opens (a second session on the same app) is
+   closed instead by the app-keyed one-turn claim in §E.4, NOT by the lock;
+   an app's turn HISTORY is still not single-threaded (two sessions can
+   alternate handoffs between turns), which is a known, named limit.
 2. the caller's SEAT, as the kernel asserts it (SO_PEERCRED → `[uids]`),
    maps through `[apps].seat_bots` to a bot id equal to the session's
    `builder_bot_id`. An unmapped seat is refused loudly. The seat that
@@ -364,7 +377,14 @@ dies at `scoped` or `scaffolded` must not leave the room silent forever
 (Gable #2295, Claudette #2299) — "Turn N done — 4
 files written (index.html, app.js, style.css, README.md), 212k tokens,
 model claude-opus-5." / "Turn N: no changes." / "Turn N halted — build hit
-its ceiling." The broker has no post right in the room; stage 1's
+its ceiling." **Slice (ii) amendment (keyboard D-1.2, Claudette
+#2345/#2354): the runner's one-line `summary` (§A) rides `files_written`
+detail and is appended to this line as the BUILDER's words, quoted after the
+house sentence** — never in the house's own voice, because it is output from
+an isolated seat that read a user's prompt. A halt keeps its summary and
+names the files it committed the same way ("… Wrote index.html, app.js.
+\"the report\"") — halts have facts too (Claudette #2352/#2354). An empty
+summary yields the plain line with no dangling quotes. The broker has no post right in the room; stage 1's
 two-member wall (#2266) stays the only path. That line is the build summary
 in the resident's transcript
 (parent B9: the resident later says "the app I built you" because the
@@ -482,8 +502,11 @@ spool are its raw material).
   the scan runs before a HALTED commit too (a timed-out turn that wrote the
   key quarantines instead of committing it); `scaffolded` ignores the repo
   root's own mtime (git init bumped it); tmpfs HOME via `--mount U=true`.
-  The `keyboard` launch principal stands as shipped (one literal, inert
-  without its `launch.toml` line, deleted at slice (ii)).
+  The `keyboard` launch principal was DELETED at slice (ii) (keyboard D-C2,
+  Gable/Claudette): the launcher literal, the `launch.toml` line, and the
+  sudoers alternative all gone, so the only principal is a `res-<name>` seat
+  and the spec's charset is the whole story. The proving turns from slice (ii)
+  on go through the `apps-build` verb, not a hand-run `keyboard` principal.
 - **Slice (i) review, rounds 2–3** (2026-09-07): BLOCK 2 (Claudette #2320,
   folded `6014c2f`) — the prompt name was checked and then reopened; now one
   `O_NOFOLLOW` open, identity from the fd. BLOCK 3 (Claudette #2325, Gable
@@ -508,6 +531,28 @@ spool are its raw material).
   sentence per #2276: that setting names the CHAT seat (keyed resident);
   the BUILD seat is broker.toml `[apps]`; inert was right for the reason in
   #2274.
+
+- **Slice (i) MERGED** to main `4d89b49` (review-seq 2336): the seat, the
+  launcher, the harvest, the image, the shelf, the brief. Three review
+  rounds (#2313/#2320/#2325), all folded; code head `f27c057`, prose head
+  `4b54789`, notes folded at `863c909`. Rounds recorded above under §A/§C/§E.
+- **Slice (ii) MERGED** to main `7d80a79` (review-seq 2354): the `apps-build`
+  verb + boot check + ledger, `harness-view`, the stage publisher + §H line,
+  migration 012, the client bar/chip/scroll, the harvest summary/flag lift,
+  the `keyboard` principal deletion. Built by three Opus hands, smoke-proven
+  live. Review: kickoff notes + Gable's app-id BLOCK folded pre-build
+  (#2347/#2349); two `publish_stage` BLOCKs folded (#2352 — a halted turn
+  free-riding the token ceiling, and a `spawned:false` refusal rewinding the
+  stage pointer); two re-read NOTEs folded (#2354 — the one-token-event-per-
+  turn invariant made a server-side wall, and a halt keeping its report).
+  Cleared #2354. Ships inert (verbs.toml OFF for both residents, prod
+  `APPS_BUILDERS` empty). Amendments this revision: §E.1 (lock lapse no
+  longer refuses a handoff or a publisher post — D-A1/D-B3), §H (the runner
+  summary quoted as the builder's words; a halt names its files), §C (the
+  `keyboard` principal deleted — D-C2).
+- **Slice (iii)** (not built): the residents' `APP_BUILD_FLOW` / adapter
+  branch (each their own review), then prod `APPS_BUILDERS` set and
+  `verbs.toml apps-build` flipped on — the go-live. Stage 3 is the :8443 gate.
 
 ## Lane → Review owner (DETERMINISTIC — filled from the lane, never preference)
 - **Lane**: custodian — broker, `harness/cc` (new image, `run-apps.sh`,
