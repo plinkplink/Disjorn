@@ -1820,7 +1820,12 @@ class Broker:
         # one atomic. §E check 4: one turn at a time per session, which is a
         # check-then-act race everywhere it is not held under a lock.
         self._apps_lock = threading.Lock()
-        self._active_apps: dict[int, int] = {}
+        # app_id -> (session, turn): one turn at a time PER APP, not per session
+        # (Gable #2347 BLOCK). A lapsed user lock lets a second session open on
+        # the same app (create_session only refuses a LIVE lock), so a claim
+        # keyed on the session would let two turns write /srv/apps/<app-id> at
+        # once. The thing protected is the app tree; the claim names the app.
+        self._active_apps: dict[str, tuple[int, int]] = {}
         self._apps_threads: list[threading.Thread] = []
         # Why the verb is off, in one flat sentence, or None. Set by the boot
         # check at the end of construction, once the audit lock exists.
@@ -3842,19 +3847,20 @@ class Broker:
 
     # -- the claim --------------------------------------------------------
 
-    def _apps_claim(self, session: int, turn: int) -> None:
-        """§E check 4: one turn at a time per session. Claimed under the lock,
-        because check-then-act on a dict is exactly the race two handoffs
-        seconds apart would win."""
+    def _apps_claim(self, app_id: str, session: int, turn: int) -> None:
+        """§E check 4: one turn at a time per APP (Gable #2347). Claimed under
+        the lock, because check-then-act on a dict is exactly the race two
+        handoffs seconds apart would win — and the two handoffs need not be the
+        same session, since a lapsed lock admits a second one on the same app."""
         with self._apps_lock:
-            if session in self._active_apps:
+            if app_id in self._active_apps:
                 raise VerbError("apps-refused",
-                                "a turn is already running for this session")
-            self._active_apps[session] = turn
+                                "a turn is already running for this app")
+            self._active_apps[app_id] = (session, turn)
 
-    def _apps_release(self, session: int) -> None:
+    def _apps_release(self, app_id: str) -> None:
         with self._apps_lock:
-            self._active_apps.pop(session, None)
+            self._active_apps.pop(app_id, None)
 
     # -- talking to the server --------------------------------------------
 
@@ -3924,7 +3930,8 @@ class Broker:
 
     def _apps_ledger_record(self, rec: dict, *, result: Optional[dict],
                             exit_code: Optional[int], halted: Optional[str],
-                            tokens: int, synthesized: bool) -> dict:
+                            tokens: int, synthesized: bool,
+                            spawned: bool = True) -> dict:
         """One ledger line's fields, from the sidecar and result.json together.
         Built in ONE place so the ceiling refusal, the harvested turn and the
         synthesized absence cannot describe the same session differently."""
@@ -3977,6 +3984,11 @@ class Broker:
             "tokens_after": tokens_before + tokens,
             "ceiling": self._apps_int("build_token_ceiling"),
             "synthesized": synthesized,
+            # A ceiling refusal spawns nothing, so it is not a turn: git will
+            # never write `turn N`, and the NEXT real handoff reuses N
+            # (Gable #2347, Claudette #2349). The server keys the turn counter
+            # off this too.
+            "spawned": spawned,
         }
 
     # -- the sidecar -------------------------------------------------------
@@ -4060,23 +4072,29 @@ class Broker:
         turns = int(view.get("turns") or 0)
         turn = turns + 1
         if tokens_used >= ceiling:
-            detail = {"turn": turn, "halted": "ceiling",
+            # Nothing spawns. The room and the bar still hear it, as turn N's
+            # first and ONLY stage event — `scoped` + halted:ceiling, pinned
+            # literal (Gable #2347): "last-reached stage" is undefined when the
+            # turn has no stages, and re-posting turn N-1's files_written with a
+            # ceiling chip would label the wrong turn. spawned:false keeps N
+            # unconsumed for the next real handoff.
+            detail = {"turn": turn, "halted": "ceiling", "spawned": False,
                       "reason": "the session reached its token ceiling before "
                                 "this turn"}
-            self._apps_post_stage(
-                session, str(view.get("stage") or "scoped"), detail)
+            self._apps_post_stage(session, "scoped", detail)
             self._apps_ledger(self._apps_ledger_record(
                 {"session": session, "turn": turn, "app_id": app_id,
                  "caller": resident, "unit": apps_unit_name(session, turn),
                  "model": self.apps.get("model"), "tokens_before": tokens_used},
                 result=None, exit_code=None, halted="ceiling", tokens=0,
-                synthesized=False))
+                synthesized=False, spawned=False))
             raise VerbError("apps-refused",
                             f"this build has hit its token ceiling "
                             f"({tokens_used} of {ceiling})")
 
-        # 4. one turn at a time. Claimed here so everything below can release it.
-        self._apps_claim(session, turn)
+        # 4. one turn at a time per app. Claimed here so everything below can
+        #    release it.
+        self._apps_claim(app_id, session, turn)
         try:
             prompt_path = self._map_resident_path(
                 resident, prompt_file, label="prompt_file")
@@ -4114,7 +4132,7 @@ class Broker:
                 # The child holds its own dups; this process must not.
                 self._close_build_logs(out_fh, err_fh)
         except BaseException:
-            self._apps_release(session)
+            self._apps_release(app_id)
             self._apps_remove_sidecar(session, turn)
             raise
 
@@ -4126,7 +4144,7 @@ class Broker:
         # also why `scoped` is posted after this window and not before it.
         refusal = self._apps_early_refusal(proc, err_path)
         if refusal is not None:
-            self._apps_release(session)
+            self._apps_release(app_id)
             self._apps_remove_sidecar(session, turn)
             self._unlink_build_logs(out_path, err_path)
             raise VerbError("apps-refused", refusal)
@@ -4261,7 +4279,7 @@ class Broker:
             self._audit("broker", "apps-build",
                         {"session": session, "turn": turn}, True,
                         f"the apps reaper failed: {exc!r}")
-            self._apps_release(session)
+            self._apps_release(str(rec.get("app_id") or ""))
             self._apps_remove_sidecar(session, turn)
             return
         # Shutting down: leave the sidecar exactly where the NEXT process looks
@@ -4343,7 +4361,7 @@ class Broker:
         self._apps_ledger(self._apps_ledger_record(
             rec, result=result, exit_code=exit_code, halted=halted,
             tokens=tokens, synthesized=False))
-        self._apps_release(session)
+        self._apps_release(str(rec.get("app_id") or ""))
         self._apps_remove_sidecar(session, turn)
 
     def _apps_synthesize(self, rec: dict, proc: Any, scaffolded: bool,
@@ -4362,7 +4380,7 @@ class Broker:
             rec, result=None,
             exit_code=exit_code if isinstance(exit_code, int) else None,
             halted="error", tokens=0, synthesized=True))
-        self._apps_release(session)
+        self._apps_release(str(rec.get("app_id") or ""))
         self._apps_remove_sidecar(session, turn)
 
     # -- reattachment after a restart --------------------------------------
@@ -4409,10 +4427,11 @@ class Broker:
                 except OSError:
                     pass
                 continue
+            app_id = str(rec.get("app_id") or "")
             with self._apps_lock:
-                if session in self._active_apps:
-                    continue        # this process already owns it
-                self._active_apps[session] = turn
+                if app_id in self._active_apps:
+                    continue        # this process already owns a turn on this app
+                self._active_apps[app_id] = (session, turn)
             adopted.append(str(rec["unit"]))
             t = threading.Thread(target=self._reap_apps, args=(rec, None),
                                  daemon=True)

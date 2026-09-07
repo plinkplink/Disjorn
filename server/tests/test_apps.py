@@ -1173,6 +1173,40 @@ async def test_turns_are_maxed_and_tokens_add_on_files_written_alone(
     assert (await view())["turns"] == 2
 
 
+async def test_a_ceiling_refusal_does_not_consume_the_turn_number(
+    client, app, settings_env, seat_toml
+):
+    """Gable #2347: a `spawned: false` event (a ceiling refusal) is posted for
+    the room but nothing ran, so it must not advance the turn counter — the
+    next real handoff reuses the number."""
+    session = await build_fixture(client, settings_env, seat_toml)
+    sid = session["id"]
+
+    async def turns() -> int:
+        return (
+            await client.get(
+                f"/apps/sessions/{sid}/harness-view",
+                headers=as_bot(client, BROKER_KEY),
+            )
+        ).json()["turns"]
+
+    # turn 1 ran and was counted.
+    await post_stage(
+        client, sid, "files_written",
+        {"turn": 1, "files": ["a.js"], "tokens": 10, "model": "m"},
+    )
+    assert await turns() == 1
+
+    # a ceiling refusal, labelled turn 2, spawned false: the room hears it but
+    # the counter stays at 1, so the next real handoff is still turn 2.
+    resp = await post_stage(
+        client, sid, "scoped",
+        {"turn": 2, "halted": "ceiling", "spawned": False, "reason": "over"},
+    )
+    assert resp.status_code == 200
+    assert await turns() == 1
+
+
 async def test_the_turn_line_says_exactly_what_the_turn_did(
     client, app, settings_env, seat_toml
 ):
@@ -1202,7 +1236,7 @@ async def test_the_turn_line_says_exactly_what_the_turn_did(
     assert (await channel_lines(channel))[-1] == (
         "Turn 1 done — 4 files written (index.html, app.js, style.css, "
         "README.md), 212k tokens, model claude-opus-5. "
-        "A four-file to-do list that stores in localStorage."
+        '"A four-file to-do list that stores in localStorage."'
     )
 
     # `deployed` is the publish, not a second outcome: one line per turn.
@@ -1215,7 +1249,7 @@ async def test_the_turn_line_says_exactly_what_the_turn_did(
          "no_changes": True, "summary": "Already does that."},
     )
     assert (await channel_lines(channel))[-1] == (
-        "Turn 2: no changes. Already does that."
+        'Turn 2: no changes. "Already does that."'
     )
 
     # A halt at `scoped` — the stage it re-posts is the last one it reached,

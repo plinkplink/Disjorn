@@ -409,14 +409,18 @@ def test_the_ceiling_refuses_and_still_tells_the_room(apps):
         "this build has hit its token ceiling (10000000 of 10000000)")
     assert apps.spawn.calls == []
     (event,) = apps.stages
-    assert event["stage"] == "deployed"          # the last-reached stage
+    # Gable #2347: always `scoped`, turn N's first and only event; not the
+    # previous turn's stage with a ceiling chip on it.
+    assert event["stage"] == "scoped"
     assert event["detail"]["turn"] == 4
     assert event["detail"]["halted"] == "ceiling"
+    assert event["detail"]["spawned"] is False   # N is not consumed
     assert event["detail"]["reason"]
     (line,) = apps.ledger()
     assert line["halted"] == "ceiling"
     assert line["exit"] is None
     assert line["tokens"] == 0
+    assert line["spawned"] is False
     assert line["ceiling"] == 10_000_000
 
 
@@ -427,13 +431,27 @@ def test_a_ceiling_refusal_with_no_stage_yet_posts_scoped(apps):
     assert apps.stages[0]["stage"] == "scoped"
 
 
-def test_one_turn_at_a_time_per_session(apps):
+def test_one_turn_at_a_time_per_app(apps):
     first = _handoff(apps)
     assert first["ok"] is True
     second = _handoff(apps)
     assert second["error"]["code"] == "apps-refused"
     assert second["error"]["message"] == (
-        "a turn is already running for this session")
+        "a turn is already running for this app")
+    assert len(apps.spawn.calls) == 1
+
+
+def test_a_second_session_on_the_same_app_cannot_open_a_second_writer(apps):
+    """Gable #2347 BLOCK: a lapsed user lock lets the owner open a NEW session
+    on the same app while the first turn still runs. The claim is keyed on the
+    app, not the session, so the second handoff is refused before a second
+    process can write /srv/apps/<app-id>."""
+    assert _handoff(apps)["ok"] is True
+    # a different session id, same app id (the view the broker reads still
+    # names the same app and the same builder).
+    apps.view["session_id"] = SESSION + 1
+    second = _handoff(apps, session_id=SESSION + 1)
+    assert second["error"]["message"] == "a turn is already running for this app"
     assert len(apps.spawn.calls) == 1
 
 
@@ -895,7 +913,7 @@ def test_a_turn_in_flight_is_re_adopted_after_a_restart(apps):
     _handoff(apps)
     assert apps.sidecars()
     # The old process goes away mid-turn: its claim and its reaper with it.
-    apps.broker._apps_release(SESSION)
+    apps.broker._apps_release(APP_ID)
     apps.write_result()
     adopted = apps.broker.adopt_inflight_apps()
     assert adopted == ["disjorn-apps-12-1.service"]
@@ -906,14 +924,14 @@ def test_a_turn_in_flight_is_re_adopted_after_a_restart(apps):
     assert apps.broker._active_apps == {}
 
 
-def test_adoption_re_claims_the_session_so_a_duplicate_handoff_is_refused(apps):
+def test_adoption_re_claims_the_app_so_a_duplicate_handoff_is_refused(apps):
     proc = FakeAppsProc()
     apps.broker._apps_spawn = FakeAppsSpawn(lambda: proc)
     _handoff(apps)
-    apps.broker._apps_release(SESSION)
+    apps.broker._apps_release(APP_ID)
     apps.broker.adopt_inflight_apps()
     assert _handoff(apps)["error"]["message"] == (
-        "a turn is already running for this session")
+        "a turn is already running for this app")
 
 
 def test_a_ticket_this_process_already_owns_is_left_alone(apps):
@@ -921,7 +939,7 @@ def test_a_ticket_this_process_already_owns_is_left_alone(apps):
     apps.broker._apps_spawn = FakeAppsSpawn(lambda: proc)
     _handoff(apps)
     assert apps.broker.adopt_inflight_apps() == []
-    assert apps.broker._active_apps == {SESSION: 1}
+    assert apps.broker._active_apps == {APP_ID: (SESSION, 1)}
 
 
 def test_an_unreadable_ticket_is_swept(apps):

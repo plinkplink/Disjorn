@@ -263,6 +263,10 @@ class StageDetail(BaseModel):
     model_config = ConfigDict(extra="allow", protected_namespaces=())
 
     turn: Optional[int] = Field(default=None, ge=1)
+    # False on a ceiling refusal: the event is posted for the room but nothing
+    # ran, so it must not advance the turn counter — the next real handoff
+    # reuses this turn number (Gable #2347, Claudette #2349).
+    spawned: Optional[bool] = None
     files: Optional[list[str]] = None
     tokens: Optional[int] = Field(default=None, ge=0)
     model: Optional[str] = None
@@ -696,8 +700,12 @@ def _turn_line(detail: dict[str, Any]) -> str:
     """
     turn = detail.get("turn")
     number = turn if isinstance(turn, int) and not isinstance(turn, bool) else 0
+    # The summary is the BUILDER's words, from an isolated seat that read a
+    # user's prompt — not the house's. It is quoted after the house sentence so
+    # neither the user nor the resident reads it as an attestation (Gable #2347,
+    # Claudette #2349). Empty summary → the plain line, no dangling quotes.
     summary = _one_line(detail.get("summary"))
-    tail = f" {summary}" if summary else ""
+    tail = f' "{summary}"' if summary else ""
 
     halted = detail.get("halted")
     if isinstance(halted, str) and halted in HALT_SENTENCES:
@@ -1105,7 +1113,10 @@ async def publish_stage(
         )
         # The turn counter is a MAX, not an increment: one turn posts several
         # events, and a counter that added one each time would count events.
-        if body.detail.turn is not None:
+        # A spawned:false event (a ceiling refusal) is NOT a turn — nothing
+        # ran — so it never advances the counter, and the next real handoff
+        # reuses its number (Gable #2347).
+        if body.detail.turn is not None and body.detail.spawned is not False:
             await conn.execute(
                 "UPDATE app_sessions SET turns = MAX(turns, ?) WHERE id = ?",
                 (body.detail.turn, session_id),
