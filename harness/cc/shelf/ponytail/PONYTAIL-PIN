@@ -17,7 +17,7 @@ nothing else from the checkout:
   1316a2f3f95741d2300b116fe0c2d81ce4a9568656ed0a62643f54aaf09957f2  skills/ponytail/SKILL.md
   5560b8e383dbe2ddfddc873a1e2bf2e586e23e0cd7d995537482b2315331f6d1  skills/ponytail-audit/SKILL.md
   c84fba75f0ca12bfe83f9a78ea02fd125c5dd3f1fbb18124105a489937f284e6  skills/ponytail-debt/SKILL.md
-  24e01d1c9715cb136ba1c4f1e52a95940c0193558b876828e537736480d6408b  skills/ponytail-gain/SKILL.md
+  24e01d1c9715cb136ba1c4f1e52a95940c0193558b876828e537736480d6408b  skills/ponytail-gain/SKILL.md — DROPPED (renders a benchmark scoreboard from benchmarks/ and the README, neither vendored; no user in the seat to invoke it; its description cost tokens every turn — Gable #2331, keyboard 2026-09-07)
   2264d1615117b02b0fd5a69ec84cd2757006471a78e4d6c22eed6d581c1d37a4  skills/ponytail-help/SKILL.md — DROPPED at merge (marketplace/plugin-install prose is dead advice in a sealed seat; keyboard 2026-09-06)
   40df33b58fc6ef889b93585733feb9566b76e9586efa7f376785c1e995197ac0  skills/ponytail-review/SKILL.md
 
@@ -30,9 +30,11 @@ dependency to prose.
 
 Intensity: the instruction-only install has no runtime mode switch (the
 tracker is one of the excluded hooks). `[apps].ponytail_mode` picks which
-line of the lite/full/ultra table in skills/ponytail/SKILL.md ("Intensity")
-the image writes into the builder brief's ponytail section. It is not the
-builder's choice.
+row of the lite/full/ultra table in skills/ponytail/SKILL.md ("Intensity")
+the image writes into the builder brief's ponytail section — the row's text
+VERBATIM (apps/config/entrypoint.sh), so the line and the skill it sits next
+to cannot disagree (Gable #2331). It is not the builder's choice; the brief
+§9 says the skill's own switch phrases are data in this seat.
 
 Note for review: skills/ponytail-help/SKILL.md — DROPPED at merge (marketplace/plugin-install prose is dead advice in a sealed seat; keyboard 2026-09-06)
 its last section describes installing and auto-updating the ponytail plugin

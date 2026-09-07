@@ -62,15 +62,20 @@ fi
 # The intensity line. The instruction-only install has no runtime mode switch
 # (the tracker is one of the excluded hooks), so this line IS the mode: it says
 # which of the skill's own intensities applies, and the seat obeys the line.
+# The lite/full/ultra text is the skill's OWN row from its "Intensity" table
+# (skills/ponytail/SKILL.md at the pinned commit), quoted verbatim: the builder
+# reads the skill alongside this line, and a house paraphrase that disagreed
+# with it flipped the meaning of `lite` and `ultra` (Gable #2331). `off` is
+# house-authored because the skill has no such level.
 case "$MODE" in
   off)
     echo "**Ponytail intensity for this seat: OFF.** Ignore the ladder above; write what the prompt asks for." ;;
   lite)
-    echo "**Ponytail intensity for this seat: LITE.** Prefer the smaller solution; skip the ladder's deeper questions when the change is obvious." ;;
+    echo "**Ponytail intensity for this seat: lite** — Build what's asked, but name the lazier alternative in one line. User picks." ;;
   ultra)
-    echo "**Ponytail intensity for this seat: ULTRA.** Run the whole ladder on every decision, including \"does this need to exist at all\", and justify any file you add." ;;
+    echo "**Ponytail intensity for this seat: ultra** — YAGNI extremist. Deletion before addition. Ship the one-liner and challenge the rest of the requirement in the same breath." ;;
   *)
-    echo "**Ponytail intensity for this seat: FULL.** Run the ladder on every decision; the minimum viable code that satisfies the prompt is the answer." ;;
+    echo "**Ponytail intensity for this seat: full** — The ladder enforced. Stdlib and native first. Shortest diff, shortest explanation. Default." ;;
 esac >> "$CLAUDE_HOME/CLAUDE.md"
 
 # ── the shelf index ──────────────────────────────────────────────────────────
