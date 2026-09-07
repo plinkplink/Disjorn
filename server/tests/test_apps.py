@@ -950,7 +950,7 @@ def test_stage_events_reach_the_owner_alone_and_live_flips_the_app(
         for member in (wa, wbot):
             line = member.receive_json()
             assert line["type"] == "message_create"
-            assert line["message"]["content"].startswith("Turn 0 done — 1 files")
+            assert line["message"]["content"].startswith("Turn 0 done — 1 file")
             assert "context" not in line
 
         # "Nobody else" by sentinel: the next frame each of them sees is the
@@ -1248,7 +1248,7 @@ async def test_the_turn_line_says_exactly_what_the_turn_did(
         client, sid, "files_written", {"turn": 6, "files": ["a.js"], "tokens": 999},
     )
     assert (await channel_lines(channel))[-1] == (
-        "Turn 6 done — 1 files written (a.js), 999 tokens, model not reported."
+        "Turn 6 done — 1 file written (a.js), 999 tokens, model not reported."
     )
 
     # Nine files: eight named, the rest counted.

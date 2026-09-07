@@ -716,8 +716,9 @@ def _turn_line(detail: dict[str, Any]) -> str:
     counted = tokens if isinstance(tokens, int) and not isinstance(tokens, bool) else 0
     model = _one_line(detail.get("model")) or "not reported"
     named = f" ({_files_word(files)})" if files else ""
+    noun = "file" if len(files) == 1 else "files"
     return (
-        f"Turn {number} done — {len(files)} files written{named}, "
+        f"Turn {number} done — {len(files)} {noun} written{named}, "
         f"{_tokens_word(counted)} tokens, model {model}.{tail}"
     )
 
