@@ -250,7 +250,23 @@ launcher's harvest, on exit:
   credential has earned a human before the next one; otherwise commit as
   `turn N`, copy to the preview root EXCLUDING `.git/` and every dotfile at
   the repo root (`.env` is the file a model writes a key into by habit),
-  report `files_written` then `deployed`.
+  report `files_written` then `deployed`. The copy is PUBLISHED BY RENAME:
+  rsync into a fresh sibling with symlinks and specials dropped as a class
+  and the §C modes applied by rsync, then the sibling takes the preview's
+  name — a copy that fails leaves the preview that worked exactly as it
+  was, and no symlink ever reaches the served root (slice (i) review
+  round 3, Claudette #2325/#2329, Gable #2327);
+- **the harvest itself failing** (git or rsync broken partway) is a
+  TERMINATED turn, not a claimed success and not a missing record:
+  `halted = "error"` with an `error` string and whatever `commit` was
+  already made (Gable #2327, Claudette #2329);
+- **a unit that ends with no `result.json` is a halt**, timed out or not.
+  The broker synthesizes the record (`halted = "error"`, detail "the turn
+  ended without a result") from the unit's exit rather than leaving a
+  stage bar waiting on a file that will never appear — absence has to mean
+  something or it means "wait forever" (Claudette #2329). Slice (ii) owns
+  this branch; the harvest makes it reachable only when `result.json`
+  itself cannot be written, which the unit's journal records loudly.
 The broker then parses usage from the spool, appends the ledger line, and
 posts the stage events with the §H detail. The verb returns immediately
 after spawn with `{turn: N, unit: …}`; the resident does not wait on it (a

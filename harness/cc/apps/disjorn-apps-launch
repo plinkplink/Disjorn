@@ -65,10 +65,18 @@ The identity is NOT an argument. Every turn of every app runs as
 `res-appsbuilding` (spec §C); the <resident> argument names WHOSE PROMPT
 DIRECTORY the prompt file must come from, and that is all it does. A caller
 that could name the uid could run a turn as anyone.
+
+THE SENTENCE SLICE (ii) STARTS WITH (Claudette #2325, #2329 — three slice-(i)
+folds in a row were the same defect): WE KEEP VALIDATING WHERE A THING IS
+INSTEAD OF WHAT IT IS. The prompt wall below is built on that: the name is a
+cheap first refusal, and every decision is made on the fd — what it is
+(regular file, not a FIFO the open would have wedged on), whose it is (the
+principal's own uid, never root's), where the kernel actually opened it.
 """
 
 from __future__ import annotations
 
+import fcntl
 import grp
 import json
 import os
@@ -208,6 +216,23 @@ def _under(root: str, real: str) -> bool:
     return real == root or real.startswith(root.rstrip("/") + os.sep)
 
 
+def principal_uid(principal: str, root: str) -> int:
+    """WHO the principal is on this disk: the owner of its mapped prompt
+    directory (already realpath'd by the caller). Root-owned config names the
+    directory; the directory's owner names the uid; a prompt file must carry
+    that uid. Root is refused at both ends — a root-owned prompt directory is
+    a misconfiguration, not a principal."""
+    try:
+        st = os.stat(root)
+    except OSError as exc:
+        die(f"cannot stat {principal}'s prompt directory {root!r}: {exc}")
+    if not stat.S_ISDIR(st.st_mode):
+        die(f"{principal}'s mapped prompt directory is not a directory: {root!r}")
+    if st.st_uid == 0:
+        die(f"{principal}'s prompt directory {root!r} is owned by root — refused")
+    return st.st_uid
+
+
 def open_prompt(principal: str, raw: str, config: dict) -> int:
     """Open the prompt ONCE and establish everything about it from the fd.
 
@@ -221,12 +246,27 @@ def open_prompt(principal: str, raw: str, config: dict) -> int:
          directory after realpath) — a cheap first refusal with a good
          message, not the wall;
       2. the file is opened with O_NOFOLLOW (the final component may not be
-         a symlink at all — a resident writes a regular file) and O_CLOEXEC;
+         a symlink at all — a resident writes a regular file), O_CLOEXEC,
+         and O_NONBLOCK — a FIFO is not a symlink, and without O_NONBLOCK a
+         planted one would park this root process in open() forever, under
+         sudo, before fstat could say "not a regular file" (Claudette #2320).
+         The flag is cleared again once the file is known to be regular,
+         where it was a no-op anyway;
       3. IDENTITY comes from the fd: fstat says regular file and gives the
-         size for the bound; /proc/self/fd/N says which path the kernel
-         actually opened, and that path — not the one we were handed — must
-         sit segment-wise under the realpath'd mapped directory. An
-         intermediate-directory swap between (1) and (2) lands here.
+         size for the bound; fstat also says WHOSE it is, and that must be
+         the principal's own uid — never root's — which is what closes the
+         hardlink-into-the-prompt-dir shape in code rather than by whatever
+         fs.protected_hardlinks is set to on the box (Claudette #2320);
+         /proc/self/fd/N says which path the kernel actually opened, and
+         that path — not the one we were handed — must sit segment-wise
+         under the realpath'd mapped directory. An intermediate-directory
+         swap between (1) and (2) lands here.
+
+    "The principal's uid" is read off the mapped directory itself: the
+    root-owned config says which directory is `res-gable`'s, and the owner of
+    that directory is who `res-gable` is on this disk. No passwd lookup, so
+    the `keyboard` literal (no such user) is covered by the same rule, and a
+    root-owned prompt directory is refused as the misconfiguration it is.
 
     The fd is returned and READ FROM; nothing reopens the name. Callers that
     only want validation close it.
@@ -254,10 +294,12 @@ def open_prompt(principal: str, raw: str, config: dict) -> int:
     if not _under(root, named):
         die(f"prompt path escapes {principal}'s prompt directory: "
             f"{raw!r} resolves to {named!r}, outside {root!r}")
+    owner = principal_uid(principal, root)
 
     limit = _prompt_limit(config)
     try:
-        fd = os.open(raw, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        fd = os.open(raw, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+                     | os.O_NONBLOCK)
     except OSError as exc:
         # ELOOP is what O_NOFOLLOW raises for a symlink final component.
         die(f"cannot open prompt (a symlink is refused; a regular file is required): {exc}")
@@ -265,6 +307,16 @@ def open_prompt(principal: str, raw: str, config: dict) -> int:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             die("prompt is not a regular file")
+        # Regular from here on: O_NONBLOCK did its one job at open() and
+        # means nothing on a regular file, so clear it rather than leave a
+        # flag on an fd that gets read from.
+        fcntl.fcntl(fd, fcntl.F_SETFL,
+                    fcntl.fcntl(fd, fcntl.F_GETFL) & ~os.O_NONBLOCK)
+        if st.st_uid == 0:
+            die("prompt file is owned by root — a resident writes its own prompts")
+        if st.st_uid != owner:
+            die(f"prompt file is owned by uid {st.st_uid}, not by {principal} "
+                f"(uid {owner}) — refused")
         if st.st_size == 0:
             die("prompt file is empty")
         if st.st_size > limit:

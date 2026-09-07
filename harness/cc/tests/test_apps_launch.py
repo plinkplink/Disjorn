@@ -24,6 +24,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -415,6 +416,91 @@ def test_the_tripwire_a_planted_symlink_to_the_credential_is_refused(seat, tmp_p
     assert proc.returncode == 64, proc.stderr
     assert "sk-ant-still-not-for-you" not in proc.stdout + proc.stderr
     assert "symlink" in proc.stderr
+
+
+def test_a_planted_fifo_cannot_wedge_the_launcher(seat):
+    """Claudette #2320: O_NOFOLLOW refuses a symlink, but a FIFO is not a
+    symlink — without O_NONBLOCK a resident plants one at the prompt path and
+    root blocks in open() forever, under sudo, before fstat ever runs. Now it
+    is refused in the time it takes to say so."""
+    seat["prompt"].unlink()
+    os.mkfifo(seat["prompt"])
+    t0 = time.monotonic()
+    proc = subprocess.run(
+        [sys.executable, str(LAUNCH), "run", *GOOD, str(seat["prompt"])],
+        capture_output=True, text=True, timeout=20, env={
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "DISJORN_APPS_LAUNCH_DRY_RUN": "1",
+            "DISJORN_APPS_LAUNCH_CONFIG": str(seat["config"]),
+            "DISJORN_APPS_LAUNCH_WRAPPER": str(seat["wrapper"]),
+            "DISJORN_APPS_LAUNCH_HARVEST": "/usr/local/lib/disjorn/apps_harvest.py",
+            "DISJORN_APPS_LAUNCH_FAKE_SEAT": FAKE_SEAT,
+        })
+    assert time.monotonic() - t0 < 10
+    assert proc.returncode == 64 and "not a regular file" in proc.stderr
+
+
+def test_the_prompt_must_be_owned_by_the_principal(seat, tmp_path):
+    """Claudette #2320: everything checked WHERE the file is, nothing WHOSE
+    it is. The principal's uid is the owner of its mapped directory; a file
+    with any other owner — root, the seat, a neighbour — is refused, which
+    closes the hardlink-into-the-prompt-dir shape by code and not by
+    fs.protected_hardlinks. Exercised for real where a second uid is
+    available (root, or the house's res-* users); the root-owned-directory
+    refusal below runs everywhere."""
+    # A directory owned by root as the mapped one: refused as misconfiguration.
+    for candidate in ("/", "/etc"):
+        if os.stat(candidate).st_uid == 0:
+            root_owned = tmp_path / "launch-root-owned.toml"
+            root_owned.write_text(
+                f'[prompt_dirs]\nkeyboard = "{candidate}"\n', encoding="utf-8")
+            proc = refuse(seat, "run", *GOOD, f"{candidate}/nope.md",
+                          config=root_owned)
+            assert "owned by root" in proc.stderr
+            break
+    # A root-owned FILE inside an honest directory: the wall the sysctl used
+    # to be. Needs a root-owned regular file we can name; /etc/hostname is one
+    # on every Debian box, reached through a symlink planted in the mapped
+    # directory... which O_NOFOLLOW already refuses. So the owner check is
+    # exercised where a hardlink can be made (same filesystem, and only when
+    # protected_hardlinks lets an unprivileged user link a foreign file —
+    # which is exactly the setting we no longer rely on): try, and assert
+    # the refusal names the owner if the link could be made at all.
+    foreign = None
+    for candidate in (Path("/etc/hostname"), Path("/etc/os-release")):
+        try:
+            if candidate.is_file() and candidate.stat().st_uid != os.geteuid():
+                link = seat["dir"] / "planted.md"
+                os.link(candidate, link)
+                foreign = link
+                break
+        except OSError:
+            continue
+    if foreign is not None:
+        proc = refuse(seat, "run", *GOOD, str(foreign))
+        assert "owned by" in proc.stderr
+    # And deterministically, whatever the sysctl: the same open_prompt() with
+    # the principal resolved to a uid the file does not carry. The comparison
+    # is what is under test; the fd path is the real one (a real file, a
+    # real fstat) and only the answer to "who is the principal" is planted.
+    code = (
+        "import sys\n"
+        f"src = open({str(LAUNCH)!r}).read()\n"
+        "ns = {'__name__': 'launcher_under_test'}\n"
+        "exec(compile(src, 'launcher', 'exec'), ns)\n"
+        "ns['principal_uid'] = lambda principal, root: 4242\n"
+        "import tomllib\n"
+        f"cfg = tomllib.load(open({str(seat['config'])!r}, 'rb'))\n"
+        f"ns['open_prompt']('keyboard', {str(seat['prompt'])!r}, cfg)\n"
+    )
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert r.returncode == 64, r.stderr
+    assert f"owned by uid {os.geteuid()}, not by keyboard (uid 4242)" in r.stderr
+    # ...and with the truth planted, the same file is accepted.
+    code_ok = code.replace("lambda principal, root: 4242",
+                           f"lambda principal, root: {os.geteuid()}")
+    r = subprocess.run([sys.executable, "-c", code_ok], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
 
 
 # ─────────────────────────────────────────────────── the config table itself ──

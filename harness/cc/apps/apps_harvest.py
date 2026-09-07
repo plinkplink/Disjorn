@@ -36,6 +36,29 @@ THE ORDER IS THE CONTRACT (§E, restated so nothing is invented):
   result.json is then written ATOMICALLY (tmp + rename) so a broker that reads
   the directory at any instant sees either no file or a whole one.
 
+  A turn that has ENDED always leaves a result. If the harvest itself fails
+  partway (git broken, rsync gone, a disk full), the record is
+  halted = "error" with an `error` string and whatever `commit` was made —
+  a TERMINATED turn, not a claimed success (Gable #2327, Claudette #2329).
+  Absence of result.json is §E's synthesized halt on the broker side; this
+  module's job is to make that path unreachable from here.
+
+THE SENTENCE SLICE (ii) STARTS WITH (Claudette #2325, #2329 — three folds in
+a row were the same defect): WE KEEP VALIDATING WHERE A THING IS INSTEAD OF
+WHAT IT IS. A name is not a file, a path is not an owner, an rsync that
+finished is not a preview that works. Decide on the object in hand (an fd,
+an inode, a tree that is entirely ours), never on the name we were given.
+
+THE PREVIEW IS PUBLISHED BY RENAME, NEVER EDITED IN PLACE (Gable #2327,
+Claudette #2329): rsync into a fresh sibling `preview.tmp.<turn>` with
+`--no-links --no-D --chmod=D0755,F0644`, then rename the sibling over the
+live root. A fresh destination makes every file a transfer, which makes
+`--chmod` total; `--no-links` drops symlinks as a CLASS (a link is never a
+legitimate static asset, and `--safe-links` would judge by where the target
+points — the predicate that failed three times); and a failed rsync leaves
+the live preview exactly as it was, which is the §E guarantee `--delete`
+into a live directory could never give.
+
 ONE HARDENING BEYOND THE SPEC, called out because it is a deviation:
 `git status --porcelain` does not list IGNORED files, so a turn that writes
 `.gitignore` with `*` and then a key-bearing file would show a clean-ish tree
@@ -407,11 +430,23 @@ def reset_tree(repo: str | os.PathLike, git_bin: str = "git") -> None:
 
 # ------------------------------------------------------------------- preview
 
-def preview_argv(repo: str | os.PathLike, preview_dir: str | os.PathLike,
+def preview_argv(repo: str | os.PathLike, dest: str | os.PathLike,
                  rsync_bin: str = "rsync") -> list[str]:
-    """The exact rsync argv §E asks for, factored out so a test can assert it
-    without needing rsync installed.
+    """The exact rsync argv, factored out so a test can assert it without
+    needing rsync installed. `dest` is the FRESH sibling, never the live root.
 
+    `--no-links`      symlinks are dropped as a class. A served static preview
+                      has no legitimate use for one, and any filter on where
+                      a link points (`--safe-links`) is a decision about a
+                      name — `x -> .env` is "inside the tree" and lands in
+                      the served root dangling (Gable #2327, Claudette #2329).
+    `--no-D`          no devices, no FIFOs, no sockets either: the preview
+                      holds regular files and directories, nothing else.
+    `--chmod=D0755,F0644`
+                      the modes spec §C wants, applied by rsync to every path
+                      it transfers — and because the destination is fresh,
+                      that is every path. No chmod walk afterwards, so no
+                      `os.chmod` on a name that might not be the thing.
     `--exclude .git`  unanchored, so it drops the repo's history AND any nested
                       .git a vendored copy dragged in.
     `--exclude /.*`   anchored to the transfer root by the leading slash, so it
@@ -419,34 +454,83 @@ def preview_argv(repo: str | os.PathLike, preview_dir: str | os.PathLike,
                       repo root — `.env` is the file a model writes a key into
                       by habit (Gable #2286) — while leaving a legitimate
                       `assets/.keep` alone.
+    No `--delete`: the destination is empty, and `--delete` into a LIVE root
+    is exactly the half-updated preview §E forbids.
     Trailing slash on the source: copy the CONTENTS of the repo, not the repo
-    directory into the preview.
+    directory into the sibling.
     """
-    return [rsync_bin, "-a", "--delete", "--exclude", ".git", "--exclude", "/.*",
-            f"{str(repo).rstrip('/')}/", f"{str(preview_dir).rstrip('/')}/"]
+    return [rsync_bin, "-a", "--no-links", "--no-D", "--chmod=D0755,F0644",
+            "--exclude", ".git", "--exclude", "/.*",
+            f"{str(repo).rstrip('/')}/", f"{str(dest).rstrip('/')}/"]
+
+
+def _remove(path: Path) -> None:
+    """Remove a leftover of OURS (a stale sibling or moved-aside root from a
+    crashed harvest), whatever shape it has. A symlink is unlinked, never
+    followed — the one lstat-then-act in this module, and it only ever runs
+    on names this module itself creates beside the preview root."""
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+
+
+def preview_sibling(preview_dir: str | os.PathLike, turn: int) -> Path:
+    """`preview.tmp.<turn>` beside the live root. Ours alone: created empty by
+    this process, filled by this process's rsync, renamed by this process."""
+    preview_dir = Path(preview_dir)
+    return preview_dir.with_name(f"{preview_dir.name}.tmp.{int(turn)}")
 
 
 def copy_preview(repo: str | os.PathLike, preview_dir: str | os.PathLike,
-                 rsync_bin: str = "rsync") -> None:
-    """Publish the committed tree to the preview root. 0755 dirs / 0644 files
-    (spec §C) so the stage-3 gate — a house process, not this user — can serve
-    it. rsync -a copies the SOURCE tree's modes, and the app repo is 0750 by
-    design (measured at the keyboard's proving turn: the preview root came out
-    0750), so the modes are set explicitly afterwards: the preview root and
-    every directory under it 0755, every file 0644."""
-    Path(preview_dir).mkdir(parents=True, exist_ok=True)
-    argv = preview_argv(repo, preview_dir, rsync_bin=rsync_bin)
+                 turn: int, rsync_bin: str = "rsync") -> None:
+    """Publish the committed tree to the preview root BY RENAME.
+
+    1. a fresh sibling `preview.tmp.<turn>` (any stale one from a crashed
+       harvest removed first — it was ours and never went live);
+    2. rsync into it with the argv above (modes set by rsync, symlinks and
+       specials dropped, nothing walked afterwards);
+    3. the live root is moved aside, the sibling takes its name, the old
+       root is removed. A rename cannot replace a non-empty directory in one
+       syscall, so this is two renames; the window between them is the only
+       instant a reader can see no preview at all, and it is the same
+       instant either way. If the second rename fails the old root is put
+       back and the error propagates — the preview that worked is still the
+       preview that is served.
+
+    A failed rsync removes the sibling (the tree is in the commit; there is
+    nothing to inspect that `git show` does not have) and raises; the live
+    root has not been touched. harvest() turns that raise into a
+    halted = "error" record.
+    """
+    preview_dir = Path(preview_dir)
+    preview_dir.parent.mkdir(parents=True, exist_ok=True)
+    sibling = preview_sibling(preview_dir, turn)
+    _remove(sibling)
+    os.mkdir(sibling, 0o755)
+    os.chmod(sibling, 0o755)             # our own fresh directory, umask-proof
+
+    argv = preview_argv(repo, sibling, rsync_bin=rsync_bin)
     proc = subprocess.run(argv, capture_output=True, text=True)
     if proc.returncode != 0:
+        shutil.rmtree(sibling, ignore_errors=True)
         raise RuntimeError(
-            f"rsync to the preview root failed ({proc.returncode}): "
+            f"rsync to the preview sibling failed ({proc.returncode}): "
             f"{(proc.stderr or proc.stdout).strip()}")
-    os.chmod(preview_dir, 0o755)
-    for dirpath, dirnames, filenames in os.walk(preview_dir):
-        for d in dirnames:
-            os.chmod(os.path.join(dirpath, d), 0o755)
-        for f in filenames:
-            os.chmod(os.path.join(dirpath, f), 0o644)
+
+    old = preview_dir.with_name(f"{preview_dir.name}.old.{int(turn)}")
+    _remove(old)
+    had_live = preview_dir.is_symlink() or preview_dir.exists()
+    if had_live:
+        os.rename(preview_dir, old)
+    try:
+        os.rename(sibling, preview_dir)
+    except OSError:
+        if had_live:
+            os.rename(old, preview_dir)
+        raise
+    if had_live:
+        _remove(old)
 
 
 # ------------------------------------------------------------------- watcher
@@ -611,10 +695,13 @@ def harvest(repo: str | os.PathLike, exit_code: int,
             git_bin: str = "git") -> dict:
     """§E's branch order, in §E's order, and then result.json.
 
-    Returns the payload it wrote. Raises only if the harvest ITSELF cannot be
-    completed (git or rsync broken); a turn that failed is a result, not an
-    exception — run-apps.sh exits 0 whenever this returns, because what the
-    broker needs is the record.
+    Returns the payload it wrote. A turn that failed is a result, not an
+    exception — and so is a HARVEST that failed: git or rsync breaking
+    partway becomes halted = "error" with the exception in `error` and any
+    commit already made in `commit` (Gable #2327, Claudette #2329). The
+    preview root is untouched on every such path (copy_preview publishes by
+    rename). The only thing that can still raise is writing result.json
+    itself, and _cli_harvest makes that loud.
     """
     ended_at = ended_at or _now_iso()
     payload = {
@@ -627,6 +714,7 @@ def harvest(repo: str | os.PathLike, exit_code: int,
         "files": [],
         "commit": None,
         "quarantine": None,
+        "error": None,
         "started_at": started_at,
         "ended_at": ended_at,
         "model": model,
@@ -641,6 +729,27 @@ def harvest(repo: str | os.PathLike, exit_code: int,
                          else "error")
 
     patterns = secret_patterns(read_key(key_file)) if key_file else []
+    try:
+        return _branches(repo, payload, halted_reason, patterns, result_dir,
+                         key_file, preview_dir, turn, quarantine_dir,
+                         spool_stdout, spool_stderr, rsync_bin, git_bin)
+    except Exception as exc:          # noqa: BLE001 — the record is the point
+        text = f"{type(exc).__name__}: {exc}"
+        for label, needle in patterns:  # an error string is still a string
+            if needle:
+                text = text.replace(needle.decode("latin-1"),
+                                    f"[REDACTED:{label}]")
+        payload["halted"] = payload["halted"] or "error"
+        payload["error"] = text
+        _warn(f"harvest FAILED partway — recording a halted turn: {text}")
+        return _finish(result_dir, payload)
+
+
+def _branches(repo, payload, halted_reason, patterns, result_dir, key_file,
+              preview_dir, turn, quarantine_dir, spool_stdout, spool_stderr,
+              rsync_bin, git_bin) -> dict:
+    """The §E branch order proper. Everything in here may raise; harvest()
+    turns a raise into a record."""
     if key_file and not patterns:
         _warn("no scannable credential — the turn's output is being published "
               "WITHOUT a secret scan; check the drop file")
@@ -664,12 +773,14 @@ def harvest(repo: str | os.PathLike, exit_code: int,
     found = scan_for_secret(repo, patterns, paths=scan_paths, git_bin=git_bin) \
         if scan_paths else None
     if found:
+        # The headline is decided HERE, on the hit; a quarantine or reset
+        # that then fails adds an `error` and does not downgrade it.
         dest = Path(quarantine_dir) if quarantine_dir else Path(result_dir) / "quarantine"
-        moved = quarantine(repo, scan_paths, dest)
-        reset_tree(repo, git_bin=git_bin)
         payload["halted"] = "secret"
         payload["quarantine"] = str(dest)
         payload["files"] = []
+        moved = quarantine(repo, scan_paths, dest)
+        reset_tree(repo, git_bin=git_bin)
         _warn(f"SECRET in the turn's output ({found['encoding']} in "
               f"{found['where']}) — {len(moved)} path(s) quarantined at {dest}, "
               f"nothing committed, nothing copied")
@@ -700,7 +811,7 @@ def harvest(repo: str | os.PathLike, exit_code: int,
     sha = commit_all(repo, f"turn {int(turn)}", git_bin=git_bin)
     payload["commit"] = sha
     payload["files"] = commit_files(repo, sha, git_bin=git_bin) if sha else []
-    copy_preview(repo, preview_dir, rsync_bin=rsync_bin)
+    copy_preview(repo, preview_dir, int(turn), rsync_bin=rsync_bin)
     return _finish(result_dir, payload)
 
 
@@ -732,7 +843,24 @@ def _cli_harvest(argv: list[str]) -> int:
     are thirteen of them and a positional bash call with thirteen slots is a
     defect waiting for its first reorder."""
     spec = json.loads(Path(argv[0]).read_text(encoding="utf-8"))
-    payload = harvest(
+    try:
+        payload = _harvest_from_spec(spec)
+    except Exception as exc:          # noqa: BLE001 — last resort, loud
+        # harvest() already turned every branch failure into a record; what
+        # reaches here is result.json ITSELF failing to be written (or the
+        # spec being unreadable). There is nothing left to write it with, so
+        # the one thing this process can still do is say so where the unit's
+        # journal will keep it. run-apps.sh exits non-zero and the broker
+        # treats a unit that ended with no result.json as a halt (§E).
+        _warn("FATAL: could not write result.json — the broker must "
+              f"synthesize the halt for this turn: {type(exc).__name__}: {exc}")
+        return 1
+    print(json.dumps(payload, sort_keys=True))
+    return 0
+
+
+def _harvest_from_spec(spec: dict) -> dict:
+    return harvest(
         spec["repo"], int(spec["exit_code"]), spec["result_dir"],
         spec.get("key_file"), spec["preview_dir"], int(spec["turn"]),
         session=int(spec["session"]), app_id=spec["app_id"],
@@ -743,8 +871,6 @@ def _cli_harvest(argv: list[str]) -> int:
         timed_out=bool(spec.get("timed_out")),
         rsync_bin=spec.get("rsync_bin", "rsync"),
     )
-    print(json.dumps(payload, sort_keys=True))
-    return 0
 
 
 def main(argv: list[str]) -> int:

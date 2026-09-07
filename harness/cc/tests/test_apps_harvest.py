@@ -455,10 +455,21 @@ def test_the_rsync_argv_is_the_exclusion_contract(ah, turn):
     copy dragged in) and `--exclude /.*` anchored to the transfer root (`.env`
     is the file a model writes a key into by habit — Gable #2286). Asserted
     against the argv so a dropped flag cannot pass on a box without rsync."""
-    argv = ah.preview_argv(turn["repo"], turn["preview"], rsync_bin="rsync")
-    assert argv == ["rsync", "-a", "--delete",
+    dest = turn["preview"].with_name("preview.tmp.3")
+    argv = ah.preview_argv(turn["repo"], dest, rsync_bin="rsync")
+    assert argv == ["rsync", "-a", "--no-links", "--no-D", "--chmod=D0755,F0644",
                     "--exclude", ".git", "--exclude", "/.*",
-                    f"{turn['repo']}/", f"{turn['preview']}/"]
+                    f"{turn['repo']}/", f"{dest}/"]
+    # no --delete: the destination is a fresh sibling, and --delete into a
+    # LIVE root is the half-updated preview §E forbids (Gable #2327).
+    assert "--delete" not in argv
+    # symlinks dropped as a CLASS, not filtered by target (Claudette #2329)
+    assert "--safe-links" not in argv and "--copy-links" not in argv
+
+
+def test_the_preview_sibling_is_named_by_turn(ah, turn):
+    assert ah.preview_sibling(turn["preview"], 3) == \
+        turn["preview"].with_name("preview.tmp.3")
 
 
 @pytest.mark.skipif(shutil.which("rsync") is None,
@@ -494,19 +505,114 @@ def test_real_rsync_excludes_git_and_root_dotfiles(ah, turn):
     assert not (preview / "vendor" / ".git").exists()
     # NOT excluded: a dotfile that is not at the root
     assert (preview / "assets" / ".keep").exists()
-    # --delete: last turn's leftovers go
+    # a fresh sibling renamed over the root: last turn's leftovers go
     assert not (preview / "stale.html").exists()
+    # and neither the sibling nor the moved-aside old root survive a publish
+    assert sorted(p.name for p in preview.parent.iterdir()) == ["preview"]
 
 
-def test_a_failing_rsync_raises_rather_than_reporting_success(ah, turn, tmp_path):
-    """The one thing the harvest may not do is write a result that says
-    `deployed` when nothing was copied."""
+@pytest.mark.skipif(shutil.which("rsync") is None,
+                    reason="rsync is not installed on this box")
+def test_a_committed_symlink_is_never_published(ah, turn, tmp_path):
+    """Claudette's third slice-(i) block (#2325): `rsync -a` carried symlinks
+    and the chmod walk followed them, so a turn committing `x -> /some/path`
+    either had root's walk chmod the TARGET (if the seat owned it) or raised
+    OSError out of the harvest (if it did not, or the link dangled) and left
+    no result.json at all. Now: no symlink reaches the preview, the target's
+    mode is untouched, and a dangling link is not even an event."""
+    repo, preview = turn["repo"], turn["preview"]
+    outside = tmp_path / "outside-the-tree.txt"
+    outside.write_text("not yours\n", encoding="utf-8")
+    os.chmod(outside, 0o600)
+    (repo / "index.html").write_text("<h1>v2</h1>\n", encoding="utf-8")
+    (repo / "escape.txt").symlink_to(outside)              # out of tree
+    (repo / "dangling.txt").symlink_to(tmp_path / "does-not-exist")
+    (repo / "inside.txt").symlink_to("index.html")          # inside, still a link
+    (repo / "assets").mkdir()
+    (repo / "assets" / "link-dir").symlink_to(repo)         # a loop, even
+    os.mkfifo(repo / "pipe")                                # --no-D
+
+    result = do_harvest(ah, turn, exit_code=0)
+
+    assert result["halted"] is None and result["error"] is None
+    assert result["commit"]
+    assert (preview / "index.html").read_text() == "<h1>v2</h1>\n"
+    for name in ("escape.txt", "dangling.txt", "inside.txt", "pipe"):
+        assert not (preview / name).exists() and not (preview / name).is_symlink()
+    assert not (preview / "assets" / "link-dir").is_symlink()
+    assert stat.S_IMODE(outside.stat().st_mode) == 0o600
+    assert stat.S_IMODE(preview.stat().st_mode) == 0o755
+    assert stat.S_IMODE((preview / "index.html").stat().st_mode) == 0o644
+    assert (turn["result_dir"] / "result.json").exists()
+
+
+def test_a_failing_rsync_is_a_halted_record_not_a_success_and_not_a_raise(
+        ah, turn, tmp_path):
+    """Two rules that looked contradictory (Gable #2327): "never report
+    success when nothing was copied" and "nothing exits without result.json".
+    Both hold: the record says halted = "error", carries the exception, keeps
+    the commit that WAS made, and the live preview is exactly what it was."""
     bad = tmp_path / "bad-rsync"
     bad.write_text("#!/bin/sh\necho boom >&2\nexit 23\n", encoding="utf-8")
     bad.chmod(0o755)
+    (turn["preview"] / "index.html").write_text("<h1>v1</h1>\n", encoding="utf-8")
     (turn["repo"] / "app.js").write_text("const x = 1;\n", encoding="utf-8")
-    with pytest.raises(RuntimeError, match="rsync"):
-        do_harvest(ah, turn, exit_code=0, rsync_bin=str(bad))
+
+    result = do_harvest(ah, turn, exit_code=0, rsync_bin=str(bad))
+
+    assert result["halted"] == "error"
+    assert "rsync" in result["error"] and "boom" in result["error"]
+    assert result["commit"] == head_sha(ah, turn["repo"])
+    assert result["files"] == ["app.js"]
+    assert result["no_changes"] is False
+    on_disk = json.loads((turn["result_dir"] / "result.json").read_text())
+    assert on_disk == result
+    # the preview that worked is still the preview
+    assert (turn["preview"] / "index.html").read_text() == "<h1>v1</h1>\n"
+    assert not (turn["preview"] / "app.js").exists()
+    assert sorted(p.name for p in turn["preview"].parent.iterdir()) == ["preview"]
+
+
+def test_a_broken_git_is_a_halted_record_too(ah, turn, tmp_path):
+    """The harvest's own tooling failing is a terminated turn, not a raise:
+    the broker needs the record more than it needs the traceback."""
+    bad = tmp_path / "bad-git"
+    bad.write_text("#!/bin/sh\necho 'fatal: nope' >&2\nexit 128\n", encoding="utf-8")
+    bad.chmod(0o755)
+    (turn["repo"] / "app.js").write_text("const x = 1;\n", encoding="utf-8")
+    result = do_harvest(ah, turn, exit_code=0, git_bin=str(bad))
+    assert result["halted"] == "error"
+    assert "CalledProcessError" in result["error"]
+    assert result["commit"] is None
+    assert json.loads((turn["result_dir"] / "result.json").read_text()) == result
+
+
+def test_a_secret_hit_keeps_its_headline_when_the_quarantine_breaks(ah, turn, tmp_path):
+    """halted = "secret" is the decision that ends the session; a failure
+    AFTER that decision adds an `error`, it does not downgrade the halt."""
+    (turn["repo"] / "config.js").write_text(f'const k = "{FAKE_KEY}";\n',
+                                            encoding="utf-8")
+    # the quarantine root is a FILE, so mkdir under it fails
+    blocker = tmp_path / "blocker"
+    blocker.write_text("", encoding="utf-8")
+    result = do_harvest(ah, turn, exit_code=0, quarantine_dir=blocker / "q")
+    assert result["halted"] == "secret"
+    assert result["error"]
+    assert result["commit"] is None
+    assert json.loads((turn["result_dir"] / "result.json").read_text()) == result
+
+
+def test_the_error_string_is_redacted(ah, turn, tmp_path):
+    """An exception message can quote its input; the key must not ride out
+    in `error` any more than in a spool."""
+    bad = tmp_path / "bad-rsync"
+    bad.write_text(f"#!/bin/sh\necho 'auth {FAKE_KEY} failed' >&2\nexit 5\n",
+                   encoding="utf-8")
+    bad.chmod(0o755)
+    (turn["repo"] / "app.js").write_text("const x = 1;\n", encoding="utf-8")
+    result = do_harvest(ah, turn, exit_code=0, rsync_bin=str(bad))
+    assert FAKE_KEY not in result["error"]
+    assert "[REDACTED:raw]" in result["error"]
 
 
 # ────────────────────────────────────────────────────────── result.json ──────
@@ -521,9 +627,10 @@ def test_result_json_matches_the_schema_and_is_atomic(ah, turn, tmp_path):
     assert on_disk == returned
     assert set(on_disk) == {
         "session", "turn", "app_id", "exit", "halted", "no_changes", "files",
-        "commit", "quarantine", "started_at", "ended_at", "model", "runner",
-        "spool", "spool_redacted", "usage",
+        "commit", "quarantine", "error", "started_at", "ended_at", "model",
+        "runner", "spool", "spool_redacted", "usage",
     }
+    assert on_disk["error"] is None
     assert on_disk["session"] == 12 and on_disk["turn"] == 3
     assert on_disk["app_id"] == "abc234567xyz"
     assert on_disk["exit"] == 0
@@ -635,6 +742,34 @@ def test_cli_harvest_runs_the_whole_thing_from_a_json_spec(ah, turn, tmp_path):
     payload = json.loads(proc.stdout)
     assert payload["commit"] and payload["halted"] is None
     assert json.loads((turn["result_dir"] / "result.json").read_text()) == payload
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory modes")
+def test_cli_is_loud_when_even_the_result_cannot_be_written(ah, turn, tmp_path):
+    """The one path harvest() cannot record: result.json itself failing to be
+    written. The CLI says so on stderr, in words the unit's journal keeps,
+    and exits non-zero so run-apps.sh fails loudly — and §E's rule takes
+    over: a unit that ends with no result.json is a halt the broker
+    synthesizes (Claudette #2329)."""
+    (turn["repo"] / "app.js").write_text("const x = 1;\n", encoding="utf-8")
+    spec = tmp_path / "harvest-input.json"
+    spec.write_text(json.dumps({
+        "repo": str(turn["repo"]), "exit_code": 0,
+        "result_dir": str(turn["result_dir"]), "key_file": str(turn["key_file"]),
+        "preview_dir": str(turn["preview"]), "turn": 3, "session": 12,
+        "app_id": "abc234567xyz", "started_at": "2026-09-06T10:00:00+00:00",
+        "rsync_bin": _fake_rsync(tmp_path),
+    }), encoding="utf-8")
+    os.chmod(turn["result_dir"], 0o500)
+    try:
+        proc = subprocess.run([sys.executable, str(HARVEST_PY), "harvest", str(spec)],
+                              capture_output=True, text=True)
+    finally:
+        os.chmod(turn["result_dir"], 0o755)
+    assert proc.returncode == 1
+    assert proc.stdout.strip() == ""
+    assert "FATAL" in proc.stderr and "synthesize" in proc.stderr
+    assert not (turn["result_dir"] / "result.json").exists()
 
 
 def test_cli_ensure_repo(ah, tmp_path):
