@@ -484,6 +484,26 @@ spool are its raw material).
   root's own mtime (git init bumped it); tmpfs HOME via `--mount U=true`.
   The `keyboard` launch principal stands as shipped (one literal, inert
   without its `launch.toml` line, deleted at slice (ii)).
+- **Slice (i) review, rounds 2–3** (2026-09-07): BLOCK 2 (Claudette #2320,
+  folded `6014c2f`) — the prompt name was checked and then reopened; now one
+  `O_NOFOLLOW` open, identity from the fd. BLOCK 3 (Claudette #2325, Gable
+  #2327 deltas, fold list #2329; folded `f27c057`) — the preview chmod walk
+  followed symlinks and a dangling link raised out of the harvest with no
+  record. Folded: publish by rename through a fresh sibling (`--no-links
+  --no-D --chmod=D0755,F0644`, no walk, no `--delete` into a live root);
+  every harvest failure is a `halted = "error"` record with the commit kept;
+  §E's absence rule; the launcher's `O_NONBLOCK` (a planted FIFO cannot
+  wedge root) and owner check (`st_uid` = the mapped directory's owner,
+  root refused — reading TAKEN #2336); the sentence in both module
+  docstrings: *we keep validating where a thing is instead of what it is.*
+  Gable's ponytail read (#2331, folded `4b54789`, PASS #2339): intensity
+  rows quoted verbatim, §9's three disagreements, `ponytail-gain` dropped.
+  Code head signed `f27c057` (#2336, four NOTEs), prose head passed
+  `4b54789`; NOTEs folded before merge at `863c909`: staging under
+  `/srv/apps-www/.staging/<app-id>/` and the §C served-set sentence,
+  cleanup failure warns, one record shape, the publisher owns the preview
+  root, the pin is a test. **Merged to main `4d89b49` (review-seq 2336),
+  suite 408.** Carried forward by Gable: her #2312 `APP_BUILD_FLOW` folds.
 - Parent spec Round 14 (same commit) corrects Round 13's `APPS_BUILDERS`
   sentence per #2276: that setting names the CHAT seat (keyed resident);
   the BUILD seat is broker.toml `[apps]`; inert was right for the reason in
