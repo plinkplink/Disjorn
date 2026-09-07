@@ -1,9 +1,10 @@
-"""APPS stage 1 — the registry, the sessions, the walls, the stage stream.
+"""APPS — the registry, the sessions, the walls, the stage stream, the turn.
 
 SPECS/2026-08-30-apps-tab-v1.md (confirmed by plink, seq 2211; stage 1 opened
-at Round 12).
+at Round 12) and SPECS/2026-09-06-apps-builder-seat.md §J (confirmed seq 2302;
+stage 2 slice (ii) is section 11 at the end of this file).
 
-Four claims carry the rest and are worth naming before the code:
+Four claims carry stage 1 and are worth naming before the code:
 
 1. **A build chat is a real channel, walled by the real wall.** The tests do
    not check that this router refuses a stranger; they check that the ORDINARY
@@ -942,6 +943,16 @@ def test_stage_events_reach_the_owner_alone_and_live_flips_the_app(
             "created_at": published.json()["created_at"],
         }
 
+        # …and then the §H turn line, which is a MESSAGE and therefore reaches
+        # both members of the room rather than the owner alone (stage 2 §H).
+        # It carries no `context`: it is the `system` bot's, so it summons
+        # nobody, which is what keeps a report of a build from starting one.
+        for member in (wa, wbot):
+            line = member.receive_json()
+            assert line["type"] == "message_create"
+            assert line["message"]["content"].startswith("Turn 0 done — 1 files")
+            assert "context" not in line
+
         # "Nobody else" by sentinel: the next frame each of them sees is the
         # ordinary traffic that follows, so no app_stage arrived in between.
         post_msg(wsc, cookie(ta), main, "sentinel")
@@ -971,11 +982,25 @@ def test_stage_events_reach_the_owner_alone_and_live_flips_the_app(
     assert reloaded["stages"][0]["detail"] == {"files": ["index.html"]}
     assert reloaded["stage"] == "live"
 
-    # A finished-by-lock session refuses further stages with 410.
+    # A lapsed lock does NOT close the door on the harness (D-B3): the lock is
+    # the user's chat exclusivity, and a turn that ran has to be reportable
+    # even though the modal went away. An ENDED session does.
     call(
         wsc,
         db.execute,
         "UPDATE app_sessions SET locked_until = '2000-01-01T00:00:00.000Z' WHERE id = ?",
+        (session["id"],),
+    )
+    lapsed = wsc.post(
+        f"/apps/sessions/{session['id']}/stage",
+        json={"stage": "deployed"},
+        headers={"X-Api-Key": BROKER_KEY},
+    )
+    assert lapsed.status_code == 200, lapsed.text
+    call(
+        wsc,
+        db.execute,
+        "UPDATE app_sessions SET ended_at = '2000-01-01T00:00:00.000Z' WHERE id = ?",
         (session["id"],),
     )
     stale = wsc.post(
@@ -984,3 +1009,396 @@ def test_stage_events_reach_the_owner_alone_and_live_flips_the_app(
         headers={"X-Api-Key": BROKER_KEY},
     )
     assert stale.status_code == 410
+
+
+# ---------------------------------------------------------------------------
+# 11. Stage 2 — a turn (SPECS/2026-09-06-apps-builder-seat.md §J, slice ii)
+# ---------------------------------------------------------------------------
+#
+# Three claims, and they are the whole slice from this side:
+#
+# 8.  The harness reads a session through ONE narrow shape and reports turns
+#     into the same door. `open` is a field there, not a status code.
+# 9.  A turn is counted, not accumulated by event: several events carry one
+#     turn number, and only the one that read the runner's result carries its
+#     usage.
+# 10. The room learns what happened. The §H line is a server-side effect of
+#     the event, authored by `system`, and a halt writes one whatever stage it
+#     re-posted — a turn that dies at `scoped` must not leave the room silent.
+
+
+async def build_fixture(client, settings_env, seat_toml, *, admin: bool = False):
+    """An open session, its owner logged in, and `broker` as the publisher."""
+    await make_user("alice", "Alice", admin=admin)
+    builder = await make_bot("gable")
+    await make_bot("broker", BROKER_KEY)
+    settings_env(
+        APPS_BUILDERS=[{"bot_id": builder, "model_source": str(seat_toml)}],
+        APPS_STAGE_PUBLISHER_BOT_NAMES=["broker"],
+    )
+    await login(client, "alice")
+    return (await start_session(client, builder)).json()
+
+
+async def post_stage(client, session_id: int, stage: str, detail: dict | None = None):
+    body: dict = {"stage": stage}
+    if detail is not None:
+        body["detail"] = detail
+    return await client.post(
+        f"/apps/sessions/{session_id}/stage",
+        json=body,
+        headers=as_bot(client, BROKER_KEY),
+    )
+
+
+async def channel_lines(channel_id: int) -> list[str]:
+    rows = await db.fetch_all(
+        "SELECT content FROM messages WHERE channel_id = ? ORDER BY seq", (channel_id,)
+    )
+    return [r["content"] for r in rows]
+
+
+async def test_harness_view_is_publisher_gated_and_answers_the_four_checks(
+    client, app, settings_env, seat_toml
+):
+    """Claim 8. It is the broker's whole read of a session: is it there, is it
+    open, whose builder is it, and what has it spent."""
+    session = await build_fixture(client, settings_env, seat_toml)
+    path = f"/apps/sessions/{session['id']}/harness-view"
+
+    # The owner is not a publisher, and being the person the stream is FOR is
+    # not a way in.
+    refused = await client.get(path)
+    assert refused.status_code == 403
+    assert refused.json()["detail"] == (
+        "Only the build harness or an admin can publish a build stage"
+    )
+
+    r = await client.get(path, headers=as_bot(client, BROKER_KEY))
+    assert r.status_code == 200, r.text
+    view = r.json()
+    assert view == {
+        "session_id": session["id"],
+        "app_id": session["app"]["id"],
+        "owner_user_id": session["app"]["owner_user_id"],
+        "builder_bot_id": session["builder"]["bot_id"],
+        "channel_id": session["channel_id"],
+        "stage": None,
+        "turns": 0,
+        "tokens_used": 0,
+        "open": True,
+        "lock_lapsed": False,
+        "ended_at": None,
+        "locked_until": session["locked_until"],
+    }
+
+    # A session nobody minted is 404, not an empty view.
+    missing = await client.get(
+        "/apps/sessions/9999/harness-view", headers=as_bot(client, BROKER_KEY)
+    )
+    assert missing.status_code == 404
+
+    # A lapsed lock is reported, not enforced (D-A1): the broker is told, and
+    # it still spawns. `open` is what closes the door.
+    await db.execute(
+        "UPDATE app_sessions SET locked_until = '2000-01-01T00:00:00.000Z' "
+        "WHERE id = ?",
+        (session["id"],),
+    )
+    lapsed = (await client.get(path, headers=as_bot(client, BROKER_KEY))).json()
+    assert (lapsed["lock_lapsed"], lapsed["open"]) == (True, True)
+
+    ended = db.utc_now()
+    await db.execute(
+        "UPDATE app_sessions SET ended_at = ? WHERE id = ?", (ended, session["id"])
+    )
+    closed = (await client.get(path, headers=as_bot(client, BROKER_KEY))).json()
+    assert (closed["open"], closed["ended_at"]) == (False, ended)
+
+
+
+async def test_turns_are_maxed_and_tokens_add_on_files_written_alone(
+    client, app, settings_env, seat_toml
+):
+    """Claim 9. One turn posts four events; the counter must not count them."""
+    session = await build_fixture(client, settings_env, seat_toml)
+    sid = session["id"]
+
+    async def view() -> dict:
+        return (
+            await client.get(
+                f"/apps/sessions/{sid}/harness-view",
+                headers=as_bot(client, BROKER_KEY),
+            )
+        ).json()
+
+    for stage, detail in (
+        ("scoped", {"turn": 1, "model": "claude-opus-5"}),
+        ("scaffolded", {"turn": 1}),
+        (
+            "files_written",
+            {
+                "turn": 1,
+                "files": ["index.html"],
+                "tokens": 40407,
+                "model": "claude-opus-5",
+                "no_changes": False,
+            },
+        ),
+        ("deployed", {"turn": 1}),
+    ):
+        assert (await post_stage(client, sid, stage, detail)).status_code == 200
+
+    first = await view()
+    assert (first["turns"], first["tokens_used"], first["stage"]) == (
+        1, 40407, "deployed"
+    )
+
+    # Turn 2 adds; a re-posted earlier stage carrying the same turn does not
+    # move the counter backwards and does not re-add its tokens.
+    await post_stage(client, sid, "scoped", {"turn": 2, "model": "claude-opus-5"})
+    await post_stage(
+        client, sid, "files_written",
+        {"turn": 2, "files": ["app.js"], "tokens": 1000, "model": "claude-opus-5"},
+    )
+    await post_stage(
+        client, sid, "scaffolded",
+        {"turn": 2, "halted": "timeout", "tokens": 999999},
+    )
+    second = await view()
+    assert (second["turns"], second["tokens_used"]) == (2, 41407)
+
+    # A stage-1 event with no turn at all is still a valid event.
+    assert (await post_stage(client, sid, "deployed")).status_code == 200
+    assert (await view())["turns"] == 2
+
+
+async def test_the_turn_line_says_exactly_what_the_turn_did(
+    client, app, settings_env, seat_toml
+):
+    """Claim 10. §H, sentence by sentence. These strings ARE the interface —
+    they land in the user's room and in both residents' transcripts, and a
+    resident that later says "the app I built you" is quoting them."""
+    session = await build_fixture(client, settings_env, seat_toml)
+    sid, channel = session["id"], session["channel_id"]
+
+    # Nothing before the terminal event: `scoped` and `scaffolded` move the
+    # bar, and a room narrating its own scaffolding is noise.
+    await post_stage(client, sid, "scoped", {"turn": 1, "model": "claude-opus-5"})
+    await post_stage(client, sid, "scaffolded", {"turn": 1})
+    assert len(await channel_lines(channel)) == 1  # the opener, and only it
+
+    await post_stage(
+        client, sid, "files_written",
+        {
+            "turn": 1,
+            "files": ["index.html", "app.js", "style.css", "README.md"],
+            "tokens": 212_400,
+            "model": "claude-opus-5",
+            "no_changes": False,
+            "summary": "A four-file to-do list that stores in localStorage.",
+        },
+    )
+    assert (await channel_lines(channel))[-1] == (
+        "Turn 1 done — 4 files written (index.html, app.js, style.css, "
+        "README.md), 212k tokens, model claude-opus-5. "
+        "A four-file to-do list that stores in localStorage."
+    )
+
+    # `deployed` is the publish, not a second outcome: one line per turn.
+    await post_stage(client, sid, "deployed", {"turn": 1})
+    assert len(await channel_lines(channel)) == 2
+
+    await post_stage(
+        client, sid, "files_written",
+        {"turn": 2, "files": [], "tokens": 800, "model": "claude-opus-5",
+         "no_changes": True, "summary": "Already does that."},
+    )
+    assert (await channel_lines(channel))[-1] == (
+        "Turn 2: no changes. Already does that."
+    )
+
+    # A halt at `scoped` — the stage it re-posts is the last one it reached,
+    # and the room hears about it anyway.
+    await post_stage(
+        client, sid, "scoped",
+        {"turn": 3, "halted": "ceiling",
+         "reason": "9,900,000 of 10,000,000 tokens spent."},
+    )
+    assert (await channel_lines(channel))[-1] == (
+        "Turn 3 halted — build hit its ceiling. "
+        "9,900,000 of 10,000,000 tokens spent."
+    )
+
+    await post_stage(client, sid, "scaffolded", {"turn": 4, "halted": "timeout"})
+    assert (await channel_lines(channel))[-1] == "Turn 4 halted — the build timed out."
+
+    await post_stage(
+        client, sid, "scaffolded",
+        {"turn": 5, "halted": "error", "reason": "the turn ended\nwithout a result"},
+    )
+    # The reason arrived with a newline in it and lands as one line: a build
+    # seat's free text is plain text in the transcript, never a second line.
+    assert (await channel_lines(channel))[-1] == (
+        "Turn 5 halted — the build failed. the turn ended without a result"
+    )
+
+    # Sub-thousand tokens print as themselves; an absent model is said so.
+    await post_stage(
+        client, sid, "files_written", {"turn": 6, "files": ["a.js"], "tokens": 999},
+    )
+    assert (await channel_lines(channel))[-1] == (
+        "Turn 6 done — 1 files written (a.js), 999 tokens, model not reported."
+    )
+
+    # Nine files: eight named, the rest counted.
+    await post_stage(
+        client, sid, "files_written",
+        {"turn": 7, "files": [f"f{i}.js" for i in range(9)], "tokens": 1000,
+         "model": "m"},
+    )
+    assert (await channel_lines(channel))[-1] == (
+        "Turn 7 done — 9 files written (f0.js, f1.js, f2.js, f3.js, f4.js, "
+        "f5.js, f6.js, f7.js, +1 more), 1k tokens, model m."
+    )
+
+    # Every line is the seeded `system` bot's, and none of them is the
+    # builder's — the broker has no post right in this room (stage 1 #2266).
+    system = await db.fetch_one("SELECT id FROM bots WHERE name = 'system'")
+    rows = await db.fetch_all(
+        "SELECT author_type, author_id FROM messages WHERE channel_id = ?", (channel,)
+    )
+    assert {(r["author_type"], r["author_id"]) for r in rows} == {
+        ("bot", system["id"])
+    }
+
+
+async def test_a_credential_halt_closes_the_session(
+    client, app, settings_env, seat_toml
+):
+    """§E: a turn that tried to publish a credential has earned a human before
+    the next one. The line says so and the door shuts in the same breath."""
+    session = await build_fixture(client, settings_env, seat_toml)
+    sid = session["id"]
+
+    r = await post_stage(
+        client, sid, "scaffolded",
+        {"turn": 1, "halted": "secret", "quarantine": "/srv/apps-quarantine/x/1"},
+    )
+    assert r.status_code == 200, r.text
+    assert (await channel_lines(session["channel_id"]))[-1] == (
+        "Turn 1 halted — the build tried to write a credential; this session "
+        "is closed and an admin has been notified."
+    )
+
+    view = (
+        await client.get(
+            f"/apps/sessions/{sid}/harness-view", headers=as_bot(client, BROKER_KEY)
+        )
+    ).json()
+    assert view["open"] is False
+    assert view["ended_at"] is not None
+    assert view["locked_until"] == view["ended_at"]   # the lock came back too
+
+    # The user's modal finds out the next time it beats, and the harness is
+    # refused its next post on the same fact.
+    await login(client, "alice")
+    beat = await client.post(f"/apps/sessions/{sid}/heartbeat")
+    assert beat.status_code == 410
+    assert (await post_stage(client, sid, "scoped", {"turn": 2})).status_code == 410
+
+    # The quarantine path rode along in `detail` untouched — an unknown key is
+    # still an accepted key.
+    reloaded = await db.fetch_one(
+        "SELECT detail FROM app_stage_events WHERE session_id = ? ORDER BY id DESC",
+        (sid,),
+    )
+    assert json.loads(reloaded["detail"])["quarantine"] == "/srv/apps-quarantine/x/1"
+
+
+async def test_detail_is_typed_where_the_server_acts_on_it(
+    client, app, settings_env, seat_toml
+):
+    """The keys that choose a sentence or move a counter are validated at the
+    door. Everything else stays free-form, because a publisher that learns a
+    new fact should not need a server release to report it."""
+    session = await build_fixture(client, settings_env, seat_toml)
+    sid = session["id"]
+
+    for bad in (
+        {"halted": "wandered off"},          # not one of the four sentences
+        {"turn": 0},                         # turns start at 1
+        {"tokens": -1},
+        {"summary": "s" * 301},
+        {"reason": "r" * 301},
+        {"files": "index.html"},             # a list, not a name
+    ):
+        r = await post_stage(client, sid, "scaffolded", bad)
+        assert r.status_code == 422, (bad, r.text)
+
+    # And the 2000-char bound stays the outer wall, whatever the keys are.
+    over = await post_stage(
+        client, sid, "files_written", {"turn": 1, "files": ["x" * 60] * 40},
+    )
+    assert over.status_code == 422
+
+    # A detail at the brief's worst case — 40 names plus the "+N more" marker,
+    # a 300-char summary — fits under the bound. If this ever fails, the cap
+    # in the broker's detail builder is the thing that is wrong.
+    packed = await post_stage(
+        client, sid, "files_written",
+        {
+            "turn": 3,
+            "files": [f"src/component-{i:02d}.js" for i in range(40)] + ["+160 more"],
+            "tokens": 431_200,
+            "model": "claude-opus-5",
+            "no_changes": False,
+            "summary": "s" * 300,
+        },
+    )
+    assert packed.status_code == 200, packed.text
+
+
+async def test_an_admin_publishing_by_hand_keeps_the_lock(
+    client, app, settings_env, seat_toml
+):
+    """D-B3 is scoped to the harness. An admin poking a session nobody is
+    watching is exactly the case the lock is there to catch."""
+    session = await build_fixture(client, settings_env, seat_toml, admin=True)
+    sid = session["id"]
+    await db.execute(
+        "UPDATE app_sessions SET locked_until = '2000-01-01T00:00:00.000Z' "
+        "WHERE id = ?",
+        (sid,),
+    )
+
+    await login(client, "alice")
+    by_hand = await client.post(
+        f"/apps/sessions/{sid}/stage", json={"stage": "scaffolded"}
+    )
+    assert by_hand.status_code == 410
+
+    assert (await post_stage(client, sid, "scaffolded", {"turn": 1})).status_code == 200
+
+
+async def test_the_migration_adds_the_two_turn_columns(app):
+    """012. Both default to 0, which is the truth for a session that never ran
+    a turn — including every session created before the migration."""
+    rows = await db.fetch_all("PRAGMA table_info(app_sessions)")
+    columns = {r["name"]: r for r in rows}
+    for name in ("turns", "tokens_used"):
+        assert columns[name]["notnull"] == 1
+        assert columns[name]["dflt_value"] == "0"
+
+
+def test_the_turn_line_renders_without_a_database():
+    """The §H sentences, straight from the renderer — the one place they are
+    written, asserted without a session in the way."""
+    from app.routers.apps import _turn_line
+
+    assert _turn_line({}) == "Turn 0 done — 0 files written, 0 tokens, model not reported."
+    assert _turn_line({"turn": 2, "no_changes": True}) == "Turn 2: no changes."
+    # A summary that is only control characters is no summary at all.
+    assert _turn_line({"turn": 2, "no_changes": True, "summary": "\n\t "}) == (
+        "Turn 2: no changes."
+    )

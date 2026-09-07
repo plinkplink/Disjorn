@@ -1,22 +1,24 @@
-"""APPS — the registry, the build sessions, and the stage stream (stage 1).
+"""APPS — the registry, the build sessions, and the stage stream.
 
 SPECS/2026-08-30-apps-tab-v1.md (confirmed by plink, #custodian seq 2211;
-stage 1 opened at Round 12).
+stage 1 opened at Round 12) and SPECS/2026-09-06-apps-builder-seat.md §J
+(confirmed seq 2302; stage 2 slice (ii) gives the stage stream a TURN).
 
-| method | path                          | who                          |
-|--------|-------------------------------|------------------------------|
-| GET    | /apps                         | user   — my menu + my quota   |
-| GET    | /apps/discover                | user   — visible, not on menu |
-| GET    | /apps/builders                | user   — the chooser's cards  |
-| GET    | /apps/quota                   | user                          |
-| POST   | /apps/sessions                | user   — start a build        |
-| GET    | /apps/sessions/{id}           | owner                         |
-| POST   | /apps/sessions/{id}/heartbeat | owner  — push the lock out    |
-| POST   | /apps/sessions/{id}/end       | owner  — idempotent           |
-| POST   | /apps/sessions/{id}/stage     | broker bot / admin            |
-| PATCH  | /apps/{app_id}                | owner  — name, description    |
-| POST   | /apps/{app_id}/menu           | user   — if visible to them   |
-| DELETE | /apps/{app_id}/menu           | user   — not the owner's own  |
+| method | path                             | who                          |
+|--------|----------------------------------|------------------------------|
+| GET    | /apps                            | user   — my menu + my quota   |
+| GET    | /apps/discover                   | user   — visible, not on menu |
+| GET    | /apps/builders                   | user   — the chooser's cards  |
+| GET    | /apps/quota                      | user                          |
+| POST   | /apps/sessions                   | user   — start a build        |
+| GET    | /apps/sessions/{id}              | owner                         |
+| GET    | /apps/sessions/{id}/harness-view | broker bot / admin            |
+| POST   | /apps/sessions/{id}/heartbeat    | owner  — push the lock out    |
+| POST   | /apps/sessions/{id}/end          | owner  — idempotent           |
+| POST   | /apps/sessions/{id}/stage        | broker bot / admin            |
+| PATCH  | /apps/{app_id}                   | owner  — name, description    |
+| POST   | /apps/{app_id}/menu              | user   — if visible to them   |
+| DELETE | /apps/{app_id}/menu              | user   — not the owner's own  |
 
 THE MODAL CHAT IS A REAL CHANNEL. A build session creates a channel of type
 `app_build` with exactly two members — the owner and the builder bot — and
@@ -32,17 +34,31 @@ resident integration: a builder resident already summons on `context is not
 None`. Nothing in this file talks to a resident, and nothing in the harness
 changed.
 
-STAGE 1 IS A SUBSCRIPTION INTERFACE WITH NO PRODUCTION PUBLISHER. The stage
-endpoint below is the only writer of `app_stage_events`, it is gated to the
-broker seat and admins, and nothing in production calls it yet. The consumer —
-the client store and its stage bar — is real, and a second subscriber must be
-addable without touching the publisher.
+THE STAGE ENDPOINT IS THE ONLY WRITER of `app_stage_events`, and it is gated
+to the configured harness seats and admins — never to the session's own owner,
+who is who the stream is FOR. The consumers (the client store, its stage bar)
+subscribe; a second one must be addable without touching the publisher.
 
-NOT IN STAGE 1, and deliberately not stubbed: the apps-builder seat, the
-serving gate and origin, the iframe's real src, the share dialog, remix file
-copy, screenshots, the per-build token ceiling. Those are broker-enforced or
-later-stage; a placeholder here that pretends to do one of them is worse than
-its absence.
+A TURN IS THE UNIT STAGE 2 ADDED. The broker hands one build prompt to the
+apps-builder seat and posts the turn's progress here: `scoped` at spawn,
+`scaffolded` when the marker lands, `files_written` when the unit's result is
+read, `deployed` when the tree was published. A halted turn re-posts its LAST
+REACHED stage with `detail.halted` set, because the five-stage vocabulary is a
+CHECK constraint and a halt is not a sixth stage. That is why every reader that
+renders a label keys off `detail`, never off the stage name: `files_written`
+is the turn's terminal stage, not literally "files were written"
+(SPECS/2026-09-06-apps-builder-seat.md §A, Claudette #2293).
+
+Two things follow from the turn, and both live here rather than in the broker:
+`app_sessions.turns` / `.tokens_used` are maintained from `detail` (§J, so the
+modal's hidden ceiling never needs the broker's ledger), and the §H system
+line is written into the build channel as a SERVER-SIDE effect of the event —
+the broker has no post right in that room, and stage 1's two-member wall
+(#2266) stays the only path into it.
+
+NOT IN STAGE 2, and deliberately not stubbed: the serving gate and origin, the
+iframe's real src, the share dialog, remix file copy, screenshots. `live` is
+stage 3's word — the user's explicit "done" — and nothing here reaches it.
 """
 
 import json
@@ -51,10 +67,10 @@ import re
 import secrets
 from base64 import b32encode
 from datetime import datetime, time as dt_time, timedelta, timezone
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, Literal, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .. import db, events
 from ..config import get_settings, read_model_pin
@@ -79,6 +95,33 @@ MAX_APP_DESCRIPTION_CHARS = 300
 # the way messages bounds its metadata: an uncapped JSON field on a write path
 # is a side channel with a database behind it.
 MAX_STAGE_DETAIL_CHARS = 2000
+
+# The two free-text fields inside a detail — the runner's one-line report and a
+# halt's reason. Both are rendered into a room message, so they are bounded
+# well under the detail's own cap: a sentence, not a paragraph.
+MAX_STAGE_LINE_CHARS = 300
+
+# How much of a turn's file list the §H line names before it counts the rest.
+# The scroll in the modal shows them all; the transcript line is a sentence.
+STAGE_LINE_FILES = 8
+
+# Why a turn stopped. A CLOSED set, because each value picks a sentence: an
+# unknown reason would be a turn that halted with nothing said about it.
+HaltReason = Literal["timeout", "error", "secret", "ceiling"]
+
+# One sentence per halt, keyed by the reason. `ceiling` is the only one the
+# broker posts without anything having run (D-1.2b): the refusal still reaches
+# the room and the bar, because a handoff that was declined is a fact about
+# the build and not just about the broker.
+HALT_SENTENCES: dict[str, str] = {
+    "ceiling": "build hit its ceiling.",
+    "timeout": "the build timed out.",
+    "error": "the build failed.",
+    "secret": (
+        "the build tried to write a credential; this session is closed and an "
+        "admin has been notified."
+    ),
+}
 
 # D4: 12 chars of lowercase base32 (RFC 4648 alphabet, lowercased), minted from
 # secrets. 60 bits, and never sequential — an app id lands in a URL path
@@ -200,16 +243,52 @@ class AppPatch(BaseModel):
     )
 
 
+class StageDetail(BaseModel):
+    """What a stage event is allowed to SAY about a turn.
+
+    Every field is optional and unknown keys are still accepted, because
+    `detail` was and stays free-form: a stage-1 event's bare `{}` is still a
+    valid event, and a publisher that learns a new fact should not need a
+    server release to report it. What this model buys is that the keys the
+    server itself ACTS on — the ones that move `turns`, add to `tokens_used`,
+    and choose the sentence written into the room — are typed at the door
+    rather than guessed at the point of use. `halted` in particular is a
+    closed set: it selects a sentence, so a value nobody wrote a sentence for
+    is a 422 here rather than a silent no-line later.
+
+    `protected_namespaces` is cleared for `model`, which names the model the
+    turn ran on and is a wire word from the spec, not a pydantic attribute.
+    """
+
+    model_config = ConfigDict(extra="allow", protected_namespaces=())
+
+    turn: Optional[int] = Field(default=None, ge=1)
+    files: Optional[list[str]] = None
+    tokens: Optional[int] = Field(default=None, ge=0)
+    model: Optional[str] = None
+    no_changes: Optional[bool] = None
+    summary: Optional[str] = Field(default=None, max_length=MAX_STAGE_LINE_CHARS)
+    halted: Optional[HaltReason] = None
+    reason: Optional[str] = Field(default=None, max_length=MAX_STAGE_LINE_CHARS)
+
+
 class StagePublish(BaseModel):
     stage: AppStage
-    detail: dict[str, Any] = Field(default_factory=dict)
+    detail: StageDetail = Field(default_factory=StageDetail)
+
+    def detail_dict(self) -> dict[str, Any]:
+        """The detail EXACTLY as it was sent — set keys and unknown keys, and
+        nothing this model merely defaults to None. It is persisted, echoed on
+        the bus, and read back by the modal, so a round trip must not grow
+        fields the publisher never wrote."""
+        return self.detail.model_dump(exclude_unset=True)
 
     @model_validator(mode="after")
     def _bound_detail(self) -> "StagePublish":
         """Keep `detail` from becoming an uncapped side channel (messages.py's
         _bound_metadata, same reasoning, same shape)."""
         try:
-            encoded = json.dumps(self.detail)
+            encoded = json.dumps(self.detail_dict())
         except (TypeError, ValueError):
             raise ValueError("detail must be JSON-serializable") from None
         if len(encoded) > MAX_STAGE_DETAIL_CHARS:
@@ -217,6 +296,36 @@ class StagePublish(BaseModel):
                 f"detail exceeds {MAX_STAGE_DETAIL_CHARS} serialized characters"
             )
         return self
+
+
+class HarnessView(BaseModel):
+    """One build session as the BROKER needs to see it (§E.1).
+
+    The broker's four pre-flight checks read exactly this and nothing else: is
+    the session there, is it open, whose builder is it, and has it spent its
+    ceiling. It is a separate shape from SessionOut on purpose — SessionOut is
+    the modal's payload, full of things the harness has no business holding
+    (the app's description, the builder's avatar, the owner's quota), and a
+    harness that reads the user's view would drift into rendering it.
+
+    `lock_lapsed` is INFORMATIONAL. The lock is the user's chat exclusivity,
+    pushed out by the modal's heartbeat; it does not gate a handoff, because a
+    resident that hands a prompt over seconds after the user closed the modal
+    should still land the turn (keyboard ruling D-A1). `open` is the door.
+    """
+
+    session_id: int
+    app_id: str
+    owner_user_id: int
+    builder_bot_id: int
+    channel_id: int
+    stage: Optional[AppStage] = None
+    turns: int
+    tokens_used: int
+    open: bool
+    lock_lapsed: bool
+    ended_at: Optional[str] = None
+    locked_until: str
 
 
 # ---------------------------------------------------------------------------
@@ -538,6 +647,101 @@ def _opener_text(
     )
 
 
+def _one_line(text: Any) -> str:
+    """A publisher's free text, made safe to put in a message.
+
+    The runner's summary and a halt's reason both come from a build seat that
+    read a prompt somebody typed. They are plain text in the transcript and
+    nothing else: control characters (a newline included) collapse to spaces,
+    so one line cannot become several and cannot smuggle a blank one, and the
+    result is bounded again here rather than trusted from the door.
+    """
+    if not isinstance(text, str):
+        return ""
+    flattened = "".join(" " if ch < " " or ch == "\x7f" else ch for ch in text)
+    return " ".join(flattened.split())[:MAX_STAGE_LINE_CHARS]
+
+
+def _tokens_word(tokens: int) -> str:
+    """`212k` once a turn is into the thousands, the integer below that.
+
+    Rounded on purpose: this number is a bill, not a measurement, and a line
+    that reads "211,847 tokens" invites arithmetic the ceiling is not asking
+    anybody to do.
+    """
+    return f"{tokens / 1000:.0f}k" if tokens >= 1000 else str(tokens)
+
+
+def _files_word(files: list[str]) -> str:
+    """The first few names, then a count of the rest."""
+    named = [_one_line(f) for f in files[:STAGE_LINE_FILES]]
+    rest = len(files) - len(named)
+    if rest > 0:
+        named.append(f"+{rest} more")
+    return ", ".join(named)
+
+
+def _turn_line(detail: dict[str, Any]) -> str:
+    """The §H line for one turn.
+
+    ONE message per turn outcome, authored by `system`, and it is the build
+    summary in the resident's transcript as much as it is the user's receipt
+    (§H, parent B9: the resident later says "the app I built you" because the
+    transcript says so). Like the opener it carries no context block, so it
+    summons nobody.
+
+    A halt wins over `files_written`, whatever stage the event re-posted: a
+    turn that died at `scoped` must not leave the room silent, and a turn that
+    died after writing files is still a halt (Gable #2295, Claudette #2299).
+    """
+    turn = detail.get("turn")
+    number = turn if isinstance(turn, int) and not isinstance(turn, bool) else 0
+    summary = _one_line(detail.get("summary"))
+    tail = f" {summary}" if summary else ""
+
+    halted = detail.get("halted")
+    if isinstance(halted, str) and halted in HALT_SENTENCES:
+        reason = _one_line(detail.get("reason"))
+        return (
+            f"Turn {number} halted — {HALT_SENTENCES[halted]}"
+            + (f" {reason}" if reason else "")
+        )
+
+    if detail.get("no_changes") is True:
+        return f"Turn {number}: no changes.{tail}"
+
+    raw = detail.get("files")
+    files = [f for f in raw if isinstance(f, str)] if isinstance(raw, list) else []
+    tokens = detail.get("tokens")
+    counted = tokens if isinstance(tokens, int) and not isinstance(tokens, bool) else 0
+    model = _one_line(detail.get("model")) or "not reported"
+    named = f" ({_files_word(files)})" if files else ""
+    return (
+        f"Turn {number} done — {len(files)} files written{named}, "
+        f"{_tokens_word(counted)} tokens, model {model}.{tail}"
+    )
+
+
+async def _close_session(conn: Any, session_id: int, moment: str) -> None:
+    """End a session and release its lock, keeping the FIRST ending.
+
+    Both endings run through here — the owner's `end` verb and the server's
+    own on a credential halt — so "ended" means one thing in the table. The
+    `ended_at IS NULL` guard is what makes it idempotent: a second call is a
+    duplicate click or a retry, not a second ending, and rewriting the
+    timestamp would quietly move when the build finished.
+
+    `locked_until` comes back to now in the same statement. The lock is only
+    ever read as "is it still in the future", so leaving a future lock on an
+    ended session would be a row that answers two questions differently.
+    """
+    await conn.execute(
+        """UPDATE app_sessions SET ended_at = ?, locked_until = ?
+            WHERE id = ? AND ended_at IS NULL""",
+        (moment, moment, session_id),
+    )
+
+
 # ---------------------------------------------------------------------------
 # GET /apps, /apps/discover, /apps/builders, /apps/quota
 # ---------------------------------------------------------------------------
@@ -770,19 +974,11 @@ async def heartbeat_session(session_id: int, user: CurrentUser) -> dict[str, Any
 
 @router.post("/apps/sessions/{session_id}/end")
 async def end_session(session_id: int, user: CurrentUser) -> dict[str, Any]:
-    """Close the session and release the lock. Idempotent.
-
-    Idempotent by keeping the FIRST ended_at: a second call is a duplicate
-    click or a retry, not a second ending, and rewriting the timestamp would
-    quietly move when the build finished.
-    """
+    """Close the session and release the lock. Idempotent (_close_session)."""
     session = await _require_session(session_id, user)
     if session["ended_at"] is None:
         ended_at = _now()
-        await db.execute(
-            "UPDATE app_sessions SET ended_at = ? WHERE id = ? AND ended_at IS NULL",
-            (ended_at, session_id),
-        )
+        await _close_session(db, session_id, ended_at)
     else:
         ended_at = session["ended_at"]
     return {"id": session_id, "ended_at": ended_at}
@@ -792,7 +988,7 @@ async def end_session(session_id: int, user: CurrentUser) -> dict[str, Any]:
 # POST /apps/sessions/{id}/stage — the publisher half of the stage stream
 # ---------------------------------------------------------------------------
 
-def _require_stage_publisher(actor: Actor) -> None:
+def _require_stage_publisher(actor: Actor) -> bool:
     """Only the configured build-harness seats, or an admin.
 
     A stage event is an ATTESTATION about what a build actually did — the modal
@@ -800,15 +996,60 @@ def _require_stage_publisher(actor: Actor) -> None:
     list is config a person edits (APPS_STAGE_PUBLISHER_BOT_NAMES), never
     something a caller asserts about itself. The session's own owner is
     deliberately NOT on the list: the user is who the stream is FOR.
+
+    Returns whether the caller is the HARNESS rather than an admin. The two
+    are not interchangeable at the session gate: the harness reports turns it
+    already ran, and an admin is a person poking the stream by hand.
     """
     if actor.type == "bot" and actor.bot is not None:
         if actor.bot.name in get_settings().APPS_STAGE_PUBLISHER_BOT_NAMES:
-            return
+            return True
     elif actor.user is not None and actor.user.is_admin:
-        return
+        return False
     raise HTTPException(
         status_code=403,
         detail="Only the build harness or an admin can publish a build stage",
+    )
+
+
+async def _publisher_session(session_id: int) -> dict[str, Any]:
+    """The session row a publisher named, or 404."""
+    session = await db.fetch_one(
+        "SELECT * FROM app_sessions WHERE id = ?", (session_id,)
+    )
+    if session is None:
+        raise HTTPException(status_code=404, detail="Build session not found")
+    return session
+
+
+@router.get("/apps/sessions/{session_id}/harness-view")
+async def harness_view(session_id: int, actor: CurrentActor) -> HarnessView:
+    """What the broker reads before it hands a prompt to the build seat (§E.1).
+
+    Publisher-gated by the same list that gates the stage endpoint, because it
+    is the same relationship in the other direction: the harness reports turns
+    here and asks about them here, and nobody else does either.
+
+    It answers about a session that has ENDED as readily as one that is open —
+    `open` is a field, not a status code. A refusal the broker has to turn back
+    into "this build session has ended" is a refusal that tells it less than
+    the row does.
+    """
+    _require_stage_publisher(actor)
+    session = await _publisher_session(session_id)
+    return HarnessView(
+        session_id=session["id"],
+        app_id=session["app_id"],
+        owner_user_id=session["user_id"],
+        builder_bot_id=session["builder_bot_id"],
+        channel_id=session["channel_id"],
+        stage=session["stage"],
+        turns=session["turns"],
+        tokens_used=session["tokens_used"],
+        open=session["ended_at"] is None,
+        lock_lapsed=session["locked_until"] <= _now(),
+        ended_at=session["ended_at"],
+        locked_until=session["locked_until"],
     )
 
 
@@ -816,24 +1057,41 @@ def _require_stage_publisher(actor: Actor) -> None:
 async def publish_stage(
     session_id: int, actor: CurrentActor, body: StagePublish = Body(...)
 ) -> StageEventOut:
-    """Persist a stage event, mark the session, publish it to the owner.
+    """Persist a stage event, mark the session, publish it to the owner, and —
+    when the event ends a turn — write the turn's line into the room.
 
     Persisted BEFORE it is published, so a modal that reloads sees the same
     stages a live modal saw. `live` is also the app's done state, so it flips
-    `apps.status` in the same transaction — the two facts are one fact.
+    `apps.status` in the same transaction — the two facts are one fact. So is
+    a credential halt and the session's ending: §E closes the session on a
+    secret, and a turn recorded as quarantined next to a session still taking
+    handoffs would be two answers to one question.
+
+    THE SESSION GATE DEPENDS ON WHO IS ASKING (keyboard ruling D-B3). For the
+    harness, only `ended_at` closes the door: the turn already ran, and the
+    record of it has to land in the room even if the user's modal went away
+    and let the lock lapse mid-build. An admin publishing by hand keeps the
+    old gate, lapse included — a person poking a session nobody is watching is
+    the case the lock is there to catch.
 
     Fan-out is the OWNER's sockets only (app/ws.py). Not the builder bot: a
     resident reading the harness's report of its own build back as an inbound
-    frame is a loop nobody asked for.
+    frame is a loop nobody asked for. The §H line is a different path on
+    purpose — it is a MESSAGE in the build channel, so both members see it the
+    way they see everything else in the room.
     """
-    _require_stage_publisher(actor)
-    session = await db.fetch_one("SELECT * FROM app_sessions WHERE id = ?", (session_id,))
-    if session is None:
-        raise HTTPException(status_code=404, detail="Build session not found")
-    _require_session_open(session)
+    from_harness = _require_stage_publisher(actor)
+    session = await _publisher_session(session_id)
+    if from_harness:
+        if session["ended_at"] is not None:
+            raise HTTPException(status_code=410, detail="This build session has ended")
+    else:
+        _require_session_open(session)
 
-    detail_json = json.dumps(body.detail)
+    detail = body.detail_dict()
+    detail_json = json.dumps(detail)
     created_at = _now()
+    halted = body.detail.halted
     async with db.transaction() as conn:
         cur = await conn.execute(
             """INSERT INTO app_stage_events (session_id, stage, detail, created_at)
@@ -844,6 +1102,23 @@ async def publish_stage(
         await conn.execute(
             "UPDATE app_sessions SET stage = ? WHERE id = ?", (body.stage, session_id)
         )
+        # The turn counter is a MAX, not an increment: one turn posts several
+        # events, and a counter that added one each time would count events.
+        if body.detail.turn is not None:
+            await conn.execute(
+                "UPDATE app_sessions SET turns = MAX(turns, ?) WHERE id = ?",
+                (body.detail.turn, session_id),
+            )
+        # Usage lands once per turn, on the event that read the runner's
+        # result — so the meter adds there and nowhere else, and a halt that
+        # re-posts an earlier stage cannot double-count it.
+        if body.stage == "files_written" and body.detail.tokens is not None:
+            await conn.execute(
+                "UPDATE app_sessions SET tokens_used = tokens_used + ? WHERE id = ?",
+                (body.detail.tokens, session_id),
+            )
+        if halted == "secret":
+            await _close_session(conn, session_id, created_at)
         if body.stage == "live":
             await conn.execute(
                 "UPDATE apps SET status = 'live', updated_at = ? WHERE id = ?",
@@ -858,15 +1133,28 @@ async def publish_stage(
             "session_id": session_id,
             "app_id": session["app_id"],
             "stage": body.stage,
-            "detail": body.detail,
+            "detail": detail,
             "created_at": created_at,
         }
     )
+
+    if body.stage == "files_written" or halted is not None:
+        try:
+            await deliver_message(
+                session["channel_id"], "bot", await _system_bot_id(),
+                _turn_line(detail),
+            )
+        except Exception:  # noqa: BLE001
+            # The event is durable and the bar has already moved; failing the
+            # request here would tell the broker its turn did not land when it
+            # did, and the broker would post the whole thing again.
+            logger.exception("app build turn line failed for session %s", session_id)
+
     return StageEventOut(
         id=event_id,
         session_id=session_id,
         stage=body.stage,
-        detail=body.detail,
+        detail=detail,
         created_at=created_at,
     )
 
