@@ -55,6 +55,7 @@
 "board-flag" = false
 "board-comment" = false
 "summon-hop" = false
+"apps-build" = false
 
 # NOTE there is no `wake` line in either seat section, and adding one grants
 # nothing: the broker refuses `wake` to every resident identity in code, before
@@ -78,6 +79,7 @@
 "board-flag" = false
 "board-comment" = false
 "summon-hop" = false
+"apps-build" = false
 
 # THE WAKE CALLER (SPECS/2026-08-25-agentic-residents.md). plink, at the
 # keyboard, from his own uid — the section name is the identity his uid maps to

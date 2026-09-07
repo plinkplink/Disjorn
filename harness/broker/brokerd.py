@@ -37,9 +37,9 @@ Config: /etc/disjorn-broker/broker.toml + verbs.toml (templates alongside this
 file). Paths overridable for tests via DISJORN_BROKER_CONFIG /
 DISJORN_BROKER_VERBS or --config/--verbs.
 
-Runs as plink (not root) under systemd. There are exactly TWO privileged escape
-hatches, both narrow sudoers rules and both listed here so a third is a visible
-act rather than a habit:
+Runs as plink (not root) under systemd. There are exactly THREE privileged
+escape hatches, all narrow sudoers rules and all listed here so a fourth is a
+visible act rather than a habit:
   * harness/keyboard/90-disjorn-broker.sudoers — `sudo -n systemctl restart
     disjorn`, nothing else (WP-H3, restart-disjorn).
   * harness/keyboard/91-disjorn-build.sudoers — `sudo -n disjorn-build-launch
@@ -47,6 +47,12 @@ act rather than a habit:
     (harness/broker/disjorn-build-launch) is the only thing that runs as root;
     what it starts runs as the RESIDENT, in a transient systemd unit. It ships
     UNINSTALLED, like the verb it serves.
+  * harness/keyboard/92-disjorn-apps.sudoers — `sudo -n disjorn-apps-launch run
+    <principal> <session> <turn> <app-id> <prompt-path>`, nothing else
+    (SPECS/2026-09-06-apps-builder-seat.md, apps-build). Same shape as the
+    build hatch and the same wall: the helper validates every argument before
+    it spends any privilege, and the turn runs as res-appsbuilding — never as
+    the resident that asked for it, and never as plink.
 """
 
 from __future__ import annotations
@@ -59,6 +65,7 @@ import pwd
 import re
 import signal
 import socket
+import sqlite3
 import stat
 import struct
 import subprocess
@@ -162,6 +169,144 @@ BUILD_ACTIVE_STATES = frozenset(
 # cgroup), so the new process re-reads these and re-adopts.
 BUILD_SIDECAR_SUFFIX = ".build.json"
 BUILD_SIDECAR_SCHEMA = 1
+
+# --------------------------------------------------------------- apps-build
+# SPECS/2026-09-06-apps-builder-seat.md §B/§E. An APP BUILD TURN is launched
+# the same way a spec build is — `sudo -n <launcher> run …`, a transient unit
+# under a seat's uid, a 0600 sidecar so a broker restart can re-adopt it — but
+# everything the broker learns about the turn comes back through the FILESYSTEM
+# (`/srv/apps-turns/<session>/<turn>/result.json`, written atomically by the
+# seat's harvest) rather than through the spool. The broker never opens the
+# spools: they are 0600 seat-only, and result.json is the whole contract.
+APPS_UNIT_PREFIX = "disjorn-apps-"
+APPS_SIDECAR_SUFFIX = ".apps.json"
+APPS_SIDECAR_SCHEMA = 1
+# The launcher's "refused before any privilege" exit (bad charset, prompt
+# outside the mapped dir, symlink, wrong owner, over the byte bound). It comes
+# back in milliseconds, which is why the verb can still refuse in the caller's
+# own turn instead of leaving a scoped event and a silent room.
+APPS_LAUNCH_REFUSED_EXIT = 64
+APPS_SPAWN_CHECK_SEC = 1.0
+# The stage endpoint's own bound on `detail` (server-side, 2000 chars of JSON).
+# Held HERE too, so a 200-file turn is trimmed to something that lands rather
+# than posted into a 422 nobody sees.
+APPS_DETAIL_MAX_CHARS = 2000
+APPS_FILES_CAP = 40
+APPS_SUMMARY_MAX = 300
+APPS_TURN_MAX_SEC = 1800          # launch.toml [apps].turn_max_sec, mirrored
+# What `[apps]` means when a key is absent. The table itself is NOT defaulted:
+# no table means the verb is not configured on this broker and says so (§A0),
+# because a broker that invented /srv/apps-turns out of nothing would spawn
+# turns at a launcher that is not installed.
+APPS_DEFAULTS: dict = {
+    "runner": "claude-code",
+    "seat_bots": {},
+    "model": "claude-opus-5",
+    "build_token_ceiling": 10_000_000,
+    "prompt_max_bytes": 65536,
+    "turns_root": "/srv/apps-turns",
+    "launch_command": ["sudo", "-n",
+                       "/usr/local/lib/disjorn/disjorn-apps-launch", "run"],
+    "unit_state_command": ["systemctl", "show", "--property=ActiveState",
+                           "--value"],
+    "ledger_path": "/var/log/disjorn-broker/apps-ledger.jsonl",
+    "log_dir": "/var/log/disjorn-broker/apps-logs",
+    "poll_sec": 2,
+    "result_grace_sec": 30,
+    "chat_markers": ["[[CHAT]]", "[[/CHAT]]"],
+}
+# The app id is a positional argument to a privileged launcher and a directory
+# name under /srv; it is held to the same shape the launcher enforces so a
+# broker that has been handed a bad one refuses before sudo does.
+APPS_APP_ID_RE = re.compile(r"^[a-z2-7]{12}$")
+APPS_SEAT_RE = re.compile(r"^res-[a-z]{1,24}$")
+_APPS_MORE_RE = re.compile(r"^\+(\d+) more$")
+# The one sentence a resident that faithfully quoted a user gets to say back
+# (§E, Claudette #2284). Verbatim, and asserted verbatim by test: "something
+# went wrong" is what it exists to stop being the answer.
+APPS_CHAT_MARKER_REFUSAL = (
+    "The prompt file contains a chat marker the harness cannot pass through; "
+    "quote the user's words without it")
+
+
+def apps_unit_name(session: int, turn: int) -> str:
+    """The transient unit one turn runs in. A pure function of (session, turn)
+    on BOTH sides — the launcher pins `--unit=` to it, the broker polls and
+    re-adopts by it — so a turn this process did not launch is still findable."""
+    return f"{APPS_UNIT_PREFIX}{int(session)}-{int(turn)}.service"
+
+
+def apps_tokens(usage: Optional[dict]) -> int:
+    """The ceiling column: input + output + cache_creation (spec §E "Ledger").
+
+    Cache READS are excluded deliberately. They are the cheap half and they
+    dominate the raw total (877k of 908k on the proving turn), so counting them
+    would trip a 10M ceiling on a build that did almost no fresh work — the
+    opposite of a runaway kill. A turn whose runner reported no usage line
+    counts 0: an unmeasured turn must not silently spend the ceiling."""
+    if not isinstance(usage, dict):
+        return 0
+    total = 0
+    for key in ("input_tokens", "output_tokens", "cache_creation_input_tokens"):
+        value = usage.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            total += value
+    return total
+
+
+def apps_clean_line(text: Any, limit: int = APPS_SUMMARY_MAX) -> Optional[str]:
+    """One line of runner-written text, safe to put in a room. Control
+    characters out (a summary is rendered as plain text and nothing else),
+    collapsed to a single line, bounded. None for anything that is not a
+    non-empty string."""
+    if not isinstance(text, str):
+        return None
+    cleaned = "".join(ch for ch in text if ch == " " or ch.isprintable()).strip()
+    return cleaned[:limit] or None
+
+
+def apps_cap_files(files: Any, cap: int = APPS_FILES_CAP) -> list[str]:
+    """The turn's file list, bounded. Over the cap the last entry says how many
+    were dropped — a truncation that admits itself, rather than a list that
+    silently stops."""
+    if not isinstance(files, list):
+        return []
+    names = [str(f) for f in files if isinstance(f, str)]
+    if len(names) <= cap:
+        return names
+    return names[:cap] + [f"+{len(names) - cap} more"]
+
+
+def apps_fit_detail(detail: dict) -> dict:
+    """A stage `detail` that will fit the server's 2000-char bound, whatever the
+    turn touched. Trimmed in the order that loses the least: the summary is
+    shortened, then dropped, then the file list is capped harder. `turn` and
+    `halted` are never touched — they are what the room and the bar read."""
+    fitted = dict(detail)
+    if isinstance(fitted.get("summary"), str):
+        fitted["summary"] = fitted["summary"][:APPS_SUMMARY_MAX]
+
+    def size(d: dict) -> int:
+        return len(json.dumps(d, ensure_ascii=False))
+
+    if size(fitted) <= APPS_DETAIL_MAX_CHARS:
+        return fitted
+    if "summary" in fitted:
+        del fitted["summary"]
+    files = fitted.get("files")
+    if not isinstance(files, list):
+        return fitted
+    # The list may already end in a "+N more" marker from apps_cap_files; those
+    # N are still dropped files and must not be lost from the count as the list
+    # shrinks further, or the marker would start understating the truncation.
+    named = [f for f in files if not _APPS_MORE_RE.match(str(f))]
+    dropped = sum(int(m.group(1)) for m in
+                  (_APPS_MORE_RE.match(str(f)) for f in files) if m)
+    while size(fitted) > APPS_DETAIL_MAX_CHARS and named:
+        cut = max(1, len(named) // 2)
+        named, dropped = named[:-cut], dropped + cut
+        fitted["files"] = named + [f"+{dropped} more"]
+    return fitted
 
 # ---------------------------------------------------------------- publish lines
 # SPECS/2026-08-13-build-publish-path.md item 3. The build session no longer
@@ -270,12 +415,21 @@ def build_unit_name(slug: str) -> str:
 
 
 class VerbError(Exception):
-    """A verb failed or a request was rejected. code -> PROTOCOL.md error codes."""
+    """A verb failed or a request was rejected. code -> PROTOCOL.md error codes.
 
-    def __init__(self, code: str, message: str) -> None:
+    `status` carries the SERVER's HTTP status when the failure came from a call
+    to the Disjorn API, and None otherwise. It exists because some refusals are
+    only legible by status: a 404 from the apps harness view is "no such build
+    session" (a flat sentence for the resident), a 410 on a stage post is a
+    session that ended (never retried), and everything else is the server being
+    unreachable. The message stays the human half; this is the machine half."""
+
+    def __init__(self, code: str, message: str,
+                 status: Optional[int] = None) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        self.status = status
 
 
 def _bad(msg: str) -> VerbError:
@@ -584,10 +738,20 @@ def _sdk_transport(disjorn_cfg: dict, body: str) -> dict:
 # callable so tests stub it, exactly like _sdk_transport above.
 # --------------------------------------------------------------------------
 
+def _api_label(path: str) -> str:
+    """What to CALL the surface in a refusal. One helper serves two of them now
+    (/planroom and /apps), and a resident told "the plan room API is
+    unreachable" after an apps-build handoff would go looking in the wrong
+    place."""
+    return "apps API" if path.startswith("/apps") else "plan room API"
+
+
 def _planroom_http(disjorn_cfg: dict, method: str, path: str,
                    payload: Optional[dict] = None) -> dict:
-    """One JSON call to the Disjorn server's /planroom surface, as the broker's
-    own bot identity.
+    """One JSON call to the Disjorn server, as the broker's own bot identity.
+    The board verbs' /planroom surface and the apps-build verb's /apps surface
+    both come through here: one place that knows how the broker authenticates
+    to the server, and one place that turns an HTTP failure into a sentence.
 
     WHY THE BOARD VERBS GO THROUGH THE SERVER RATHER THAN READING TWO FILES.
     A card is derived state plus board-native state — the derived half is in
@@ -633,10 +797,11 @@ def _planroom_http(disjorn_cfg: dict, method: str, path: str,
         # told "the Plan Room index is unavailable" can act; one told "HTTP
         # 503" has to go find someone.
         raise VerbError("exec-failure",
-                        detail or f"plan room API returned {exc.code}") from None
+                        detail or f"{_api_label(path)} returned {exc.code}",
+                        status=exc.code) from None
     except Exception as exc:  # noqa: BLE001 — network, DNS, timeout, bad JSON
         raise VerbError("exec-failure",
-                        f"plan room API unreachable: {exc}") from None
+                        f"{_api_label(path)} unreachable: {exc}") from None
 
 
 def _urlq(value: str) -> str:
@@ -1614,6 +1779,7 @@ class Broker:
         transport: Optional[Callable[[dict, str], dict]] = None,
         build_spawn: Optional[Callable[[list[str]], Any]] = None,
         planroom_api: Optional[Callable[..., dict]] = None,
+        apps_spawn: Optional[Callable[..., Any]] = None,
     ) -> None:
         self.config = config
         self.verbs_path = verbs_path
@@ -1624,6 +1790,11 @@ class Broker:
         # How a detached build session is launched. Injected in tests (mock the
         # exec); prod uses _default_build_spawn (a detached, un-waited Popen).
         self._build_spawn = build_spawn or self._default_build_spawn
+        # How one apps-build TURN is launched. Same injection point and same
+        # shape as _build_spawn; the difference is that the broker waits a
+        # moment on this one (APPS_SPAWN_CHECK_SEC) to catch the launcher's
+        # pre-privilege refusal, and never again.
+        self._apps_spawn = apps_spawn or self._default_apps_spawn
         broker_cfg = config.get("broker", {})
         self.socket_path: str = broker_cfg.get("socket_path", DEFAULT_SOCKET_PATH)
         self.audit_path: str = broker_cfg["audit_log"]
@@ -1635,6 +1806,25 @@ class Broker:
         self.commands: dict[str, Any] = config.get("commands", {})
         self.paths: dict[str, str] = config.get("paths", {})
         self.disjorn: dict[str, Any] = config.get("disjorn", {})
+        # APPS v1 stage 2 (SPECS/2026-09-06-apps-builder-seat.md §B). The table
+        # is the whole switch: absent means this broker has no apps-builder
+        # seat behind it, and `apps-build` says so instead of spawning at a
+        # launcher that is not installed. Present means every key below has a
+        # value, defaulted here rather than at each use so there is one place
+        # to read what an unset knob means.
+        apps_cfg = config.get("apps")
+        self.apps_configured: bool = isinstance(apps_cfg, dict) and bool(apps_cfg)
+        self.apps: dict[str, Any] = {
+            **APPS_DEFAULTS, **(apps_cfg if isinstance(apps_cfg, dict) else {})}
+        # Session -> turn currently in flight, and the lock that makes claiming
+        # one atomic. §E check 4: one turn at a time per session, which is a
+        # check-then-act race everywhere it is not held under a lock.
+        self._apps_lock = threading.Lock()
+        self._active_apps: dict[int, int] = {}
+        self._apps_threads: list[threading.Thread] = []
+        # Why the verb is off, in one flat sentence, or None. Set by the boot
+        # check at the end of construction, once the audit lock exists.
+        self._apps_disabled_reason: Optional[str] = None
         # Plan Room. `index` is the derived card cache this daemon WRITES and
         # the server reads; everything else here is about when to rebuild it.
         # Absent config means the board is simply not wired up on this host:
@@ -1802,7 +1992,21 @@ class Broker:
             "board-search": self._verb_board_search,
             "board-flag": self._verb_board_flag,
             "board-comment": self._verb_board_comment,
+            # APPS v1 stage 2. Registered unconditionally, like every other
+            # verb: whether this broker can serve it is a REFUSAL WITH A
+            # REASON, never a missing key that reads as "no such verb".
+            "apps-build": self._verb_apps_build,
         }
+
+        # The seat map is checked against the server's `bots` table ONCE, here,
+        # while there is still a human watching the boot. A renumbered bot id
+        # would otherwise hand one resident's build session to the other, and
+        # the first anyone would know is a turn appearing in the wrong room.
+        if self.apps_configured:
+            self._apps_disabled_reason = self._apps_seat_map_failure()
+            if self._apps_disabled_reason:
+                self._audit("broker", "apps-build", {}, False,
+                            self._apps_disabled_reason)
 
     # -------------------------------------------------------- wake config
 
@@ -2125,7 +2329,11 @@ class Broker:
             # handler-raised over-budget (e.g. the WP-L4 build budget, refused
             # before any launch) — neither reached execution. A denial also
             # REFUNDS the action reservation: denials must not consume budget.
-            allowed = exc.code not in ("bad-args", "over-budget")
+            # `apps-refused` joins them: every one of §E's four checks refuses
+            # BEFORE a turn is spawned, so the call was denied, not executed —
+            # and the flat sentence it carries is the audit summary a reader
+            # needs to see next to allowed=false.
+            allowed = exc.code not in ("bad-args", "over-budget", "apps-refused")
             if reserved and not allowed:
                 self._release_action(resident)
             self._audit(caller, verb, args, allowed,
@@ -3453,6 +3661,771 @@ class Broker:
                 f"(budget {budget_str})",
                 {"build_started": True})
 
+    # ------------------------------------------------------- apps-build (§E)
+    #
+    # THE SHAPE OF THIS VERB, and why it is not start-build with different
+    # strings. A spec build is one long-running child whose stdout IS the
+    # evidence; an app build turn is a unit run by ANOTHER seat, whose evidence
+    # the broker can only read off the filesystem. So:
+    #
+    #   * the launcher blocks for the whole turn (measured: 68s and 192s), and
+    #     the verb must return at spawn — a summon has a clock. The process is
+    #     therefore detached and never waited on, except for one second at the
+    #     start to catch the launcher's pre-privilege refusal.
+    #   * the result is `/srv/apps-turns/<s>/<t>/result.json`, written
+    #     atomically by the seat's harvest. The broker (plink) only ever READS
+    #     under /srv/apps*, and never opens the 0600 spools beside it.
+    #   * ABSENCE IS A HALT (§E, Claudette #2329). A unit that ended with no
+    #     result.json gets a synthesized record, because a stage bar waiting on
+    #     a file that will never appear is a room that never hears anything.
+
+    def _apps_message_db(self) -> Optional[str]:
+        """The server DB the seat-map boot check reads, resolved the way
+        metrics.py's `gate_paths` resolves it: `[gate].message_db`, else
+        <[gate].deploy_tree>/server/data/disjorn.db.
+
+        PINNED ON BOTH SIDES, like `_local_coverage_log` above and for the same
+        reason: two programs reading one deployment's database by two rules is
+        how a check ends up silently reading a file nobody writes. A test reads
+        the resolution out of metrics and compares."""
+        gate = self.config.get("gate")
+        if not isinstance(gate, dict):
+            return None
+        path = gate.get("message_db")
+        if isinstance(path, str) and path:
+            return path
+        deploy_tree = gate.get("deploy_tree")
+        if isinstance(deploy_tree, str) and deploy_tree:
+            return os.path.join(deploy_tree, "server", "data", "disjorn.db")
+        return None
+
+    def _apps_seat_map_failure(self) -> Optional[str]:
+        """None if `[apps].seat_bots` agrees with the server's `bots` table,
+        else one flat sentence saying how it does not (§B, Claudette #2293).
+
+        The map is what makes §E check 2 more than a formality: the seat that
+        elicited is the only seat that may hand off, and the seat never asserts
+        who it is — the broker knows, from SO_PEERCRED through `[uids]` through
+        this map. A renumbered bot id would hand one resident's session to the
+        other, so the ids are verified against names ONCE at boot, loudly, and
+        the verb goes off rather than the broker going down: no other resident's
+        hands depend on this wire.
+
+        The handle is opened read-only and closed immediately. A long-lived
+        handle on the server's database in a privileged daemon is a lock and a
+        liability for a check that runs once."""
+        seat_bots = self.apps.get("seat_bots")
+        if not isinstance(seat_bots, dict) or not seat_bots:
+            return ("[apps].seat_bots is empty, so no seat maps to a builder "
+                    "bot and no handoff could ever be attributed")
+        for seat, bot_id in seat_bots.items():
+            if not isinstance(seat, str) or not APPS_SEAT_RE.match(seat):
+                return (f"[apps].seat_bots names {seat!r}, which is not a "
+                        "res-<name> resident seat")
+            if not isinstance(bot_id, int) or isinstance(bot_id, bool):
+                return (f"[apps].seat_bots maps {seat} to {bot_id!r}, which is "
+                        "not a bot id")
+        db_path = self._apps_message_db()
+        if not db_path or not os.path.exists(db_path):
+            return ("the server database named by [gate].message_db / "
+                    "[gate].deploy_tree is not readable, so the seat map "
+                    "cannot be checked against the bots that exist")
+        try:
+            db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        except sqlite3.Error as exc:
+            return (f"the server database at {db_path} could not be opened "
+                    f"read-only ({exc}), so the seat map cannot be checked")
+        try:
+            for seat, bot_id in seat_bots.items():
+                row = db.execute("select name from bots where id = ?",
+                                 (int(bot_id),)).fetchone()
+                if row is None:
+                    return (f"[apps].seat_bots maps {seat} to bot {bot_id}, "
+                            "which does not exist on this server")
+                expected = seat[len("res-"):].lower()
+                if str(row[0] or "").lower() != expected:
+                    return (f"[apps].seat_bots maps {seat} to bot {bot_id}, "
+                            f"whose name is {row[0]!r} and not {expected!r}")
+        except sqlite3.Error as exc:
+            return (f"the server's bots table could not be read ({exc}), so "
+                    "the seat map cannot be checked")
+        finally:
+            db.close()
+        return None
+
+    def _apps_unavailable(self) -> None:
+        """Raise the one refusal that means "this broker cannot run turns".
+        Called first in the verb so the reason is a sentence a resident can
+        repeat to a user, never a traceback and never a silent no-op."""
+        if not self.apps_configured:
+            raise VerbError("apps-refused",
+                            "apps-build is not configured on this broker")
+        if self._apps_disabled_reason:
+            raise VerbError("apps-refused",
+                            "apps-build is disabled: the seat map failed its "
+                            f"boot check — {self._apps_disabled_reason}")
+
+    # -- config readers ---------------------------------------------------
+
+    def _apps_int(self, key: str) -> int:
+        value = self.apps.get(key, APPS_DEFAULTS.get(key))
+        if not isinstance(value, int) or isinstance(value, bool):
+            return int(APPS_DEFAULTS.get(key, 0))
+        return value
+
+    def _apps_num(self, key: str) -> float:
+        """A duration knob. Fractional on purpose: the two the reaper spins on
+        (`poll_sec`, `result_grace_sec`) are whole seconds in production and
+        need to be much smaller than that in a test, and a knob that silently
+        ignored 0.05 would make the tests wait for the defaults instead."""
+        value = self.apps.get(key, APPS_DEFAULTS.get(key))
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return float(APPS_DEFAULTS.get(key, 0))
+        return float(value)
+
+    def _apps_argv(self, key: str) -> list[str]:
+        """A fixed argv list out of `[apps]`, validated like `[commands]` is.
+        Same doctrine everywhere in this file: config-supplied list, scalar
+        args appended by the handler, shell never involved."""
+        argv = self.apps.get(key, APPS_DEFAULTS[key])
+        if not isinstance(argv, list) or not argv or not all(
+                isinstance(a, str) for a in argv):
+            raise VerbError("internal",
+                            f"apps.{key} must be a non-empty list of strings")
+        return list(argv)
+
+    def _apps_log_dir(self) -> str:
+        """Where a turn's launcher spool and its sidecar live: plink-owned,
+        0700, resident-unreachable. Not the turn's OWN stdout — that is the
+        seat's 0600 spool under /srv, which this daemon never opens."""
+        d = self.apps.get("log_dir") or APPS_DEFAULTS["log_dir"]
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        return str(d)
+
+    def _apps_turn_dir(self, session: int, turn: int) -> str:
+        return os.path.join(str(self.apps.get("turns_root")
+                                or APPS_DEFAULTS["turns_root"]),
+                            str(session), str(turn))
+
+    def _apps_sidecar_path(self, session: int, turn: int) -> str:
+        return os.path.join(self._apps_log_dir(),
+                            f"{session}-{turn}{APPS_SIDECAR_SUFFIX}")
+
+    # -- launch -----------------------------------------------------------
+
+    def _default_apps_spawn(self, argv: list[str], *, stdout: Any,
+                            stderr: Any) -> subprocess.Popen:
+        """Launch one turn DETACHED. `start_new_session=True` puts it in its own
+        session, stdin is /dev/null (the prompt travels as a PATH the launcher
+        opens itself, never on this pipe), and stdout/stderr are 0600 files —
+        the launcher blocks for the whole turn and the broker must not be
+        holding a pipe it has to drain for it."""
+        return subprocess.Popen(  # noqa: S603 — argv list, no shell
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=stdout,
+            stderr=stderr,
+            start_new_session=True,
+        )
+
+    def _apps_unit_state(self, unit: str) -> str:
+        """systemd's word for an adopted turn's unit — `active`, `failed`,
+        `inactive`, or `unknown` if we cannot ask. Unprivileged read, exactly
+        like a build's."""
+        try:
+            cp = self._run([*self._apps_argv("unit_state_command"), unit], 30)
+        except Exception:  # noqa: BLE001 — a state probe never breaks a reaper
+            return "unknown"
+        if cp.returncode != 0:
+            return "unknown"
+        return (cp.stdout or "").strip().lower() or "unknown"
+
+    # -- the claim --------------------------------------------------------
+
+    def _apps_claim(self, session: int, turn: int) -> None:
+        """§E check 4: one turn at a time per session. Claimed under the lock,
+        because check-then-act on a dict is exactly the race two handoffs
+        seconds apart would win."""
+        with self._apps_lock:
+            if session in self._active_apps:
+                raise VerbError("apps-refused",
+                                "a turn is already running for this session")
+            self._active_apps[session] = turn
+
+    def _apps_release(self, session: int) -> None:
+        with self._apps_lock:
+            self._active_apps.pop(session, None)
+
+    # -- talking to the server --------------------------------------------
+
+    def _apps_harness_view(self, session: int) -> dict:
+        """The session as the SERVER knows it (§1.1). Publisher-gated; a 404 is
+        a session that does not exist, which is a refusal with a sentence rather
+        than an exec-failure with a status code."""
+        try:
+            view = self.planroom_api(
+                self.disjorn, "GET", f"/apps/sessions/{session}/harness-view")
+        except VerbError as exc:
+            if exc.status == 404:
+                raise VerbError("apps-refused", "no such build session") from None
+            raise
+        if not isinstance(view, dict):
+            raise VerbError("exec-failure",
+                            "the apps harness view returned no session")
+        return view
+
+    def _apps_post_stage(self, session: int, stage: str, detail: dict) -> bool:
+        """Publish one stage event. True if the server took it.
+
+        BEST-EFFORT AND SAID SO. The room's line is a server-side effect of this
+        post, so a failure is worth one retry — but the LEDGER is written either
+        way, and the ledger is the record. A 410 means the session ended (the
+        secret path closes it from under us) and is never retried: repeating a
+        post into a closed session is noise, not persistence."""
+        payload = {"stage": stage, "detail": apps_fit_detail(detail)}
+        path = f"/apps/sessions/{session}/stage"
+        for attempt in (1, 2):
+            try:
+                self.planroom_api(self.disjorn, "POST", path, payload)
+                return True
+            except VerbError as exc:
+                self._audit("broker", "apps-build",
+                            {"session": session, "stage": stage}, True,
+                            f"stage post failed: {exc.message}")
+                if exc.status == 410 or attempt == 2:
+                    return False
+                time.sleep(self._apps_num("poll_sec"))
+            except Exception as exc:  # noqa: BLE001 — never crash a reaper
+                self._audit("broker", "apps-build",
+                            {"session": session, "stage": stage}, True,
+                            f"stage post failed: {exc!r}")
+                return False
+        return False
+
+    # -- the ledger (§E) ---------------------------------------------------
+
+    def _apps_ledger(self, record: dict) -> None:
+        """One JSON line per turn, append-only. The ledger is what makes a
+        ceiling a measurement rather than a belief: it names the column it
+        summed (`ceiling_column`), so a trip can be argued with. Never raises —
+        a turn that happened is still a turn that happened if the log is
+        unwritable, and the audit line says so instead."""
+        path = str(self.apps.get("ledger_path") or APPS_DEFAULTS["ledger_path"])
+        try:
+            parent = os.path.dirname(path)
+            if parent:
+                os.makedirs(parent, mode=0o700, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, default=str, ensure_ascii=False) + "\n")
+        except OSError as exc:
+            self._audit("broker", "apps-build",
+                        {"session": record.get("session")}, True,
+                        f"apps ledger unwritable: {exc}")
+
+    def _apps_ledger_record(self, rec: dict, *, result: Optional[dict],
+                            exit_code: Optional[int], halted: Optional[str],
+                            tokens: int, synthesized: bool) -> dict:
+        """One ledger line's fields, from the sidecar and result.json together.
+        Built in ONE place so the ceiling refusal, the harvested turn and the
+        synthesized absence cannot describe the same session differently."""
+        result = result or {}
+        usage = result.get("usage") if isinstance(result.get("usage"), dict) else None
+        # HOW LONG THE TURN TOOK, from the turn's OWN clock where it has one.
+        # result.json's started_at/ended_at are the unit's; the sidecar's
+        # started_at is the broker's spawn. Pairing one with the other measures
+        # the gap between two machines' opinions, not a build — so the pair has
+        # to come from one source, and a turn that never reported falls back to
+        # this process's monotonic clock rather than guessing.
+        seconds = None
+        started = result.get("started_at") or rec.get("started_at")
+        ended = result.get("ended_at")
+        if started and ended:
+            try:
+                seconds = round((_dt.datetime.fromisoformat(str(ended))
+                                 - _dt.datetime.fromisoformat(str(started))
+                                 ).total_seconds(), 1)
+            except (TypeError, ValueError):
+                seconds = None
+        if seconds is None and isinstance(rec.get("started_mono"), float):
+            seconds = round(time.monotonic() - rec["started_mono"], 1)
+        tokens_before = int(rec.get("tokens_before") or 0)
+        return {
+            "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            "session": rec.get("session"),
+            "app": rec.get("app_id"),
+            "turn": rec.get("turn"),
+            "caller": rec.get("caller"),
+            "unit": rec.get("unit"),
+            "exit": exit_code,
+            "seconds": seconds,
+            "halted": halted,
+            "no_changes": bool(result.get("no_changes")),
+            "commit": result.get("commit"),
+            "files": len(result.get("files") or []),
+            "model": result.get("model") or rec.get("model"),
+            "runner": result.get("runner") or self.apps.get("runner"),
+            "usage": {
+                "input": (usage or {}).get("input_tokens"),
+                "output": (usage or {}).get("output_tokens"),
+                "cache_read": (usage or {}).get("cache_read_input_tokens"),
+                "cache_creation": (usage or {}).get("cache_creation_input_tokens"),
+                "cost_usd": (usage or {}).get("total_cost_usd"),
+            } if usage else None,
+            "tokens": tokens,
+            # Parent Round 6: the trip log record names the column it summed.
+            "ceiling_column": "input+output+cache_creation",
+            "tokens_after": tokens_before + tokens,
+            "ceiling": self._apps_int("build_token_ceiling"),
+            "synthesized": synthesized,
+        }
+
+    # -- the sidecar -------------------------------------------------------
+
+    def _apps_write_sidecar(self, rec: dict) -> None:
+        """Persist what a FUTURE broker process needs to finish this turn's
+        story. Written BEFORE the launch (0600) and removed on every terminal
+        path, exactly like a build's — and with NO pid, for the same reason: the
+        only pid we hold is the local sudo process, which is precisely what does
+        not survive a restart. The unit name is the durable handle."""
+        path = self._apps_sidecar_path(rec["session"], rec["turn"])
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({k: v for k, v in rec.items() if k != "started_mono"}, fh)
+
+    def _apps_remove_sidecar(self, session: int, turn: int) -> None:
+        try:
+            os.unlink(self._apps_sidecar_path(session, turn))
+        except OSError:
+            pass
+
+    # -- the verb ----------------------------------------------------------
+
+    def _verb_apps_build(self, resident: str, args: dict) -> tuple[dict, str, dict]:
+        """Hand one build prompt to the apps-builder seat for an open session.
+
+        The gate, in §E's order, each refusal a flat sentence the resident can
+        repeat to the user:
+          1. the session exists and is OPEN — read from the server, never from
+             anything the caller said. A LAPSED LOCK does not refuse: the lock
+             is the user's chat exclusivity, and a resident handing off seconds
+             after the modal closed should still land the turn (keyboard ruling
+             D-A1);
+          2. this SEAT maps, through plink's `[apps].seat_bots`, to the bot the
+             session belongs to. A bot id is never a verb argument;
+          3. the session is under its token ceiling. Checked BEFORE the turn
+             because usage lands when the runner finishes: a trip blocks the
+             NEXT handoff and one turn can overshoot. That is a runaway kill,
+             not a budget, and nothing here may promise a mid-turn stop;
+          4. no turn is already running for this session.
+        Then the prompt file — the caller's own path, mapped through its
+        path_map, read by the broker as a courtesy check (the launcher's own
+        read, O_NOFOLLOW and owner-checked, is the wall).
+
+        Returns AT SPAWN. The turn's outcome reaches the user as a system line
+        in the room, written by the server when the reaper posts the terminal
+        stage; the resident does not wait on it, because a summon has a clock."""
+        self._apps_unavailable()
+        _reject_unknown(args, {"session_id", "prompt_file"})
+        if "session_id" not in args:
+            raise _bad("session_id is required")
+        session = _check_int(args, "session_id", 0, 1, 999_999_999)
+        prompt_file = _check_str(args, "prompt_file", required=True, max_len=4000)
+        assert prompt_file is not None
+
+        # 1. the session, as the server knows it.
+        view = self._apps_harness_view(session)
+        if not view.get("open", False):
+            raise VerbError("apps-refused", "this build session has ended")
+        app_id = str(view.get("app_id") or "")
+        if not APPS_APP_ID_RE.match(app_id):
+            raise VerbError("exec-failure",
+                            "the session's app id is not a valid app id")
+
+        # 2. the seat -> bot map. The seat is the kernel's word (SO_PEERCRED
+        #    through [uids]); the bot is plink's config. Neither is the
+        #    caller's.
+        seat_bots = self.apps.get("seat_bots") or {}
+        mapped = seat_bots.get(resident)
+        if not isinstance(mapped, int) or isinstance(mapped, bool):
+            raise VerbError("apps-refused",
+                            "this seat is not mapped to a builder bot")
+        if mapped != view.get("builder_bot_id"):
+            raise VerbError("apps-refused",
+                            "this session belongs to another builder")
+
+        # 3. the ceiling. A refusal still POSTS (D-1.2b): the room and the bar
+        #    have to see why nothing is going to happen, even though nothing ran.
+        ceiling = self._apps_int("build_token_ceiling")
+        tokens_used = int(view.get("tokens_used") or 0)
+        turns = int(view.get("turns") or 0)
+        turn = turns + 1
+        if tokens_used >= ceiling:
+            detail = {"turn": turn, "halted": "ceiling",
+                      "reason": "the session reached its token ceiling before "
+                                "this turn"}
+            self._apps_post_stage(
+                session, str(view.get("stage") or "scoped"), detail)
+            self._apps_ledger(self._apps_ledger_record(
+                {"session": session, "turn": turn, "app_id": app_id,
+                 "caller": resident, "unit": apps_unit_name(session, turn),
+                 "model": self.apps.get("model"), "tokens_before": tokens_used},
+                result=None, exit_code=None, halted="ceiling", tokens=0,
+                synthesized=False))
+            raise VerbError("apps-refused",
+                            f"this build has hit its token ceiling "
+                            f"({tokens_used} of {ceiling})")
+
+        # 4. one turn at a time. Claimed here so everything below can release it.
+        self._apps_claim(session, turn)
+        try:
+            prompt_path = self._map_resident_path(
+                resident, prompt_file, label="prompt_file")
+            self._apps_check_prompt(prompt_path)
+            unit = apps_unit_name(session, turn)
+            out_path = os.path.join(self._apps_log_dir(), f"{session}-{turn}.out")
+            err_path = os.path.join(self._apps_log_dir(), f"{session}-{turn}.err")
+            out_fh = self._apps_open_log(out_path)
+            err_fh = self._apps_open_log(err_path)
+            rec = {
+                "schema": APPS_SIDECAR_SCHEMA,
+                "session": session, "turn": turn, "app_id": app_id,
+                "unit": unit, "caller": resident,
+                "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                "deadline": time.time() + self.apps.get(
+                    "turn_max_sec", APPS_TURN_MAX_SEC)
+                + self._apps_num("result_grace_sec"),
+                "out_path": out_path, "err_path": err_path,
+                "tokens_before": tokens_used,
+                "model": self.apps.get("model"),
+                "started_mono": time.monotonic(),
+            }
+            try:
+                self._apps_write_sidecar(rec)
+                argv = [*self._apps_argv("launch_command"), resident,
+                        str(session), str(turn), app_id, prompt_path]
+                try:
+                    proc = self._apps_spawn(argv, stdout=out_fh, stderr=err_fh)
+                except OSError as exc:
+                    # Never spawned — no unit, no turn, nothing to reap. The
+                    # claim and the ticket come back in the handler below.
+                    raise VerbError("exec-failure",
+                                    f"the turn failed to launch: {exc}") from None
+            finally:
+                # The child holds its own dups; this process must not.
+                self._close_build_logs(out_fh, err_fh)
+        except BaseException:
+            self._apps_release(session)
+            self._apps_remove_sidecar(session, turn)
+            raise
+
+        # The launcher refuses before any privilege in milliseconds (exit 64:
+        # bad charset, a path outside the caller's prompt dir, a symlink, the
+        # wrong owner, an empty or oversized file). Waiting one second for that
+        # is what lets the REFUSAL reach the resident in its own turn, instead
+        # of arriving as a halted event about a turn that never began — which is
+        # also why `scoped` is posted after this window and not before it.
+        refusal = self._apps_early_refusal(proc, err_path)
+        if refusal is not None:
+            self._apps_release(session)
+            self._apps_remove_sidecar(session, turn)
+            self._unlink_build_logs(out_path, err_path)
+            raise VerbError("apps-refused", refusal)
+
+        self._apps_post_stage(session, "scoped",
+                              {"turn": turn, "model": self.apps.get("model")})
+        t = threading.Thread(target=self._reap_apps, args=(rec, proc), daemon=True)
+        self._apps_threads.append(t)
+        t.start()
+        return ({"turn": turn, "unit": unit, "app_id": app_id},
+                f"apps-build turn {turn} for session {session} launched as {unit}",
+                {"session": session, "turn": turn, "unit": unit,
+                 "app_id": app_id})
+
+    def _apps_open_log(self, path: str) -> Any:
+        """The launcher's own stdout/stderr, 0600. Not the turn's output: that
+        belongs to the seat and stays under /srv where this daemon never reads
+        it. What lands here is what sudo and systemd-run have to say."""
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        except OSError as exc:
+            raise VerbError("exec-failure",
+                            f"cannot create the turn's output file: {exc}") from None
+        return os.fdopen(fd, "wb")
+
+    def _apps_check_prompt(self, path: str) -> None:
+        """The prompt, read as bytes and bounded — a COURTESY CHECK, not the
+        wall. The launcher reads the same file O_NOFOLLOW with an owner check
+        and refuses on its own; this read exists so the resident hears "your
+        prompt has a chat marker in it" from the verb it called, in words it can
+        pass on, rather than "exit 64" from a helper it cannot see.
+
+        The broker never modifies the file. A prompt is data."""
+        bound = self._apps_int("prompt_max_bytes")
+        try:
+            with open(path, "rb") as fh:
+                blob = fh.read(bound + 1)
+        except OSError:
+            raise VerbError("apps-refused",
+                            "the prompt file cannot be read") from None
+        if not blob.strip():
+            raise VerbError("apps-refused", "the prompt file is empty")
+        if len(blob) > bound:
+            raise VerbError("apps-refused",
+                            f"the prompt file is larger than {bound} bytes")
+        markers = self.apps.get("chat_markers") or APPS_DEFAULTS["chat_markers"]
+        for marker in markers:
+            if isinstance(marker, str) and marker and marker.encode() in blob:
+                raise VerbError("apps-refused", APPS_CHAT_MARKER_REFUSAL)
+
+    def _apps_early_refusal(self, proc: Any, err_path: str) -> Optional[str]:
+        """The launcher's pre-privilege refusal, or None if the turn is under
+        way. Waits at most APPS_SPAWN_CHECK_SEC — a turn runs for minutes, so
+        anything that has already exited in that window never started."""
+        try:
+            rc = proc.wait(timeout=APPS_SPAWN_CHECK_SEC)
+        except subprocess.TimeoutExpired:
+            return None            # still running: the turn is under way
+        except Exception:  # noqa: BLE001 — a probe never sinks a launched turn
+            return None
+        if rc == 0 or rc is None:
+            return None
+        tail = self._read_build_tail(err_path).strip().splitlines()
+        last = tail[-1].strip()[:200] if tail else ""
+        if rc == APPS_LAUNCH_REFUSED_EXIT:
+            return f"the launcher refused the turn: {last}" if last else \
+                "the launcher refused the turn (exit 64)"
+        return (f"the turn could not be launched (exit {rc})"
+                + (f": {last}" if last else ""))
+
+    # -- the reaper --------------------------------------------------------
+
+    def _reap_apps(self, rec: dict, proc: Any = None) -> None:
+        """Watch one turn to its terminal record, publish it, log it, let go.
+
+        Runs in a daemon thread; the verb returned at spawn. `proc` is the local
+        sudo/launcher process when this broker launched the turn, and None when
+        the turn was re-adopted after a restart — in which case liveness is the
+        unit's state instead. Everything else is identical, deliberately: two
+        reapers that told different stories about the same turn would be two
+        answers to what happened.
+
+        Every exit path releases the claim and tears up the sidecar. Every
+        exception is audited: a thread that dies silently leaves a session
+        claimed forever and a bar that never moves."""
+        session, turn = int(rec["session"]), int(rec["turn"])
+        turn_dir = self._apps_turn_dir(session, turn)
+        result_path = os.path.join(turn_dir, "result.json")
+        grace = self._apps_num("result_grace_sec")
+        poll = max(0.01, self._apps_num("poll_sec"))
+        scaffolded = False
+        ended_at: Optional[float] = None      # when the process/unit went away
+        unparseable_since: Optional[float] = None
+        try:
+            while not self._closed:
+                if not scaffolded and os.path.exists(
+                        os.path.join(turn_dir, "scaffolded")):
+                    self._apps_post_stage(session, "scaffolded", {"turn": turn})
+                    scaffolded = True
+                result, bad = self._apps_read_result(result_path)
+                if result is not None:
+                    self._apps_finish(rec, result, proc, scaffolded)
+                    return
+                if bad:
+                    # A half-written file the harvest is still renaming into
+                    # place: re-read. Past the grace it is not going to become
+                    # JSON, and absence is a halt.
+                    now = time.monotonic()
+                    unparseable_since = unparseable_since or now
+                    if now - unparseable_since <= grace:
+                        time.sleep(poll)
+                        continue
+                if proc is not None:
+                    alive = proc.poll() is None
+                else:
+                    alive = self._apps_unit_state(
+                        str(rec.get("unit"))) in BUILD_ACTIVE_STATES
+                if not alive:
+                    now = time.monotonic()
+                    ended_at = ended_at if ended_at is not None else now
+                    if now - ended_at >= grace:
+                        self._apps_synthesize(
+                            rec, proc, scaffolded,
+                            "the turn ended without a result")
+                        return
+                if time.time() > float(rec.get("deadline") or 0):
+                    self._apps_synthesize(rec, proc, scaffolded,
+                                          "the turn passed its deadline")
+                    return
+                time.sleep(poll)
+        except Exception as exc:  # noqa: BLE001 — never die silently
+            self._audit("broker", "apps-build",
+                        {"session": session, "turn": turn}, True,
+                        f"the apps reaper failed: {exc!r}")
+            self._apps_release(session)
+            self._apps_remove_sidecar(session, turn)
+            return
+        # Shutting down: leave the sidecar exactly where the NEXT process looks
+        # for it. Losing the ticket while a turn runs is the one way to strand
+        # it for good.
+
+    @staticmethod
+    def _apps_read_result(path: str) -> tuple[Optional[dict], bool]:
+        """(record, unparseable). The harvest writes result.json with tmp+rename,
+        so a partial read should be impossible — but a file that is present and
+        not JSON is a real state (a broken harvest, a filesystem that lost the
+        rename) and it must not be read as "still running" forever."""
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except FileNotFoundError:
+            return None, False
+        except (OSError, json.JSONDecodeError):
+            return None, True
+        return (data, False) if isinstance(data, dict) else (None, True)
+
+    def _apps_last_stage(self, rec: dict, scaffolded: bool) -> str:
+        """Where the bar is standing when a turn halts. A halted event re-posts
+        the LAST STAGE REACHED rather than inventing a new one: the stage bar
+        says how far the build got, and the halt rides in the detail (§1.2)."""
+        if scaffolded or os.path.exists(
+                os.path.join(self._apps_turn_dir(int(rec["session"]),
+                                                 int(rec["turn"])), "scaffolded")):
+            return "scaffolded"
+        return "scoped"
+
+    def _apps_finish(self, rec: dict, result: dict, proc: Any,
+                     scaffolded: bool) -> None:
+        """The terminal record exists: publish it, flag what needs a human, log
+        it, release. Tolerant of keys an older harvest did not write — a record
+        from before `summary`/`flag` existed is still a record."""
+        session, turn = int(rec["session"]), int(rec["turn"])
+        halted = result.get("halted")
+        error = apps_clean_line(result.get("error"))
+        tokens = apps_tokens(result.get("usage"))
+        files = apps_cap_files(result.get("files"))
+        model = result.get("model") or rec.get("model")
+        summary = apps_clean_line(result.get("summary"))
+        exit_code = result.get("exit")
+        exit_code = exit_code if isinstance(exit_code, int) else None
+        if halted or error:
+            halted = str(halted) if halted else "error"
+            detail = {"turn": turn, "halted": halted, "files": files,
+                      "tokens": tokens, "model": model}
+            if error:
+                detail["reason"] = error
+            self._apps_post_stage(session, self._apps_last_stage(rec, scaffolded),
+                                  detail)
+            if halted == "secret":
+                # §E: a turn that tried to publish a credential has earned a
+                # human before the next one. The server closes the session; this
+                # is the line that tells an admin where the evidence went.
+                self._narrate(
+                    f"FLAG apps-build: session {session} turn {turn} "
+                    f"(app {rec.get('app_id')}, caller {rec.get('caller')}) "
+                    "tried to write a credential — quarantined at "
+                    f"{result.get('quarantine')}; the session was closed by the "
+                    "server.")
+        else:
+            halted = None
+            detail = {"turn": turn, "files": files, "tokens": tokens,
+                      "model": model, "no_changes": bool(result.get("no_changes"))}
+            if summary:
+                detail["summary"] = summary
+            self._apps_post_stage(session, "files_written", detail)
+            if result.get("commit") and not result.get("no_changes"):
+                self._apps_post_stage(session, "deployed", {"turn": turn})
+        flag = apps_clean_line(result.get("flag"))
+        if flag:
+            # The builder never talks to the user: a flag goes to the admin in
+            # one line and the build continues (parent "Flagging").
+            self._narrate(f"FLAG apps-build: session {session} turn {turn} "
+                          f"(app {rec.get('app_id')}): {flag}")
+        self._apps_ledger(self._apps_ledger_record(
+            rec, result=result, exit_code=exit_code, halted=halted,
+            tokens=tokens, synthesized=False))
+        self._apps_release(session)
+        self._apps_remove_sidecar(session, turn)
+
+    def _apps_synthesize(self, rec: dict, proc: Any, scaffolded: bool,
+                         reason: str) -> None:
+        """The absence branch (§E, Claudette #2329): a unit that ended with no
+        result.json is a HALT. Absence has to mean something or it means "wait
+        forever", so the broker writes the record the harvest could not, marks
+        it `synthesized` in the ledger so nobody mistakes it for a measurement,
+        and lets the room hear that the turn is over."""
+        session, turn = int(rec["session"]), int(rec["turn"])
+        exit_code = getattr(proc, "returncode", None) if proc is not None else None
+        self._apps_post_stage(
+            session, self._apps_last_stage(rec, scaffolded),
+            {"turn": turn, "halted": "error", "reason": reason})
+        self._apps_ledger(self._apps_ledger_record(
+            rec, result=None,
+            exit_code=exit_code if isinstance(exit_code, int) else None,
+            halted="error", tokens=0, synthesized=True))
+        self._apps_release(session)
+        self._apps_remove_sidecar(session, turn)
+
+    # -- reattachment after a restart --------------------------------------
+
+    def adopt_inflight_apps(self) -> list[str]:
+        """Re-adopt app build turns that outlived the previous broker process.
+        Called ONCE at startup, next to adopt_inflight_builds and for the same
+        reason: the unit lives outside this daemon's cgroup, so a restart no
+        longer kills a turn — but its reaper died, and without this the turn
+        would finish into a result.json nobody reads, its stage events never
+        posted and its session claimed by nobody.
+
+        Adoption OBSERVES: it never launches anything. A sidecar whose unit is
+        already gone is handled by the same reaper as a live one, which finds no
+        result (or a fresh one) and does the right thing either way — including
+        synthesizing the halt for a turn that died while we were down.
+
+        Returns the units adopted, for the boot log and for tests. Never fatal:
+        losing one narration must not cost every resident its hands."""
+        adopted: list[str] = []
+        if not self.apps_configured:
+            return adopted
+        try:
+            entries = sorted(os.listdir(self._apps_log_dir()))
+        except OSError:
+            return adopted
+        for name in entries:
+            if not name.endswith(APPS_SIDECAR_SUFFIX):
+                continue
+            path = os.path.join(self._apps_log_dir(), name)
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    rec = json.load(fh)
+                session, turn = int(rec["session"]), int(rec["turn"])
+                # The ticket must be named after the turn it claims, or the ids
+                # inside decide what gets published while the filename decides
+                # what gets deleted.
+                if name != f"{session}-{turn}{APPS_SIDECAR_SUFFIX}":
+                    raise ValueError("sidecar name does not match its turn")
+                rec["unit"] = rec.get("unit") or apps_unit_name(session, turn)
+            except Exception:  # noqa: BLE001 — an unreadable ticket is garbage
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+                continue
+            with self._apps_lock:
+                if session in self._active_apps:
+                    continue        # this process already owns it
+                self._active_apps[session] = turn
+            adopted.append(str(rec["unit"]))
+            t = threading.Thread(target=self._reap_apps, args=(rec, None),
+                                 daemon=True)
+            self._apps_threads.append(t)
+            t.start()
+        return adopted
+
+    def join_apps(self, timeout: float = 10.0) -> None:
+        """Join the apps reaper threads — TEST convenience only. Production
+        never waits on a turn."""
+        for t in list(self._apps_threads):
+            t.join(timeout)
+
     # ---------------------------------------------------------------- wake
 
     def _check_wake_identity(self, resident: str, verb: str) -> Optional[str]:
@@ -3750,6 +4723,39 @@ class Broker:
             {"wake_id": record["wake_id"]},
         )
 
+    # ------------------------------------------- resident path translation
+
+    def _map_resident_path(self, resident: str, path: str,
+                           label: str = "path") -> str:
+        """One container path, translated to the host path it means — and
+        refused if it means nothing.
+
+        Residents pass THEIR view of the filesystem; the broker runs host-side
+        where those paths do not exist. `[residents.<r>.path_map]` translates
+        container prefixes to host paths (longest prefix wins) AND is the
+        allowlist: a path outside every mapped root is bad-args, so a resident
+        can only ever name places deliberately exposed to it.
+
+        WP-H13 F2: an absent map FAILS CLOSED. It used to pass the caller's path
+        through verbatim, so a resident configured without a map could aim a
+        privileged verb at any host path the broker uid can read.
+
+        ONE implementation, two callers (classify-diff's repo, apps-build's
+        prompt file). Two copies of a translation that is also an allowlist
+        would be two answers to "may this resident name this path", and the
+        second one is always the one nobody re-reads."""
+        path_map = self.residents.get(resident, {}).get("path_map")
+        if not path_map:
+            raise _bad(f"no path_map configured for {resident}; a {label} must "
+                       "resolve through an explicit allowlist")
+        best = max((p for p in path_map
+                    if path == p or path.startswith(p.rstrip("/") + "/")),
+                   key=len, default=None)
+        if best is None:
+            raise _bad(f"{label} is not under a mapped root for {resident}; "
+                       f"available roots: {sorted(path_map)}")
+        return path_map[best].rstrip("/") + path[len(best.rstrip("/")):]
+
     def _verb_classify_diff(self, resident: str, args: dict) -> tuple[dict, str]:
         """Contract with harness/classifier/classify_diff.py (WP-H4):
         argv: <classify_diff.py> --repo <abs path> --range <git range>
@@ -3776,28 +4782,7 @@ class Broker:
         for _side in rng.replace("...", "..").split(".."):
             if _side.startswith("-"):
                 raise _bad("neither side of the range may start with '-'")
-        # Residents pass THEIR view of the filesystem; the broker runs
-        # host-side where those paths don't exist. [residents.<r>.path_map]
-        # translates container prefixes to host paths (longest prefix wins)
-        # AND is the allowlist: a repo outside every mapped root is rejected,
-        # so a resident can only ever point the classifier at repos
-        # deliberately exposed to them.
-        #
-        # WP-H13 F2: absent map now FAILS CLOSED. It used to pass the caller's
-        # repo through verbatim, so a resident configured without a map could
-        # aim git at any host path the broker uid can read. A resident allowed
-        # to classify must have an explicit map; no map = no classify.
-        path_map = self.residents.get(resident, {}).get("path_map")
-        if not path_map:
-            raise _bad(f"no classify-diff path_map configured for {resident}; "
-                       "classify-diff requires an explicit repo allowlist")
-        best = max((p for p in path_map
-                    if repo == p or repo.startswith(p.rstrip("/") + "/")),
-                   key=len, default=None)
-        if best is None:
-            raise _bad(f"repo not under a mapped root for {resident}; "
-                       f"available roots: {sorted(path_map)}")
-        repo = path_map[best].rstrip("/") + repo[len(best.rstrip("/")):]
+        repo = self._map_resident_path(resident, repo, label="repo")
         gates = args.get("gates", {})
         if not isinstance(gates, dict):
             raise _bad("gates must be an object")
@@ -4364,6 +5349,14 @@ def main(argv: Optional[list[str]] = None) -> int:
                   f"{', '.join(adopted)}", file=sys.stderr)
     except Exception as exc:  # noqa: BLE001
         print(f"disjorn-broker: WARNING build re-adoption failed: {exc!r}",
+              file=sys.stderr)
+    try:
+        adopted_apps = broker.adopt_inflight_apps()
+        if adopted_apps:
+            print(f"disjorn-broker: re-adopted in-flight app turns: "
+                  f"{', '.join(adopted_apps)}", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 — same rule as builds above
+        print(f"disjorn-broker: WARNING app turn re-adoption failed: {exc!r}",
               file=sys.stderr)
 
     print(f"disjorn-broker: listening on {broker.socket_path} "

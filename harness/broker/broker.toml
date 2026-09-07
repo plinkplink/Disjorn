@@ -496,3 +496,66 @@ url = "http://127.0.0.1:8399"
 api_key_path = "/etc/disjorn-broker/broker-api-key"
 # Channel id of #custodian (look it up in the server DB / channel list).
 custodian_channel_id = 4
+
+[apps]
+# APPS v1 stage 2 — the apps-builder seat and the `apps-build` handoff verb
+# (SPECS/2026-09-06-apps-builder-seat.md §B/§E).
+#
+# COMMENTED OUT = no apps-builder behind this broker. The verb still exists and
+# answers "apps-build is not configured on this broker" — the same fail-closed
+# shape as an unflipped kill switch, and never a boot failure: every other
+# resident's hands are unrelated to this one wire.
+#
+# WHAT A TURN IS. A resident writes a build prompt into its own
+# ~/apps-prompts/<session>-<turn>.md, calls `apps-build`, and the broker spawns
+# ONE transient unit through the sudoers helper below. The turn runs as
+# res-appsbuilding — not as the resident, not as plink — with the app repo as
+# its only writable path and no house credential of any kind. Everything the
+# broker learns about it comes back as /srv/apps-turns/<session>/<turn>/
+# result.json, written atomically by that seat's harvest. The 0600 spools
+# beside it are the seat's; this daemon never opens them.
+#
+# runner = "claude-code"          # selects the image and the usage parser
+# SEAT -> BUILDER BOT. Plink's file, and the reason §E check 2 is more than a
+# formality: a bot id is NEVER a verb argument, so the only thing that says
+# which resident owns which build session is this map plus SO_PEERCRED. It is
+# CHECKED AT BOOT against the server's bots table (name must match the seat's
+# suffix); a mismatch disables the verb with one audit line rather than handing
+# one resident's session to the other.
+# seat_bots = { res-gable = 2, res-claudette = 1 }
+# model = "claude-opus-5"         # INFORMATIONAL: what the `scoped` event and
+#                                 # the ledger say when nothing better is known.
+#                                 # The truth for a finished turn is the model
+#                                 # result.json reports. The seat's actual pin
+#                                 # lives in /etc/disjorn-apps/launch.toml
+#                                 # [runner].model — 10-appsbuilding.sh's drift
+#                                 # check compares the two.
+# THE HIDDEN CEILING (parent Round 6). Summed across a session's turns and
+# checked BEFORE a turn, because usage lands when the runner finishes: a trip
+# blocks the NEXT handoff and one turn can overshoot. That is a runaway kill,
+# not a budget, and no UI may promise a mid-turn stop.
+# build_token_ceiling = 10000000
+# prompt_max_bytes = 65536        # the broker's courtesy check; the launcher
+#                                 # enforces its own bound on the same file
+# turn_max_sec = 1800             # mirrors launch.toml [apps].turn_max_sec —
+#                                 # used only to date the sidecar's deadline
+# turns_root = "/srv/apps-turns"  # READ-ONLY to this daemon, always
+# THE PRIVILEGED HATCH (harness/keyboard/92-disjorn-apps.sudoers). Fixed argv,
+# shell never involved: [*launch_command, principal, session, turn, app-id,
+# prompt-path]. The helper validates every one of those before it spends any
+# privilege and exits 64 if it does not like them.
+# launch_command = ["sudo", "-n", "/usr/local/lib/disjorn/disjorn-apps-launch", "run"]
+# unit_state_command = ["systemctl", "show", "--property=ActiveState", "--value"]
+# THE LEDGER (§E): one line per turn, append-only, naming the column the
+# ceiling summed. It is the record even when a stage post fails.
+# ledger_path = "/var/log/disjorn-broker/apps-ledger.jsonl"
+# log_dir = "/var/log/disjorn-broker/apps-logs"   # 0700: the launcher's own
+#                                 # stdout/stderr and the in-flight sidecars
+# poll_sec = 2                    # how often a reaper looks at the turn dir
+# result_grace_sec = 30           # how long after the unit ends the broker
+#                                 # waits for result.json before calling the
+#                                 # absence a halt (§E, Claudette #2329)
+# CHAT MARKERS. A prompt carrying one is refused with a DISTINGUISHABLE
+# sentence, so a resident that faithfully quoted a user who typed the marker
+# can say what happened instead of "something went wrong".
+# chat_markers = ["[[CHAT]]", "[[/CHAT]]"]

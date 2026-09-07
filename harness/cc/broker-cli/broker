@@ -406,6 +406,31 @@ VERB_SURFACE = {
             },
         },
     },
+    "apps-build": {
+        "help": "hand a build prompt to the apps-builder seat for the session you are in",
+        "args": {
+            "session_id": {
+                "flag": "--session-id",
+                "type": "integer",
+                "required": True,
+                "help": "The build session you are in — the `session_id` from the app block in your channel context. Never a bot id, never a user id.",
+                "minimum": 1,
+                "maximum": 999999999,
+            },
+            "prompt_file": {
+                "flag": "--prompt-file",
+                "type": "string",
+                "required": True,
+                "help": "Absolute path to the prompt file you just wrote, inside your own ~/apps-prompts/ and named `<session_id>-<turn>.md`. Anywhere else is refused.",
+                "min_len": 1,
+                "max_len": 4000,
+                "absolute_path": True,
+                "no_dotdot": True,
+                "no_leading_dash": True,
+                "no_nul": True,
+            },
+        },
+    },
 }
 # ── END GENERATED VERB SURFACE ──────────────────────────────────────────
 
