@@ -1,0 +1,127 @@
+# harness/cc/Containerfile.apps — the apps-builder seat image (APPS v1 stage 2).
+#
+# A SEPARATE FILE, not a stage of the resident Containerfile, on purpose: the
+# two images share a base and nothing else. The resident image carries the
+# broker CLI, house_memory, the whole server requirements stack and pytest,
+# because a resident answers to a house. This seat answers to no one — it has
+# no broker socket, no gatehouse, no house memory, no spine, no platform clone
+# and no house credential of any kind (spec §A). Everything it must not have is
+# a line that is not in this file, and a shared multi-stage file is how those
+# lines come back.
+#
+# ── Runtime mount plan (what run-apps.sh wires up) ────────────────────────────
+#
+#   /work            rw   the app repo /srv/apps/<app-id>/. THE ONLY writable
+#                         path that persists. It may already contain an app.
+#   /shelf           ro   the vendored asset shelf — image content, made
+#                         unwritable below, so "read-only" needs no mount flag.
+#   /config          ro   the credential drop directory
+#                         /srv/disjorn-build-config/appsbuilding, with
+#                         /config/env masked by /dev/null.
+#   /home/resident   rw   a per-turn TMPFS home, discarded at exit. Claude Code
+#                         needs a writable home for its own state (Gable
+#                         #2286); nothing in it survives the turn.
+#
+# ── Env contract ─────────────────────────────────────────────────────────────
+#   ANTHROPIC_API_KEY        the seat's DEDICATED, metered, rotatable key,
+#                            passed by NAME only (never in argv) by
+#                            run-apps.sh. There is no key at build time and no
+#                            OAuth path: this seat is metered deliberately
+#                            (spec §D), so app-build spend is its own line on
+#                            the bill and can be revoked without touching a
+#                            resident.
+#   PONYTAIL_DEFAULT_MODE    off|lite|full|ultra — which intensity line the
+#                            entrypoint writes into the brief.
+#   APPS_SESSION, APPS_TURN  the turn's identity, for the runner's own logs.
+#   Nothing else house-related is set, and there is nothing in here to call
+#   home with.
+#
+# ── Build ────────────────────────────────────────────────────────────────────
+#   harness/keyboard/10-appsbuilding.sh stages a SMALL context (shelf/ +
+#   apps/config/ + this file) and builds:
+#
+#     podman build -t localhost/disjorn-apps-builder:latest \
+#                  -f Containerfile.apps <staged-context>
+#
+#   The COPY paths below are relative to that staged context, NOT to the repo
+#   root. The repo root must never be a build context: it is ~871MB and
+#   contains the production database, and "we added a .containerignore" is one
+#   forgotten line away from an image that carries it. Same rule, same reason,
+#   as 07-resident-image.sh.
+
+FROM docker.io/library/debian:trixie-slim
+
+# Pinned Claude Code release. THIS MUST EQUAL harness/cc/Containerfile's pin —
+# the two seats run the same CLI and a silent divergence between them is the
+# copied-value drift shape this project pays for most often.
+# harness/cc/tests/test_apps_launch.py fails if they disagree.
+ARG CLAUDE_CODE_VERSION=2.1.259
+
+# Base toolchain, and no more than that. ca-certificates for api.anthropic.com;
+# node+npm as the CC runtime; git because the seat's own tooling reads a repo
+# (the HARVEST's commits happen on the host, as res-appsbuilding — nothing in
+# here commits); ripgrep because Claude Code's Grep tool wants it and a missing
+# rg turns "read /work first" into a silent tool failure.
+#
+# NOT installed, deliberately: python3 (the store shim's tests are node), pip,
+# pytest, the server requirements, rsync (the harvest is host-side), and the
+# broker CLI (there is no socket to call).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        git \
+        nodejs \
+        npm \
+        ripgrep \
+    && rm -rf /var/lib/apt/lists/*
+
+# Claude Code CLI, pinned. No API key exists at build time.
+RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
+    && npm cache clean --force
+
+# Non-root container user. uid 1000 is the keep-id target: run-apps.sh maps the
+# res-appsbuilding host uid onto it, so files the turn writes into /work are
+# owned on the host by the one account that owns /srv/apps.
+RUN useradd --create-home --uid 1000 --user-group --shell /bin/bash resident
+
+# ── the shelf ────────────────────────────────────────────────────────────────
+# Vendored assets, pinned and hashed in shelf/MANIFEST.toml. Read-only by
+# convention AND by mode: chmod -R a-w means even a bug in a mount flag cannot
+# make it writable by uid 1000. The directory may be EMPTY in a worktree where
+# the shelf has not been vendored yet — the entrypoint and the brief both
+# degrade to "no shelf index" rather than failing the turn.
+COPY shelf/ /shelf/
+RUN chmod -R a-w /shelf
+
+# ── the seat's config ────────────────────────────────────────────────────────
+# /config-image is the IMAGE's own config (the brief, the settings, the
+# entrypoint). /config at runtime is the HOST mount and holds the credential
+# only; the two are deliberately different paths so nothing can confuse the
+# thing plink drops a key into with the thing the image ships.
+COPY apps/config/ /config-image/
+RUN chmod 0755 /config-image \
+    && chmod 0644 /config-image/*.md /config-image/*.json \
+    && install -m 0755 /config-image/entrypoint.sh /usr/local/bin/apps-entrypoint.sh
+
+# Managed settings: /config-image/settings.json becomes Claude Code's
+# non-overridable policy layer, which the per-turn tmpfs HOME cannot outrank.
+# It is image content, so the turn cannot edit the policy it runs under.
+RUN mkdir -p /etc/claude-code \
+    && ln -s /config-image/settings.json /etc/claude-code/managed-settings.json
+
+# The version is readable from the image itself so 10-appsbuilding.sh's DRIFT
+# block can compare what is INSTALLED to what this file says, instead of
+# trusting that the last build used the current Containerfile.
+LABEL disjorn.claude-code-version="${CLAUDE_CODE_VERSION}" \
+      disjorn.seat="apps-builder" \
+      org.opencontainers.image.title="disjorn-apps-builder" \
+      org.opencontainers.image.description="Disjorn apps-builder seat: static-app build hand, no house credential, /work only."
+
+USER resident
+WORKDIR /work
+
+# The entrypoint composes ~/.claude/CLAUDE.md in the tmpfs HOME (brief +
+# ponytail + intensity line + shelf index) and then execs the container
+# command, which run-apps.sh sets from [runner].command plus --model. There is
+# no CMD: a turn with no runner argv is a mistake, and the entrypoint says so
+# and exits 64 rather than idling.
+ENTRYPOINT ["/usr/local/bin/apps-entrypoint.sh"]

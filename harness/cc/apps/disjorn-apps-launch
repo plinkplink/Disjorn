@@ -1,0 +1,607 @@
+#!/usr/bin/python3
+"""disjorn-apps-launch — the ONE privileged step of an apps-builder turn.
+
+INSTALLED AT /usr/local/lib/disjorn/disjorn-apps-launch, root:root 0755, and
+named EXACTLY by /etc/sudoers.d/92-disjorn-apps. Sibling of, and modelled line
+for line on its elder brother `harness/broker/disjorn-build-launch` (WP-L4) — read that file's header first; the reasoning
+about sudoers wildcards, fixed argv and "the validation below is the actual
+boundary" is identical here and is not repeated in full.
+
+    disjorn-apps-launch run <resident> <session> <turn> <app-id> <prompt-path>
+
+execs, with stdin/stdout/stderr passed through untouched (`--pipe`):
+
+    systemd-run --unit=disjorn-apps-<session>-<turn>
+                --uid=res-appsbuilding --gid=res-appsbuilding
+                --collect --pipe <fixed limits...> <--setenv=...> --
+                /usr/local/lib/disjorn/run-apps.sh <session> <turn> <app-id>
+                                                   <prompt-path>
+
+WHY A HELPER AND NOT A SUDOERS LINE FOR systemd-run: sudoers matches command
+arguments as ONE concatenated string, so any rule permissive enough to carry a
+real systemd-run invocation must end in a wildcard, and a wildcard matches
+spaces — which makes it a grant of `--uid=0 --property=ExecStartPre=...`, i.e.
+full root. The privileged surface has to be a fixed-argv program that validates
+its own inputs. This is that program. The regexes in the sudoers file are a
+second fence, not the fence.
+
+NOTHING HERE IS POLICY. The session lock, the quota, the token ceiling and the
+seat→bot map all live in the broker (slice ii). This program decides exactly
+one thing: that the identity, the unit name, the argument shapes, the prompt's
+location and the resource envelope are the ones the design allows, or nothing
+runs.
+
+EXIT CODES
+    0   execed (or, under DISJORN_APPS_LAUNCH_DRY_RUN=1, printed the argv)
+    64  REFUSED — every refusal below, before any privilege is used. 64 is
+        spec §C's number ("Anything else is exit 64 before any privilege is
+        used"), and it differs deliberately from disjorn-build-launch's 2 so
+        the broker can tell a validation refusal from a systemd failure
+        without parsing stderr.
+
+CHARSETS (spec §C — these are SPEC, not code, because they are the whole wall
+between a sudoers-scoped launcher and an arbitrary path):
+    resident    ^res-[a-z]{1,24}$   ... plus the literal `keyboard`, see below
+    session     ^[1-9][0-9]{0,8}$
+    turn        ^[1-9][0-9]{0,3}$
+    app id      ^[a-z2-7]{12}$      (stage 1 D4, base32 lower)
+    prompt path realpath must land under that principal's mapped directory
+
+THE `keyboard` PRINCIPAL — A DOCUMENTED DEVIATION, FLAGGED FOR THE KEYBOARD.
+Spec §C's charset is `^res-[a-z]{1,24}$` and admits nothing else. The slice (i)
+build brief nonetheless ships `keyboard = "/home/plink/apps-prompts"` in
+launch.toml and says "the keyboard entry is what the proving turn uses" — and
+slice (i) has no broker verb, so the proving turn has no res-* caller to be.
+The two cannot both be obeyed. Resolved by admitting exactly ONE additional
+literal, `keyboard`, and nothing else: not a widened regex, not a wildcard, one
+name that a reader can see in a diff. It is inert unless
+/etc/disjorn-apps/launch.toml also carries a `keyboard` entry under
+[prompt_dirs], so deleting that one line after the proving turn removes the
+principal entirely — which is what the keyboard should do once slice (ii)
+lands. RE-RULE THIS AT SLICE (ii): if the answer is "spec wins", delete
+KEYBOARD_PRINCIPAL below and the launch.toml line, and nothing else changes.
+
+The identity is NOT an argument. Every turn of every app runs as
+`res-appsbuilding` (spec §C); the <resident> argument names WHOSE PROMPT
+DIRECTORY the prompt file must come from, and that is all it does. A caller
+that could name the uid could run a turn as anyone.
+
+THE SENTENCE SLICE (ii) STARTS WITH (Claudette #2325, #2329 — three slice-(i)
+folds in a row were the same defect): WE KEEP VALIDATING WHERE A THING IS
+INSTEAD OF WHAT IT IS. The prompt wall below is built on that: the name is a
+cheap first refusal, and every decision is made on the fd — what it is
+(regular file, not a FIFO the open would have wedged on), whose it is (the
+principal's own uid, never root's), where the kernel actually opened it.
+"""
+
+from __future__ import annotations
+
+import fcntl
+import grp
+import json
+import os
+import pwd
+import re
+import stat
+import sys
+
+try:
+    import tomllib
+except ModuleNotFoundError:                              # pragma: no cover
+    tomllib = None                                        # python < 3.11
+
+# ---------------------------------------------------------------- fixed paths
+SYSTEMD_RUN = "/usr/bin/systemd-run"
+# The ONLY program this helper will ever start. Not an argument: a caller that
+# could name the program could run anything as the apps-builder.
+WRAPPER = "/usr/local/lib/disjorn/run-apps.sh"
+HARVEST = "/usr/local/lib/disjorn/apps_harvest.py"
+CONFIG_PATH = "/etc/disjorn-apps/launch.toml"
+UNIT_PREFIX = "disjorn-apps-"
+
+# The seat. Spec §C: one host identity owns everything under /srv/apps, and it
+# is never derived from an argument.
+SEAT_USER = "res-appsbuilding"
+
+# Roots, all created by harness/keyboard/10-appsbuilding.sh (spec §C).
+APPS_ROOT = "/srv/apps"                                   # <app-id>/ 0750
+TURNS_ROOT = "/srv/apps-turns"                            # <session>/<turn>/ 0755
+WWW_ROOT = "/srv/apps-www"                                # <app-id>/preview/ 0755
+QUARANTINE_ROOT = "/srv/apps-quarantine"                  # <app-id>/<turn>/ 0700
+CONFIG_DIR = "/srv/disjorn-build-config/appsbuilding"     # 0750, holds `env`
+
+# ------------------------------------------------------------- fixed envelope
+# Deliberately NOT arguments (spec §C names each one). A limit a caller can
+# widen is not a limit. plink tunes them by sudoediting THIS file, which is the
+# same discipline the build launcher uses: the levers live outside every caller.
+MEMORY_MAX = "4G"
+LIMIT_FSIZE = 268435456          # 256 MiB per file — bounds the spool too
+TASKS_MAX = 512
+DEFAULT_TURN_MAX_SEC = 1800      # RuntimeMaxSec; overridable by [apps] only
+
+# Defaults for everything the config table may set. Present so a missing or
+# minimal launch.toml still produces a correct turn rather than a KeyError.
+DEFAULT_IMAGE = "localhost/disjorn-apps-builder:latest"
+DEFAULT_RUNNER_COMMAND = ["claude", "-p", "--output-format", "stream-json",
+                          "--verbose"]
+DEFAULT_MODEL = "claude-opus-5"
+DEFAULT_PONYTAIL_MODE = "full"
+
+# ------------------------------------------------------------------ charsets
+RESIDENT_RE = re.compile(r"^res-[a-z]{1,24}$")
+KEYBOARD_PRINCIPAL = "keyboard"          # the one literal; see the header
+SESSION_RE = re.compile(r"^[1-9][0-9]{0,8}$")
+TURN_RE = re.compile(r"^[1-9][0-9]{0,3}$")
+APP_ID_RE = re.compile(r"^[a-z2-7]{12}$")
+PONYTAIL_RE = re.compile(r"^(off|lite|full|ultra)$")
+MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
+MAX_PATH_LEN = 4096
+DEFAULT_PROMPT_MAX_BYTES = 65536   # [apps].prompt_max_bytes default (spec §B)
+MAX_RUNNER_ARGS = 32
+MAX_ARG_LEN = 512
+
+EXIT_REFUSED = 64
+
+
+def die(msg: str) -> "None":
+    """Every refusal, and the only way out that is not an exec. Exit 64 before
+    any privilege is used (spec §C)."""
+    sys.stderr.write(f"disjorn-apps-launch: REFUSED: {msg}\n")
+    raise SystemExit(EXIT_REFUSED)
+
+
+# ---------------------------------------------------------------- validation
+
+def check_principal(raw: str) -> str:
+    """The prompt-directory principal. `res-<name>` per spec §C, or the single
+    literal `keyboard` (see the header's deviation note). NOT a uid: the turn
+    always runs as res-appsbuilding."""
+    if raw == KEYBOARD_PRINCIPAL:
+        return raw
+    if not RESIDENT_RE.match(raw):
+        die(f"resident is not res-<name> (or {KEYBOARD_PRINCIPAL!r}): {raw!r}")
+    return raw
+
+
+def check_session(raw: str) -> str:
+    if not SESSION_RE.match(raw):
+        die(f"session id is not a bare positive integer: {raw!r}")
+    return raw
+
+
+def check_turn(raw: str) -> str:
+    if not TURN_RE.match(raw):
+        die(f"turn is not 1-9999: {raw!r}")
+    return raw
+
+
+def check_app_id(raw: str) -> str:
+    """Stage 1's base32-lower app id. It becomes a directory name under three
+    /srv roots and a podman --name component, so anything that could read as a
+    path segment, a flag or a unit-name escape is out by construction."""
+    if not APP_ID_RE.match(raw):
+        die(f"app id is not 12 lowercase base32 characters: {raw!r}")
+    return raw
+
+
+def load_config(path: str) -> dict:
+    """The config table this program reads ITSELF — the mapped prompt
+    directories, the runner argv, the model, the ponytail intensity and the
+    turn clock. Not arguments, because a caller that could name the prompt
+    directory could name any directory."""
+    if tomllib is None:                                   # pragma: no cover
+        die("python is too old for tomllib; cannot read the launch config")
+    try:
+        with open(path, "rb") as fh:
+            return tomllib.load(fh)
+    except FileNotFoundError:
+        die(f"launch config missing: {path} "
+            f"(install it from harness/cc/apps/launch.toml.example)")
+    except OSError as exc:
+        die(f"launch config unreadable: {path}: {exc}")
+    except Exception as exc:                              # tomllib decode error
+        die(f"launch config is not valid TOML: {path}: {exc}")
+
+
+def _prompt_limit(config: dict) -> int:
+    apps = config.get("apps") or {}
+    limit = apps.get("prompt_max_bytes", DEFAULT_PROMPT_MAX_BYTES)
+    if not isinstance(limit, int) or limit <= 0:
+        die("[apps].prompt_max_bytes must be a positive integer")
+    return limit
+
+
+def _under(root: str, real: str) -> bool:
+    """Segment-wise containment: `/a/b-evil/x` is not under `/a/b`."""
+    return real == root or real.startswith(root.rstrip("/") + os.sep)
+
+
+def principal_uid(principal: str, root: str) -> int:
+    """WHO the principal is on this disk: the owner of its mapped prompt
+    directory (already realpath'd by the caller). Root-owned config names the
+    directory; the directory's owner names the uid; a prompt file must carry
+    that uid. Root is refused at both ends — a root-owned prompt directory is
+    a misconfiguration, not a principal.
+
+    KNOWN EDGE (Claudette #2336): this rule stops distinguishing two
+    principals the day launch.toml maps two [prompt_dirs] entries to
+    directories owned by the SAME uid — the check degrades to "somebody's,
+    not root's" with no error. Today no two entries share an owner; whoever
+    adds a second directory for an existing owner has to add the
+    distinguishing check here too."""
+    try:
+        st = os.stat(root)
+    except OSError as exc:
+        die(f"cannot stat {principal}'s prompt directory {root!r}: {exc}")
+    if not stat.S_ISDIR(st.st_mode):
+        die(f"{principal}'s mapped prompt directory is not a directory: {root!r}")
+    if st.st_uid == 0:
+        die(f"{principal}'s prompt directory {root!r} is owned by root — refused")
+    return st.st_uid
+
+
+def open_prompt(principal: str, raw: str, config: dict) -> int:
+    """Open the prompt ONCE and establish everything about it from the fd.
+
+    THIS IS THE PATH WALL, and the thing behind it is a file, not a name
+    (Claudette's second slice-(i) block: a check about a name followed by a
+    read of the name is two windows for the principal — who is exactly the
+    party modelled as possibly prompt-injected — to swap in a symlink and have
+    root read the credential file onto a build hand's stdin). So:
+
+      1. the NAME is checked (absolute, no control bytes, under the mapped
+         directory after realpath) — a cheap first refusal with a good
+         message, not the wall;
+      2. the file is opened with O_NOFOLLOW (the final component may not be
+         a symlink at all — a resident writes a regular file), O_CLOEXEC,
+         and O_NONBLOCK — a FIFO is not a symlink, and without O_NONBLOCK a
+         planted one would park this root process in open() forever, under
+         sudo, before fstat could say "not a regular file" (Claudette #2320).
+         The flag is cleared again once the file is known to be regular,
+         where it was a no-op anyway;
+      3. IDENTITY comes from the fd: fstat says regular file and gives the
+         size for the bound; fstat also says WHOSE it is, and that must be
+         the principal's own uid — never root's — which is what closes the
+         hardlink-into-the-prompt-dir shape in code rather than by whatever
+         fs.protected_hardlinks is set to on the box (Claudette #2320);
+         /proc/self/fd/N says which path the kernel actually opened, and
+         that path — not the one we were handed — must sit segment-wise
+         under the realpath'd mapped directory. An intermediate-directory
+         swap between (1) and (2) lands here.
+
+    "The principal's uid" is read off the mapped directory itself: the
+    root-owned config says which directory is `res-gable`'s, and the owner of
+    that directory is who `res-gable` is on this disk. No passwd lookup, so
+    the `keyboard` literal (no such user) is covered by the same rule, and a
+    root-owned prompt directory is refused as the misconfiguration it is.
+
+    The fd is returned and READ FROM; nothing reopens the name. Callers that
+    only want validation close it.
+    """
+    principal = check_principal(principal)
+    dirs = config.get("prompt_dirs")
+    if not isinstance(dirs, dict):
+        die("launch config has no [prompt_dirs] table")
+    mapped = dirs.get(principal)
+    if not isinstance(mapped, str) or not mapped:
+        die(f"no prompt directory mapped for {principal!r} "
+            f"(add it under [prompt_dirs] in the launch config)")
+    if not mapped.startswith("/"):
+        die(f"mapped prompt directory for {principal!r} is not absolute: {mapped!r}")
+
+    if len(raw) > MAX_PATH_LEN:
+        die("prompt path too long")
+    if "\0" in raw or "\n" in raw or "\r" in raw:
+        die("prompt path contains a control character")
+    if not raw.startswith("/"):
+        die(f"prompt path is not absolute: {raw!r}")
+
+    root = os.path.realpath(mapped)
+    named = os.path.realpath(raw)
+    if not _under(root, named):
+        die(f"prompt path escapes {principal}'s prompt directory: "
+            f"{raw!r} resolves to {named!r}, outside {root!r}")
+    owner = principal_uid(principal, root)
+
+    limit = _prompt_limit(config)
+    try:
+        fd = os.open(raw, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+                     | os.O_NONBLOCK)
+    except OSError as exc:
+        # ELOOP is what O_NOFOLLOW raises for a symlink final component.
+        die(f"cannot open prompt (a symlink is refused; a regular file is required): {exc}")
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            die("prompt is not a regular file")
+        # Regular from here on: O_NONBLOCK did its one job at open() and
+        # means nothing on a regular file, so clear it rather than leave a
+        # flag on an fd that gets read from.
+        fcntl.fcntl(fd, fcntl.F_SETFL,
+                    fcntl.fcntl(fd, fcntl.F_GETFL) & ~os.O_NONBLOCK)
+        if st.st_uid == 0:
+            die("prompt file is owned by root — a resident writes its own prompts")
+        if st.st_uid != owner:
+            die(f"prompt file is owned by uid {st.st_uid}, not by {principal} "
+                f"(uid {owner}) — refused")
+        if st.st_size == 0:
+            die("prompt file is empty")
+        if st.st_size > limit:
+            die(f"prompt file is {st.st_size} bytes, over the {limit}-byte bound")
+        try:
+            actual = os.readlink(f"/proc/self/fd/{fd}")
+        except OSError as exc:
+            die(f"cannot establish the opened file's identity: {exc}")
+        if not _under(root, actual):
+            die(f"the opened prompt is {actual!r}, outside {root!r} — refused")
+    except SystemExit:
+        os.close(fd)
+        raise
+    return fd
+
+
+def read_prompt_fd(fd: int, config: dict) -> bytes:
+    """The bytes behind the fd open_prompt returned, bounded once more against
+    a file that grew after fstat. The fd is closed on return."""
+    limit = _prompt_limit(config)
+    try:
+        chunks = []
+        got = 0
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            got += len(chunk)
+            if got > limit:
+                die("prompt file grew past the bound while being read")
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
+    data = b"".join(chunks)
+    if not data:
+        die("prompt file is empty")
+    return data
+
+
+def prompt_on_stdin(data: bytes) -> int:
+    """Hand the bounded prompt bytes to the unit on STDIN, and write nothing.
+
+    Claudette's review block (#custodian, slice (i)): root must never create
+    or chown anything inside a seat-writable tree — a pre-planted symlink at
+    the turn directory or at `prompt.md.tmp` turns a root write into
+    seat-to-root. So root stages NOTHING under /srv/apps-turns. Instead the
+    validated bytes go into an anonymous memfd, which becomes this process's
+    stdin; `systemd-run --pipe` inherits it, so the unit's stdin IS the
+    prompt. The wrapper, running as the seat, copies it into its own result
+    directory. No path, no race, no privilege on the wrong side of the line.
+    """
+    fd = os.memfd_create("apps-prompt", 0)
+    view = memoryview(data)
+    while view:
+        n = os.write(fd, view)
+        view = view[n:]
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.dup2(fd, 0)
+    os.close(fd)
+    return 0
+
+
+def check_runner_command(config: dict) -> "list":
+    """`[runner] command` becomes argv INSIDE the container. It is config
+    (plink's), never anything a resident composed — but it is still bounded and
+    control-character-free so nothing weird reaches the process table."""
+    runner = config.get("runner") or {}
+    command = runner.get("command", DEFAULT_RUNNER_COMMAND)
+    if not isinstance(command, list) or not command:
+        die("[runner] command must be a non-empty array of strings")
+    if len(command) > MAX_RUNNER_ARGS:
+        die(f"[runner] command has too many arguments ({len(command)})")
+    for arg in command:
+        if not isinstance(arg, str):
+            die("[runner] command must contain only strings")
+        if len(arg) > MAX_ARG_LEN:
+            die("[runner] command argument too long")
+        if any(c in arg for c in ("\0", "\n", "\r")):
+            die("[runner] command argument contains a control character")
+    return list(command)
+
+
+def check_model(config: dict) -> str:
+    model = (config.get("runner") or {}).get("model", DEFAULT_MODEL)
+    if not isinstance(model, str) or not MODEL_RE.match(model):
+        die(f"[runner] model is not a plain model id: {model!r}")
+    return model
+
+
+def check_apps_table(config: dict) -> "tuple":
+    """`[apps]` — the turn clock, the ponytail intensity, the image."""
+    apps = config.get("apps") or {}
+    turn_max = apps.get("turn_max_sec", DEFAULT_TURN_MAX_SEC)
+    if not isinstance(turn_max, int) or isinstance(turn_max, bool) \
+            or not (1 <= turn_max <= 86400):
+        die(f"[apps] turn_max_sec is not 1..86400 seconds: {turn_max!r}")
+    mode = apps.get("ponytail_mode", DEFAULT_PONYTAIL_MODE)
+    if not isinstance(mode, str) or not PONYTAIL_RE.match(mode):
+        die(f"[apps] ponytail_mode is not off|lite|full|ultra: {mode!r}")
+    image = apps.get("image", DEFAULT_IMAGE)
+    if not isinstance(image, str) or not image or any(
+            c in image for c in (" ", "\0", "\n", "\r")):
+        die(f"[apps] image is not a plain image reference: {image!r}")
+    return turn_max, mode, image
+
+
+def check_seat() -> "tuple":
+    """Resolve res-appsbuilding, or refuse. The account must ALREADY EXIST —
+    creating one needs root, so passwd membership is a fact this program cannot
+    be talked into. uid/gid 0 are refused explicitly: the entire point is that
+    the turn does not run as root."""
+    try:
+        pw = pwd.getpwnam(SEAT_USER)
+    except KeyError:
+        die(f"no such seat account: {SEAT_USER} "
+            f"(run harness/keyboard/10-appsbuilding.sh)")
+    if pw.pw_uid == 0 or pw.pw_gid == 0:
+        die(f"{SEAT_USER} resolves to uid/gid 0 — refusing to run a turn as root")
+    try:
+        group = grp.getgrgid(pw.pw_gid).gr_name
+    except KeyError:
+        group = str(pw.pw_gid)
+    return pw, group
+
+
+def check_wrapper(path: str) -> None:
+    """The wrapper must be a root-owned regular file that no one else can
+    write. If plink could rewrite it, `sudo <helper>` would become `sudo
+    <anything>` — as res-appsbuilding, not as root, but still not a boundary
+    anyone should have to argue about."""
+    try:
+        st = os.stat(path)
+    except OSError as exc:
+        die(f"launch wrapper unusable: {exc}")
+    if not stat.S_ISREG(st.st_mode):
+        die(f"launch wrapper is not a regular file: {path}")
+    if st.st_uid != 0:
+        die(f"launch wrapper is not root-owned: {path} (uid {st.st_uid})")
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        die(f"launch wrapper is group- or world-writable: {path}")
+
+
+# ------------------------------------------------------------------ the argv
+
+def build_run_argv(principal: str, session: str, turn: str, app_id: str,
+                   prompt_path: str, config: dict, *, wrapper: str = WRAPPER,
+                   harvest: str = HARVEST, seat=None, prompt_fd=None) -> "list":
+    """Every check, then the exact systemd-run argv. Factored out so the test
+    suite can assert the argv byte for byte without a systemd on the other end
+    — the argv IS the contract between this program and the unit."""
+    principal = check_principal(principal)
+    session = check_session(session)
+    turn = check_turn(turn)
+    app_id = check_app_id(app_id)
+    if prompt_fd is None:
+        # Validation only (dry runs, tests): open the wall once and let go.
+        os.close(open_prompt(principal, prompt_path, config))
+    command = check_runner_command(config)
+    model = check_model(config)
+    turn_max, ponytail_mode, image = check_apps_table(config)
+    pw, group = seat if seat is not None else check_seat()
+
+    unit = f"{UNIT_PREFIX}{session}-{turn}"
+    # The unit gets the prompt on STDIN (see prompt_on_stdin), never a path:
+    # the seat cannot read a home, and root writes nothing in the seat's tree.
+    return [
+        SYSTEMD_RUN,
+        # Deterministic and greppable, and a second launch of the same turn
+        # collides LOUDLY ("Unit ... was already loaded") instead of racing the
+        # repo and the podman --name. The broker's one-turn-per-session claim
+        # (§E.4) is the first line of that defence; this is the kernel's.
+        f"--unit={unit}",
+        f"--description=Disjorn apps turn {session}/{turn} ({app_id})",
+        # THE IDENTITY. PID 1 sets the credentials, so podman's keep-id and
+        # $HOME are res-appsbuilding's by construction rather than convention,
+        # and everything the turn writes under /srv/apps is owned by the one
+        # account that owns /srv/apps.
+        f"--uid={SEAT_USER}",
+        f"--gid={group}",
+        # Unload the transient unit when it finishes, success or failure, so a
+        # failed turn never blocks the next turn of the same session.
+        "--collect",
+        # Pass OUR stdin/stdout/stderr through untouched. The unit holds its
+        # own dups, so it keeps running — and keeps writing its spools and
+        # result.json — after this process and the broker are gone. That is
+        # what makes the turn's completion a fact the unit recorded rather than
+        # something the broker had to be awake to witness (spec §C).
+        "--pipe",
+        # Kernel-enforced envelope (the constants above; spec §A).
+        f"--property=RuntimeMaxSec={turn_max}",
+        f"--property=MemoryMax={MEMORY_MAX}",
+        f"--property=LimitFSIZE={LIMIT_FSIZE}",
+        "--property=LimitCORE=0",
+        f"--property=TasksMax={TASKS_MAX}",
+        # rootless podman needs the seat's own runtime dir (lingering is on,
+        # 10-appsbuilding.sh), and a res-* uid cannot traverse /home/plink, so
+        # nothing may default to a path under it.
+        f"--setenv=XDG_RUNTIME_DIR=/run/user/{pw.pw_uid}",
+        f"--setenv=HOME={pw.pw_dir}",
+        # Everything the wrapper needs, from the ONE table this program read.
+        # The wrapper reads no config of its own: two readers of one file is
+        # the drift shape this project pays for most often.
+        f"--setenv=APPS_SESSION={session}",
+        f"--setenv=APPS_TURN={turn}",
+        f"--setenv=APPS_APP_ID={app_id}",
+        f"--setenv=APPS_IMAGE={image}",
+        f"--setenv=APPS_MODEL={model}",
+        f"--setenv=APPS_PONYTAIL_MODE={ponytail_mode}",
+        f"--setenv=APPS_RUNNER_COMMAND={json.dumps(command)}",
+        f"--setenv=APPS_TURN_MAX_SEC={turn_max}",
+        f"--setenv=APPS_PROMPT_MAX_BYTES={_prompt_limit(config)}",
+        f"--setenv=APPS_REPO_ROOT={APPS_ROOT}",
+        f"--setenv=APPS_TURNS_ROOT={TURNS_ROOT}",
+        f"--setenv=APPS_WWW_ROOT={WWW_ROOT}",
+        f"--setenv=APPS_QUARANTINE_ROOT={QUARANTINE_ROOT}",
+        f"--setenv=APPS_CONFIG_DIR={CONFIG_DIR}",
+        f"--setenv=APPS_HARVEST={harvest}",
+        "--",
+        wrapper, session, turn, app_id,
+    ]
+
+
+def main(argv: "list") -> int:
+    # DRY RUN is for the test suite and for reading the argv at the keyboard.
+    # It is UNREACHABLE through the privileged path: sudo's env_reset (Debian
+    # default) drops DISJORN_* before this process starts, so the sudoers rule
+    # can only ever reach the exec'ing branch. It still runs every check.
+    dry = os.environ.get("DISJORN_APPS_LAUNCH_DRY_RUN") == "1"
+    # The config path override is likewise env_reset'd away on the privileged
+    # path. It exists so a test (and a keyboard rehearsal) can point at a
+    # scratch table without giving any caller a second code path.
+    config_path = os.environ.get("DISJORN_APPS_LAUNCH_CONFIG") or CONFIG_PATH
+    wrapper = WRAPPER
+    harvest = HARVEST
+    if dry and os.environ.get("DISJORN_APPS_LAUNCH_WRAPPER"):
+        wrapper = os.environ["DISJORN_APPS_LAUNCH_WRAPPER"]
+    if dry and os.environ.get("DISJORN_APPS_LAUNCH_HARVEST"):
+        harvest = os.environ["DISJORN_APPS_LAUNCH_HARVEST"]
+
+    if len(argv) < 2 or argv[1] != "run":
+        die("usage: disjorn-apps-launch run <resident> <session> <turn> "
+            "<app-id> <prompt-path>")
+    if len(argv) != 7:
+        die(f"run takes exactly 5 arguments, got {len(argv) - 2}")
+
+    config = load_config(config_path)
+    seat = None
+    if dry and os.environ.get("DISJORN_APPS_LAUNCH_FAKE_SEAT"):
+        # A test box has no res-appsbuilding. The FAKE_SEAT override is
+        # dry-run-only for the same reason every other override is.
+        uid, home, group = os.environ["DISJORN_APPS_LAUNCH_FAKE_SEAT"].split(":")
+        seat = (type("pw", (), {"pw_uid": int(uid), "pw_dir": home})(), group)
+    elif not dry:
+        check_wrapper(wrapper)
+
+    # ONE open of the prompt, before anything else, and the argv is built
+    # around that fd — the name is never consulted again.
+    prompt_fd = open_prompt(argv[2], argv[6], config)
+    out = build_run_argv(argv[2], argv[3], argv[4], argv[5], argv[6], config,
+                         wrapper=wrapper, harvest=harvest, seat=seat,
+                         prompt_fd=prompt_fd)
+
+    if dry:
+        os.close(prompt_fd)
+        print(json.dumps(out))
+        return 0
+    data = read_prompt_fd(prompt_fd, config)
+    prompt_on_stdin(data)
+    # Fixed argv, no shell, and exec (not fork): the descriptors the caller
+    # handed us pass straight through, and sudo's child IS systemd-run, so the
+    # unit's start status comes back to the caller unchanged. A scrubbed
+    # environment too — this program runs as root and inherits nothing it was
+    # not handed on purpose; the UNIT's environment comes from PID 1, which is
+    # why every --setenv= above exists.
+    os.execve(out[0], out, {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"})
+    die(f"exec failed: {out[0]}")   # pragma: no cover — execve does not return
+    return EXIT_REFUSED
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

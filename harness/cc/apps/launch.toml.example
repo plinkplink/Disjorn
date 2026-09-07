@@ -1,0 +1,51 @@
+# launch.toml.example — the apps-builder launcher's own config table.
+#
+# INSTALLED AT /etc/disjorn-apps/launch.toml (root:root 0644) by
+# harness/keyboard/10-appsbuilding.sh, which copies this file if the target is
+# absent and NEVER overwrites an existing one. Read by
+# /usr/local/lib/disjorn/disjorn-apps-launch (as root, before it drops into the
+# unit) and by nothing else — run-apps.sh receives everything it needs as
+# --setenv= on the unit, because two readers of one file is the drift shape
+# this project pays for most often.
+#
+# It is CONFIG, not argument: a caller that could name its own prompt directory
+# could name any directory, so the mapping lives here, root-owned, outside
+# every caller's reach.
+
+# ── Where a prompt file may come from ────────────────────────────────────────
+# principal -> the ONE directory its prompt files must resolve under, after
+# realpath. The launcher refuses (exit 64) a path that lands anywhere else,
+# including one reached through a symlink inside the directory.
+#
+# Principals are `res-<name>` (spec §C's charset) plus the single literal
+# `keyboard`. Slice (i) has NO broker verb, so the proving turn has no res-*
+# caller to be and runs as `keyboard`; the entry below is what makes that
+# possible. DELETE THE `keyboard` LINE once slice (ii)'s `apps-build` verb
+# lands — with no entry here the principal is refused, whatever the launcher's
+# charset says. See the deviation note in disjorn-apps-launch's header.
+[prompt_dirs]
+res-gable = "/home/res-gable/resident-home/apps-prompts"
+res-claudette = "/home/res-claudette/resident-home/apps-prompts"
+keyboard = "/home/plink/apps-prompts"
+
+# ── The runner ───────────────────────────────────────────────────────────────
+# `command` is the argv the image's entrypoint execs, with `--model <model>`
+# appended by run-apps.sh. Changing the runner is meant to be exactly this:
+# a different image and a different command, with the stage bar, the ledger and
+# the verb untouched (spec §A, the portability wall).
+[runner]
+command = ["claude", "-p", "--output-format", "stream-json", "--verbose"]
+model = "claude-opus-5"
+
+# ── The seat's knobs ─────────────────────────────────────────────────────────
+# turn_max_sec   becomes the unit's RuntimeMaxSec. A turn that hits it is
+#                SIGTERM'd; run-apps.sh catches that, still harvests, and the
+#                result records halted = "timeout".
+# ponytail_mode  off | lite | full | ultra — which intensity line the image's
+#                entrypoint writes into the builder brief. NOT the builder's
+#                choice (parent Round 5).
+# image          the seat image built by 10-appsbuilding.sh.
+[apps]
+turn_max_sec = 1800
+ponytail_mode = "full"
+image = "localhost/disjorn-apps-builder:latest"

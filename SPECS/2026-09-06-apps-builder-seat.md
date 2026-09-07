@@ -143,7 +143,12 @@ A new system user in the resident-user pattern (`01-users.sh`,
 `02-podman.sh`): its own subuid/subgid range, podman `keep-id`, home
 `/home/res-appsbuilding` holding only podman state. Owns `/srv/apps/`
 (app repos, 0750) and writes `/srv/apps-www/<app-id>/preview/` (0755,
-world-readable so the stage-3 gate, a house process, can serve it). Transient
+world-readable so the stage-3 gate, a house process, can serve it). **Only
+`<app-id>/preview/` is ever served; nothing else under `/srv/apps-www/` is
+a path.** In-flight publishes stage under `/srv/apps-www/.staging/<app-id>/`
+(0700, the seat's alone; `.staging` cannot collide with an app id), so a
+half-transferred tree or a superseded copy is never inside the served set
+even if stage 3 serves the app directory (Claudette #2336). Transient
 units `disjorn-apps-<session>-<turn>.service` run as this user via a
 `disjorn-apps-launch` sudoers-scoped launcher, the `disjorn-build-launch`
 pattern. **Its argument charsets are the whole wall between a sudoers-
@@ -252,7 +257,23 @@ launcher's harvest, on exit:
   credential has earned a human before the next one; otherwise commit as
   `turn N`, copy to the preview root EXCLUDING `.git/` and every dotfile at
   the repo root (`.env` is the file a model writes a key into by habit),
-  report `files_written` then `deployed`.
+  report `files_written` then `deployed`. The copy is PUBLISHED BY RENAME:
+  rsync into a fresh sibling with symlinks and specials dropped as a class
+  and the §C modes applied by rsync, then the sibling takes the preview's
+  name — a copy that fails leaves the preview that worked exactly as it
+  was, and no symlink ever reaches the served root (slice (i) review
+  round 3, Claudette #2325/#2329, Gable #2327);
+- **the harvest itself failing** (git or rsync broken partway) is a
+  TERMINATED turn, not a claimed success and not a missing record:
+  `halted = "error"` with an `error` string and whatever `commit` was
+  already made (Gable #2327, Claudette #2329);
+- **a unit that ends with no `result.json` is a halt**, timed out or not.
+  The broker synthesizes the record (`halted = "error"`, detail "the turn
+  ended without a result") from the unit's exit rather than leaving a
+  stage bar waiting on a file that will never appear — absence has to mean
+  something or it means "wait forever" (Claudette #2329). Slice (ii) owns
+  this branch; the harvest makes it reachable only when `result.json`
+  itself cannot be written, which the unit's journal records loudly.
 The broker then parses usage from the spool, appends the ledger line, and
 posts the stage events with the §H detail. The verb returns immediately
 after spawn with `{turn: N, unit: …}`; the resident does not wait on it (a

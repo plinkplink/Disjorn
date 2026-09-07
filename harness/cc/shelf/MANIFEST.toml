@@ -1,0 +1,158 @@
+# The apps-builder asset shelf — vendoring manifest.
+#
+# Spec: SPECS/2026-09-06-apps-builder-seat.md §F. Admission bar: "an app is
+# worse without it". Every third-party file on the shelf has exactly one
+# [[file]] entry here; nothing else third-party may be committed under
+# harness/cc/shelf/.
+#
+# Versions pinned 2026-09-06 from the npm registry. The digests below were
+# computed from the tarballs the registry served on that date; fetch.sh
+# refuses to write a file whose digest does not match.
+#
+# House-written files (fonts/fonts.css, store/*, INDEX.md, README.md,
+# PONYTAIL-PIN, kenney/README) are NOT listed here — they are ours, git is
+# their provenance. The ponytail vendoring is pinned in PONYTAIL-PIN, not
+# here, because it is a git checkout rather than a registry tarball.
+#
+# Format, per entry (fetch.sh parses this file with awk; keep it flat,
+# one `key = "value"` per line, values double-quoted):
+#   slot                 shelf directory / role in the brief
+#   package, version     npm coordinates
+#   tarball_url          exact download URL
+#   tarball_sha256       sha256 of the .tgz
+#   path_in_tarball      member to extract, verbatim
+#   shelf_path           where it lands, relative to this file
+#   sha256               sha256 of the extracted file
+#   license              SPDX id
+#   license_in_tarball   the package's own licence text
+#   license_shelf_path   where that text lands
+
+[[file]]
+slot = "game"
+package = "kaplay"
+version = "3001.0.19"
+tarball_url = "https://registry.npmjs.org/kaplay/-/kaplay-3001.0.19.tgz"
+tarball_sha256 = "03e17d374e9e20a346716b888a408fc6b1e2dcd5dde8eecab745de521b65831e"
+path_in_tarball = "package/dist/kaplay.js"
+shelf_path = "game/kaplay.js"
+sha256 = "88a946eafc4161f83505449d830b87c7bc15822bb0dae8ce03b2437506ef4a4b"
+license = "MIT"
+license_in_tarball = "package/LICENSE.md"
+license_shelf_path = "game/LICENSE"
+
+[[file]]
+slot = "chart"
+package = "chart.js"
+version = "4.5.1"
+tarball_url = "https://registry.npmjs.org/chart.js/-/chart.js-4.5.1.tgz"
+tarball_sha256 = "f540d98468457ac7a0aabb32006dfb066297e096c5ea063a5d80aa973d1c337a"
+path_in_tarball = "package/dist/chart.umd.min.js"
+shelf_path = "chart/chart.umd.min.js"
+sha256 = "48444a82d4edcb5bec0f1965faacdde18d9c17db3063d042abada2f705c9f54a"
+license = "MIT"
+license_in_tarball = "package/LICENSE.md"
+license_shelf_path = "chart/LICENSE"
+
+[[file]]
+slot = "css"
+package = "modern-normalize"
+version = "3.0.1"
+tarball_url = "https://registry.npmjs.org/modern-normalize/-/modern-normalize-3.0.1.tgz"
+tarball_sha256 = "0f95ba08572a9b74e277fb26c08751e92d9d48fe153f14553adadcf2ac070927"
+path_in_tarball = "package/modern-normalize.css"
+shelf_path = "css/modern-normalize.css"
+sha256 = "b4ad31da9b1b17de182a08e4c39159496574d90a82464c6d5afeda7133f0e110"
+license = "MIT"
+license_in_tarball = "package/license"
+license_shelf_path = "css/LICENSE"
+
+[[file]]
+slot = "fonts"
+package = "@fontsource/inter"
+version = "5.3.0"
+tarball_url = "https://registry.npmjs.org/@fontsource/inter/-/inter-5.3.0.tgz"
+tarball_sha256 = "02034af8d41dcc67ac8eab88f642e129bb8a2e8922abf30229c32725f54d8fd6"
+path_in_tarball = "package/files/inter-latin-400-normal.woff2"
+shelf_path = "fonts/inter-latin-400-normal.woff2"
+sha256 = "8909904ab6c872eb994093482a88a28eca2cd95912d7b6fecd72103b0dc07edc"
+license = "OFL-1.1"
+license_in_tarball = "package/LICENSE"
+license_shelf_path = "fonts/LICENSE-inter"
+
+[[file]]
+slot = "fonts"
+package = "@fontsource/inter"
+version = "5.3.0"
+tarball_url = "https://registry.npmjs.org/@fontsource/inter/-/inter-5.3.0.tgz"
+tarball_sha256 = "02034af8d41dcc67ac8eab88f642e129bb8a2e8922abf30229c32725f54d8fd6"
+path_in_tarball = "package/files/inter-latin-500-normal.woff2"
+shelf_path = "fonts/inter-latin-500-normal.woff2"
+sha256 = "f3779f1efccc4bdcdf9c0a02ab95bf6bd092ed09c48c08cedc725889edd1d19f"
+license = "OFL-1.1"
+license_in_tarball = "package/LICENSE"
+license_shelf_path = "fonts/LICENSE-inter"
+
+[[file]]
+slot = "fonts"
+package = "@fontsource/inter"
+version = "5.3.0"
+tarball_url = "https://registry.npmjs.org/@fontsource/inter/-/inter-5.3.0.tgz"
+tarball_sha256 = "02034af8d41dcc67ac8eab88f642e129bb8a2e8922abf30229c32725f54d8fd6"
+path_in_tarball = "package/files/inter-latin-600-normal.woff2"
+shelf_path = "fonts/inter-latin-600-normal.woff2"
+sha256 = "f9a06e79cd3a2a20951c0f0e28f66dd0e6d3fda73911d640a2125c8fcb78f21a"
+license = "OFL-1.1"
+license_in_tarball = "package/LICENSE"
+license_shelf_path = "fonts/LICENSE-inter"
+
+[[file]]
+slot = "fonts"
+package = "@fontsource/inter"
+version = "5.3.0"
+tarball_url = "https://registry.npmjs.org/@fontsource/inter/-/inter-5.3.0.tgz"
+tarball_sha256 = "02034af8d41dcc67ac8eab88f642e129bb8a2e8922abf30229c32725f54d8fd6"
+path_in_tarball = "package/files/inter-latin-700-normal.woff2"
+shelf_path = "fonts/inter-latin-700-normal.woff2"
+sha256 = "6f56409fd3d64bb85f7d070bce20749db2d66b6d63cec586cc22d1c761be2491"
+license = "OFL-1.1"
+license_in_tarball = "package/LICENSE"
+license_shelf_path = "fonts/LICENSE-inter"
+
+[[file]]
+slot = "fonts"
+package = "@fontsource/jetbrains-mono"
+version = "5.3.0"
+tarball_url = "https://registry.npmjs.org/@fontsource/jetbrains-mono/-/jetbrains-mono-5.3.0.tgz"
+tarball_sha256 = "1bbea47d1387406da5b6ccc4184cc61eae6851cc0db5c1d9bbd088ea9daa0b4a"
+path_in_tarball = "package/files/jetbrains-mono-latin-400-normal.woff2"
+shelf_path = "fonts/jetbrains-mono-latin-400-normal.woff2"
+sha256 = "14425ba9c695763c1547f48a206b7aa60350a33ae23de09f0407877f3fcd89eb"
+license = "OFL-1.1"
+license_in_tarball = "package/LICENSE"
+license_shelf_path = "fonts/LICENSE-jetbrains-mono"
+
+[[file]]
+slot = "fonts"
+package = "@fontsource/jetbrains-mono"
+version = "5.3.0"
+tarball_url = "https://registry.npmjs.org/@fontsource/jetbrains-mono/-/jetbrains-mono-5.3.0.tgz"
+tarball_sha256 = "1bbea47d1387406da5b6ccc4184cc61eae6851cc0db5c1d9bbd088ea9daa0b4a"
+path_in_tarball = "package/files/jetbrains-mono-latin-700-normal.woff2"
+shelf_path = "fonts/jetbrains-mono-latin-700-normal.woff2"
+sha256 = "d0d4e818808f2a0ba39b2b09d1989366f63494e295f003c7ef436697378507e8"
+license = "OFL-1.1"
+license_in_tarball = "package/LICENSE"
+license_shelf_path = "fonts/LICENSE-jetbrains-mono"
+
+[[file]]
+slot = "icons"
+package = "lucide-static"
+version = "1.41.0"
+tarball_url = "https://registry.npmjs.org/lucide-static/-/lucide-static-1.41.0.tgz"
+tarball_sha256 = "d10f583e2076986ddcf79def168e6ce1e64f742fa06b6014347c59fa581aa6cb"
+path_in_tarball = "package/sprite.svg"
+shelf_path = "icons/sprite.svg"
+sha256 = "73c75bac1e84d780d0370295b52eeb532b25433084fb14b0b17026fc2f4d0325"
+license = "ISC"
+license_in_tarball = "package/LICENSE"
+license_shelf_path = "icons/LICENSE"

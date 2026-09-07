@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "additionalDirectories": ["/shelf"],
+    "allow": [
+      "Read(//work/**)",
+      "Edit(//work/**)",
+      "Write(//work/**)",
+      "Read(//shelf/**)",
+      "Glob",
+      "Grep",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(mkdir:*)",
+      "Bash(cp:*)",
+      "Bash(mv:*)",
+      "Bash(rm:*)",
+      "Bash(node:*)"
+    ],
+    "deny": [
+      "WebFetch",
+      "WebSearch",
+      "Bash(curl:*)",
+      "Bash(wget:*)",
+      "Bash(nc:*)",
+      "Bash(ncat:*)",
+      "Bash(socat:*)",
+      "Bash(ssh:*)",
+      "Bash(scp:*)",
+      "Bash(npm:*)",
+      "Bash(npx:*)",
+      "Bash(pip:*)",
+      "Bash(git push:*)",
+      "Bash(sudo:*)",
+      "Bash(su:*)",
+      "Read(//config/**)",
+      "Edit(//config/**)",
+      "Write(//config/**)",
+      "Read(//config-image/**)",
+      "Edit(//shelf/**)",
+      "Write(//shelf/**)"
+    ]
+  }
+}
