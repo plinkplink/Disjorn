@@ -488,7 +488,10 @@ def test_start_build_template_section_parses():
     assert sb["stop_command"][2:] == [sb["command"][2], "stop"]
     assert sb["unit_state_command"][0] == "systemctl"   # unprivileged read
     assert "sudo" not in sb["unit_state_command"]
-    assert sb["model"] == "claude-opus-4-8"          # WP-L5 pin, no fallback
+    # WP-L5 pin, no fallback. The VALUE is plink's (moved to Opus 5 at 300a7fe);
+    # what this line pins is that the template carries one at all, since the
+    # broker refuses to build without it.
+    assert sb["model"] == "claude-opus-5"
     assert sb["session_argv"][-1] == "build-session"  # argv0 for the "$@" pin
     assert sb["specs_dir"].endswith("/SPECS")
     # 10, set by plink 2026-08-05. NOT a "ratified default" — the 2 this line

@@ -31,7 +31,7 @@ ALL_VERBS = [
     "classify-diff", "read-prod-logs", "read-own-log", "read-metrics",
     "file-proposal", "query-own-audit",
     "board-list", "board-card", "board-search", "board-flag", "board-comment",
-    "summon-hop",
+    "summon-hop", "apps-build",
 ]
 
 RECORD_STUB = textwrap.dedent("""\

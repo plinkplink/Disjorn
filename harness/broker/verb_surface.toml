@@ -505,6 +505,45 @@ minimum = 0
 description = "The #custodian seq of the human post being reported, so the same post reported by both adapters resets the counter once."
 
 
+
+# ── apps-build ───────────────────────────────────────────────────────────
+[verbs.apps-build]
+tool_name = "apps_build"
+cli_help = "hand a build prompt to the apps-builder seat for the session you are in"
+announce_preface = false
+description = """\
+Hand ONE build prompt to the apps-builder seat, for the app build session you \
+are in. YOU DO NOT BUILD THE APP: another seat does, in its own container, and \
+it never talks to the user. Your job is to elicit what the user wants and write \
+it down well.\n\nThe prompt is a FILE, not an argument: write it to your own \
+~/apps-prompts/ as `<session_id>-<turn>.md` (turn 1, then 2, 3 …) and pass that \
+path. One carrying a chat marker is refused with: "The prompt file contains a \
+chat marker the harness cannot pass through; quote the user's words without it" \
+— quote the words plainly and hand off again.\n\nONE TURN AT A TIME per \
+session, and the verb RETURNS AT SPAWN: it answers with the turn number, not \
+the result. What the turn did arrives in the room by itself, as a system line \
+naming the files, the tokens and the model. Say what you handed off, then wait \
+for that line.\
+"""
+
+[verbs.apps-build.args.session_id]
+type = "integer"
+required = true
+minimum = 1
+maximum = 999999999
+description = "The build session you are in — the `session_id` from the app block in your channel context. Never a bot id, never a user id."
+
+[verbs.apps-build.args.prompt_file]
+type = "string"
+required = true
+min_len = 1
+max_len = 4000
+absolute_path = true
+no_dotdot = true
+no_leading_dash = true
+no_nul = true
+description = "Absolute path to the prompt file you just wrote, inside your own ~/apps-prompts/ and named `<session_id>-<turn>.md`. Anywhere else is refused."
+
 # ══ ADAPTER TOOLS ═════════════════════════════════════════════════════════
 #
 # Everything above this line is a BROKER VERB. Everything below it is not.

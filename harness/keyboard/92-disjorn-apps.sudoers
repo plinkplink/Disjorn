@@ -32,12 +32,10 @@
 #   disjorn-apps-<session>-<turn>` at the keyboard, with plink's own sudo, and
 #   it should stay that deliberate.
 #
-# ONE LINE FOR ONE CALLER, ON PURPOSE. Slice (i) has no broker verb: the
-# keyboard proves the seat by running the launcher by hand. Slice (ii)'s
-# `apps-build` verb is called by the broker, which already runs as plink, so
-# this same line serves it and nothing needs widening. If the broker is ever
-# given its own uid, that is a NEW line here with a visible diff — never a
-# wildcard.
+# ONE LINE FOR ONE CALLER, ON PURPOSE. The `apps-build` verb is called by the
+# broker, which already runs as plink, so this one line serves every turn and
+# nothing needs widening. If the broker is ever given its own uid, that is a
+# NEW line here with a visible diff — never a wildcard.
 #
 # WHAT AN ATTACKER WHO OWNS THE plink UID GAINS: the ability to run
 # run-apps.sh — and nothing else — as res-appsbuilding, on a prompt file that
@@ -52,10 +50,11 @@
 # line below as narrowing, and the helper as the boundary.
 #
 #   run <principal> <session> <turn> <app-id> <prompt-path>
-#     principal   res-<name>, or the literal `keyboard` (slice (i)'s proving
-#                 turn — see the deviation note in disjorn-apps-launch's
-#                 header; delete the `keyboard` alternative here AND the
-#                 launch.toml entry once slice (ii) lands)
+#     principal   res-<name>, spec §C's charset and nothing else — the calling
+#                 seat, which names WHOSE prompt directory the file must come
+#                 from and never which uid the turn runs as. (Slice (i) also
+#                 admitted the literal `keyboard` for its proving turn; that
+#                 alternative went out with slice (ii)'s broker verb.)
 #     session     [1-9][0-9]{0,8}
 #     turn        [1-9][0-9]{0,3}
 #     app-id      [a-z2-7]{12}          (stage 1 D4, base32 lower)
@@ -63,6 +62,6 @@
 #                 realpath, to that principal's mapped prompt directory
 
 Cmnd_Alias DISJORN_APPS_LAUNCH = \
-    /usr/local/lib/disjorn/disjorn-apps-launch ^run (res-[a-z]{1,24}|keyboard) [1-9][0-9]{0,8} [1-9][0-9]{0,3} [a-z2-7]{12} /[^ ]{1,4000}$
+    /usr/local/lib/disjorn/disjorn-apps-launch ^run res-[a-z]{1,24} [1-9][0-9]{0,8} [1-9][0-9]{0,3} [a-z2-7]{12} /[^ ]{1,4000}$
 
 plink ALL=(root) NOPASSWD: DISJORN_APPS_LAUNCH
