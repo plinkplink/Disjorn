@@ -3773,6 +3773,16 @@ class Broker:
             return int(APPS_DEFAULTS.get(key, 0))
         return value
 
+    def _apps_num(self, key: str) -> float:
+        """A duration knob. Fractional on purpose: the two the reaper spins on
+        (`poll_sec`, `result_grace_sec`) are whole seconds in production and
+        need to be much smaller than that in a test, and a knob that silently
+        ignored 0.05 would make the tests wait for the defaults instead."""
+        value = self.apps.get(key, APPS_DEFAULTS.get(key))
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return float(APPS_DEFAULTS.get(key, 0))
+        return float(value)
+
     def _apps_argv(self, key: str) -> list[str]:
         """A fixed argv list out of `[apps]`, validated like `[commands]` is.
         Same doctrine everywhere in this file: config-supplied list, scalar
@@ -3884,7 +3894,7 @@ class Broker:
                             f"stage post failed: {exc.message}")
                 if exc.status == 410 or attempt == 2:
                     return False
-                time.sleep(self._apps_int("poll_sec"))
+                time.sleep(self._apps_num("poll_sec"))
             except Exception as exc:  # noqa: BLE001 — never crash a reaper
                 self._audit("broker", "apps-build",
                             {"session": session, "stage": stage}, True,
@@ -3920,18 +3930,22 @@ class Broker:
         synthesized absence cannot describe the same session differently."""
         result = result or {}
         usage = result.get("usage") if isinstance(result.get("usage"), dict) else None
-        started = rec.get("started_at")
-        # The turn's OWN clock when the harvest reported one (started_at and
-        # ended_at are the unit's, not this broker's), falling back to the
-        # broker's monotonic clock for a turn that never reported.
+        # HOW LONG THE TURN TOOK, from the turn's OWN clock where it has one.
+        # result.json's started_at/ended_at are the unit's; the sidecar's
+        # started_at is the broker's spawn. Pairing one with the other measures
+        # the gap between two machines' opinions, not a build — so the pair has
+        # to come from one source, and a turn that never reported falls back to
+        # this process's monotonic clock rather than guessing.
         seconds = None
-        try:
-            if started and result.get("ended_at"):
-                seconds = round(
-                    (_dt.datetime.fromisoformat(str(result["ended_at"]))
-                     - _dt.datetime.fromisoformat(str(started))).total_seconds(), 1)
-        except (TypeError, ValueError):
-            seconds = None
+        started = result.get("started_at") or rec.get("started_at")
+        ended = result.get("ended_at")
+        if started and ended:
+            try:
+                seconds = round((_dt.datetime.fromisoformat(str(ended))
+                                 - _dt.datetime.fromisoformat(str(started))
+                                 ).total_seconds(), 1)
+            except (TypeError, ValueError):
+                seconds = None
         if seconds is None and isinstance(rec.get("started_mono"), float):
             seconds = round(time.monotonic() - rec["started_mono"], 1)
         tokens_before = int(rec.get("tokens_before") or 0)
@@ -4066,7 +4080,7 @@ class Broker:
         try:
             prompt_path = self._map_resident_path(
                 resident, prompt_file, label="prompt_file")
-            self._apps_read_prompt(prompt_path)
+            self._apps_check_prompt(prompt_path)
             unit = apps_unit_name(session, turn)
             out_path = os.path.join(self._apps_log_dir(), f"{session}-{turn}.out")
             err_path = os.path.join(self._apps_log_dir(), f"{session}-{turn}.err")
@@ -4079,7 +4093,7 @@ class Broker:
                 "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
                 "deadline": time.time() + self.apps.get(
                     "turn_max_sec", APPS_TURN_MAX_SEC)
-                + self._apps_int("result_grace_sec"),
+                + self._apps_num("result_grace_sec"),
                 "out_path": out_path, "err_path": err_path,
                 "tokens_before": tokens_used,
                 "model": self.apps.get("model"),
@@ -4089,7 +4103,13 @@ class Broker:
                 self._apps_write_sidecar(rec)
                 argv = [*self._apps_argv("launch_command"), resident,
                         str(session), str(turn), app_id, prompt_path]
-                proc = self._apps_spawn(argv, stdout=out_fh, stderr=err_fh)
+                try:
+                    proc = self._apps_spawn(argv, stdout=out_fh, stderr=err_fh)
+                except OSError as exc:
+                    # Never spawned — no unit, no turn, nothing to reap. The
+                    # claim and the ticket come back in the handler below.
+                    raise VerbError("exec-failure",
+                                    f"the turn failed to launch: {exc}") from None
             finally:
                 # The child holds its own dups; this process must not.
                 self._close_build_logs(out_fh, err_fh)
@@ -4132,7 +4152,7 @@ class Broker:
                             f"cannot create the turn's output file: {exc}") from None
         return os.fdopen(fd, "wb")
 
-    def _apps_read_prompt(self, path: str) -> bytes:
+    def _apps_check_prompt(self, path: str) -> None:
         """The prompt, read as bytes and bounded — a COURTESY CHECK, not the
         wall. The launcher reads the same file O_NOFOLLOW with an owner check
         and refuses on its own; this read exists so the resident hears "your
@@ -4156,7 +4176,6 @@ class Broker:
         for marker in markers:
             if isinstance(marker, str) and marker and marker.encode() in blob:
                 raise VerbError("apps-refused", APPS_CHAT_MARKER_REFUSAL)
-        return blob
 
     def _apps_early_refusal(self, proc: Any, err_path: str) -> Optional[str]:
         """The launcher's pre-privilege refusal, or None if the turn is under
@@ -4196,8 +4215,8 @@ class Broker:
         session, turn = int(rec["session"]), int(rec["turn"])
         turn_dir = self._apps_turn_dir(session, turn)
         result_path = os.path.join(turn_dir, "result.json")
-        grace = self._apps_int("result_grace_sec")
-        poll = max(0.01, float(self._apps_int("poll_sec")))
+        grace = self._apps_num("result_grace_sec")
+        poll = max(0.01, self._apps_num("poll_sec"))
         scaffolded = False
         ended_at: Optional[float] = None      # when the process/unit went away
         unparseable_since: Optional[float] = None
