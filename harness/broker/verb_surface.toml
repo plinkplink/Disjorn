@@ -505,6 +505,47 @@ minimum = 0
 description = "The #custodian seq of the human post being reported, so the same post reported by both adapters resets the counter once."
 
 
+
+# ── apps-build ───────────────────────────────────────────────────────────
+[verbs.apps-build]
+tool_name = "apps_build"
+cli_help = "hand a build prompt to the apps-builder seat for the session you are in"
+announce_preface = false
+description = """\
+Hand ONE build prompt to the apps-builder seat, for the app build session whose \
+channel you are in. YOU DO NOT BUILD THE APP — a separate seat does, in its own \
+container, and it never talks to the user. Your job is to elicit what the user \
+wants and write it down well.\n\nThe prompt is a FILE, not an argument: write it \
+to your own ~/apps-prompts/ as `<session_id>-<turn>.md` (turn 1 for the first \
+handoff, then 2, 3 …) and pass that path. The broker reads it; it never reaches \
+a shell. A prompt containing a chat marker is refused with: "The prompt file \
+contains a chat marker the harness cannot pass through; quote the user's words \
+without it" — quote the user's words plainly instead and hand off \
+again.\n\nONE TURN AT A TIME per session, and the verb RETURNS AT SPAWN: it \
+answers with the turn number and the unit, not with the result. What the turn \
+did arrives in the room by itself, as a system line naming the files, the \
+tokens and the model. Say in one line what you handed off, then wait for that \
+line before promising anything about the app.\
+"""
+
+[verbs.apps-build.args.session_id]
+type = "integer"
+required = true
+minimum = 1
+maximum = 999999999
+description = "The build session you are in — the `session_id` from the app block in your channel context. Never a bot id, never a user id."
+
+[verbs.apps-build.args.prompt_file]
+type = "string"
+required = true
+min_len = 1
+max_len = 4000
+absolute_path = true
+no_dotdot = true
+no_leading_dash = true
+no_nul = true
+description = "Absolute path to the prompt file you just wrote, inside your own ~/apps-prompts/ and named `<session_id>-<turn>.md`. Anywhere else is refused."
+
 # ══ ADAPTER TOOLS ═════════════════════════════════════════════════════════
 #
 # Everything above this line is a BROKER VERB. Everything below it is not.

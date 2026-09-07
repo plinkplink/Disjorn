@@ -55,6 +55,7 @@ Failure:
 | `over-budget`    | resident hit the daily action cap in `broker.toml [budgets]`    |
 | `bad-args`       | args failed the verb's schema (also: malformed request JSON)   |
 | `exec-failure`   | verb was authorized but its execution failed (exit/timeout/IO) |
+| `apps-refused`   | an `apps-build` check refused the handoff; the message is the flat sentence |
 | `internal`       | broker-side problem (bad config, unexpected exception)         |
 
 Every request — success, failure, or denial — appends exactly one line to the
@@ -498,6 +499,48 @@ adapters are the callers; a session has no reason to press it.
 
 The clock never unparks a chain: midnight rolls the 24-per-UTC-day ceiling and
 nothing else. A parked work item stays parked until a human posts about it.
+
+### `apps-build`
+
+SPECS/2026-09-06-apps-builder-seat.md §E. Hand ONE build prompt to the
+apps-builder seat for an open app build session. The calling resident does not
+build anything: the turn runs as `res-appsbuilding`, in its own transient unit,
+with the app repo as its only writable path and no house credential of any kind.
+
+- args: `{"session_id": int, "prompt_file": str}`, both required, and NOTHING
+  else — in particular no bot id. Which resident owns which session is
+  `[apps].seat_bots` plus SO_PEERCRED, never an argument.
+- result: `{"turn": int, "unit": str, "app_id": str}`. It RETURNS AT SPAWN: the
+  launcher blocks for the whole turn (minutes), so the broker detaches it and a
+  daemon reaper publishes the outcome. A summon has a clock.
+- `prompt_file` is the CALLER's view of its own filesystem, resolved through
+  `[residents.<r>.path_map]` like `classify-diff`'s `repo` — one implementation,
+  and it is the allowlist as much as the translation. The launcher confines the
+  same file again to the caller's own prompt directory, with O_NOFOLLOW and an
+  owner check; the broker's read is the courtesy half, so a resident hears about
+  a chat marker in words instead of as exit 64.
+- The four checks, in order, each refusing with `apps-refused` and a flat
+  sentence: the session exists and is OPEN (a lapsed user lock does NOT refuse —
+  the lock is the user's chat exclusivity, not the turn's authorization); this
+  seat maps to the session's builder bot; the session is under its token
+  ceiling; no turn is already running for it. A ceiling refusal also POSTS a
+  halted stage event and writes a ledger line, so the room hears why nothing is
+  going to happen even though nothing ran.
+- The broker has NO post right in the room. Everything the user sees is a
+  server-side effect of the stage events it publishes as the `broker` bot.
+- A turn's record is `/srv/apps-turns/<session>/<turn>/result.json`, which the
+  broker READS and never writes; the 0600 spools beside it are the seat's and
+  this daemon never opens them. A unit that ends with no `result.json` is a
+  halt, synthesized after `[apps].result_grace_sec` and marked `synthesized` in
+  the ledger — absence has to mean something or it means "wait forever".
+- Every turn appends one line to `[apps].ledger_path`, naming the column the
+  ceiling summed (`input+output+cache_creation`). The ledger is the record even
+  when a stage post fails.
+- With `[apps]` absent the verb answers "apps-build is not configured on this
+  broker"; with a `seat_bots` map the boot check cannot verify against the
+  server's `bots` table it answers "apps-build is disabled: the seat map failed
+  its boot check — …". Neither is a boot failure: no other resident's hands
+  depend on this wire.
 
 ### `wake`
 
