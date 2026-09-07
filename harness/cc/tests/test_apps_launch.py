@@ -37,7 +37,7 @@ EXAMPLE_TOML = CC_DIR / "apps" / "launch.toml.example"
 FAKE_SEAT = "997:/home/res-appsbuilding:res-appsbuilding"
 FAKE_UID = 997
 
-GOOD = ("keyboard", "12", "3", "abc234567xyz")     # principal, session, turn, app
+GOOD = ("res-gable", "12", "3", "abc234567xyz")    # principal, session, turn, app
 
 
 @pytest.fixture()
@@ -53,7 +53,6 @@ def seat(tmp_path):
     config = tmp_path / "launch.toml"
     config.write_text(f"""
 [prompt_dirs]
-keyboard = "{prompts}"
 res-gable = "{prompts}"
 
 [runner]
@@ -153,12 +152,15 @@ def test_exact_systemd_run_argv(seat):
     ]
 
 
-def test_the_seat_uid_is_never_an_argument(seat):
+def test_the_seat_uid_is_never_an_argument(seat, tmp_path):
     """--uid is res-appsbuilding whoever asked. The <resident> argument names a
     PROMPT DIRECTORY and nothing else (spec §C)."""
-    for principal in ("keyboard", "res-gable"):
+    for principal in ("res-gable", "res-claudette"):
+        config = tmp_path / f"{principal}.toml"
+        config.write_text(seat["config"].read_text().replace(
+            "res-gable =", f"{principal} ="), encoding="utf-8")
         argv = accept(seat, "run", principal, "12", "3", "abc234567xyz",
-                      str(seat["prompt"]))
+                      str(seat["prompt"]), config=config)
         assert "--uid=res-appsbuilding" in argv
         assert not any(a.startswith("--uid=") and a != "--uid=res-appsbuilding"
                        for a in argv)
@@ -202,7 +204,7 @@ def test_extra_trailing_argument_is_refused(seat):
 # ─────────────────────────────────────────── charsets: the principal (§C) ────
 
 @pytest.mark.parametrize("principal", [
-    "res-gable", "res-claudette", "res-a", "res-" + "a" * 24, "keyboard",
+    "res-gable", "res-claudette", "res-a", "res-" + "a" * 24,
 ])
 def test_principal_accepted(seat, tmp_path, principal):
     config = tmp_path / "p.toml"
@@ -225,10 +227,7 @@ def test_principal_accepted(seat, tmp_path, principal):
     "res-gable/../root",      # path traversal
     "res-gable\nres-evil",    # newline
     "root",
-    "KEYBOARD",               # the literal is exact, not case-folded
-    "keyboard2",              # ... and not a prefix
-    "keyboards",
-    "-keyboard",
+    "keyboard",               # slice (i)'s literal, gone with its proving turn
     "res-gable;id",
     "--uid=0",
 ])
@@ -239,17 +238,34 @@ def test_principal_refused(seat, principal):
 def test_principal_with_no_mapped_directory_is_refused(seat):
     """`res-claudette` is a perfectly legal principal and still has no entry in
     THIS table. The charset says the name is well formed; the table says
-    whether it may launch. Both must pass — which is what makes deleting the
-    `keyboard` line from launch.toml a complete removal of that principal."""
+    whether it may launch. Both must pass — which is what makes deleting a
+    line from launch.toml a complete removal of that principal, and it is how
+    slice (i)'s `keyboard` entry was removed twice over."""
     refuse(seat, "run", "res-claudette", "12", "3", "abc234567xyz",
            str(seat["prompt"]))
+
+
+def test_the_keyboard_principal_is_gone(seat, tmp_path):
+    """Slice (i) admitted exactly one extra literal so its proving turn had a
+    caller to be; slice (ii) has the `apps-build` verb and spec §C's charset
+    wins (keyboard ruling D-C2). The refusal is the CHARSET's, so a stale
+    /etc/disjorn-apps/launch.toml that still maps the name cannot bring the
+    principal back — an installed config outlives a deploy, and this is the
+    wall that does not."""
+    stale = tmp_path / "stale.toml"
+    stale.write_text(seat["config"].read_text().replace(
+        "res-gable =", f'keyboard = "{seat["dir"]}"\nres-gable ='),
+        encoding="utf-8")
+    proc = refuse(seat, "run", "keyboard", "12", "3", "abc234567xyz",
+                  str(seat["prompt"]), config=stale)
+    assert "not res-<name>" in proc.stderr
 
 
 # ───────────────────────────────────────────── charsets: session and turn ────
 
 @pytest.mark.parametrize("session", ["1", "9", "12", "999999999"])
 def test_session_accepted(seat, session):
-    accept(seat, "run", "keyboard", session, "3", "abc234567xyz",
+    accept(seat, "run", "res-gable", session, "3", "abc234567xyz",
            str(seat["prompt"]))
 
 
@@ -258,13 +274,13 @@ def test_session_accepted(seat, session):
     " 1", "1 ", "1\n2", "1;id", "abc", "0x10", "١٢",          # arabic-indic
 ])
 def test_session_refused(seat, session):
-    refuse(seat, "run", "keyboard", session, "3", "abc234567xyz",
+    refuse(seat, "run", "res-gable", session, "3", "abc234567xyz",
            str(seat["prompt"]))
 
 
 @pytest.mark.parametrize("turn", ["1", "9", "42", "9999"])
 def test_turn_accepted(seat, turn):
-    accept(seat, "run", "keyboard", "12", turn, "abc234567xyz",
+    accept(seat, "run", "res-gable", "12", turn, "abc234567xyz",
            str(seat["prompt"]))
 
 
@@ -272,7 +288,7 @@ def test_turn_accepted(seat, turn):
     "", "0", "007", "10000", "-1", "1.5", " 2", "2 ", "2;id", "two", "٣",
 ])
 def test_turn_refused(seat, turn):
-    refuse(seat, "run", "keyboard", "12", turn, "abc234567xyz",
+    refuse(seat, "run", "res-gable", "12", turn, "abc234567xyz",
            str(seat["prompt"]))
 
 
@@ -282,7 +298,7 @@ def test_turn_refused(seat, turn):
     "aaaaaaaaaaaa", "abc234567xyz", "234567234567", "zzzzzzzzzzzz",
 ])
 def test_app_id_accepted(seat, app_id):
-    accept(seat, "run", "keyboard", "12", "3", app_id, str(seat["prompt"]))
+    accept(seat, "run", "res-gable", "12", "3", app_id, str(seat["prompt"]))
 
 
 @pytest.mark.parametrize("app_id", [
@@ -302,14 +318,14 @@ def test_app_id_accepted(seat, app_id):
     "aaaaaaaaaaa\n",
 ])
 def test_app_id_refused(seat, app_id):
-    refuse(seat, "run", "keyboard", "12", "3", app_id, str(seat["prompt"]))
+    refuse(seat, "run", "res-gable", "12", "3", app_id, str(seat["prompt"]))
 
 
 def test_app_id_is_the_only_thing_that_names_a_directory(seat):
     """The app id lands in three /srv paths and a podman --name. Its charset is
     the reason none of them can be talked into a traversal — asserted here by
     reading it back out of the argv the launcher built."""
-    argv = accept(seat, "run", "keyboard", "12", "3", "abc234567xyz",
+    argv = accept(seat, "run", "res-gable", "12", "3", "abc234567xyz",
                   str(seat["prompt"]))
     assert "--setenv=APPS_APP_ID=abc234567xyz" in argv
     joined = " ".join(argv)
@@ -453,7 +469,7 @@ def test_the_prompt_must_be_owned_by_the_principal(seat, tmp_path):
         if os.stat(candidate).st_uid == 0:
             root_owned = tmp_path / "launch-root-owned.toml"
             root_owned.write_text(
-                f'[prompt_dirs]\nkeyboard = "{candidate}"\n', encoding="utf-8")
+                f'[prompt_dirs]\nres-gable = "{candidate}"\n', encoding="utf-8")
             proc = refuse(seat, "run", *GOOD, f"{candidate}/nope.md",
                           config=root_owned)
             assert "owned by root" in proc.stderr
@@ -491,11 +507,11 @@ def test_the_prompt_must_be_owned_by_the_principal(seat, tmp_path):
         "ns['principal_uid'] = lambda principal, root: 4242\n"
         "import tomllib\n"
         f"cfg = tomllib.load(open({str(seat['config'])!r}, 'rb'))\n"
-        f"ns['open_prompt']('keyboard', {str(seat['prompt'])!r}, cfg)\n"
+        f"ns['open_prompt']('res-gable', {str(seat['prompt'])!r}, cfg)\n"
     )
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert r.returncode == 64, r.stderr
-    assert f"owned by uid {os.geteuid()}, not by keyboard (uid 4242)" in r.stderr
+    assert f"owned by uid {os.geteuid()}, not by res-gable (uid 4242)" in r.stderr
     # ...and with the truth planted, the same file is accepted.
     code_ok = code.replace("lambda principal, root: 4242",
                            f"lambda principal, root: {os.geteuid()}")
@@ -512,7 +528,7 @@ def test_missing_config_is_refused(seat, tmp_path):
 
 def test_malformed_config_is_refused(seat, tmp_path):
     bad = tmp_path / "bad.toml"
-    bad.write_text("[prompt_dirs\nkeyboard = ", encoding="utf-8")
+    bad.write_text("[prompt_dirs\nres-gable = ", encoding="utf-8")
     refuse(seat, "run", *GOOD, str(seat["prompt"]), config=bad)
 
 
@@ -524,7 +540,7 @@ def test_config_without_prompt_dirs_is_refused(seat, tmp_path):
 
 def test_relative_mapped_directory_is_refused(seat, tmp_path):
     bad = tmp_path / "rel.toml"
-    bad.write_text('[prompt_dirs]\nkeyboard = "apps-prompts"\n', encoding="utf-8")
+    bad.write_text('[prompt_dirs]\nres-gable = "apps-prompts"\n', encoding="utf-8")
     refuse(seat, "run", *GOOD, str(seat["prompt"]), config=bad)
 
 
@@ -577,11 +593,12 @@ def test_model_with_a_space_is_refused(seat, tmp_path):
 
 def test_shipped_example_config_parses_and_launches(seat, tmp_path):
     """The example the keyboard script installs must actually work: same
-    defaults, same three principals. Its prompt_dirs point at real house paths,
-    so only the parse and the table shape are asserted here."""
+    defaults, same two principals — the seats, and nobody else. Its
+    prompt_dirs point at real house paths, so only the parse and the table
+    shape are asserted here."""
     import tomllib
     data = tomllib.loads(EXAMPLE_TOML.read_text(encoding="utf-8"))
-    assert set(data["prompt_dirs"]) == {"res-gable", "res-claudette", "keyboard"}
+    assert set(data["prompt_dirs"]) == {"res-gable", "res-claudette"}
     assert data["runner"]["command"][0] == "claude"
     assert data["runner"]["model"] == "claude-opus-5"
     assert data["apps"]["turn_max_sec"] == 1800

@@ -47,6 +47,7 @@ ETCDIR=/etc/disjorn-apps
 CONFIG_DIR=/srv/disjorn-build-config/appsbuilding
 SUDOERS_SRC="$REPO/harness/keyboard/92-disjorn-apps.sudoers"
 SUDOERS_DST=/etc/sudoers.d/92-disjorn-apps
+BROKER_TOML=/etc/disjorn-broker/broker.toml       # read-only, for the drift block
 
 DRIFT_ONLY=0
 [ "${1:-}" = "--drift" ] && DRIFT_ONLY=1
@@ -277,6 +278,38 @@ else
   echo "  MISSING  $ETCDIR/launch.toml"; drift=1
 fi
 
+# THE MODEL LIVES IN TWO TABLES, which is this project's most expensive
+# recurring defect shape: [runner].model in the launcher's config is the truth
+# per turn (it becomes the container's --model and the model recorded in
+# result.json), while [apps].model in the broker's config rides the `scoped`
+# stage event and defaults the ledger line. When they disagree the room says
+# one model and another one ran, and nothing anywhere errors. So: read both,
+# say both. Read-only, and "unset" is a real answer — a table may legitimately
+# leave the key out and take its default.
+read_model() {   # <toml> <table> <key>
+  python3 - "$1" "$2" "$3" <<'PYMODEL'
+import sys, tomllib
+path, table, key = sys.argv[1:4]
+try:
+    with open(path, "rb") as fh:
+        data = tomllib.load(fh)
+except OSError:
+    print("unreadable"); raise SystemExit(0)
+except Exception:
+    print("unparsable"); raise SystemExit(0)
+value = (data.get(table) or {}).get(key)
+print(value if isinstance(value, str) and value else "unset")
+PYMODEL
+}
+launch_model=$(read_model "$ETCDIR/launch.toml" runner model)
+broker_model=$(read_model "$BROKER_TOML" apps model)
+if [ "$launch_model" = "$broker_model" ]; then
+  echo "  same     model $launch_model (launch.toml [runner] = broker.toml [apps])"
+else
+  echo "  DIFFERS  model: launch.toml [runner] $launch_model, broker.toml [apps] $broker_model"
+  drift=1
+fi
+
 # The image's pinned CC version vs the Containerfile's. The label exists for
 # exactly this comparison: a rebuild that never happened is invisible otherwise.
 want_cc=$(sed -n 's/^ARG CLAUDE_CODE_VERSION=\(.*\)$/\1/p' \
@@ -322,13 +355,24 @@ fi
 
 cat <<'NEXTEOF'
 
-Next, at the keyboard, to prove the seat (slice (i) has no broker verb):
+Next, at the keyboard: a turn is proved THROUGH THE BROKER VERB now.
 
-  mkdir -p ~/apps-prompts && echo "Build a one-page tip calculator." > ~/apps-prompts/1-1.md
-  sudo /usr/local/lib/disjorn/disjorn-apps-launch run keyboard 1 1 aaaaaaaaaaaa \
-       /home/plink/apps-prompts/1-1.md
-  cat /srv/apps-turns/1/1/result.json
-  sudo ls -la /srv/apps/aaaaaaaaaaaa /srv/apps-www/aaaaaaaaaaaa/preview
+Slice (i)'s `keyboard` principal is gone (spec §C wins), so there is no
+launcher line left to type — and `sudo -u res-gable ...` is not the
+substitute. The prompt has to be a file the SEAT owns inside the seat's own
+mapped directory, and the verb is what mints the turn number, the ledger line
+and the room's system line; a launcher run around it produces a turn no
+session ever hears about.
 
-(The app id is any 12 lowercase base32 characters; stage 1 mints real ones.)
+  1. open the APPS tab in Disjorn and start a build session with the resident;
+  2. have the resident hand the prompt off — its `apps_build` tool writes
+     ~/apps-prompts/<session>-<turn>.md and calls the broker verb;
+  3. watch the turn land, from the outside:
+       journalctl -fu disjorn-apps-<session>-<turn>.service
+       cat  /srv/apps-turns/<session>/<turn>/result.json
+       tail -n1 /var/log/disjorn-broker/apps-ledger.jsonl
+       sudo ls -la /srv/apps/<app-id> /srv/apps-www/<app-id>/preview
+
+(A turn that must die early is still `sudo systemctl stop
+disjorn-apps-<session>-<turn>.service` — deliberately a keyboard act.)
 NEXTEOF
