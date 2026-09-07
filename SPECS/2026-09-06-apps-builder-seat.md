@@ -56,10 +56,12 @@ The apps-builder is a build hand, not a persona. Its whole interface is:
 - **`/work`** (rw): the app repo `/srv/apps/<app-id>/`, a git repo the host
   initialised at first turn. The ONLY writable path.
 - **`/shelf`** (ro): the vendored asset shelf (§F).
-- **`/config`** (ro): the builder brief `BUILDER-BRIEF.md` (§G) and the
-  runner's own config (for Claude Code: a `CLAUDE.md` that is the brief plus
-  ponytail's instruction file, hooks, settings). Credential by name only,
-  masked from the session the way `run-build.sh` does it.
+- **`/config-image`** (image content, ro): the builder brief
+  `BUILDER-BRIEF.md` (§G) and the runner's own config (for Claude Code:
+  the `CLAUDE.md` the entrypoint composes from the brief plus ponytail's
+  instruction file, and managed settings). NOTHING from the host credential
+  directory is mounted (slice (i) review): the credential travels by name
+  only, as `run-resident.sh` does it.
 - **`$HOME`**: a per-turn tmpfs, discarded at exit — Claude Code needs a
   writable home for its own state (Gable #2286). `/work` stays the only
   writable path that persists, which is the sense that matters.
@@ -441,6 +443,26 @@ spool are its raw material).
   halted event, not only `files_written` (§H, §J). Gable's
   `APP_BUILD_FLOW` wording is drafted seat-local for step (iii).
   **Confirm-ready from both residents at this revision.**
+- **Slice (i) review** (Claudette, 2026-09-07; banner #2313, fold #2318,
+  branch `loop/2026-09-06-apps-builder-seat-s1` @ `eaaf30e`): one BLOCK —
+  the keyboard's prompt-staging fold had root creating and chowning inside
+  the seat-writable result directory with symlink-following calls
+  (seat-to-root). Folded by removing the root write entirely: the launcher
+  feeds the bounded prompt bytes to the unit on stdin through a memfd and
+  `systemd-run --pipe`; the wrapper stages its own 0600 copy as the seat
+  (§C amended: root writes nothing under `/srv/apps-turns`). Four NOTEs
+  folded: nothing from the credential directory is mounted into the
+  container (§A amended — `/config` is image content; a rotation's
+  `env.old` had a path in); spools are secret-scanned and redacted in place
+  and usage is parsed into `result.json` by the harvest as the seat, so
+  spools stay 0600 seat-only and the broker never opens one (§C, §E); an
+  ignored-only turn is scanned and quarantines on a hit though git calls it
+  clean; the post-hit reset clears ignored leftovers. Also from the slice:
+  the scan runs before a HALTED commit too (a timed-out turn that wrote the
+  key quarantines instead of committing it); `scaffolded` ignores the repo
+  root's own mtime (git init bumped it); tmpfs HOME via `--mount U=true`.
+  The `keyboard` launch principal stands as shipped (one literal, inert
+  without its `launch.toml` line, deleted at slice (ii)).
 - Parent spec Round 14 (same commit) corrects Round 13's `APPS_BUILDERS`
   sentence per #2276: that setting names the CHAT seat (keyed resident);
   the BUILD seat is broker.toml `[apps]`; inert was right for the reason in
