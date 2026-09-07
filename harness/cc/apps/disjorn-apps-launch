@@ -221,7 +221,14 @@ def principal_uid(principal: str, root: str) -> int:
     directory (already realpath'd by the caller). Root-owned config names the
     directory; the directory's owner names the uid; a prompt file must carry
     that uid. Root is refused at both ends — a root-owned prompt directory is
-    a misconfiguration, not a principal."""
+    a misconfiguration, not a principal.
+
+    KNOWN EDGE (Claudette #2336): this rule stops distinguishing two
+    principals the day launch.toml maps two [prompt_dirs] entries to
+    directories owned by the SAME uid — the check degrades to "somebody's,
+    not root's" with no error. Today no two entries share an owner; whoever
+    adds a second directory for an existing owner has to add the
+    distinguishing check here too."""
     try:
         st = os.stat(root)
     except OSError as exc:

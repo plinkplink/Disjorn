@@ -141,7 +141,12 @@ A new system user in the resident-user pattern (`01-users.sh`,
 `02-podman.sh`): its own subuid/subgid range, podman `keep-id`, home
 `/home/res-appsbuilding` holding only podman state. Owns `/srv/apps/`
 (app repos, 0750) and writes `/srv/apps-www/<app-id>/preview/` (0755,
-world-readable so the stage-3 gate, a house process, can serve it). Transient
+world-readable so the stage-3 gate, a house process, can serve it). **Only
+`<app-id>/preview/` is ever served; nothing else under `/srv/apps-www/` is
+a path.** In-flight publishes stage under `/srv/apps-www/.staging/<app-id>/`
+(0700, the seat's alone; `.staging` cannot collide with an app id), so a
+half-transferred tree or a superseded copy is never inside the served set
+even if stage 3 serves the app directory (Claudette #2336). Transient
 units `disjorn-apps-<session>-<turn>.service` run as this user via a
 `disjorn-apps-launch` sudoers-scoped launcher, the `disjorn-build-launch`
 pattern. **Its argument charsets are the whole wall between a sudoers-

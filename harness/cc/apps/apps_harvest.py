@@ -475,19 +475,46 @@ def _remove(path: Path) -> None:
         shutil.rmtree(path)
 
 
-def preview_sibling(preview_dir: str | os.PathLike, turn: int) -> Path:
-    """`preview.tmp.<turn>` beside the live root. Ours alone: created empty by
-    this process, filled by this process's rsync, renamed by this process."""
+STAGING_NAME = ".staging"
+
+
+def staging_root(preview_dir: str | os.PathLike) -> Path:
+    """`<www-root>/.staging/<app-id>/` — where the sibling and the moved-aside
+    old root live while a publish is in flight. NOT under `<app-id>/`: the
+    served set is `<www-root>/<app-id>/preview/` and stage 3 may well serve
+    the app DIRECTORY, in which case a sibling beside `preview/` is a URL for
+    as long as it exists — a half-transferred tree, or a superseded copy
+    forever if its removal ever failed (Claudette #2336). `.staging` can never
+    collide with an app id (`^[a-z2-7]{12}$`) and is 0700: nothing but this
+    user reads a tree that has not been published. Same filesystem as the
+    live root, so the rename is still a rename."""
     preview_dir = Path(preview_dir)
-    return preview_dir.with_name(f"{preview_dir.name}.tmp.{int(turn)}")
+    app_dir = preview_dir.parent
+    return app_dir.parent / STAGING_NAME / app_dir.name
+
+
+def preview_sibling(preview_dir: str | os.PathLike, turn: int) -> Path:
+    """`preview.tmp.<turn>` under the staging root. Ours alone: created empty
+    by this process, filled by this process's rsync, renamed by this
+    process."""
+    preview_dir = Path(preview_dir)
+    return staging_root(preview_dir) / f"{preview_dir.name}.tmp.{int(turn)}"
+
+
+def preview_old(preview_dir: str | os.PathLike, turn: int) -> Path:
+    """Where the superseded live root goes for the instant between the two
+    renames, and until it is removed."""
+    preview_dir = Path(preview_dir)
+    return staging_root(preview_dir) / f"{preview_dir.name}.old.{int(turn)}"
 
 
 def copy_preview(repo: str | os.PathLike, preview_dir: str | os.PathLike,
                  turn: int, rsync_bin: str = "rsync") -> None:
     """Publish the committed tree to the preview root BY RENAME.
 
-    1. a fresh sibling `preview.tmp.<turn>` (any stale one from a crashed
-       harvest removed first — it was ours and never went live);
+    1. a fresh sibling `preview.tmp.<turn>` under the staging root (any
+       stale one from a crashed harvest removed first — it was ours and
+       never went live);
     2. rsync into it with the argv above (modes set by rsync, symlinks and
        specials dropped, nothing walked afterwards);
     3. the live root is moved aside, the sibling takes its name, the old
@@ -496,7 +523,14 @@ def copy_preview(repo: str | os.PathLike, preview_dir: str | os.PathLike,
        instant a reader can see no preview at all, and it is the same
        instant either way. If the second rename fails the old root is put
        back and the error propagates — the preview that worked is still the
-       preview that is served.
+       preview that is served. Removing the old root afterwards has nothing
+       left to protect, so its failure is a warning, not a demoted turn
+       (Claudette #2336).
+
+    The app directory `<www-root>/<app-id>/` is created HERE, by the
+    publisher, on the first publish — not by the wrapper on every turn. "A
+    preview exists" and "a preview worked" are the same observable
+    (Claudette #2336).
 
     A failed rsync removes the sibling (the tree is in the commit; there is
     nothing to inspect that `git show` does not have) and raises; the live
@@ -504,7 +538,9 @@ def copy_preview(repo: str | os.PathLike, preview_dir: str | os.PathLike,
     halted = "error" record.
     """
     preview_dir = Path(preview_dir)
-    preview_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging = staging_root(preview_dir)
+    staging.mkdir(parents=True, exist_ok=True)
+    os.chmod(staging.parent, 0o700)      # <www-root>/.staging: ours only
     sibling = preview_sibling(preview_dir, turn)
     _remove(sibling)
     os.mkdir(sibling, 0o755)
@@ -518,8 +554,12 @@ def copy_preview(repo: str | os.PathLike, preview_dir: str | os.PathLike,
             f"rsync to the preview sibling failed ({proc.returncode}): "
             f"{(proc.stderr or proc.stdout).strip()}")
 
-    old = preview_dir.with_name(f"{preview_dir.name}.old.{int(turn)}")
+    old = preview_old(preview_dir, turn)
     _remove(old)
+    app_dir = preview_dir.parent
+    if not app_dir.is_dir():
+        os.makedirs(app_dir, exist_ok=True)
+        os.chmod(app_dir, 0o755)         # the served path; a house process reads it
     had_live = preview_dir.is_symlink() or preview_dir.exists()
     if had_live:
         os.rename(preview_dir, old)
@@ -530,7 +570,12 @@ def copy_preview(repo: str | os.PathLike, preview_dir: str | os.PathLike,
             os.rename(old, preview_dir)
         raise
     if had_live:
-        _remove(old)
+        try:
+            _remove(old)
+        except OSError as exc:
+            _warn(f"published, but could not remove the superseded root "
+                  f"{old}: {exc} — it is under the unserved staging root and "
+                  f"the next publish will retry")
 
 
 # ------------------------------------------------------------------- watcher
@@ -720,6 +765,10 @@ def harvest(repo: str | os.PathLike, exit_code: int,
         "model": model,
         "runner": RUNNER,
         "spool": {"stdout": spool_stdout, "stderr": spool_stderr},
+        # Set again inside _branches; present HERE so an error record has the
+        # same shape as a success record (Claudette #2336).
+        "spool_redacted": False,
+        "usage": None,
     }
 
     halted_reason = None

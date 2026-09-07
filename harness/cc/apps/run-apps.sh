@@ -79,7 +79,11 @@ CONTAINER_NAME="disjorn-apps-$SESSION-$TURN"
 # in place (Claudette, slice (i) review). The broker, which runs as plink,
 # reads result.json and nothing else (BL-D2).
 umask 0022
-mkdir -p "$RESULT_DIR" "$PREVIEW_DIR"
+# The RESULT dir only. The preview root is created by the harvest's publisher
+# on the first publish, never here: a turn that never publishes (a secret
+# halt on turn 1) must not leave an empty served root behind — "a preview
+# exists" and "a preview worked" are one observable (Claudette #2336).
+mkdir -p "$RESULT_DIR"
 # The prompt: bounded bytes the launcher (root) read behind its path wall and
 # put on OUR stdin. We copy it into our own result directory, as the seat,
 # 0600 — root never writes here (Claudette's block, slice (i) review).

@@ -68,8 +68,9 @@ def turn(tmp_path, ah):
 
     result_dir = tmp_path / "srv-apps-turns" / "12" / "3"
     result_dir.mkdir(parents=True)
+    # NOT created: the publisher creates the preview root on the first
+    # publish, and a turn that never publishes leaves none (Claudette #2336).
     preview = tmp_path / "srv-apps-www" / "abc234567xyz" / "preview"
-    preview.mkdir(parents=True)
     quarantine = tmp_path / "srv-apps-quarantine" / "abc234567xyz" / "3"
     key_file = tmp_path / "env"
     key_file.write_text(f"ANTHROPIC_API_KEY={FAKE_KEY}\n", encoding="utf-8")
@@ -118,6 +119,7 @@ def test_ensure_repo_is_idempotent_and_sets_the_seat_identity(ah, tmp_path):
 def test_halted_turn_commits_the_work_and_leaves_the_preview_untouched(ah, turn):
     """A half-built app must never replace a preview that worked (Claudette
     #2284) — and the work is still committed, so the NEXT turn can see it."""
+    turn["preview"].mkdir(parents=True)
     (turn["preview"] / "index.html").write_text("<h1>the good one</h1>\n",
                                                 encoding="utf-8")
     (turn["repo"] / "index.html").write_text("<h1>half done</h1>\n",
@@ -179,7 +181,7 @@ def test_clean_exit_with_an_empty_diff_commits_and_copies_nothing(ah, turn):
     assert result["files"] == []
     assert result["quarantine"] is None
     assert head_sha(ah, turn["repo"]) == before
-    assert list(turn["preview"].iterdir()) == []
+    assert not turn["preview"].exists()      # never published, no root
 
 
 def test_a_turn_that_only_wrote_an_ignored_file_is_no_changes(ah, turn):
@@ -320,7 +322,7 @@ def test_a_secret_in_the_output_quarantines_and_halts(ah, turn, encoding):
     assert not (turn["repo"] / "vendor").exists()
     assert (turn["repo"] / "index.html").read_text() == "<h1>v1</h1>\n"
     # nothing reached the preview
-    assert list(turn["preview"].iterdir()) == []
+    assert not turn["preview"].exists()      # never published, no root
 
 
 def test_the_preview_root_is_world_readable_whatever_the_repo_mode_was(ah, turn):
@@ -359,7 +361,7 @@ def test_a_halted_turn_is_scanned_before_its_halted_commit(ah, turn):
     assert log_subjects(ah, turn["repo"]) == ["turn 1"]
     assert (turn["quarantine"] / "half.js").exists()
     assert ah.is_clean(turn["repo"])
-    assert list(turn["preview"].iterdir()) == []
+    assert not turn["preview"].exists()      # never published, no root
 
 
 def test_a_secret_in_a_modification_to_a_tracked_file_is_caught(ah, turn):
@@ -388,7 +390,7 @@ def test_a_secret_hidden_by_a_gitignore_is_still_caught(ah, turn):
     assert result["halted"] == "secret"
     assert (turn["quarantine"] / "secrets" / "k.txt").exists()
     assert not (turn["repo"] / "secrets").exists()
-    assert list(turn["preview"].iterdir()) == []
+    assert not turn["preview"].exists()      # never published, no root
 
 
 def test_a_secret_in_a_binary_file_is_caught(ah, turn):
@@ -455,7 +457,7 @@ def test_the_rsync_argv_is_the_exclusion_contract(ah, turn):
     copy dragged in) and `--exclude /.*` anchored to the transfer root (`.env`
     is the file a model writes a key into by habit — Gable #2286). Asserted
     against the argv so a dropped flag cannot pass on a box without rsync."""
-    dest = turn["preview"].with_name("preview.tmp.3")
+    dest = ah.preview_sibling(turn["preview"], 3)
     argv = ah.preview_argv(turn["repo"], dest, rsync_bin="rsync")
     assert argv == ["rsync", "-a", "--no-links", "--no-D", "--chmod=D0755,F0644",
                     "--exclude", ".git", "--exclude", "/.*",
@@ -467,9 +469,19 @@ def test_the_rsync_argv_is_the_exclusion_contract(ah, turn):
     assert "--safe-links" not in argv and "--copy-links" not in argv
 
 
-def test_the_preview_sibling_is_named_by_turn(ah, turn):
+def test_the_siblings_live_under_the_unserved_staging_root(ah, turn):
+    """Claudette #2336: atomic in the namespace is not atomic in the served
+    set. A sibling beside `preview/` is a URL if stage 3 serves the app
+    directory; under `<www-root>/.staging/<app-id>/` it never is, and
+    `.staging` cannot be an app id."""
+    www = turn["preview"].parent.parent
     assert ah.preview_sibling(turn["preview"], 3) == \
-        turn["preview"].with_name("preview.tmp.3")
+        www / ".staging" / "abc234567xyz" / "preview.tmp.3"
+    assert ah.preview_old(turn["preview"], 3) == \
+        www / ".staging" / "abc234567xyz" / "preview.old.3"
+    assert ah.staging_root(turn["preview"]).parent.name == ".staging"
+    import re
+    assert not re.match(r"^[a-z2-7]{12}$", ".staging")
 
 
 @pytest.mark.skipif(shutil.which("rsync") is None,
@@ -489,6 +501,7 @@ def test_real_rsync_excludes_git_and_root_dotfiles(ah, turn):
     (repo / "vendor" / ".git").mkdir()
     (repo / "vendor" / ".git" / "config").write_text("x", encoding="utf-8")
     (repo / "vendor" / "chart.js").write_text("// chart\n", encoding="utf-8")
+    turn["preview"].mkdir(parents=True)
     (turn["preview"] / "stale.html").write_text("old", encoding="utf-8")
 
     result = do_harvest(ah, turn, exit_code=0)
@@ -509,6 +522,9 @@ def test_real_rsync_excludes_git_and_root_dotfiles(ah, turn):
     assert not (preview / "stale.html").exists()
     # and neither the sibling nor the moved-aside old root survive a publish
     assert sorted(p.name for p in preview.parent.iterdir()) == ["preview"]
+    staging = ah.staging_root(preview)
+    assert list(staging.iterdir()) == []
+    assert stat.S_IMODE(staging.parent.stat().st_mode) == 0o700
 
 
 @pytest.mark.skipif(shutil.which("rsync") is None,
@@ -543,6 +559,8 @@ def test_a_committed_symlink_is_never_published(ah, turn, tmp_path):
     assert stat.S_IMODE(outside.stat().st_mode) == 0o600
     assert stat.S_IMODE(preview.stat().st_mode) == 0o755
     assert stat.S_IMODE((preview / "index.html").stat().st_mode) == 0o644
+    # the app directory was created by the publisher, 0755 for the gate
+    assert stat.S_IMODE(preview.parent.stat().st_mode) == 0o755
     assert (turn["result_dir"] / "result.json").exists()
 
 
@@ -555,6 +573,7 @@ def test_a_failing_rsync_is_a_halted_record_not_a_success_and_not_a_raise(
     bad = tmp_path / "bad-rsync"
     bad.write_text("#!/bin/sh\necho boom >&2\nexit 23\n", encoding="utf-8")
     bad.chmod(0o755)
+    turn["preview"].mkdir(parents=True)
     (turn["preview"] / "index.html").write_text("<h1>v1</h1>\n", encoding="utf-8")
     (turn["repo"] / "app.js").write_text("const x = 1;\n", encoding="utf-8")
 
@@ -571,6 +590,64 @@ def test_a_failing_rsync_is_a_halted_record_not_a_success_and_not_a_raise(
     assert (turn["preview"] / "index.html").read_text() == "<h1>v1</h1>\n"
     assert not (turn["preview"] / "app.js").exists()
     assert sorted(p.name for p in turn["preview"].parent.iterdir()) == ["preview"]
+
+
+def test_a_turn_that_never_publishes_leaves_no_preview_root(ah, turn):
+    """Claudette #2336: the wrapper used to mkdir the preview root on every
+    turn, so a turn-1 secret halt left an empty served root behind. Now the
+    publisher owns the root and it appears only when a preview worked."""
+    (turn["repo"] / "config.js").write_text(f'const k = "{FAKE_KEY}";\n',
+                                            encoding="utf-8")
+    result = do_harvest(ah, turn, exit_code=0)
+    assert result["halted"] == "secret"
+    assert not turn["preview"].exists()
+    assert not turn["preview"].parent.exists()
+    # a halted turn with work: committed, still no preview root
+    (turn["repo"] / "app.js").write_text("x\n", encoding="utf-8")
+    result = do_harvest(ah, turn, exit_code=1)
+    assert result["halted"] == "error" and result["commit"]
+    assert not turn["preview"].parent.exists()
+
+
+def test_an_error_record_has_the_same_shape_as_a_success_record(ah, turn, tmp_path):
+    """Claudette #2336: `spool_redacted` and `usage` were set inside the
+    branch order, so a raise before them produced a record missing both
+    keys and slice (ii) would tell "no usage" from "no key" by luck."""
+    bad = tmp_path / "bad-git"
+    bad.write_text("#!/bin/sh\nexit 128\n", encoding="utf-8")
+    bad.chmod(0o755)
+    (turn["repo"] / "app.js").write_text("x\n", encoding="utf-8")
+    err = do_harvest(ah, turn, exit_code=0, git_bin=str(bad))
+    ok = do_harvest(ah, turn, exit_code=0, rsync_bin=_fake_rsync(tmp_path))
+    assert err["halted"] == "error" and ok["halted"] is None
+    assert set(err) == set(ok)
+    assert err["spool_redacted"] is False and err["usage"] is None
+
+
+def test_a_failed_cleanup_of_the_old_root_does_not_demote_the_turn(
+        ah, turn, tmp_path, monkeypatch, capsys):
+    """Claudette #2336: commit made, preview published, and the record said
+    halted because a stale directory would not delete. Warn and carry on;
+    that last call has nothing left to protect."""
+    if shutil.which("rsync") is None:
+        pytest.skip("rsync not installed")
+    turn["preview"].mkdir(parents=True)
+    (turn["preview"] / "index.html").write_text("<h1>v1</h1>\n", encoding="utf-8")
+    (turn["repo"] / "index.html").write_text("<h1>v2</h1>\n", encoding="utf-8")
+    real_remove = ah._remove
+
+    def flaky_remove(path):
+        if path.name.startswith("preview.old.") and path.exists():
+            raise OSError(16, "Device or resource busy")
+        real_remove(path)
+    monkeypatch.setattr(ah, "_remove", flaky_remove)
+
+    result = do_harvest(ah, turn, exit_code=0)
+    assert result["halted"] is None and result["error"] is None
+    assert result["commit"]
+    assert (turn["preview"] / "index.html").read_text() == "<h1>v2</h1>\n"
+    assert "could not remove the superseded root" in capsys.readouterr().err
+    assert ah.preview_old(turn["preview"], 3).is_dir()   # under .staging, unserved
 
 
 def test_a_broken_git_is_a_halted_record_too(ah, turn, tmp_path):
