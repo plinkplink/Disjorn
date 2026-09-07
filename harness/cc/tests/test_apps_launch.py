@@ -103,8 +103,10 @@ def accept(seat, *args, **kw):
 def test_valid_run_prints_argv_and_exits_zero(seat):
     argv = accept(seat, "run", *GOOD, str(seat["prompt"]))
     assert argv[0] == "/usr/bin/systemd-run"
-    assert argv[-5:] == [str(seat["wrapper"]), "12", "3", "abc234567xyz",
-                         "/srv/apps-turns/12/3/prompt.md"]
+    # The wrapper gets NO prompt path: the prompt travels on stdin (memfd),
+    # and root writes nothing under the seat's tree (Claudette's block).
+    assert argv[-4:] == [str(seat["wrapper"]), "12", "3", "abc234567xyz"]
+    assert not any(a.startswith("/srv/apps-turns") for a in argv)
 
 
 def test_exact_systemd_run_argv(seat):
@@ -146,7 +148,6 @@ def test_exact_systemd_run_argv(seat):
         "--setenv=APPS_HARVEST=/usr/local/lib/disjorn/apps_harvest.py",
         "--",
         str(seat["wrapper"]), "12", "3", "abc234567xyz",
-        "/srv/apps-turns/12/3/prompt.md",   # the STAGED copy, never a home path
     ]
 
 
@@ -384,9 +385,9 @@ def test_a_symlink_that_stays_inside_is_accepted(seat):
     link = seat["dir"] / "alias.md"
     link.symlink_to(seat["prompt"])
     argv = accept(seat, "run", *GOOD, str(link))
-    # realpath'd on the way through for the wall; the unit itself is handed
-    # the STAGED copy in its result directory, never a path into a home.
-    assert argv[-1] == "/srv/apps-turns/%s/%s/prompt.md" % (GOOD[1], GOOD[2])
+    # realpath'd on the way through for the wall; the unit is handed no path
+    # at all — the prompt rides stdin.
+    assert argv[-1] == GOOD[3]
 
 
 # ─────────────────────────────────────────────────── the config table itself ──
@@ -507,3 +508,24 @@ def test_apps_image_pins_the_same_claude_code_as_the_resident_image():
     assert apps == resident, (
         f"Containerfile.apps pins claude-code {apps}, Containerfile pins "
         f"{resident} — bump both together or neither")
+
+
+# ───────────────────────────────────────── the prompt rides stdin, root writes nothing ──
+
+def test_prompt_on_stdin_puts_exactly_the_bytes_on_fd_zero():
+    """Claudette's block on slice (i): root must never create or chown inside
+    the seat-writable tree. The launcher feeds the bounded bytes to the unit
+    through its own stdin (systemd-run --pipe inherits it) and touches no
+    path. Run in a child so the test's own stdin is untouched."""
+    import os, subprocess, sys
+    code = (
+        "import importlib.util, os, sys\n"
+        f"src = open({str(LAUNCH)!r}).read()\n"
+        "ns = {'__name__': 'launcher_under_test'}\n"
+        "exec(compile(src, 'launcher', 'exec'), ns)\n"
+        "ns['prompt_on_stdin'](b'hello prompt\\n' * 3)\n"
+        "sys.stdout.write(os.read(0, 1 << 16).decode())\n"
+    )
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "hello prompt\n" * 3

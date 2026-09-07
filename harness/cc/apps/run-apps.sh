@@ -6,7 +6,7 @@
 # res-appsbuilding, never as root, never as plink: systemd-run set the
 # credentials before this process existed.
 #
-#     run-apps.sh <session> <turn> <app-id> <prompt-path>
+#     run-apps.sh <session> <turn> <app-id>      (the prompt arrives on stdin)
 #
 # Everything else arrives as APPS_* environment from the launcher, which is the
 # only reader of /etc/disjorn-apps/launch.toml. This script reads no config.
@@ -19,7 +19,7 @@
 #      result directory on the first change under /work outside .git/ after
 #      now. The broker READS that marker; it never holds a watch of its own;
 #   3. `podman run` the seat: /work rw, the image's own /shelf ro, /config ro
-#      with its env file masked, a tmpfs HOME, the prompt on stdin, the runner's
+#      nothing from the credential dir mounted, a tmpfs HOME, the prompt on stdin, the runner's
 #      stream spooled to 0600 files;
 #   4. HARVEST via apps_harvest.py — the exit status decides everything and the
 #      order is spec §E's, which that module implements and its test suite
@@ -36,10 +36,9 @@ _tag="$(basename "$0" .sh)"
 _say() { echo "$_tag: $*" >&2; }
 _die() { _say "FATAL: $*"; exit 1; }
 
-SESSION="${1:?usage: run-apps.sh <session> <turn> <app-id> <prompt-path>}"
-TURN="${2:?usage: run-apps.sh <session> <turn> <app-id> <prompt-path>}"
-APP_ID="${3:?usage: run-apps.sh <session> <turn> <app-id> <prompt-path>}"
-PROMPT="${4:?usage: run-apps.sh <session> <turn> <app-id> <prompt-path>}"
+SESSION="${1:?usage: run-apps.sh <session> <turn> <app-id>   (prompt on stdin)}"
+TURN="${2:?usage: run-apps.sh <session> <turn> <app-id>   (prompt on stdin)}"
+APP_ID="${3:?usage: run-apps.sh <session> <turn> <app-id>   (prompt on stdin)}"
 
 # The launcher validated all four against spec §C's charsets before any
 # privilege was used. Re-asserted here anyway, cheaply: this script is also
@@ -48,7 +47,7 @@ PROMPT="${4:?usage: run-apps.sh <session> <turn> <app-id> <prompt-path>}"
 [[ "$SESSION" =~ ^[1-9][0-9]{0,8}$ ]] || _die "session id: $SESSION"
 [[ "$TURN"    =~ ^[1-9][0-9]{0,3}$ ]] || _die "turn: $TURN"
 [[ "$APP_ID"  =~ ^[a-z2-7]{12}$    ]] || _die "app id: $APP_ID"
-[ -f "$PROMPT" ] || _die "prompt file missing: $PROMPT"
+[ -t 0 ] && _die "the prompt arrives on stdin (the launcher feeds it); refusing a terminal"
 
 IMAGE="${APPS_IMAGE:-localhost/disjorn-apps-builder:latest}"
 MODEL="${APPS_MODEL:-claude-opus-5}"
@@ -75,10 +74,18 @@ CONTAINER_NAME="disjorn-apps-$SESSION-$TURN"
 
 # 0755 dirs / 0644 files under the result root (spec §C): the broker reads and
 # inotifies that directory without owning it. The spools are re-chmod'd 0600
-# below — they are the runner's raw stream, and only this seat and the broker's
-# usage parser have any business in them (BL-D2).
+# below — they are the runner's raw stream and ONLY THIS SEAT ever opens them:
+# the harvest parses usage into result.json and redacts the key out of them
+# in place (Claudette, slice (i) review). The broker, which runs as plink,
+# reads result.json and nothing else (BL-D2).
 umask 0022
 mkdir -p "$RESULT_DIR" "$PREVIEW_DIR"
+# The prompt: bounded bytes the launcher (root) read behind its path wall and
+# put on OUR stdin. We copy it into our own result directory, as the seat,
+# 0600 — root never writes here (Claudette's block, slice (i) review).
+PROMPT="$RESULT_DIR/prompt.md"
+( umask 077 && head -c 1048576 > "$PROMPT" ) || _die "cannot stage the prompt"
+[ -s "$PROMPT" ] || _die "empty prompt on stdin"
 STARTED_AT_EPOCH="$(date +%s)"
 STARTED_AT="$(date -u -Is)"
 
@@ -128,9 +135,10 @@ args=(
   # /work — THE ONLY WRITABLE PATH THAT PERSISTS. It may already contain an
   # app; the builder brief's first rule is to read it before writing.
   -v "$REPO:/work:rw"
-  # /config — the credential drop directory, read-only, with the env file
-  # itself masked below. /shelf is image content, read-only by being baked.
-  -v "$CONFIG_DIR:/config:ro"
+  # NOTHING from the credential directory is mounted (Claudette, slice (i)
+  # review): the first rotation that leaves an env.old beside env would
+  # publish the key through a read-only /config mount. The brief, settings
+  # and shelf are image content; the credential travels by NAME only.
   # A per-turn HOME on tmpfs: Claude Code needs a writable home for its own
   # state (Gable #2286), and it is discarded at exit, so nothing about one turn
   # leaks into the next except through the repo.
@@ -176,7 +184,6 @@ if [ -f "$ENV_FILE" ]; then
   exec 9<"$_filtered"
   rm -f "$_filtered"
   args+=( --env-file /dev/fd/9 )
-  args+=( -v "/dev/null:/config/env:ro" )
 else
   _say "WARNING credential file absent: $ENV_FILE — the turn will fail to authenticate"
 fi

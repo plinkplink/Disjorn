@@ -193,6 +193,64 @@ def test_a_turn_that_only_wrote_an_ignored_file_is_no_changes(ah, turn):
     assert do_harvest(ah, turn, exit_code=0)["no_changes"] is True
 
 
+def test_an_ignored_only_turn_carrying_the_key_is_still_quarantined(ah, turn):
+    """Claudette, slice (i) review: an ignored-only turn came back clean, so it
+    was reported no_changes and never scanned, and the payload sat in /work
+    for the next turn's "read /work first". The scan set is wider than the
+    cleanliness test, and runs even when git says nothing changed."""
+    (turn["repo"] / ".gitignore").write_text("scratch/\n", encoding="utf-8")
+    ah.commit_all(turn["repo"], "turn 1b")
+    (turn["repo"] / "scratch").mkdir()
+    (turn["repo"] / "scratch" / "k.txt").write_text(FAKE_KEY + "\n", encoding="utf-8")
+    result = do_harvest(ah, turn, exit_code=0)
+    assert result["halted"] == "secret"
+    assert result["no_changes"] is False
+    assert (turn["quarantine"] / "scratch" / "k.txt").exists()
+    assert not (turn["repo"] / "scratch").exists()
+
+
+def test_the_spools_are_redacted_and_usage_is_lifted_into_the_result(ah, turn):
+    """Claudette, slice (i) review: the runner's raw stream is exactly where an
+    auth failure prints a key, and the spools are 0600 seat-only while the
+    broker runs as plink — so the key is redacted in place and usage is
+    parsed HERE into result.json; nothing else ever needs to open a spool."""
+    import base64 as _b64
+    b64 = _b64.b64encode(FAKE_KEY.encode()).decode()
+    result_line = json.dumps({
+        "type": "result", "subtype": "success", "is_error": False,
+        "num_turns": 3, "duration_ms": 4321, "total_cost_usd": 0.42,
+        "usage": {"input_tokens": 10, "output_tokens": 20,
+                  "cache_creation_input_tokens": 30, "cache_read_input_tokens": 40},
+        "result": "done",
+    })
+    (turn["result_dir"] / "stdout.log").write_text(
+        '{"type":"system"}\n' + result_line + "\n", encoding="utf-8")
+    (turn["result_dir"] / "stderr.log").write_text(
+        f"auth failed for key {FAKE_KEY} (b64 {b64})\n", encoding="utf-8")
+    (turn["repo"] / "index.html").write_text("<h1>v2</h1>\n", encoding="utf-8")
+
+    result = do_harvest(ah, turn, exit_code=0)
+
+    assert result["halted"] is None and result["commit"]
+    assert result["spool_redacted"] is True
+    err = (turn["result_dir"] / "stderr.log").read_text()
+    assert FAKE_KEY not in err and b64 not in err
+    assert "[REDACTED:raw]" in err and "[REDACTED:base64]" in err
+    assert result["usage"] == {
+        "input_tokens": 10, "output_tokens": 20,
+        "cache_creation_input_tokens": 30, "cache_read_input_tokens": 40,
+        "total_cost_usd": 0.42, "num_turns": 3, "duration_ms": 4321,
+        "is_error": False,
+    }
+
+
+def test_usage_is_none_when_the_spool_has_no_result_line(ah, turn):
+    (turn["result_dir"] / "stdout.log").write_text("garbage\n{not json\n", encoding="utf-8")
+    result = do_harvest(ah, turn, exit_code=1)
+    assert result["usage"] is None
+    assert result["spool_redacted"] is False
+
+
 # ─────────────────────────────────────────────── branch 3a: the secret scan ──
 
 def test_secret_patterns_are_raw_base64_and_lowercase_hex(ah):
@@ -446,7 +504,7 @@ def test_result_json_matches_the_schema_and_is_atomic(ah, turn, tmp_path):
     assert set(on_disk) == {
         "session", "turn", "app_id", "exit", "halted", "no_changes", "files",
         "commit", "quarantine", "started_at", "ended_at", "model", "runner",
-        "spool",
+        "spool", "spool_redacted", "usage",
     }
     assert on_disk["session"] == 12 and on_disk["turn"] == 3
     assert on_disk["app_id"] == "abc234567xyz"

@@ -398,7 +398,11 @@ def reset_tree(repo: str | os.PathLike, git_bin: str = "git") -> None:
     if has_commits(repo, git_bin=git_bin):
         git(repo, "reset", "-q", git_bin=git_bin)       # unstage anything add'ed
         git(repo, "checkout", "--", ".", check=False, git_bin=git_bin)
-    git(repo, "clean", "-fdq", check=False, git_bin=git_bin)
+    # -x too: the quarantine moved every ignored FILE out, and an ignored
+    # directory left standing is exactly the shape the next turn's "read
+    # /work first" would wander into. After a secret hit the session ends,
+    # so nothing legitimate is lost by clearing ignored leftovers.
+    git(repo, "clean", "-fdxq", check=False, git_bin=git_bin)
 
 
 # ------------------------------------------------------------------- preview
@@ -519,6 +523,74 @@ def write_result_atomic(result_dir: str | os.PathLike, payload: dict) -> str:
     return str(final)
 
 
+# -------------------------------------------------------------------- spools
+
+def redact_spools(paths: list[str], patterns: list[tuple[str, bytes]]) -> bool:
+    """Replace every encoding of the key in the spool files, in place.
+
+    Returns True if anything was redacted. Spools are the runner's raw
+    stdout/stderr; an authentication failure is the classic place a client
+    library echoes a credential. Redacting keeps a later reader (a human at
+    3am, the v2 scrollback) from meeting the value.
+    """
+    redacted = False
+    for p in paths:
+        if not p or not patterns:
+            continue
+        try:
+            blob = Path(p).read_bytes()
+        except OSError:
+            continue
+        out = blob
+        for label, needle in patterns:
+            if needle and needle in out:
+                out = out.replace(needle, b"[REDACTED:" + label.encode() + b"]")
+        if out != blob:
+            tmp = Path(p + ".tmp")
+            tmp.write_bytes(out)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, p)
+            redacted = True
+    return redacted
+
+
+def parse_usage_claude_code(spool_stdout: str) -> dict | None:
+    """Usage from Claude Code's stream-json: the final `result` line carries
+    `usage` (input/output/cache_creation/cache_read) and `total_cost_usd`.
+    The ONE runner-specific parser the spec allows (§A); a different runner
+    means a sibling function keyed by [apps].runner, not a change here.
+    Absent, unreadable or unparsable → None, never a guess.
+    """
+    if not spool_stdout:
+        return None
+    try:
+        lines = Path(spool_stdout).read_bytes().splitlines()
+    except OSError:
+        return None
+    for raw in reversed(lines):
+        raw = raw.strip()
+        if not raw.startswith(b"{"):
+            continue
+        try:
+            obj = json.loads(raw)
+        except ValueError:
+            continue
+        if obj.get("type") != "result":
+            continue
+        usage = obj.get("usage") or {}
+        return {
+            "input_tokens": usage.get("input_tokens"),
+            "output_tokens": usage.get("output_tokens"),
+            "cache_creation_input_tokens": usage.get("cache_creation_input_tokens"),
+            "cache_read_input_tokens": usage.get("cache_read_input_tokens"),
+            "total_cost_usd": obj.get("total_cost_usd"),
+            "num_turns": obj.get("num_turns"),
+            "duration_ms": obj.get("duration_ms"),
+            "is_error": obj.get("is_error"),
+        }
+    return None
+
+
 # ------------------------------------------------------------------- harvest
 
 def harvest(repo: str | os.PathLike, exit_code: int,
@@ -560,30 +632,29 @@ def harvest(repo: str | os.PathLike, exit_code: int,
                          if timed_out or exit_code in TIMEOUT_EXIT_CODES
                          else "error")
 
-    if is_clean(repo, git_bin=git_bin):
-        if halted_reason:
-            # Halted before it wrote anything: nothing to keep, nothing to
-            # scan, preview untouched.
-            payload["halted"] = halted_reason
-            return _finish(result_dir, payload)
-        # The runner answered, refused, or decided nothing needed changing.
-        # This is a TERMINAL, non-error outcome and it must end the bar's wait
-        # (§A: `files_written` with detail.no_changes).
-        payload["no_changes"] = True
-        return _finish(result_dir, payload)
-
-    # Dirty, halted or not: the scan runs BEFORE anything is committed or
-    # copied, because a commit is what puts the value beyond recall — and a
-    # timed-out turn is exactly the one most likely to have been mid-way
-    # through writing something it should not (keyboard fold, 2026-09-06:
-    # the spec's "commit as halted" is subordinate to "the value must not
-    # enter history").
-    scan_paths = dirty_paths(repo, ignored=True, git_bin=git_bin)
     patterns = secret_patterns(read_key(key_file)) if key_file else []
     if key_file and not patterns:
         _warn("no scannable credential — the turn's output is being published "
               "WITHOUT a secret scan; check the drop file")
-    found = scan_for_secret(repo, patterns, paths=scan_paths, git_bin=git_bin)
+
+    # The spools first: the runner's raw stream is exactly where an auth
+    # failure prints a key (Claudette, slice (i) review). They are 0600 and
+    # seat-only, never published, but a value sitting in a file is a value
+    # sitting in a file — redact in place, record that it happened.
+    payload["spool_redacted"] = redact_spools(
+        [spool_stdout, spool_stderr], patterns)
+    # Usage lives in result.json, parsed HERE as the seat, so the spools can
+    # stay 0600 seat-only and the broker (plink) never needs to open them.
+    payload["usage"] = parse_usage_claude_code(spool_stdout)
+
+    # The scan set is WIDER than "is the tracked tree dirty": --ignored=matching
+    # includes files a self-written .gitignore would hide. An ignored-only
+    # turn is `no_changes` to git and to the bar, but it is still scanned, and
+    # a hit still quarantines — otherwise the payload sits in /work for the
+    # next turn's "read /work first" (Claudette, slice (i) review).
+    scan_paths = dirty_paths(repo, ignored=True, git_bin=git_bin)
+    found = scan_for_secret(repo, patterns, paths=scan_paths, git_bin=git_bin) \
+        if scan_paths else None
     if found:
         dest = Path(quarantine_dir) if quarantine_dir else Path(result_dir) / "quarantine"
         moved = quarantine(repo, scan_paths, dest)
@@ -594,6 +665,18 @@ def harvest(repo: str | os.PathLike, exit_code: int,
         _warn(f"SECRET in the turn's output ({found['encoding']} in "
               f"{found['where']}) — {len(moved)} path(s) quarantined at {dest}, "
               f"nothing committed, nothing copied")
+        return _finish(result_dir, payload)
+
+    if is_clean(repo, git_bin=git_bin):
+        if halted_reason:
+            # Halted before it wrote anything trackable: nothing to keep,
+            # preview untouched.
+            payload["halted"] = halted_reason
+            return _finish(result_dir, payload)
+        # The runner answered, refused, or decided nothing needed changing.
+        # This is a TERMINAL, non-error outcome and it must end the bar's wait
+        # (§A: `files_written` with detail.no_changes).
+        payload["no_changes"] = True
         return _finish(result_dir, payload)
 
     if halted_reason:
