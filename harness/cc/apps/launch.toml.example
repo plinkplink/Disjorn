@@ -17,16 +17,14 @@
 # realpath. The launcher refuses (exit 64) a path that lands anywhere else,
 # including one reached through a symlink inside the directory.
 #
-# Principals are `res-<name>` (spec §C's charset) plus the single literal
-# `keyboard`. Slice (i) has NO broker verb, so the proving turn has no res-*
-# caller to be and runs as `keyboard`; the entry below is what makes that
-# possible. DELETE THE `keyboard` LINE once slice (ii)'s `apps-build` verb
-# lands — with no entry here the principal is refused, whatever the launcher's
-# charset says. See the deviation note in disjorn-apps-launch's header.
+# Principals are `res-<name>` and nothing else (spec §C's charset). A seat
+# reaches a turn through the broker's `apps-build` verb, which passes its own
+# name as the principal; there is no keyboard entry, because there is no
+# caller at the keyboard. The table is the second gate after the charset: a
+# well-formed name with no line here cannot launch.
 [prompt_dirs]
 res-gable = "/home/res-gable/resident-home/apps-prompts"
 res-claudette = "/home/res-claudette/resident-home/apps-prompts"
-keyboard = "/home/plink/apps-prompts"
 
 # ── The runner ───────────────────────────────────────────────────────────────
 # `command` is the argv the image's entrypoint execs, with `--model <model>`

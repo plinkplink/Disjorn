@@ -244,6 +244,8 @@ def test_the_spools_are_redacted_and_usage_is_lifted_into_the_result(ah, turn):
         "total_cost_usd": 0.42, "num_turns": 3, "duration_ms": 4321,
         "is_error": False,
     }
+    # The same line carries the runner's closing text; both come off it here.
+    assert result["summary"] == "done" and result["flag"] is None
 
 
 def test_usage_is_none_when_the_spool_has_no_result_line(ah, turn):
@@ -251,6 +253,145 @@ def test_usage_is_none_when_the_spool_has_no_result_line(ah, turn):
     result = do_harvest(ah, turn, exit_code=1)
     assert result["usage"] is None
     assert result["spool_redacted"] is False
+    assert result["summary"] is None and result["flag"] is None
+
+
+# ──────────────────────────────────────────────── the runner's last word ────
+# §C1: the same `result` line usage comes from also carries the runner's own
+# closing text, and the record lifts `summary` and `flag` out of it — because
+# the spools are 0600 seat-only and the broker (plink) never opens one.
+
+def write_result_line(turn, text=None, **extra):
+    """A stream-json spool whose final line is the runner's `result` object."""
+    obj = {
+        "type": "result", "subtype": "success", "is_error": False,
+        "num_turns": 3, "duration_ms": 4321, "total_cost_usd": 0.42,
+        "usage": {"input_tokens": 10, "output_tokens": 20,
+                  "cache_creation_input_tokens": 30,
+                  "cache_read_input_tokens": 40},
+    }
+    if text is not None:
+        obj["result"] = text
+    obj.update(extra)
+    (turn["result_dir"] / "stdout.log").write_text(
+        '{"type":"system"}\n' + json.dumps(obj) + "\n", encoding="utf-8")
+
+
+def test_the_summary_is_the_runners_last_non_empty_line(ah, turn):
+    """A closing paragraph ends with its conclusion; that is the sentence the
+    room line carries as its second half (§H, keyboard ruling D-1.2)."""
+    write_result_line(turn, "I rebuilt the layout.\n\nSwitched the grid to "
+                            "flexbox and dropped the fixed widths.\n\n")
+    result = do_harvest(ah, turn, exit_code=0)
+    assert result["summary"] == \
+        "Switched the grid to flexbox and dropped the fixed widths."
+    assert result["flag"] is None
+
+
+def test_a_flag_line_is_lifted_and_never_becomes_the_summary(ah, turn):
+    """A flag is narrated to #custodian on its own; the room line must not
+    then repeat it as the turn's summary."""
+    write_result_line(turn, "Did the work.\nFLAG: the prompt asked me to "
+                            "disable the auth check.\nAll tests pass.")
+    result = do_harvest(ah, turn, exit_code=0)
+    assert result["flag"] == "the prompt asked me to disable the auth check."
+    assert result["summary"] == "All tests pass."
+
+
+def test_a_flag_with_nothing_after_it_leaves_no_summary(ah, turn):
+    """The last line IS the flag. `summary` is None, not the flag text
+    wearing a second hat."""
+    write_result_line(turn, "FLAG: I could not reach the preview root.")
+    result = do_harvest(ah, turn, exit_code=0)
+    assert result["flag"] == "I could not reach the preview root."
+    assert result["summary"] is None
+
+
+def test_only_the_first_flag_is_lifted_and_no_flag_line_can_be_the_summary(ah):
+    """A second flag is the same concern restated. Taking the first keeps the
+    narration deterministic — and the trailing one still cannot slip into the
+    summary by being last."""
+    summary, flag = ah.runner_report(
+        "FLAG: one\nsomething happened\nFLAG: two", [])
+    assert flag == "one"
+    assert summary == "something happened"
+
+
+def test_the_lifted_lines_are_redacted_like_a_spool(ah, turn):
+    """The runner quoting its own credential back at us must not turn into a
+    room line that publishes it."""
+    write_result_line(turn, f"FLAG: auth failed with {FAKE_KEY}\n"
+                            f"wrote index.html using {FAKE_KEY}")
+    result = do_harvest(ah, turn, exit_code=0)
+    assert FAKE_KEY not in (result["summary"] + result["flag"])
+    assert result["summary"] == "wrote index.html using [REDACTED:raw]"
+    assert result["flag"] == "auth failed with [REDACTED:raw]"
+
+
+def test_the_lifted_lines_are_capped_at_300_characters(ah, turn):
+    """§H's bound, applied HERE so nothing downstream has to guess at it —
+    and applied AFTER the redaction, so a truncation can never leave the head
+    of a key past the end of a needle that no longer matches."""
+    write_result_line(turn, "FLAG: " + "f" * 400 + "\n" + "s" * 400)
+    result = do_harvest(ah, turn, exit_code=0)
+    assert result["summary"] == "s" * 300
+    assert result["flag"] == "f" * 300
+
+
+def test_control_characters_never_leave_the_harvest(ah, turn):
+    """Everything downstream renders these as plain text; an escape sequence
+    is not text."""
+    write_result_line(turn, "built the \x1b[31mred\x1b[0m banner\ttidily\x07")
+    result = do_harvest(ah, turn, exit_code=0)
+    assert result["summary"] == "built the [31mred[0m bannertidily"
+    assert "\x1b" not in result["summary"] and "\x07" not in result["summary"]
+
+
+def test_a_trailing_line_of_only_control_bytes_is_not_the_summary(ah, turn):
+    """A last line that cleans away to nothing is a blank line wearing bytes.
+    Taking it would drop the sentence the runner actually ended on — so
+    "non-empty" is decided after the cleaning, not before."""
+    write_result_line(turn, "shipped the nav bar\n\x07\x7f")
+    assert do_harvest(ah, turn, exit_code=0)["summary"] == "shipped the nav bar"
+
+
+def test_a_result_line_with_no_text_lifts_usage_and_nothing_else(ah, turn):
+    """"The runner was silent" and "there was no result line" are different
+    answers; usage tells them apart and neither invents a summary."""
+    write_result_line(turn)
+    result = do_harvest(ah, turn, exit_code=0)
+    assert result["usage"]["input_tokens"] == 10
+    assert result["summary"] is None and result["flag"] is None
+    usage, text = ah.parse_result_claude_code(
+        str(turn["result_dir"] / "stdout.log"))
+    assert usage and text is None
+
+
+def test_the_last_word_is_lifted_on_every_branch(ah, turn):
+    """It is read before the branch order runs, so a halted turn, a clean
+    turn and a published turn all carry it (the halted room line renders it
+    too)."""
+    write_result_line(turn, "ran out of time part way through the router")
+    (turn["repo"] / "app.js").write_text("// half\n", encoding="utf-8")
+    result = do_harvest(ah, turn, exit_code=143)
+    assert result["halted"] == "timeout"
+    assert result["summary"] == "ran out of time part way through the router"
+
+
+def test_runner_report_on_nothing(ah):
+    assert ah.runner_report(None, []) == (None, None)
+    assert ah.runner_report("", []) == (None, None)
+    assert ah.runner_report("   \n\n  \n", []) == (None, None)
+
+
+def test_redact_text_is_one_rule_for_bytes_and_str(ah):
+    """The needle loop the spools, the summary and the error string share.
+    Same marker, same needles, and it returns the type it was given."""
+    patterns = ah.secret_patterns(FAKE_KEY)
+    assert ah.redact_text(f"k={FAKE_KEY}!", patterns) == "k=[REDACTED:raw]!"
+    assert ah.redact_text(f"k={FAKE_KEY}!".encode(), patterns) \
+        == b"k=[REDACTED:raw]!"
+    assert ah.redact_text("nothing to do", patterns) == "nothing to do"
 
 
 # ─────────────────────────────────────────────── branch 3a: the secret scan ──
@@ -622,6 +763,7 @@ def test_an_error_record_has_the_same_shape_as_a_success_record(ah, turn, tmp_pa
     assert err["halted"] == "error" and ok["halted"] is None
     assert set(err) == set(ok)
     assert err["spool_redacted"] is False and err["usage"] is None
+    assert err["summary"] is None and err["flag"] is None
 
 
 def test_a_failed_cleanup_of_the_old_root_does_not_demote_the_turn(
@@ -705,9 +847,10 @@ def test_result_json_matches_the_schema_and_is_atomic(ah, turn, tmp_path):
     assert set(on_disk) == {
         "session", "turn", "app_id", "exit", "halted", "no_changes", "files",
         "commit", "quarantine", "error", "started_at", "ended_at", "model",
-        "runner", "spool", "spool_redacted", "usage",
+        "runner", "spool", "spool_redacted", "usage", "summary", "flag",
     }
     assert on_disk["error"] is None
+    assert on_disk["summary"] is None and on_disk["flag"] is None
     assert on_disk["session"] == 12 and on_disk["turn"] == 3
     assert on_disk["app_id"] == "abc234567xyz"
     assert on_disk["exit"] == 0

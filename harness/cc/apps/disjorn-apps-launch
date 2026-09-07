@@ -41,25 +41,17 @@ EXIT CODES
 
 CHARSETS (spec §C — these are SPEC, not code, because they are the whole wall
 between a sudoers-scoped launcher and an arbitrary path):
-    resident    ^res-[a-z]{1,24}$   ... plus the literal `keyboard`, see below
+    resident    ^res-[a-z]{1,24}$
     session     ^[1-9][0-9]{0,8}$
     turn        ^[1-9][0-9]{0,3}$
     app id      ^[a-z2-7]{12}$      (stage 1 D4, base32 lower)
     prompt path realpath must land under that principal's mapped directory
 
-THE `keyboard` PRINCIPAL — A DOCUMENTED DEVIATION, FLAGGED FOR THE KEYBOARD.
-Spec §C's charset is `^res-[a-z]{1,24}$` and admits nothing else. The slice (i)
-build brief nonetheless ships `keyboard = "/home/plink/apps-prompts"` in
-launch.toml and says "the keyboard entry is what the proving turn uses" — and
-slice (i) has no broker verb, so the proving turn has no res-* caller to be.
-The two cannot both be obeyed. Resolved by admitting exactly ONE additional
-literal, `keyboard`, and nothing else: not a widened regex, not a wildcard, one
-name that a reader can see in a diff. It is inert unless
-/etc/disjorn-apps/launch.toml also carries a `keyboard` entry under
-[prompt_dirs], so deleting that one line after the proving turn removes the
-principal entirely — which is what the keyboard should do once slice (ii)
-lands. RE-RULE THIS AT SLICE (ii): if the answer is "spec wins", delete
-KEYBOARD_PRINCIPAL below and the launch.toml line, and nothing else changes.
+HISTORY: slice (i) admitted one additional literal principal, `keyboard`, so
+that the proving turn had a caller in a slice with no broker verb. It was
+removed at slice (ii), when `apps-build` landed and every turn has a res-*
+seat to be; the sudoers alternative went with it, and spec §C's charset is now
+the only one.
 
 The identity is NOT an argument. Every turn of every app runs as
 `res-appsbuilding` (spec §C); the <resident> argument names WHOSE PROMPT
@@ -129,7 +121,6 @@ DEFAULT_PONYTAIL_MODE = "full"
 
 # ------------------------------------------------------------------ charsets
 RESIDENT_RE = re.compile(r"^res-[a-z]{1,24}$")
-KEYBOARD_PRINCIPAL = "keyboard"          # the one literal; see the header
 SESSION_RE = re.compile(r"^[1-9][0-9]{0,8}$")
 TURN_RE = re.compile(r"^[1-9][0-9]{0,3}$")
 APP_ID_RE = re.compile(r"^[a-z2-7]{12}$")
@@ -153,13 +144,10 @@ def die(msg: str) -> "None":
 # ---------------------------------------------------------------- validation
 
 def check_principal(raw: str) -> str:
-    """The prompt-directory principal. `res-<name>` per spec §C, or the single
-    literal `keyboard` (see the header's deviation note). NOT a uid: the turn
-    always runs as res-appsbuilding."""
-    if raw == KEYBOARD_PRINCIPAL:
-        return raw
+    """The prompt-directory principal: `res-<name>`, spec §C's charset and
+    nothing else. NOT a uid — the turn always runs as res-appsbuilding."""
     if not RESIDENT_RE.match(raw):
-        die(f"resident is not res-<name> (or {KEYBOARD_PRINCIPAL!r}): {raw!r}")
+        die(f"resident is not res-<name>: {raw!r}")
     return raw
 
 
@@ -271,9 +259,10 @@ def open_prompt(principal: str, raw: str, config: dict) -> int:
 
     "The principal's uid" is read off the mapped directory itself: the
     root-owned config says which directory is `res-gable`'s, and the owner of
-    that directory is who `res-gable` is on this disk. No passwd lookup, so
-    the `keyboard` literal (no such user) is covered by the same rule, and a
-    root-owned prompt directory is refused as the misconfiguration it is.
+    that directory is who `res-gable` is on this disk. No passwd lookup —
+    the fact under test is who owns the tree the prompt came out of, not who
+    is in /etc/passwd — and a root-owned prompt directory is refused as the
+    misconfiguration it is.
 
     The fd is returned and READ FROM; nothing reopens the name. Callers that
     only want validation close it.
