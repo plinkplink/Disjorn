@@ -4345,6 +4345,11 @@ class Broker:
                       "tokens": tokens, "model": model}
             if error:
                 detail["reason"] = error
+            # A turn that wrote a report and THEN failed still has a report
+            # worth reading; forward it so the room's halt line can quote it
+            # (Claudette #2354). Absent on a turn that said nothing.
+            if summary:
+                detail["summary"] = summary
             self._apps_post_stage(session, self._apps_last_stage(rec, scaffolded),
                                   detail)
             if halted == "secret":

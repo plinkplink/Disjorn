@@ -717,10 +717,14 @@ def _turn_line(detail: dict[str, Any]) -> str:
         raw = detail.get("files")
         halt_files = [f for f in raw if isinstance(f, str)] if isinstance(raw, list) else []
         wrote = f" Wrote {_files_word(halt_files)}." if halt_files else ""
+        # A halt that carried a report keeps it: the turn where the runner
+        # wrote something and then failed is the turn the report is most worth
+        # reading (Claudette #2354). Same quoted-builder-words rendering.
         return (
             f"Turn {number} halted — {HALT_SENTENCES[halted]}"
             + (f" {reason}" if reason else "")
             + wrote
+            + tail
         )
 
     if detail.get("no_changes") is True:
@@ -1145,11 +1149,27 @@ async def publish_stage(
         # exists to stop — never trips it (Claudette #2352 BLOCK 1). §E's
         # invariant: exactly one event per turn carries `tokens`. A
         # spawned:false refusal carries none and is guarded regardless.
+        # …and the meter is a running `+=`, so "exactly one event per turn
+        # carries tokens" cannot be left to the reaper's good behaviour: a
+        # retried post after a timeout it thought failed would double-charge
+        # the ceiling. Enforced here — a turn's tokens are counted only if no
+        # EARLIER event for the same turn already carried them (Claudette
+        # #2354). The just-inserted row is excluded by id.
         if body.detail.tokens is not None and body.detail.spawned is not False:
-            await conn.execute(
-                "UPDATE app_sessions SET tokens_used = tokens_used + ? WHERE id = ?",
-                (body.detail.tokens, session_id),
+            prior = await conn.execute(
+                """SELECT 1 FROM app_stage_events
+                    WHERE session_id = ? AND id != ?
+                      AND json_extract(detail, '$.turn') = ?
+                      AND json_extract(detail, '$.tokens') IS NOT NULL
+                    LIMIT 1""",
+                (session_id, event_id, body.detail.turn),
             )
+            already = await prior.fetchone()
+            if already is None:
+                await conn.execute(
+                    "UPDATE app_sessions SET tokens_used = tokens_used + ? WHERE id = ?",
+                    (body.detail.tokens, session_id),
+                )
         if halted == "secret":
             await _close_session(conn, session_id, created_at)
         if body.stage == "live":

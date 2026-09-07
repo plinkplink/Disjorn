@@ -675,6 +675,17 @@ def test_a_turn_that_died_before_scaffolding_reposts_scoped(apps):
     assert apps.stages[-1]["detail"]["reason"] == "the harvest could not commit"
 
 
+def test_a_halted_turn_forwards_its_report(apps):
+    """Claudette #2354: a turn that wrote a report and then failed still
+    carries it, so the room's halt line can quote it."""
+    apps.write_scaffolded()
+    apps.write_result(halted="error", exit=1, commit="abc123",
+                      files=["a.js"], summary="Wired it, deploy step errored.")
+    _handoff(apps)
+    apps.broker.join_apps(timeout=5)
+    assert apps.stages[-1]["detail"]["summary"] == "Wired it, deploy step errored."
+
+
 def test_a_harvest_that_failed_is_a_halt_even_with_no_halted_field(apps):
     """§E, Gable #2327: the harvest failing partway is a TERMINATED turn, not a
     claimed success — an `error` string with `halted: null` still halts."""

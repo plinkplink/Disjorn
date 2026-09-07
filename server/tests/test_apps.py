@@ -1261,6 +1261,56 @@ async def test_a_halt_names_what_it_wrote(client, app, settings_env, seat_toml):
     )
 
 
+async def test_a_halt_that_wrote_a_report_keeps_it(
+    client, app, settings_env, seat_toml
+):
+    """Claudette #2354: the turn where the runner wrote something and then
+    failed is the turn its report is most worth reading."""
+    session = await build_fixture(client, settings_env, seat_toml)
+    sid, channel = session["id"], session["channel_id"]
+    await post_stage(
+        client, sid, "scaffolded",
+        {"turn": 1, "halted": "error", "files": ["a.js"], "tokens": 5,
+         "model": "m", "reason": "publish failed",
+         "summary": "Wired the form but the deploy step errored."},
+    )
+    assert (await channel_lines(channel))[-1] == (
+        'Turn 1 halted — the build failed. publish failed Wrote a.js. '
+        '"Wired the form but the deploy step errored."'
+    )
+
+
+async def test_a_turns_tokens_are_counted_once_even_if_the_event_repeats(
+    client, app, settings_env, seat_toml
+):
+    """Claudette #2354: the meter is a running +=, so 'one event per turn
+    carries tokens' is enforced, not trusted — a retried post after a timeout
+    the reaper thought failed must not double-charge the ceiling."""
+    session = await build_fixture(client, settings_env, seat_toml)
+    sid = session["id"]
+
+    async def used() -> int:
+        return (
+            await client.get(
+                f"/apps/sessions/{sid}/harness-view",
+                headers=as_bot(client, BROKER_KEY),
+            )
+        ).json()["tokens_used"]
+
+    detail = {"turn": 1, "files": ["a.js"], "tokens": 40407, "model": "m"}
+    assert (await post_stage(client, sid, "files_written", detail)).status_code == 200
+    assert await used() == 40407
+    # the identical event again (a retry): counted once.
+    assert (await post_stage(client, sid, "files_written", detail)).status_code == 200
+    assert await used() == 40407
+    # turn 2's own tokens still add.
+    await post_stage(
+        client, sid, "files_written",
+        {"turn": 2, "files": ["b.js"], "tokens": 1000, "model": "m"},
+    )
+    assert await used() == 41407
+
+
 async def test_the_turn_line_says_exactly_what_the_turn_did(
     client, app, settings_env, seat_toml
 ):
