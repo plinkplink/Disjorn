@@ -323,6 +323,24 @@ def test_a_secret_in_the_output_quarantines_and_halts(ah, turn, encoding):
     assert list(turn["preview"].iterdir()) == []
 
 
+def test_the_preview_root_is_world_readable_whatever_the_repo_mode_was(ah, turn):
+    """Measured at the proving turn: rsync -a carried the repo's 0750 onto the
+    preview root, which the stage-3 gate (a house process) could not enter."""
+    import shutil as _sh
+    if _sh.which("rsync") is None:
+        pytest.skip("rsync not installed")
+    os.chmod(turn["repo"], 0o750)
+    (turn["repo"] / "assets").mkdir()
+    (turn["repo"] / "assets" / "a.css").write_text("x{}\n", encoding="utf-8")
+    os.chmod(turn["repo"] / "assets", 0o750)
+    (turn["repo"] / "index.html").write_text("<h1>v2</h1>\n", encoding="utf-8")
+    result = do_harvest(ah, turn, exit_code=0)
+    assert result["commit"]
+    assert stat.S_IMODE(turn["preview"].stat().st_mode) == 0o755
+    assert stat.S_IMODE((turn["preview"] / "assets").stat().st_mode) == 0o755
+    assert stat.S_IMODE((turn["preview"] / "assets" / "a.css").stat().st_mode) == 0o644
+
+
 def test_a_halted_turn_is_scanned_before_its_halted_commit(ah, turn):
     """Keyboard fold, 2026-09-06 (hand A's own observation): a timed-out turn
     is the one most likely to be mid-way through writing something it should

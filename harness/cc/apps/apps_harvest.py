@@ -430,8 +430,10 @@ def copy_preview(repo: str | os.PathLike, preview_dir: str | os.PathLike,
                  rsync_bin: str = "rsync") -> None:
     """Publish the committed tree to the preview root. 0755 dirs / 0644 files
     (spec §C) so the stage-3 gate — a house process, not this user — can serve
-    it; rsync -a preserves our own modes, so the umask that run-apps.sh sets is
-    what decides them."""
+    it. rsync -a copies the SOURCE tree's modes, and the app repo is 0750 by
+    design (measured at the keyboard's proving turn: the preview root came out
+    0750), so the modes are set explicitly afterwards: the preview root and
+    every directory under it 0755, every file 0644."""
     Path(preview_dir).mkdir(parents=True, exist_ok=True)
     argv = preview_argv(repo, preview_dir, rsync_bin=rsync_bin)
     proc = subprocess.run(argv, capture_output=True, text=True)
@@ -439,6 +441,12 @@ def copy_preview(repo: str | os.PathLike, preview_dir: str | os.PathLike,
         raise RuntimeError(
             f"rsync to the preview root failed ({proc.returncode}): "
             f"{(proc.stderr or proc.stdout).strip()}")
+    os.chmod(preview_dir, 0o755)
+    for dirpath, dirnames, filenames in os.walk(preview_dir):
+        for d in dirnames:
+            os.chmod(os.path.join(dirpath, d), 0o755)
+        for f in filenames:
+            os.chmod(os.path.join(dirpath, f), 0o644)
 
 
 # ------------------------------------------------------------------- watcher
