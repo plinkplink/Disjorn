@@ -836,8 +836,13 @@ def runner_report(text: str | None,
     for ln in reversed(lines):
         if ln.startswith(FLAG_PREFIX):
             continue
+        # "Non-empty" is decided on the line AFTER it is cleaned, not on the
+        # raw one: a trailing line that cleans away to nothing (a stray bell,
+        # a lone DEL) is a blank line wearing bytes, and taking it would
+        # silently drop the sentence the runner actually ended on.
         summary = _one_line(ln, patterns) or None
-        break
+        if summary is not None:
+            break
     return summary, flag
 
 

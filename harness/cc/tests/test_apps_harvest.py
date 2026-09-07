@@ -347,6 +347,14 @@ def test_control_characters_never_leave_the_harvest(ah, turn):
     assert "\x1b" not in result["summary"] and "\x07" not in result["summary"]
 
 
+def test_a_trailing_line_of_only_control_bytes_is_not_the_summary(ah, turn):
+    """A last line that cleans away to nothing is a blank line wearing bytes.
+    Taking it would drop the sentence the runner actually ended on — so
+    "non-empty" is decided after the cleaning, not before."""
+    write_result_line(turn, "shipped the nav bar\n\x07\x7f")
+    assert do_harvest(ah, turn, exit_code=0)["summary"] == "shipped the nav bar"
+
+
 def test_a_result_line_with_no_text_lifts_usage_and_nothing_else(ah, turn):
     """"The runner was silent" and "there was no result line" are different
     answers; usage tells them apart and neither invents a summary."""
