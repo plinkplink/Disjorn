@@ -1,0 +1,31 @@
+-- 012_apps_turns.sql — a build session counts its turns and its tokens.
+--
+-- SPECS/2026-09-06-apps-builder-seat.md §J (confirmed by plink, #custodian
+-- seq 2302; stage 2, slice (ii): the `apps-build` verb, the ledger, and the
+-- stage publisher's turn vocabulary).
+--
+-- Stage 1's session row was three things — the quota unit, the lock, and the
+-- join between an app and its channel. Stage 2 makes it a fourth: the meter
+-- for the hidden per-build token ceiling (parent Round 6, 10,000,000), which
+-- is enforced across a session's turns by the broker BEFORE each handoff.
+--
+-- Both columns are DERIVED from the stage stream and written by the stage
+-- endpoint, never by a caller asserting them:
+--
+--   * `turns` is `max(turns, detail.turn)` on any event carrying a turn. Max,
+--     not increment: the broker posts several events per turn (scoped,
+--     scaffolded, files_written, deployed) and a counter that added one each
+--     time would count events, not turns.
+--   * `tokens_used` accumulates `detail.tokens` on `files_written` only —
+--     the one event per turn that carries the runner's usage. The ceiling is
+--     checked before a turn and recorded after it, so one turn may overshoot
+--     and the NEXT handoff is what gets refused (§E.3: a runaway kill, not a
+--     budget).
+--
+-- They are columns on the session rather than a read over the ledger because
+-- the ledger lives on the broker's disk and the modal's ceiling must not need
+-- it (§J). A session created before this migration reads 0 for both, which is
+-- the truth: it never ran a turn.
+
+ALTER TABLE app_sessions ADD COLUMN turns INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE app_sessions ADD COLUMN tokens_used INTEGER NOT NULL DEFAULT 0;

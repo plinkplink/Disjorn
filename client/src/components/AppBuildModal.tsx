@@ -16,8 +16,13 @@
  * Share and Change something render disabled for the same reason, each saying
  * what would enable it.
  *
- * The stage bar reads ONLY from the apps store. Nothing publishes stage
- * events yet; when the harness does, this bar moves without being touched.
+ * The stage bar reads ONLY from the apps store, and it reads the DETAIL, not
+ * the stage name (SPECS/2026-09-06-apps-builder-seat.md §A). `files_written`
+ * is the turn's terminal stage rather than literally "files were written": a
+ * turn that answered and changed nothing arrives there with `no_changes`, and
+ * a halted turn arrives at whatever stage it last reached with `halted` set.
+ * A bar that labelled itself from the stage word would tell the user a turn
+ * that failed at `scoped` was still being scoped.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -27,7 +32,7 @@ import { useApps } from "../stores/apps";
 import { useChannels } from "../stores/channels";
 import { useMembers } from "../stores/members";
 import { useMessages } from "../stores/messages";
-import type { Attachment, Message } from "../types";
+import type { Attachment, HaltReason, Message } from "../types";
 import { APP_STAGE_LABELS, APP_STAGES } from "../types";
 import { socket } from "../ws";
 import { QuotaMeter } from "./AppsChooserModal";
@@ -41,6 +46,28 @@ import { SummarizeModal } from "./SummarizeModal";
 const HEARTBEAT_MS = 60_000;
 /** Mirrors D10's bound. The server is the wall; this is only courtesy. */
 const NAME_MAX = 60;
+
+/* What a halt says on the chip. Short forms of the sentences the server
+   already wrote into the room — the room is where the detail lives, and the
+   bar is where you glance. */
+const HALT_CHIP_TEXT: Record<HaltReason, string> = {
+  ceiling: "hit its ceiling",
+  timeout: "timed out",
+  error: "failed",
+  secret: "closed: credential",
+};
+
+/** How many files the turn actually touched.
+
+    The publisher caps the list at 40 names and appends a literal `+N more`,
+    so the count is the names present plus whatever that marker claims. A file
+    genuinely called `+3 more` would be miscounted by one line, which is the
+    right trade against making every long turn read "41 files". */
+function countFiles(files: string[]): number {
+  const last = files[files.length - 1];
+  const more = last === undefined ? null : /^\+(\d+) more$/.exec(last);
+  return more === null ? files.length : files.length - 1 + Number(more[1]);
+}
 
 function elapsedSince(startedAt: string, now: number): string {
   const started = Date.parse(startedAt);
@@ -79,6 +106,10 @@ export function AppBuildModal({
   const [summarizeTarget, setSummarizeTarget] = useState<string | null>(null);
 
   const channelId = session?.channel_id ?? null;
+  /* The turn stopped waiting on anything (it halted, or it changed nothing),
+     so the clock is a final reading rather than a counter. Read up here
+     because the timer effect below runs before the render body. */
+  const clockFrozen = session?.lastTurn?.done === true;
   const nestedOpen = imageAtt !== null || summarizeTarget !== null;
   const nestedOpenRef = useRef(nestedOpen);
   nestedOpenRef.current = nestedOpen;
@@ -130,11 +161,14 @@ export function AppBuildModal({
   }, [sessionId, ended]);
 
   // Elapsed clock. Seconds, since the session's own start — never a percent
-  // and never an estimate of how far along the build is.
+  // and never an estimate of how far along the build is. It genuinely STOPS
+  // when the turn does; a frozen reading kept alive by a live timer is a
+  // clock that only looks stopped.
   useEffect(() => {
+    if (clockFrozen) return;
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
-  }, []);
+  }, [clockFrozen]);
 
   // Esc closes — unless a nested modal owns it (both ImageModal and
   // SummarizeModal listen on the window too), or the key came from a text
@@ -225,6 +259,26 @@ export function AppBuildModal({
 
   const { app, builder } = session;
   const reached = session.stage === null ? -1 : APP_STAGES.indexOf(session.stage);
+
+  /* The turn, and what it makes the bar say. `lastTurn` is derived in the
+     store from the whole event list, so a new turn's `scoped` clears a halt
+     and nothing else does. */
+  const turn = session.lastTurn ?? null;
+  const halted = turn?.halted ?? null;
+  const currentLabel =
+    halted !== null
+      ? "Halted"
+      : turn !== null && turn.no_changes && session.stage === "files_written"
+        ? "No changes"
+        : null;
+
+  /* The final reading is the terminal event's own timestamp, not whenever
+     this component last noticed — a modal opened ten minutes after a build
+     halted must show when it halted. */
+  const finishedAt = clockFrozen
+    ? (session.stages[session.stages.length - 1]?.created_at ?? null)
+    : null;
+  const clockAt = finishedAt === null ? now : Date.parse(finishedAt) || now;
 
   /* The nested modals are SIBLINGS of the backdrop, not children of it: a
      click inside one would otherwise bubble to the backdrop's onClick and
@@ -335,19 +389,43 @@ export function AppBuildModal({
                   key={stage}
                   className={`stage-step${
                     i < reached ? " done" : i === reached ? " current" : ""
-                  }`}
+                  }${i === reached && halted !== null ? " halted" : ""}`}
                 >
                   <span className="stage-dot" aria-hidden />
-                  <span className="stage-label">{APP_STAGE_LABELS[stage]}</span>
+                  <span className="stage-label">
+                    {(i === reached ? currentLabel : null) ??
+                      APP_STAGE_LABELS[stage]}
+                  </span>
                 </li>
               ))}
             </ol>
+            {halted !== null && (
+              <div className="app-build-chip app-build-chip--halted" role="status">
+                Turn {turn?.turn ?? 0} {HALT_CHIP_TEXT[halted]}
+              </div>
+            )}
             <div className="app-elapsed">
               <span className="app-elapsed-label">Elapsed</span>
               <span className="app-elapsed-clock">
-                {elapsedSince(session.started_at, now)}
+                {elapsedSince(session.started_at, clockAt)}
               </span>
             </div>
+            {turn !== null && turn.files.length > 0 && (
+              <div className="app-file-scroll">
+                <div className="app-file-scroll-head">
+                  Turn {turn.turn} — {countFiles(turn.files)} files
+                </div>
+                <ul className="app-file-list">
+                  {turn.files.map((file, i) => (
+                    /* Plain text, every entry — these are paths a build seat
+                       chose, and the `+N more` marker is one of them. Keyed by
+                       position because a turn may legitimately touch the same
+                       path twice in one capped list. */
+                    <li key={`${i}:${file}`}>{file}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
             <div className="app-preview-frozen">
               <div className="app-preview-banner">
                 Build in progress — the preview is frozen.

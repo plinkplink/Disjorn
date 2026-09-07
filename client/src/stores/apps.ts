@@ -1,13 +1,17 @@
-/* The apps registry, client side (SPECS/2026-08-30-apps-tab-v1.md, stage 1).
+/* The apps registry, client side (SPECS/2026-08-30-apps-tab-v1.md, stage 1;
+ * SPECS/2026-09-06-apps-builder-seat.md §J, stage 2).
  *
- * This store is the CONSUMER end of the stage-event stream. The publisher —
- * the harness that will emit `scoped … live` while a build runs — does not
- * exist yet; in stage 1 the only thing that can POST a stage is the broker
- * seat, and nothing does. What matters is that the subscription is real: a
- * frame arriving here updates the session's `stages` and `stage`, and every
- * renderer reads those. The stage bar in AppBuildModal is one subscriber. A
- * second one (a build log, a sidebar dot) can be added by subscribing to this
- * store and touching nothing else — no publisher change, no new plumbing.
+ * This store is the CONSUMER end of the stage-event stream. A frame arriving
+ * here updates the session's `stages` and `stage`, and every renderer reads
+ * those. The stage bar in AppBuildModal is one subscriber. A second one (a
+ * build log, a sidebar dot) can be added by subscribing to this store and
+ * touching nothing else — no publisher change, no new plumbing.
+ *
+ * Stage 2 gave the stream a TURN, and the one derived thing this store keeps
+ * is `session.lastTurn`: what the newest turn wrote, whether it halted, and
+ * whether it is over. It is DERIVED, from `stages`, by one function used both
+ * by the live frame handler and by the reload path — a store that computed it
+ * two ways would show a reloaded modal a different turn than a live one.
  *
  * Like every store here it talks to `api`, never to `ws`: the socket imports
  * stores, stores never import the socket, and that is what keeps the import
@@ -33,8 +37,10 @@ import type {
   AppStageFrame,
   AppUpdateFrame,
   Builder,
+  HaltReason,
   Quota,
   StageEvent,
+  TurnState,
 } from "../types";
 
 /* An `app_stage` frame carries no row id — the persisted event has one, the
@@ -51,6 +57,68 @@ function stageEventFromFrame(frame: AppStageFrame): StageEvent {
     detail: frame.detail,
     created_at: frame.created_at,
   };
+}
+
+const HALT_REASONS: readonly HaltReason[] = [
+  "timeout",
+  "error",
+  "secret",
+  "ceiling",
+];
+
+function haltOf(value: unknown): HaltReason | null {
+  return HALT_REASONS.includes(value as HaltReason)
+    ? (value as HaltReason)
+    : null;
+}
+
+/**
+ * The newest turn a session's events describe, or null before the first one.
+ *
+ * Folded over the WHOLE list rather than read off the last event, because one
+ * turn arrives as several events and only some of them carry each fact: the
+ * files come with `files_written`, the halt may come on a re-posted `scoped`,
+ * and `deployed` carries nothing but the number. A newer turn number wipes
+ * the slate — that is how a halted chip clears when the next turn starts
+ * (§B4), and it is the only thing that clears it.
+ */
+function turnFromStages(stages: StageEvent[]): TurnState | null {
+  let state: TurnState | null = null;
+  for (const event of stages) {
+    const detail = event.detail ?? {};
+    const turn = typeof detail.turn === "number" ? detail.turn : null;
+    if (turn === null) continue;
+    if (state === null || turn > state.turn) {
+      state = {
+        turn,
+        files: [],
+        halted: null,
+        no_changes: false,
+        summary: null,
+        done: false,
+      };
+    } else if (turn < state.turn) {
+      continue; // an out-of-order event about a turn that is already history
+    }
+    if (Array.isArray(detail.files)) {
+      state.files = detail.files.filter((f): f is string => typeof f === "string");
+    }
+    if (typeof detail.summary === "string") state.summary = detail.summary;
+    const halted = haltOf(detail.halted);
+    if (halted !== null) {
+      state.halted = halted;
+      state.done = true;
+    }
+    if (event.stage === "files_written") {
+      state.no_changes = detail.no_changes === true;
+      if (state.no_changes) state.done = true;
+    }
+  }
+  return state;
+}
+
+function withTurn(session: AppSession): AppSession {
+  return { ...session, lastTurn: turnFromStages(session.stages) };
 }
 
 interface AppsState {
@@ -120,7 +188,7 @@ export const useApps = create<AppsState>()((set, get) => {
     },
 
     startSession: async (builderBotId, appId) => {
-      const session = await startAppSession(builderBotId, appId);
+      const session = withTurn(await startAppSession(builderBotId, appId));
       set({
         sessions: { ...get().sessions, [session.id]: session },
         quota: session.quota,
@@ -131,7 +199,10 @@ export const useApps = create<AppsState>()((set, get) => {
     },
 
     loadSession: async (sessionId) => {
-      const session = await fetchAppSession(sessionId);
+      // The reload path and the live path both go through withTurn, so a
+      // modal reopened mid-build shows the same turn a modal that never
+      // closed is showing.
+      const session = withTurn(await fetchAppSession(sessionId));
       set({
         sessions: { ...get().sessions, [sessionId]: session },
         quota: session.quota,
@@ -183,11 +254,11 @@ export const useApps = create<AppsState>()((set, get) => {
         set({
           sessions: {
             ...get().sessions,
-            [frame.session_id]: {
+            [frame.session_id]: withTurn({
               ...session,
               stage: frame.stage,
               stages: [...session.stages, stageEventFromFrame(frame)],
-            },
+            }),
           },
         });
       }

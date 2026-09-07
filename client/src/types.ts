@@ -216,7 +216,13 @@ export interface AvatarUploadResponse {
 
 /* The stage vocabulary is FIXED and shared with the server's CHECK constraint
    (brief D7). Order is load-bearing: it is the stage bar, left to right. No
-   percent exists anywhere — a stage is reached or it is not. */
+   percent exists anywhere — a stage is reached or it is not.
+
+   It is also NOT the whole story, and stage 2 is where that starts to matter:
+   a halted turn re-posts its last reached stage with `detail.halted` set, and
+   a turn that changed nothing is `files_written` with `no_changes`. So a
+   renderer keys its LABEL off the detail, never off the stage name
+   (SPECS/2026-09-06-apps-builder-seat.md §A, Claudette #2293). */
 export const APP_STAGES = [
   "scoped",
   "scaffolded",
@@ -291,13 +297,65 @@ export interface Quota {
   resets_at: string;
 }
 
+/** Why a turn stopped. A closed set: each value is a sentence the server
+    already wrote into the room, and the chip below is its short form. */
+export type HaltReason = "timeout" | "error" | "secret" | "ceiling";
+
+/**
+ * What a stage event says about the turn that produced it (stage 2, §1.2).
+ *
+ * Every key is optional and unknown keys still ride along: `detail` is
+ * free-form on the wire and a stage-1 event's bare `{}` is still a valid
+ * event. These are the keys this client RENDERS, typed so that a renderer
+ * reaching for one that is not there has to say what it does instead.
+ */
+export interface StageDetail {
+  /** 1-based, and the same number on every event of one turn. */
+  turn?: number;
+  /** Paths the turn's commit touched. Capped by the publisher at 40 names
+      plus a literal `"+N more"` entry, which is plain text, not a path. */
+  files?: string[];
+  tokens?: number;
+  model?: string;
+  /** The turn ended clean with an empty diff: an answer, a refusal, or a
+      decision that nothing needed changing. It ENDS the turn. */
+  no_changes?: boolean;
+  /** The runner's one-line report. Plain text, always — never markup. */
+  summary?: string;
+  halted?: HaltReason;
+  reason?: string;
+  [key: string]: unknown;
+}
+
 /** StageEventOut. `detail` is a bounded JSON object (filenames and the like). */
 export interface StageEvent {
   id: number;
   session_id: number;
   stage: AppStage;
-  detail: Record<string, unknown>;
+  detail: StageDetail;
   created_at: string;
+}
+
+/**
+ * The latest turn on a session, derived from its stage events.
+ *
+ * Derived rather than stored: the server sends events, not a turn record, and
+ * a client that kept its own turn row would have two answers the moment a
+ * reload replayed `stages`. `onStage` and the reload path both build this the
+ * same way, from the same input.
+ */
+export interface TurnState {
+  turn: number;
+  files: string[];
+  halted: HaltReason | null;
+  no_changes: boolean;
+  summary: string | null;
+  /** True when the turn stopped WAITING on anything: it halted, or it ended
+      clean with an empty diff. The elapsed clock stops here — a turn that
+      ends must end the bar's wait, not leave the user watching a counter
+      (spec §A). A turn that wrote files does NOT set it: the session goes on,
+      and the clock is the session's, not the turn's. */
+  done: boolean;
 }
 
 /** SessionOut — everything the build modal renders, in one payload. */
@@ -312,6 +370,9 @@ export interface AppSession {
   stage: AppStage | null;
   stages: StageEvent[];
   quota: Quota;
+  /** Client-side, derived from `stages` — not a field the server sends. Null
+      until the first event carrying a turn arrives. */
+  lastTurn?: TurnState | null;
 }
 
 /* ---- WebSocket frames (server -> client) ---- */
@@ -431,7 +492,7 @@ export interface AppStageFrame {
   session_id: number;
   app_id: string;
   stage: AppStage;
-  detail: Record<string, unknown>;
+  detail: StageDetail;
   created_at: string;
 }
 
