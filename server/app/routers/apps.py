@@ -710,9 +710,17 @@ def _turn_line(detail: dict[str, Any]) -> str:
     halted = detail.get("halted")
     if isinstance(halted, str) and halted in HALT_SENTENCES:
         reason = _one_line(detail.get("reason"))
+        # A halt that committed a tree still names what it wrote: the user's
+        # next prompt is written against that repo, and "the build failed"
+        # with no file list leaves them editing changes they were never told
+        # about (Claudette #2352). Halts have facts too.
+        raw = detail.get("files")
+        halt_files = [f for f in raw if isinstance(f, str)] if isinstance(raw, list) else []
+        wrote = f" Wrote {_files_word(halt_files)}." if halt_files else ""
         return (
             f"Turn {number} halted — {HALT_SENTENCES[halted]}"
             + (f" {reason}" if reason else "")
+            + wrote
         )
 
     if detail.get("no_changes") is True:
@@ -1108,9 +1116,16 @@ async def publish_stage(
             (session_id, body.stage, detail_json, created_at),
         )
         event_id = cur.lastrowid
-        await conn.execute(
-            "UPDATE app_sessions SET stage = ? WHERE id = ?", (body.stage, session_id)
-        )
+        # A spawned:false event (a ceiling refusal) posts for the room but
+        # nothing ran, so it moves NOTHING about the session's progress — not
+        # the turn counter (below) and not the stage pointer, which would
+        # otherwise rewind a session sitting at `deployed` back to `scoped`
+        # (Claudette #2352 BLOCK 2).
+        if body.detail.spawned is not False:
+            await conn.execute(
+                "UPDATE app_sessions SET stage = ? WHERE id = ?",
+                (body.stage, session_id),
+            )
         # The turn counter is a MAX, not an increment: one turn posts several
         # events, and a counter that added one each time would count events.
         # A spawned:false event (a ceiling refusal) is NOT a turn — nothing
@@ -1121,10 +1136,16 @@ async def publish_stage(
                 "UPDATE app_sessions SET turns = MAX(turns, ?) WHERE id = ?",
                 (body.detail.turn, session_id),
             )
-        # Usage lands once per turn, on the event that read the runner's
-        # result — so the meter adds there and nowhere else, and a halt that
-        # re-posts an earlier stage cannot double-count it.
-        if body.stage == "files_written" and body.detail.tokens is not None:
+        # Usage lands ONCE PER TURN, on the event that read the runner's
+        # result — which is `files_written` for a turn that finished and the
+        # re-posted `scoped`/`scaffolded` for a turn that burned tokens and
+        # then halted (result.json carries `usage` on those paths too, since
+        # 863c909). Meter on the PRESENCE of `tokens`, never on the stage
+        # NAME, or a build that fails repeatedly — the exact runaway a ceiling
+        # exists to stop — never trips it (Claudette #2352 BLOCK 1). §E's
+        # invariant: exactly one event per turn carries `tokens`. A
+        # spawned:false refusal carries none and is guarded regardless.
+        if body.detail.tokens is not None and body.detail.spawned is not False:
             await conn.execute(
                 "UPDATE app_sessions SET tokens_used = tokens_used + ? WHERE id = ?",
                 (body.detail.tokens, session_id),

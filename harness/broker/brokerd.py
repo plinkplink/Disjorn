@@ -3851,7 +3851,21 @@ class Broker:
         """§E check 4: one turn at a time per APP (Gable #2347). Claimed under
         the lock, because check-then-act on a dict is exactly the race two
         handoffs seconds apart would win — and the two handoffs need not be the
-        same session, since a lapsed lock admits a second one on the same app."""
+        same session, since a lapsed lock admits a second one on the same app.
+
+        THREE THINGS THIS WALL IS NOT, named so nobody assumes them (Claudette
+        #2352 NOTEs):
+          - it is not single-threaded turn HISTORY for an app. Two sessions can
+            exist on one app between turns (create_session still 409s only on a
+            LIVE lock), and each counts its turns off its own row and writes
+            §H lines into its own room. The claim stops two turns writing the
+            tree AT ONCE; it does not merge two sessions' histories;
+          - it is not durable. The claim is this process's memory plus a
+            sidecar under log_dir, adopted on restart — good for ONE broker,
+            exactly as good as that directory, and no better;
+          - it is not visible to anyone else. harness-view answers about a
+            SESSION, not an app; there is no in-flight-per-app fact in the
+            database for another reader to see."""
         with self._apps_lock:
             if app_id in self._active_apps:
                 raise VerbError("apps-refused",

@@ -1154,23 +1154,30 @@ async def test_turns_are_maxed_and_tokens_add_on_files_written_alone(
         1, 40407, "deployed"
     )
 
-    # Turn 2 adds; a re-posted earlier stage carrying the same turn does not
-    # move the counter backwards and does not re-add its tokens.
+    # Turn 2 adds; the earlier `scoped` re-post carrying no tokens does not.
     await post_stage(client, sid, "scoped", {"turn": 2, "model": "claude-opus-5"})
     await post_stage(
         client, sid, "files_written",
         {"turn": 2, "files": ["app.js"], "tokens": 1000, "model": "claude-opus-5"},
     )
-    await post_stage(
-        client, sid, "scaffolded",
-        {"turn": 2, "halted": "timeout", "tokens": 999999},
-    )
     second = await view()
     assert (second["turns"], second["tokens_used"]) == (2, 41407)
 
+    # Turn 3 burns tokens and then HALTS — its usage re-posts on `scaffolded`,
+    # not `files_written`, and it must STILL meter, or a build that fails
+    # repeatedly runs free against the ceiling (Claudette #2352 BLOCK 1).
+    await post_stage(client, sid, "scoped", {"turn": 3, "model": "claude-opus-5"})
+    await post_stage(client, sid, "scaffolded", {"turn": 3})
+    await post_stage(
+        client, sid, "scaffolded",
+        {"turn": 3, "halted": "timeout", "tokens": 500000, "model": "claude-opus-5"},
+    )
+    third = await view()
+    assert (third["turns"], third["tokens_used"]) == (3, 541407)
+
     # A stage-1 event with no turn at all is still a valid event.
     assert (await post_stage(client, sid, "deployed")).status_code == 200
-    assert (await view())["turns"] == 2
+    assert (await view())["turns"] == 3
 
 
 async def test_a_ceiling_refusal_does_not_consume_the_turn_number(
@@ -1205,6 +1212,53 @@ async def test_a_ceiling_refusal_does_not_consume_the_turn_number(
     )
     assert resp.status_code == 200
     assert await turns() == 1
+
+
+async def test_a_ceiling_refusal_does_not_rewind_the_session_stage(
+    client, app, settings_env, seat_toml
+):
+    """Claudette #2352 BLOCK 2: a session sitting at `deployed` gets a ceiling
+    refusal posted as `scoped`, and its stage pointer must not go backwards —
+    nothing ran, nothing about its progress changed."""
+    session = await build_fixture(client, settings_env, seat_toml)
+    sid = session["id"]
+
+    async def stage() -> str:
+        return (
+            await client.get(
+                f"/apps/sessions/{sid}/harness-view",
+                headers=as_bot(client, BROKER_KEY),
+            )
+        ).json()["stage"]
+
+    await post_stage(
+        client, sid, "files_written",
+        {"turn": 1, "files": ["a.js"], "tokens": 10, "model": "m"},
+    )
+    await post_stage(client, sid, "deployed", {"turn": 1})
+    assert await stage() == "deployed"
+
+    await post_stage(
+        client, sid, "scoped",
+        {"turn": 2, "halted": "ceiling", "spawned": False, "reason": "over"},
+    )
+    assert await stage() == "deployed"     # not rewound to scoped
+
+
+async def test_a_halt_names_what_it_wrote(client, app, settings_env, seat_toml):
+    """Claudette #2352: a halt that committed a tree still lists its files, so
+    the user's next prompt is not written against a repo they weren't told
+    changed."""
+    session = await build_fixture(client, settings_env, seat_toml)
+    sid, channel = session["id"], session["channel_id"]
+    await post_stage(
+        client, sid, "scaffolded",
+        {"turn": 1, "halted": "timeout", "files": ["index.html", "app.js"],
+         "tokens": 5, "model": "m"},
+    )
+    assert (await channel_lines(channel))[-1] == (
+        "Turn 1 halted — the build timed out. Wrote index.html, app.js."
+    )
 
 
 async def test_the_turn_line_says_exactly_what_the_turn_did(
