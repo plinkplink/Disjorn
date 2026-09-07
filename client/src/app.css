@@ -3603,6 +3603,72 @@
   color: var(--text-0);
 }
 
+/* The halted chip. One line under the bar, in the palette's only alarming
+   colour, and it says WHICH halt — "hit its ceiling" and "closed: credential"
+   are different things to have happened. It stays until the next turn's
+   `scoped` clears it, which is the store's job, not this rule's. */
+
+.app-build-chip {
+  align-self: flex-start;
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-round);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+}
+
+.app-build-chip--halted {
+  color: var(--danger);
+  background: rgba(240, 84, 108, 0.14);
+  border: 1px solid var(--danger);
+}
+
+.stage-step.halted {
+  color: var(--danger);
+}
+
+.stage-step.halted .stage-dot {
+  background: var(--danger);
+  box-shadow: 0 0 0 3px rgba(240, 84, 108, 0.2);
+}
+
+/* The filenames, as they land. A scroll rather than a growing panel: the list
+   is the turn's whole diff and a forty-name build must not push the preview
+   off the modal. Monospace because these are paths. */
+
+.app-file-scroll {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-m);
+  background: var(--bg-2);
+  overflow: hidden;
+}
+
+.app-file-scroll-head {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-1);
+  color: var(--text-1);
+  font-size: var(--text-xs);
+}
+
+.app-file-list {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  list-style: none;
+  max-height: 11em;          /* ~8 lines, then it scrolls */
+  overflow-y: auto;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  color: var(--text-1);
+}
+
+.app-file-list li {
+  white-space: pre;
+}
+
 /* The frozen preview. There is no iframe in here, in stage 1 or in this
    stylesheet: nothing is served yet, and a framed blank would read as a
    broken app rather than an absent one. */
