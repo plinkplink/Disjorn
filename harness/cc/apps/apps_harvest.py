@@ -43,6 +43,23 @@ THE ORDER IS THE CONTRACT (§E, restated so nothing is invented):
   Absence of result.json is §E's synthesized halt on the broker side; this
   module's job is to make that path unreachable from here.
 
+THE RUNNER'S LAST WORD (slice (ii), §C1). The same final `result` line the
+usage comes from also carries the runner's own closing TEXT, and the record
+lifts two things out of it, because the spools are 0600 seat-only and the
+broker (plink) must never open one:
+
+  summary  the last non-empty line the runner wrote — the server renders it
+           as a second sentence on §H's room line;
+  flag     a line the builder opened with `FLAG:` — the broker narrates it
+           to #custodian.
+
+Both are PLAIN TEXT to everyone downstream and are made so here, once:
+control characters removed, the seat's credential redacted exactly as in a
+spool, 300 characters at most. Both keys are always present in the record
+(null when the runner said nothing), because "the runner was silent" and
+"this build is too old to have the key" are two different answers and no
+reader should have to tell them apart by luck (Claudette #2336).
+
 THE SENTENCE SLICE (ii) STARTS WITH (Claudette #2325, #2329 — three folds in
 a row were the same defect): WE KEEP VALIDATING WHERE A THING IS INSTEAD OF
 WHAT IT IS. A name is not a file, a path is not an owner, an rsync that
@@ -108,6 +125,17 @@ SCAFFOLDED_NAME = "scaffolded"
 # The turn's own runner. Named here (rather than derived) because the ledger
 # and the stage detail carry it and slice (ii) keys its usage parser off it.
 RUNNER = "claude-code"
+
+# The builder raises something for a human by opening a line with this. It is
+# a CONVENTION of the builder brief, not a protocol: a turn that never writes
+# one is the normal turn, and a line that merely mentions the word is not one
+# (the prefix is anchored at the start of the line).
+FLAG_PREFIX = "FLAG:"
+
+# Both lifted lines are bounded before they leave this process. 300 is §H's
+# number for the room line, and the same bound on `flag` keeps a narration to
+# #custodian one sentence rather than a pasted transcript.
+REPORT_LINE_MAX = 300
 
 
 def _now_iso() -> str:
@@ -662,13 +690,40 @@ def write_result_atomic(result_dir: str | os.PathLike, payload: dict) -> str:
 
 # -------------------------------------------------------------------- spools
 
+def redact_text(blob, patterns: list[tuple[str, bytes]]):
+    """Replace every encoding of the credential in `blob` with a labelled mark.
+
+    THE one needle loop, and it decides on the OBJECT IN HAND rather than on
+    which caller it came from: the spools arrive as bytes (a needle has to
+    survive verbatim through a stream that is not valid UTF-8), a summary line
+    or an exception message arrives as str. Same rule, same marker, both
+    shapes — so the next place that has to be redacted cannot acquire a third,
+    slightly different copy of it. Returns the same type it was given.
+
+    latin-1 is the decode for the needles on the str side because it is TOTAL:
+    every byte maps to one code point, so a str haystack is searched for
+    exactly the bytes the scan looks for and nothing here can raise.
+    """
+    if isinstance(blob, bytes):
+        for label, needle in patterns:
+            if needle:
+                blob = blob.replace(needle, b"[REDACTED:" + label.encode() + b"]")
+        return blob
+    for label, needle in patterns:
+        if needle:
+            blob = blob.replace(needle.decode("latin-1"), f"[REDACTED:{label}]")
+    return blob
+
+
 def redact_spools(paths: list[str], patterns: list[tuple[str, bytes]]) -> bool:
     """Replace every encoding of the key in the spool files, in place.
 
     Returns True if anything was redacted. Spools are the runner's raw
     stdout/stderr; an authentication failure is the classic place a client
     library echoes a credential. Redacting keeps a later reader (a human at
-    3am, the v2 scrollback) from meeting the value.
+    3am, the v2 scrollback) from meeting the value — and it happens BEFORE the
+    result line is parsed, so the summary lifted out of it is already clean
+    before `runner_report` cleans it again.
     """
     redacted = False
     for p in paths:
@@ -678,10 +733,7 @@ def redact_spools(paths: list[str], patterns: list[tuple[str, bytes]]) -> bool:
             blob = Path(p).read_bytes()
         except OSError:
             continue
-        out = blob
-        for label, needle in patterns:
-            if needle and needle in out:
-                out = out.replace(needle, b"[REDACTED:" + label.encode() + b"]")
+        out = redact_text(blob, patterns)
         if out != blob:
             tmp = Path(p + ".tmp")
             tmp.write_bytes(out)
@@ -691,19 +743,27 @@ def redact_spools(paths: list[str], patterns: list[tuple[str, bytes]]) -> bool:
     return redacted
 
 
-def parse_usage_claude_code(spool_stdout: str) -> dict | None:
-    """Usage from Claude Code's stream-json: the final `result` line carries
-    `usage` (input/output/cache_creation/cache_read) and `total_cost_usd`.
+def parse_result_claude_code(spool_stdout: str) -> tuple[dict | None, str | None]:
+    """Claude Code's final stream-json `result` line, as (usage, text).
+
+    ONE object carries both things the record needs out of the spool: `usage`
+    (input/output/cache_creation/cache_read) with `total_cost_usd`, and
+    `result` — the runner's own closing text, from which `summary` and `flag`
+    are lifted. They are read together because they ARE together; two passes
+    over the same file could disagree about which line was the last one.
+
     The ONE runner-specific parser the spec allows (§A); a different runner
     means a sibling function keyed by [apps].runner, not a change here.
-    Absent, unreadable or unparsable → None, never a guess.
+    Absent, unreadable or unparsable → (None, None), never a guess; a result
+    line with no `result` string → (usage, None), which is not the same thing
+    and is not flattened into it.
     """
     if not spool_stdout:
-        return None
+        return None, None
     try:
         lines = Path(spool_stdout).read_bytes().splitlines()
     except OSError:
-        return None
+        return None, None
     for raw in reversed(lines):
         raw = raw.strip()
         if not raw.startswith(b"{"):
@@ -715,6 +775,7 @@ def parse_usage_claude_code(spool_stdout: str) -> dict | None:
         if obj.get("type") != "result":
             continue
         usage = obj.get("usage") or {}
+        text = obj.get("result")
         return {
             "input_tokens": usage.get("input_tokens"),
             "output_tokens": usage.get("output_tokens"),
@@ -724,8 +785,60 @@ def parse_usage_claude_code(spool_stdout: str) -> dict | None:
             "num_turns": obj.get("num_turns"),
             "duration_ms": obj.get("duration_ms"),
             "is_error": obj.get("is_error"),
-        }
-    return None
+        }, (text if isinstance(text, str) else None)
+    return None, None
+
+
+def _one_line(text: str, patterns: list[tuple[str, bytes]]) -> str:
+    """A line of runner-authored text, made safe to hand anyone.
+
+    Control characters OUT (the room line, the audit line and #custodian all
+    take this as plain text, and an escape sequence is not text); the
+    credential redacted; then, and only then, the 300-character bound —
+    truncating first could leave the head of a key past the end of a needle
+    that no longer matches.
+    """
+    clean = "".join(c for c in text if c >= " " and c != "\x7f").strip()
+    return redact_text(clean, patterns)[:REPORT_LINE_MAX]
+
+
+def runner_report(text: str | None,
+                  patterns: list[tuple[str, bytes]]) -> tuple[str | None, str | None]:
+    """(summary, flag) out of the runner's closing text.
+
+    `flag`     the FIRST line that opens with `FLAG:`, the prefix removed. A
+               builder raises one thing per turn; a second one is the same
+               concern restated, and taking the first keeps the narration
+               deterministic.
+    `summary`  the LAST non-empty line that is not a FLAG line. Last, because
+               a runner's closing paragraph ends with its conclusion; not a
+               FLAG line, because the flag is already being narrated and the
+               room line should not repeat it as a summary. (§C1 says "not the
+               FLAG line"; every FLAG line is excluded rather than only the
+               one that was lifted, so a turn whose last line is a second flag
+               does not smuggle one into the room by position.)
+
+    Either may be None, and None means the runner did not say it. Nothing is
+    invented to fill the gap.
+    """
+    if not text:
+        return None, None
+    lines = [ln.strip() for ln in text.strip().splitlines()]
+    lines = [ln for ln in lines if ln]
+
+    flag = None
+    for ln in lines:
+        if ln.startswith(FLAG_PREFIX):
+            flag = _one_line(ln[len(FLAG_PREFIX):], patterns) or None
+            break
+
+    summary = None
+    for ln in reversed(lines):
+        if ln.startswith(FLAG_PREFIX):
+            continue
+        summary = _one_line(ln, patterns) or None
+        break
+    return summary, flag
 
 
 # ------------------------------------------------------------------- harvest
@@ -769,6 +882,12 @@ def harvest(repo: str | os.PathLike, exit_code: int,
         # same shape as a success record (Claudette #2336).
         "spool_redacted": False,
         "usage": None,
+        # The runner's last word (slice (ii), §C1). Always present, null when
+        # the runner said nothing — the broker reads these with .get() for the
+        # records written before this key existed, and reads a real answer
+        # from every record written after it.
+        "summary": None,
+        "flag": None,
     }
 
     halted_reason = None
@@ -783,11 +902,9 @@ def harvest(repo: str | os.PathLike, exit_code: int,
                          key_file, preview_dir, turn, quarantine_dir,
                          spool_stdout, spool_stderr, rsync_bin, git_bin)
     except Exception as exc:          # noqa: BLE001 — the record is the point
-        text = f"{type(exc).__name__}: {exc}"
-        for label, needle in patterns:  # an error string is still a string
-            if needle:
-                text = text.replace(needle.decode("latin-1"),
-                                    f"[REDACTED:{label}]")
+        # An error string is still a string, and an exception message quotes
+        # its input: same needle loop as the spools.
+        text = redact_text(f"{type(exc).__name__}: {exc}", patterns)
         payload["halted"] = payload["halted"] or "error"
         payload["error"] = text
         _warn(f"harvest FAILED partway — recording a halted turn: {text}")
@@ -809,9 +926,14 @@ def _branches(repo, payload, halted_reason, patterns, result_dir, key_file,
     # sitting in a file — redact in place, record that it happened.
     payload["spool_redacted"] = redact_spools(
         [spool_stdout, spool_stderr], patterns)
-    # Usage lives in result.json, parsed HERE as the seat, so the spools can
-    # stay 0600 seat-only and the broker (plink) never needs to open them.
-    payload["usage"] = parse_usage_claude_code(spool_stdout)
+    # Usage AND the runner's closing text live in result.json, parsed HERE as
+    # the seat, so the spools can stay 0600 seat-only and the broker (plink)
+    # never needs to open them. Parsed AFTER the redaction above, so the text
+    # comes off a file the key has already left; `runner_report` redacts it
+    # again anyway, because a spool that could not be rewritten is a warning,
+    # not a reason to publish the value.
+    payload["usage"], report_text = parse_result_claude_code(spool_stdout)
+    payload["summary"], payload["flag"] = runner_report(report_text, patterns)
 
     # The scan set is WIDER than "is the tracked tree dirty": --ignored=matching
     # includes files a self-written .gitignore would hide. An ignored-only
