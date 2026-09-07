@@ -84,7 +84,11 @@ mkdir -p "$RESULT_DIR" "$PREVIEW_DIR"
 # put on OUR stdin. We copy it into our own result directory, as the seat,
 # 0600 — root never writes here (Claudette's block, slice (i) review).
 PROMPT="$RESULT_DIR/prompt.md"
-( umask 077 && head -c 1048576 > "$PROMPT" ) || _die "cannot stage the prompt"
+# ONE bound, ONE number: the launcher enforced [apps].prompt_max_bytes off the
+# fd before anything ran and passes the same number here; this head -c is a
+# hand-run backstop with the same value, never a second policy.
+PROMPT_MAX_BYTES="${APPS_PROMPT_MAX_BYTES:-65536}"
+( umask 077 && head -c "$PROMPT_MAX_BYTES" > "$PROMPT" ) || _die "cannot stage the prompt"
 [ -s "$PROMPT" ] || _die "empty prompt on stdin"
 STARTED_AT_EPOCH="$(date +%s)"
 STARTED_AT="$(date -u -Is)"

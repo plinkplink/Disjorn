@@ -128,6 +128,7 @@ APP_ID_RE = re.compile(r"^[a-z2-7]{12}$")
 PONYTAIL_RE = re.compile(r"^(off|lite|full|ultra)$")
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
 MAX_PATH_LEN = 4096
+DEFAULT_PROMPT_MAX_BYTES = 65536   # [apps].prompt_max_bytes default (spec §B)
 MAX_RUNNER_ARGS = 32
 MAX_ARG_LEN = 512
 
@@ -194,16 +195,43 @@ def load_config(path: str) -> dict:
         die(f"launch config is not valid TOML: {path}: {exc}")
 
 
-def check_prompt(principal: str, raw: str, config: dict) -> str:
-    """The prompt file, confined to that principal's own directory.
+def _prompt_limit(config: dict) -> int:
+    apps = config.get("apps") or {}
+    limit = apps.get("prompt_max_bytes", DEFAULT_PROMPT_MAX_BYTES)
+    if not isinstance(limit, int) or limit <= 0:
+        die("[apps].prompt_max_bytes must be a positive integer")
+    return limit
 
-    THIS IS THE PATH WALL. `realpath` first (so a symlink inside the mapped
-    directory cannot point out of it, and `..` is already collapsed), then a
-    SEGMENT-WISE containment test — a plain startswith would accept
-    `/home/plink/apps-prompts-evil/x` for the mapped dir
-    `/home/plink/apps-prompts`. The mapped directory is realpath'd too, so a
-    symlinked mount point still compares equal.
+
+def _under(root: str, real: str) -> bool:
+    """Segment-wise containment: `/a/b-evil/x` is not under `/a/b`."""
+    return real == root or real.startswith(root.rstrip("/") + os.sep)
+
+
+def open_prompt(principal: str, raw: str, config: dict) -> int:
+    """Open the prompt ONCE and establish everything about it from the fd.
+
+    THIS IS THE PATH WALL, and the thing behind it is a file, not a name
+    (Claudette's second slice-(i) block: a check about a name followed by a
+    read of the name is two windows for the principal — who is exactly the
+    party modelled as possibly prompt-injected — to swap in a symlink and have
+    root read the credential file onto a build hand's stdin). So:
+
+      1. the NAME is checked (absolute, no control bytes, under the mapped
+         directory after realpath) — a cheap first refusal with a good
+         message, not the wall;
+      2. the file is opened with O_NOFOLLOW (the final component may not be
+         a symlink at all — a resident writes a regular file) and O_CLOEXEC;
+      3. IDENTITY comes from the fd: fstat says regular file and gives the
+         size for the bound; /proc/self/fd/N says which path the kernel
+         actually opened, and that path — not the one we were handed — must
+         sit segment-wise under the realpath'd mapped directory. An
+         intermediate-directory swap between (1) and (2) lands here.
+
+    The fd is returned and READ FROM; nothing reopens the name. Callers that
+    only want validation close it.
     """
+    principal = check_principal(principal)
     dirs = config.get("prompt_dirs")
     if not isinstance(dirs, dict):
         die("launch config has no [prompt_dirs] table")
@@ -222,13 +250,81 @@ def check_prompt(principal: str, raw: str, config: dict) -> str:
         die(f"prompt path is not absolute: {raw!r}")
 
     root = os.path.realpath(mapped)
-    real = os.path.realpath(raw)
-    if real != root and not real.startswith(root.rstrip("/") + os.sep):
+    named = os.path.realpath(raw)
+    if not _under(root, named):
         die(f"prompt path escapes {principal}'s prompt directory: "
-            f"{raw!r} resolves to {real!r}, outside {root!r}")
-    if not os.path.isfile(real):
-        die(f"prompt path is not a regular file: {real!r}")
-    return real
+            f"{raw!r} resolves to {named!r}, outside {root!r}")
+
+    limit = _prompt_limit(config)
+    try:
+        fd = os.open(raw, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as exc:
+        # ELOOP is what O_NOFOLLOW raises for a symlink final component.
+        die(f"cannot open prompt (a symlink is refused; a regular file is required): {exc}")
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            die("prompt is not a regular file")
+        if st.st_size == 0:
+            die("prompt file is empty")
+        if st.st_size > limit:
+            die(f"prompt file is {st.st_size} bytes, over the {limit}-byte bound")
+        try:
+            actual = os.readlink(f"/proc/self/fd/{fd}")
+        except OSError as exc:
+            die(f"cannot establish the opened file's identity: {exc}")
+        if not _under(root, actual):
+            die(f"the opened prompt is {actual!r}, outside {root!r} — refused")
+    except SystemExit:
+        os.close(fd)
+        raise
+    return fd
+
+
+def read_prompt_fd(fd: int, config: dict) -> bytes:
+    """The bytes behind the fd open_prompt returned, bounded once more against
+    a file that grew after fstat. The fd is closed on return."""
+    limit = _prompt_limit(config)
+    try:
+        chunks = []
+        got = 0
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            got += len(chunk)
+            if got > limit:
+                die("prompt file grew past the bound while being read")
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
+    data = b"".join(chunks)
+    if not data:
+        die("prompt file is empty")
+    return data
+
+
+def prompt_on_stdin(data: bytes) -> int:
+    """Hand the bounded prompt bytes to the unit on STDIN, and write nothing.
+
+    Claudette's review block (#custodian, slice (i)): root must never create
+    or chown anything inside a seat-writable tree — a pre-planted symlink at
+    the turn directory or at `prompt.md.tmp` turns a root write into
+    seat-to-root. So root stages NOTHING under /srv/apps-turns. Instead the
+    validated bytes go into an anonymous memfd, which becomes this process's
+    stdin; `systemd-run --pipe` inherits it, so the unit's stdin IS the
+    prompt. The wrapper, running as the seat, copies it into its own result
+    directory. No path, no race, no privilege on the wrong side of the line.
+    """
+    fd = os.memfd_create("apps-prompt", 0)
+    view = memoryview(data)
+    while view:
+        n = os.write(fd, view)
+        view = view[n:]
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.dup2(fd, 0)
+    os.close(fd)
+    return 0
 
 
 def check_runner_command(config: dict) -> "list":
@@ -275,58 +371,6 @@ def check_apps_table(config: dict) -> "tuple":
     return turn_max, mode, image
 
 
-DEFAULT_PROMPT_MAX_BYTES = 65536
-STAGED_PROMPT_NAME = "prompt.md"
-
-
-def read_prompt_bounded(real: str, config: dict) -> bytes:
-    """The prompt's bytes, or a refusal. Read HERE, as root, after the path
-    wall — the file lives in a resident's (or plink's) home, which the seat
-    account cannot read and must never be able to. Bounded by
-    [apps].prompt_max_bytes (spec §B) so a prompt is a prompt and not a
-    payload; empty is refused because an empty turn is a wasted slot."""
-    apps = config.get("apps") or {}
-    limit = apps.get("prompt_max_bytes", DEFAULT_PROMPT_MAX_BYTES)
-    if not isinstance(limit, int) or limit <= 0:
-        die("[apps].prompt_max_bytes must be a positive integer")
-    try:
-        size = os.stat(real).st_size
-    except OSError as exc:
-        die(f"cannot stat prompt: {exc}")
-    if size == 0:
-        die("prompt file is empty")
-    if size > limit:
-        die(f"prompt file is {size} bytes, over the {limit}-byte bound")
-    with open(real, "rb") as fh:
-        data = fh.read(limit + 1)
-    if len(data) > limit:
-        die("prompt file grew past the bound while being read")
-    return data
-
-
-def prompt_on_stdin(data: bytes) -> int:
-    """Hand the bounded prompt bytes to the unit on STDIN, and write nothing.
-
-    Claudette's review block (#custodian, slice (i)): root must never create
-    or chown anything inside a seat-writable tree — a pre-planted symlink at
-    the turn directory or at `prompt.md.tmp` turns a root write into
-    seat-to-root. So root stages NOTHING under /srv/apps-turns. Instead the
-    validated bytes go into an anonymous memfd, which becomes this process's
-    stdin; `systemd-run --pipe` inherits it, so the unit's stdin IS the
-    prompt. The wrapper, running as the seat, copies it into its own result
-    directory. No path, no race, no privilege on the wrong side of the line.
-    """
-    fd = os.memfd_create("apps-prompt", 0)
-    view = memoryview(data)
-    while view:
-        n = os.write(fd, view)
-        view = view[n:]
-    os.lseek(fd, 0, os.SEEK_SET)
-    os.dup2(fd, 0)
-    os.close(fd)
-    return 0
-
-
 def check_seat() -> "tuple":
     """Resolve res-appsbuilding, or refuse. The account must ALREADY EXIST —
     creating one needs root, so passwd membership is a fact this program cannot
@@ -367,7 +411,7 @@ def check_wrapper(path: str) -> None:
 
 def build_run_argv(principal: str, session: str, turn: str, app_id: str,
                    prompt_path: str, config: dict, *, wrapper: str = WRAPPER,
-                   harvest: str = HARVEST, seat=None) -> "list":
+                   harvest: str = HARVEST, seat=None, prompt_fd=None) -> "list":
     """Every check, then the exact systemd-run argv. Factored out so the test
     suite can assert the argv byte for byte without a systemd on the other end
     — the argv IS the contract between this program and the unit."""
@@ -375,7 +419,9 @@ def build_run_argv(principal: str, session: str, turn: str, app_id: str,
     session = check_session(session)
     turn = check_turn(turn)
     app_id = check_app_id(app_id)
-    prompt = check_prompt(principal, prompt_path, config)
+    if prompt_fd is None:
+        # Validation only (dry runs, tests): open the wall once and let go.
+        os.close(open_prompt(principal, prompt_path, config))
     command = check_runner_command(config)
     model = check_model(config)
     turn_max, ponytail_mode, image = check_apps_table(config)
@@ -384,7 +430,6 @@ def build_run_argv(principal: str, session: str, turn: str, app_id: str,
     unit = f"{UNIT_PREFIX}{session}-{turn}"
     # The unit gets the prompt on STDIN (see prompt_on_stdin), never a path:
     # the seat cannot read a home, and root writes nothing in the seat's tree.
-    del prompt  # validated; the wall was the point
     return [
         SYSTEMD_RUN,
         # Deterministic and greppable, and a second launch of the same turn
@@ -430,6 +475,7 @@ def build_run_argv(principal: str, session: str, turn: str, app_id: str,
         f"--setenv=APPS_PONYTAIL_MODE={ponytail_mode}",
         f"--setenv=APPS_RUNNER_COMMAND={json.dumps(command)}",
         f"--setenv=APPS_TURN_MAX_SEC={turn_max}",
+        f"--setenv=APPS_PROMPT_MAX_BYTES={_prompt_limit(config)}",
         f"--setenv=APPS_REPO_ROOT={APPS_ROOT}",
         f"--setenv=APPS_TURNS_ROOT={TURNS_ROOT}",
         f"--setenv=APPS_WWW_ROOT={WWW_ROOT}",
@@ -474,17 +520,18 @@ def main(argv: "list") -> int:
     elif not dry:
         check_wrapper(wrapper)
 
+    # ONE open of the prompt, before anything else, and the argv is built
+    # around that fd — the name is never consulted again.
+    prompt_fd = open_prompt(argv[2], argv[6], config)
     out = build_run_argv(argv[2], argv[3], argv[4], argv[5], argv[6], config,
-                         wrapper=wrapper, harvest=harvest, seat=seat)
+                         wrapper=wrapper, harvest=harvest, seat=seat,
+                         prompt_fd=prompt_fd)
 
     if dry:
+        os.close(prompt_fd)
         print(json.dumps(out))
         return 0
-    # Validation passed; now, still as root, read the prompt through the
-    # path wall once more and stage it for the seat. Refusals here are still
-    # exit 64 and still precede any privileged action that outlives us.
-    real = check_prompt(argv[2], argv[6], config)
-    data = read_prompt_bounded(real, config)
+    data = read_prompt_fd(prompt_fd, config)
     prompt_on_stdin(data)
     # Fixed argv, no shell, and exec (not fork): the descriptors the caller
     # handed us pass straight through, and sudo's child IS systemd-run, so the

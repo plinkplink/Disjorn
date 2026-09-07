@@ -140,6 +140,7 @@ def test_exact_systemd_run_argv(seat):
         '--setenv=APPS_RUNNER_COMMAND=["claude", "-p", "--output-format", '
         '"stream-json", "--verbose"]',
         "--setenv=APPS_TURN_MAX_SEC=1800",
+        "--setenv=APPS_PROMPT_MAX_BYTES=65536",
         "--setenv=APPS_REPO_ROOT=/srv/apps",
         "--setenv=APPS_TURNS_ROOT=/srv/apps-turns",
         "--setenv=APPS_WWW_ROOT=/srv/apps-www",
@@ -379,15 +380,41 @@ def test_prompt_path_with_a_newline_is_refused(seat):
     refuse(seat, "run", *GOOD, str(seat["prompt"]) + "\nrm -rf /")
 
 
-def test_a_symlink_that_stays_inside_is_accepted(seat):
-    """Confinement, not paranoia: a link whose target is also in the mapped
-    directory resolves inside it and is fine."""
+def test_a_symlink_prompt_is_refused_even_when_it_points_inside(seat):
+    """Claudette's second slice-(i) block: the thing behind the wall is a
+    file, not a name. The final component is opened O_NOFOLLOW, so a symlink
+    is refused outright — even one that currently points inside — because
+    "currently" is the principal's to change between any two syscalls."""
     link = seat["dir"] / "alias.md"
     link.symlink_to(seat["prompt"])
-    argv = accept(seat, "run", *GOOD, str(link))
-    # realpath'd on the way through for the wall; the unit is handed no path
-    # at all — the prompt rides stdin.
-    assert argv[-1] == GOOD[3]
+    refuse(seat, "run", *GOOD, str(link))
+
+
+def test_the_tripwire_a_planted_symlink_to_the_credential_is_refused(seat, tmp_path):
+    """The exact attack: the named file passes every name check, then is
+    swapped for a symlink to the credential drop file. With one O_NOFOLLOW
+    open and identity taken from the fd there is no window: exit 64, and the
+    target's bytes never reach anything."""
+    secret = tmp_path / "appsbuilding-env"
+    secret.write_text("ANTHROPIC_API_KEY=sk-ant-not-for-you\n", encoding="utf-8")
+    victim = seat["dir"] / "12-3.md"
+    victim.unlink()
+    victim.symlink_to(secret)
+    proc = run(seat, "run", *GOOD, str(victim))
+    assert proc.returncode == 64, proc.stderr
+    assert "sk-ant-not-for-you" not in proc.stdout + proc.stderr
+    assert "REFUSED" in proc.stderr
+
+    # The sharper form: the target sits INSIDE the mapped directory, so every
+    # name check passes and only the O_NOFOLLOW open can refuse it.
+    inside_secret = seat["dir"] / "not-a-prompt.env"
+    inside_secret.write_text("ANTHROPIC_API_KEY=sk-ant-still-not-for-you\n", encoding="utf-8")
+    victim.unlink()
+    victim.symlink_to(inside_secret)
+    proc = run(seat, "run", *GOOD, str(victim))
+    assert proc.returncode == 64, proc.stderr
+    assert "sk-ant-still-not-for-you" not in proc.stdout + proc.stderr
+    assert "symlink" in proc.stderr
 
 
 # ─────────────────────────────────────────────────── the config table itself ──
