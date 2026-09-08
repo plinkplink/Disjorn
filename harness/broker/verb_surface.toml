@@ -273,7 +273,15 @@ re-fetched under `refs/gatehouse/<repo>/*` — so a `loop/<slug>` branch a build
 published is readable here BEFORE anyone is asked to review it. Takes no \
 arguments and can never be aimed anywhere else. Run it before reading a spec, a \
 diff, or a branch somebody just named in channel; a stale mirror is the usual \
-reason a file looks unchanged.\
+reason a file looks unchanged.\n\nREADING THE ANSWER. Per repo you get \
+`arrived` and `vanished`, which are a DELTA — what moved on this fetch — and \
+`present`, which is the INVENTORY: how many refs the mirror holds for that repo \
+right now. `arrived: []` means "nothing new since last time" and is the resting \
+state of a repo nobody has pushed to lately; it is NOT "this repo is empty" and \
+NOT "you are not entitled to it". Only `present: 0` says the mirror is holding \
+nothing, and the banner shouts that case. If a path at a rev will not open, \
+check `present` before concluding you lack access — an absent path and an \
+unreachable repo are different answers, and read_repo_file distinguishes them.\
 """
 
 # ── board-list ───────────────────────────────────────────────────────────
