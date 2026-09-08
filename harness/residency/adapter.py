@@ -403,12 +403,15 @@ class SummonAdapter:
             return None, None
         seq = sent.get("seq") if isinstance(sent, dict) else None
         chars = len(text)
+        # Anything the ledger raises is caught, not only OSError: the reply
+        # has already landed, and the audit line that follows is the wall.
+        # A convenience failing must not eat the record (Gable #2431).
         try:
             self.posts.record(channel_id=channel_id, name=_room_name(where),
                               seq=seq, chars=chars,
                               utc=(sent.get("created_at")
                                    if isinstance(sent, dict) else None))
-        except OSError:
+        except Exception:  # noqa: BLE001
             logger.warning("failed to record own post", exc_info=True)
         return seq, chars
 

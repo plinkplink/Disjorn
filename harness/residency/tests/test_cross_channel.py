@@ -351,6 +351,23 @@ def test_an_empty_ledger_adds_no_line(tmp_path):
     assert "Sends by this adapter" not in launcher.prompts[0]
 
 
+def test_a_broken_ledger_never_eats_the_audit_line(tmp_path):
+    """The ledger is the convenience; the audit line is the wall. Whatever the
+    ledger raises after the reply has landed, the line still posts with the
+    seq the server answered (Gable #2431)."""
+    class Broken(PostLedger):
+        def record(self, **kw):
+            raise ValueError("not even an OSError")
+    config = make_config(tmp_path)
+    client = FakeClient(events=[
+        make_ready(),
+        make_event(channel_id=11, seq=3, author_name="plink", context=_ctx("dev")),
+    ])
+    _run(SummonAdapter(client, config, launcher=FakeLauncher(),
+                       posts=Broken(str(tmp_path / "p.json"))))
+    assert "| posted #101 (" in client.replies_to(4)[0].content
+
+
 # ── 6. config ───────────────────────────────────────────────────────────────
 
 def test_posts_path_defaults_beside_the_cursor_file():

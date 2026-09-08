@@ -37,8 +37,11 @@
 Slice A — summon-time, harness only. **This slice gates apps-builder-seat
 slice (iii)**: the branch that selects `APP_BUILD_FLOW` has nothing to select
 on until the context block reaches the session. It builds first, alone.
-1. **The audit line carries the evidence.** `summon | plink in #dev (11) |
-   ok | posted #4 (2079 chars) | 31 actions | 189.3s | claude-fable-5-1`.
+1. **The audit line carries the evidence.** `summon | plink in room "dev"
+   (11) | ok | posted #4 (2079 chars) | 31 actions | 189.3s |
+   claude-fable-5-1` — the room quoted exactly as the header renders it
+   (ruled #2431: one renderer, no unquoted user text before `posted`); `#4`
+   is that channel's own seq.
    A summon that posted nothing says `posted none`. The next summon in
    #custodian reads its own record from the backfill; no memory of posting
    is needed.
@@ -59,8 +62,8 @@ on until the context block reaches the session. It builds first, alone.
    `.summon-posts.json` beside the cursor file: every send it makes,
    `(channel id, name, seq, chars, utc)`, last 20 kept. The header lists the
    last 5 as a harness line: `Sends by this adapter, last 5 (not a full
-   list of your posts; the audit line in the backfill is the record): #dev
-   (11) #4 2079 chars 00:42Z; …`. The wall against #2370 is the audit line
+   list of your posts; the audit line in the backfill is the record): room
+   "dev" (11) #4 2079 chars 00:42Z; …`. The wall against #2370 is the audit line
    (item 1); the ledger is a convenience that must not read as complete,
    since sends from any other path under this key never reach it.
 4. **One line in APP_BUILD_FLOW** (my draft, my lane): the verb's reply is
