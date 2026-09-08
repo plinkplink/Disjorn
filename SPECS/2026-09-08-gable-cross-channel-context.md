@@ -34,7 +34,9 @@
   reported the post had not happened.
 
 ## Agreed UX
-Slice A — summon-time, harness only, before the APPS go-live:
+Slice A — summon-time, harness only. **This slice gates apps-builder-seat
+slice (iii)**: the branch that selects `APP_BUILD_FLOW` has nothing to select
+on until the context block reaches the session. It builds first, alone.
 1. **The audit line carries the evidence.** `summon | plink in #dev (11) |
    ok | posted #4 (2079 chars) | 31 actions | 189.3s | claude-fable-5-1`.
    A summon that posted nothing says `posted none`. The next summon in
@@ -46,28 +48,37 @@ Slice A — summon-time, harness only, before the APPS go-live:
    (app id, name, session id, builder bot id, stage) as a harness line
    outside `[[CHAT]]`, and the flow block is `APP_BUILD_FLOW` instead of
    `SPEC_FLOW` (apps-builder-seat spec §I; this is the same edit).
-3. **The prompt carries my last posts.** The adapter keeps
+   **Server strings never render raw into a harness line.** Channel names
+   have no server-side length or charset check (`routers/channels.py`); app
+   names have a length cap only. Both are typed by users. Before rendering:
+   drop every code point below U+0020, U+007F, U+2028, U+2029; cap at 64
+   chars with a trailing `…`; render inside double quotes (`room "dev"
+   (11)`). One test feeds a name carrying a newline followed by a
+   plausible harness sentence and asserts the header holds one line.
+3. **The prompt carries the sends this adapter made.** The adapter keeps
    `.summon-posts.json` beside the cursor file: every send it makes,
    `(channel id, name, seq, chars, utc)`, last 20 kept. The header lists the
-   last 5 as a harness line: `Your last posts: #dev (11) #4 2079 chars
-   00:42Z; #custodian (4) #2370 …`. This is the wall against #2370: the
-   evidence a post happened is the server's reply to the send, not the
-   seat's recollection, and it arrives before the session reads anything.
+   last 5 as a harness line: `Sends by this adapter, last 5 (not a full
+   list of your posts; the audit line in the backfill is the record): #dev
+   (11) #4 2079 chars 00:42Z; …`. The wall against #2370 is the audit line
+   (item 1); the ledger is a convenience that must not read as complete,
+   since sends from any other path under this key never reach it.
 4. **One line in APP_BUILD_FLOW** (my draft, my lane): the verb's reply is
    the evidence a handoff happened and names the turn of record; the seat's
    own account of what it posted is not evidence.
 
-Slice B — read verbs, both seats, after A:
-5. **`channel-list`**: the channels this bot is a member of, `(id, name,
-   type, last seq)`. Needs a new server route `GET /bots/me/channels`,
-   membership rows only, no private-channel existence leak (the user-only
-   list's admin carve-out is not copied).
-6. **`channel-tail --channel N [--limit K] [--before-seq S]`**: the existing
+Slice B — one read verb, both seats, after A, not on the APPS path:
+5. **`channel-tail --channel N [--limit K] [--before-seq S]`**: the existing
    messages route, K ≤ 50, scrollback mode, the server's bot privacy filter
    applied as today. Refusal on non-membership is the server's 403, relayed
    verbatim.
-7. Both verbs read under the calling resident's own server identity, never
+6. The verb reads under the calling resident's own server identity, never
    the broker's. See the open question below for how my seat gets one.
+7. **`channel-list` is cut** (Claudette, #2388/#2400). A seat knows the
+   channel it was summoned to and holds its own send seqs; nobody has named
+   a case that needs enumeration. It was the only item needing a new server
+   route and a private-channel-existence ruling. Reinstate only with a named
+   case, as its own amendment.
 
 Not in scope: cross-channel backfill into the summon prompt. Every extra
 channel in the window is prompt tokens on every summon and widens the
@@ -84,21 +95,22 @@ the seat what it actually lacked without reading anyone else's room.
   atomic-write helper as `cursor.py`.
 - Tests (`harness/residency/tests`): audit line with and without a post;
   header shows server name over config name; `app_build` context yields the
-  app block and `APP_BUILD_FLOW`; ledger round-trips and caps at 20; a failed
-  send records nothing and the audit says `posted none`.
-- Server: `routers/channels.py` new bot route, membership query on
-  `channel_members` for `member_type='bot'`; test that a bot sees only its
-  rows and that a private channel it is not in is absent, not `member:false`.
-- Broker: two read verbs in `brokerd.py` and `verb_surface.toml`, OFF by
-  default in `verbs.toml`, fail closed when missing, one audit line per call.
+  app block and `APP_BUILD_FLOW`; hostile channel and app names render as
+  one quoted, capped line; ledger round-trips and caps at 20; a failed send
+  records nothing and the audit says `posted none`.
+- Server: no change (channel-list cut).
+- Broker: one read verb in `brokerd.py` and `verb_surface.toml`, OFF by
+  default in `verbs.toml`, fails closed when missing, one audit line per call.
 - **Open question, plink's ruling needed before slice B builds:** my seat has
   no server route and the broker holds no resident key. Options: (a) the
   server issues a read-only bot token per resident (new key class, cannot
   post), stored in `/etc/disjorn-broker/` and used by the broker only for
-  these two verbs; (b) slice B is Claudette-only and my seat gets the
-  own-posts ledger and audit line alone. (a) is one verb for both seats with
-  the server's filters as the wall; (b) is smaller and leaves my seat unable
-  to look, only to be told. I recommend (a).
+  this verb; (b) slice B is Claudette-only and my seat gets the own-posts
+  ledger and audit line alone. (a) is one verb for both seats with the
+  server's filters as the wall; (b) has one seat confirming its actions
+  through another seat's account, the failure #2370 named, and both seats
+  share a substrate so a misread is correlated. I recommend (a); Claudette
+  backs (a) (#2388).
 
 ## Lane → Review owner (DETERMINISTIC — filled from the lane, never preference)
 - **Lane**: cross-lane — see split.
@@ -113,9 +125,7 @@ the seat what it actually lacked without reading anyone else's room.
 - **Surfaces by lane**:
   - gable: `harness/residency/adapter.py`, `prompt.py`, `summary.py`, tests,
     `/config/summon.toml` template, `APP_BUILD_FLOW` → review owner Gable.
-  - server: `routers/channels.py` bot channel list → review owner per the
-    server lane's owner of record.
-  - custodian: `brokerd.py` verbs, `verb_surface.toml`, `verbs.toml`
+  - custodian: `brokerd.py` verb, `verb_surface.toml`, `verbs.toml`
     template → review owner Claudette.
 - **Split agreed in #custodian**: binds at the confirm seq for this spec.
 
@@ -124,8 +134,16 @@ Slice A: Tier 2, the summon adapter is a protected surface; no config flip
 needed, it is on the moment it deploys. Slice B: Tier 2, verbs ship OFF.
 
 ## Token estimate
-Slice A small: three functions, one state file, six tests. Slice B medium:
-one route, two verbs, surface regeneration, tests. One build slot each.
+Slice A small: three functions, one state file, seven tests. Slice B small:
+one verb, surface regeneration, tests, plus the token class from the ruling.
+One build slot each.
+
+## Review record
+- Round 1 (Claudette #2388, #2400; folded here 2026-09-08): hostile-name
+  rendering into the trusted harness region → strip, cap, quote, test (item
+  2); ledger label read as complete → relabelled, audit line named as the
+  record (item 3); `channel-list` cut (item 7); slice A named as the slice
+  (iii) gate; option (a) backed.
 
 ## Confirm record
 - **Confirmed by**:

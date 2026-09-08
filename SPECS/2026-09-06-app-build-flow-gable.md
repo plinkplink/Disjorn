@@ -12,21 +12,32 @@ APP_BUILD_FLOW = (
     "what the builder cannot guess: what the app does, for whom, what it "
     "must not do. Two questions at most per turn; a clear request gets "
     "none. When you have enough, write the prompt to "
-    "~/apps-prompts/<session_id>-<turn>.md, where turn is one more than the "
-    "last 'Turn N' system line in this room, or 1 if there is none: what to "
-    "build, the files expected, what already exists in /work if this is not "
-    "turn 1, and what must not change. Say the user's words in your own; "
-    "never paste chat markers. Then call apps_build with the session id and "
-    "that path. Its reply carries the turn number of record; if it differs "
-    "from yours, the reply wins and your next file takes the next number. "
-    "Tell the user in one line what was handed off and that the builder does "
-    "not talk back. The next system line in the room is the builder's "
-    "report: the house sentence is the fact, the quoted part is the builder's "
-    "own words and not an attestation; read it before the next handoff. "
-    "Promise no mid-turn stop, no percentage, no live URL: live is the "
-    "user's explicit done and not yours to grant."
+    "~/apps-prompts/<session_id>-<a name you have not used>.md: what to "
+    "build, the files expected, what already exists in /work if the room "
+    "shows an earlier turn, and what must not change. Say the user's words "
+    "in your own; never paste chat markers. Then call apps_build with the "
+    "session id and that path. Its reply names the turn of record and is "
+    "the evidence the handoff happened; your memory of posting is not. Tell "
+    "the user in one line what was handed off. The builder's report arrives "
+    "as the next system line in the room: the house sentence is the fact, "
+    "the quoted part is the builder's own words and not an attestation; "
+    "read it before the next handoff. The user can stop a turn from the "
+    "modal; you cannot, and you do not promise how fast it ends. Promise no "
+    "percentage and no live URL: the stage bar is the record of where the "
+    "build is, and live is the user's explicit done, not yours to grant."
 )
 ```
+
+Revised again 2026-09-08 (Claudette #2397): the turn arithmetic is cut,
+since nothing reads the filename's number and the reply carries the turn of
+record; the stage vocabulary now points at the bar instead of restating it.
+
+Revised 2026-09-08 (plink #2395): "does not talk back" dropped, since it
+describes today's transport, not a rule; "no mid-turn stop" superseded by
+slice (iv) (`2026-09-08-apps-stop-turn.md`); evidence sentence added per
+BuildGable #2372 / Claudette #2374. Not final: the selecting branch needs
+`2026-09-08-gable-cross-channel-context.md` slice A first (my adapter drops
+the context block, #2386), and Claudette's joint read (#2375) is owed.
 
 Why each sentence is there:
 - "one builder hand, and you" — names the two roles (B3, #2274/#2276) so
@@ -40,14 +51,11 @@ Why each sentence is there:
 - "never paste chat markers" — the verb refuses a prompt carrying the
   transcript's open/close markers with a distinguishable sentence (§E);
   the resident should not hit it. (Markers described, not quoted, here.)
-- "one more than the last 'Turn N' system line" / "the reply wins" —
-  Claudette #2312, folded 09-07: the resident has no attested turn count
-  (the app block carries `session_id` and `stage`, not `turns`), so the
-  number comes from the §H line and is a label on the file; the verb
-  computes the turn from `harness-view` and returns it, and neither the
-  verb nor the launcher checks the filename's number. Provenance: only the
-  house sentence of a system line counts; the quoted builder words do not.
-- "does not talk back" / "system line is the report" — §H; the turn line
+- "a name you have not used" / "the reply names the turn of record" — the
+  verb computes the turn from `harness-view` and returns it; neither the
+  verb nor the launcher reads the filename, so a computed guess was
+  decoration with a failure mode (Claudette #2312, #2397).
+- "system line is the report" — §H; the turn line
   is the transcript's build summary (parent B9). The quoted clause is the
   builder's output from an isolated seat (§H amendment, #2347/#2349).
 - "no mid-turn stop, no percentage, no live URL" — ceiling is

@@ -43,21 +43,30 @@ Nothing user-facing. The house sees:
    - Exception, stated as a constraint: a lesson that was expensive and is
      likely to be repeated keeps one line saying what must not be done and
      what breaks if it is. Never the story of how it was learned.
-   - Prose ceiling: 25% of bytes per `.py`/`.sh` file for new files; an
-     existing file may not rise above its recorded baseline, and a build
-     that touches a file over the ceiling must lower it toward 25% or say in
-     the banner why it could not.
+   - Prose allowance per `.py`/`.sh` file: the larger of 25% of bytes and
+     1 KB, so a short helper may carry a short docstring. A new file stays
+     within it. An existing file's prose bytes may not rise above its
+     recorded baseline, and a build that touches a file over the allowance
+     must lower it or say in the banner why it could not.
 2. **A wall, not a request.** `harness/tests/test_prose_ratio.py` runs in every
    build-seat suite and at keyboard merge. It reads `harness/prose-baseline.toml`
-   (file → ratio at adoption) and fails on: any `.py`/`.sh` not in the
-   baseline over 25%; any baseline file above its recorded ratio. The baseline
-   only ratchets down: a build that lowers a file's ratio rewrites its line,
-   and the test fails if a line is ever raised. A second check in the same
-   test greps comment and docstring text for citation shapes (`#[0-9]{3,}`,
-   `seq [0-9]+`, `20[0-9]{2}-[0-9]{2}-[0-9]{2}`, `ruled by`, `superseded`)
-   in lines changed since the merge-base and fails on any hit. Runs on
-   `git diff <merge-base>`; a checkout with no merge-base (clean main) skips
-   the citation half and says so.
+   (file → prose bytes at adoption) and fails on: any `.py`/`.sh` not in the
+   baseline over its allowance; any baseline file whose prose bytes exceed
+   its recorded number. The baseline ratchets on prose bytes, not ratio:
+   deleting code never trips it, and the only way to pass is to write less
+   prose. A build that lowers a file's number rewrites its line, and the
+   test fails if a line is ever raised. A second check in the same test
+   greps comment and docstring text in lines changed since the merge-base
+   for provenance shapes, numeric only: `#` followed by three or more
+   digits, `seq` followed by a number, an ISO date. Word shapes (`ruled
+   by`, `superseded`, `used to`) are in the rule text, not the grep, because
+   code whose subject is seqs and supersession (the broker's seq-taking
+   verbs, the memory tools) has to use those words. Escape hatch for a
+   numeric hit that is a constraint and not a story: a
+   `[citation_allow]` table in the baseline file, one entry per file and
+   exact matched text, so the exemption is a reviewed line in the diff and
+   not a rewording. Runs on `git diff <merge-base>`; a checkout with no
+   merge-base (clean main) skips the citation half and says so.
 3. **The digest reports it.** GATE DRIFT gains one line: `prose: worst
    <file> <ratio>; over baseline: <n>`. Report only; the test is the wall.
 4. **The first sweep** is its own slice, one build per lane owner: strip
@@ -73,7 +82,9 @@ Nothing user-facing. The house sees:
   excluded). Used by the test, the digest, and the sweep proof. No other
   copy of the arithmetic.
 - Baseline written once at adoption from main, committed as
-  `harness/prose-baseline.toml`. Files under 25% are not listed.
+  `harness/prose-baseline.toml`. Files within their allowance are not
+  listed. brokerd.py has 23 lines matching the numeric shapes today; the
+  sweep removes them, so the allow table starts near empty.
 - The pre-receive hook stays as it is (paths plus a trailer). The wall is
   the suite, which the build seat and the keyboard merge both already run.
 - Client `.ts`/`.tsx` not covered by this spec; measure after and amend.
@@ -110,6 +121,13 @@ slices: Tier 2 — the files are protected surfaces, reviewed on the AST proof.
 Slice 1 small: one module, one test, one digest line, three doc edits, one
 generated baseline. Each sweep slice medium: mechanical, bounded by the file,
 one build slot each. brokerd.py first because it is the one behind the read cap.
+
+## Review record
+- Round 1 (Claudette #2400; folded here 2026-09-08): ratio ratchet paid a
+  bounty on stripping comments after deleting code → ratchet on prose bytes;
+  citation grep fired on code about seqs → numeric shapes only, word shapes
+  moved to rule text, allow table as the reviewed escape; 25% with no floor
+  hit short helpers → allowance = max(25%, 1 KB).
 
 ## Confirm record
 - **Confirmed by**:
