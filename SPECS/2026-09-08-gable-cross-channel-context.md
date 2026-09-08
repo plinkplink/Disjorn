@@ -127,7 +127,7 @@ the seat what it actually lacked without reading anyone else's room.
     `/config/summon.toml` template, `APP_BUILD_FLOW` → review owner Gable.
   - custodian: `brokerd.py` verb, `verb_surface.toml`, `verbs.toml`
     template → review owner Claudette.
-- **Split agreed in #custodian**: binds at the confirm seq for this spec.
+- **Split agreed in #custodian**: binds at the confirm seq (2411) for this spec.
 
 ## Expected diff tier
 Slice A: Tier 2, the summon adapter is a protected surface; no config flip
