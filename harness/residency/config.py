@@ -160,6 +160,20 @@ class CursorConfig:
     state_path: str = "/home/resident/.summon-cursor.json"
 
 
+@dataclass
+class PostsConfig:
+    # This adapter's own-sends ledger, last 20 kept; the prompt header lists
+    # the last five. Unset = beside the cursor file, whatever directory that
+    # is — the two are one deployment's state and must not drift apart when
+    # only one of them is configured.
+    state_path: str = "/home/resident/.summon-posts.json"
+
+    @staticmethod
+    def beside(cursor_path: str) -> str:
+        return os.path.join(os.path.dirname(cursor_path) or ".",
+                            ".summon-posts.json")
+
+
 def _default_served_path() -> str:
     """`~/.wake-served.json` for the uid the wake runner runs as.
 
@@ -305,6 +319,7 @@ class AdapterConfig:
     budget: BudgetConfig = field(default_factory=BudgetConfig)
     hops: HopConfig = field(default_factory=HopConfig)
     cursor: CursorConfig = field(default_factory=CursorConfig)
+    posts: PostsConfig = field(default_factory=PostsConfig)
     text: TextConfig = field(default_factory=TextConfig)
     wake: WakeConfig = field(default_factory=WakeConfig)
 
@@ -319,6 +334,7 @@ class AdapterConfig:
         bg = data.get("budget", {}) or {}
         hp = data.get("hops", {}) or {}
         cu = data.get("cursor", {}) or {}
+        po = data.get("posts", {}) or {}
         tx = data.get("text", {}) or {}
         wk = data.get("wake", {}) or {}
 
@@ -389,6 +405,10 @@ class AdapterConfig:
             ),
             cursor=CursorConfig(
                 state_path=str(cu.get("state_path", CursorConfig.state_path)),
+            ),
+            posts=PostsConfig(
+                state_path=str(po.get("state_path") or PostsConfig.beside(
+                    str(cu.get("state_path", CursorConfig.state_path)))),
             ),
             text=TextConfig(
                 refusal_line=str(tx.get("refusal_line", TextConfig.refusal_line)),

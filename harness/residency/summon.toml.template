@@ -184,6 +184,14 @@ timeout_sec = 5.0
 [cursor]
 state_path = "/home/resident/.summon-cursor.json"   # persisted seq high-water mark
 
+[posts]
+# This adapter's own-sends ledger (SPECS/2026-09-08-gable-cross-channel-context.md
+# slice A): every reply it posts, last 20 kept, the last five listed in the
+# prompt header. A convenience beside the wall — the wall is the `posted #N`
+# field on the #custodian audit line, which the next summon reads from backfill.
+# Unset = `.summon-posts.json` in the cursor file's directory.
+# state_path = "/home/resident/.summon-posts.json"
+
 [wake]
 # THE WAKE LANE (SPECS/2026-08-25-agentic-residents.md, confirmed seq 1913).
 # Read by run_wake.py — a SEPARATE daemon from the summon adapter, which
