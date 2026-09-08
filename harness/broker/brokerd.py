@@ -2462,6 +2462,40 @@ class Broker:
                                f"+refs/heads/*:refs/gatehouse/{repo}/*"]))
         return out
 
+    def _gatehouse_count_argv(self, repo: str) -> list[str]:
+        """Fixed argv listing the refs the mirror HOLDS for `repo`. The name is
+        re-validated for the same reason the fetch re-validates it: it reaches
+        an argv, and the cost of being sure is one regex."""
+        if not isinstance(repo, str) or not self._GATEHOUSE_REPO_RE.match(repo):
+            raise VerbError("internal",
+                            f"gatehouse repo {repo!r} is not a plain repo name")
+        base = self._argv("refresh_mirror_gatehouse_count",
+                          ["git", "-C", "/srv/disjorn-ro", "for-each-ref",
+                           "--format=%(refname)"])
+        return [*base, f"refs/gatehouse/{repo}/"]
+
+    def _gatehouse_present(self, repo: str, timeout: int) -> Optional[int]:
+        """How many refs the mirror holds for `repo` — an INVENTORY, next to
+        `arrived`'s DELTA. None when the count could not be taken.
+
+        `arrived` lists only what git called a new branch on this fetch, so an
+        empty one means "nothing new", which is the resting state of any repo
+        nobody has pushed to lately. Read as an inventory it says "nothing
+        here", and those two are indistinguishable from the record alone — a
+        reader who guesses wrong concludes the repo is unreachable and goes
+        looking for a permission to fix. This number is the difference.
+
+        Best-effort by construction: the fetch has already succeeded when this
+        runs, and failing a refreshed mirror over a failed head-count would
+        report a real success as an error."""
+        try:
+            cp = self._run(self._gatehouse_count_argv(repo), timeout)
+        except VerbError:
+            return None
+        if cp.returncode != 0:
+            return None
+        return sum(1 for line in cp.stdout.splitlines() if line.strip())
+
     @staticmethod
     def _parse_fetch_refs(output: str) -> tuple[list[str], list[str]]:
         """(arrived, vanished) ref names out of `git fetch --prune` chatter.
@@ -2497,7 +2531,8 @@ class Broker:
                     f"{(cp.stderr or cp.stdout).strip()[:500]}")
             arrived, vanished = self._parse_fetch_refs(cp.stderr + cp.stdout)
             records.append({"repo": repo, "arrived": arrived,
-                            "vanished": vanished})
+                            "vanished": vanished,
+                            "present": self._gatehouse_present(repo, timeout)})
         return records
 
     def _verb_refresh_mirror(self, resident: str, args: dict) -> tuple[dict, str]:
@@ -2539,6 +2574,16 @@ class Broker:
         head = _head()
         summary = f"mirror at {head}" + ("" if head == before
                                          else f" (was {before})")
+        # No news stays no line. An entitled repo holding NOTHING is not news
+        # withheld, it is an empty mailbox, and it reads exactly like a quiet
+        # one until the banner separates them. Compared against 0 rather than
+        # tested for falsiness: an uncountable repo is None and must not raise
+        # this alarm. Placed before `moved` because the banner is truncated at
+        # 300 chars from the right, and this is the half worth keeping.
+        empty = ", ".join(rec["repo"] for rec in gatehouse
+                          if rec["present"] == 0)
+        if empty:
+            summary = f"{summary}; gatehouse EMPTY for {empty}"
         moved = "; ".join(
             f"{rec['repo']}: +{len(rec['arrived'])} new, "
             f"-{len(rec['vanished'])} harvested or deleted"
