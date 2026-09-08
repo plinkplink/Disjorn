@@ -133,13 +133,27 @@ class WakeHarness:
 
     def write_wake_record(self, wake_id: str, *, resident: str = "res-gable",
                           woken_by: str = "plink", age_sec: float = 5.0,
-                          cap: int = CAP_SEC, grace: int = GRACE_SEC) -> None:
+                          cap: int = CAP_SEC, grace: int = GRACE_SEC,
+                          since_midnight_sec: float | None = None) -> None:
         """A wake in flight (or, with a big `age_sec`, one whose window has
         passed) — written by hand so the woken-build rule can be exercised
-        without racing a real session."""
+        without racing a real session.
+
+        `since_midnight_sec` anchors the record to TODAY's UTC midnight instead
+        of counting backwards from now. The broker's daily count is a UTC
+        CALENDAR-DAY bucket, so "three hours ago" is yesterday's wake between
+        00:00 and 03:00 UTC, and a test that meant "three wakes today" went red
+        every night in that window (Claudette #2366). Anything that asserts on
+        the day's count anchors forward from midnight; `age_sec` stays for the
+        in-flight cases, where only the elapsed window matters."""
         import datetime as dt
 
-        when = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=age_sec)
+        if since_midnight_sec is not None:
+            midnight = dt.datetime.now(dt.timezone.utc).replace(
+                hour=0, minute=0, second=0, microsecond=0)
+            when = midnight + dt.timedelta(seconds=since_midnight_sec)
+        else:
+            when = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=age_sec)
         (self.spool / f"{wake_id}.wake.json").write_text(json.dumps({
             "schema": 1, "wake_id": wake_id, "resident": resident,
             "woken_by": woken_by, "requested_at": when.isoformat(),
@@ -404,11 +418,27 @@ def test_the_refusal_is_a_denial_on_the_audit_line(plink):
 
 
 def test_the_refusal_reports_the_days_wall_clock(plink):
-    """The count is the speed bump; the minutes are the cost. Three wakes an
-    hour apart, each granted a 120s cap, have spent all of it."""
-    for i in range(3):
+    """The count is the speed bump; the minutes are the cost. Three wakes
+    earlier TODAY, each granted a 120s cap, have spent all of it.
+
+    Anchored to today's UTC midnight rather than "hours ago": the broker
+    buckets by UTC calendar day, so counting backwards put these on yesterday
+    between 00:00 and 03:00 UTC and failed the suite every night in that
+    window (Claudette #2366). Each wake must also have fully elapsed its cap
+    for the minutes to read 6m, which a UTC day younger than that cannot
+    express at all — the honest answer there is that the scenario does not
+    exist yet, not a red test."""
+    import datetime as dt
+
+    offsets = [10.0, 20.0, 30.0]
+    midnight = dt.datetime.now(dt.timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+    elapsed_today = (dt.datetime.now(dt.timezone.utc) - midnight).total_seconds()
+    if elapsed_today < max(offsets) + CAP_SEC:
+        pytest.skip("this UTC day is younger than three fully-spent wakes")
+    for i, off in enumerate(offsets):
         plink.write_wake_record(f"wake-20260825T12000{i}Z-aaa11{i}",
-                                age_sec=3600 * (i + 1))
+                                since_midnight_sec=off)
 
     resp = plink.call("wake", {"resident": "res-gable", "task": "one more"})
 
