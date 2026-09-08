@@ -907,6 +907,23 @@ def test_a_result_that_lands_after_a_synthesized_halt_is_ledgered_late(apps):
     assert apps.sidecars() == []
 
 
+def test_a_late_result_that_will_not_parse_is_audited_not_silently_dropped(apps):
+    """Gable #2370: it cannot be ledgered — there is nothing to ledger — but
+    dropping it with its ticket would leave no line anywhere."""
+    proc = FakeAppsProc()
+    apps.broker._apps_spawn = FakeAppsSpawn(lambda: proc)
+    _handoff(apps)
+    proc.finish(rc=143)
+    apps.broker.join_apps(timeout=5)
+    apps.write_result(raw="{not json")           # the late record is garbage
+    ledgered = len(apps.ledger())
+    assert apps.broker.adopt_inflight_apps() == []
+    assert len(apps.ledger()) == ledgered        # nothing invented
+    assert apps.sidecars() == []
+    assert any("would not parse" in (ln.get("result_summary") or "")
+               for ln in apps.audit_lines())
+
+
 def test_a_synthesized_turn_with_no_late_result_just_drops_its_ticket(apps):
     proc = FakeAppsProc()
     apps.broker._apps_spawn = FakeAppsSpawn(lambda: proc)

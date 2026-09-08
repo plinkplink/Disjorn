@@ -437,7 +437,11 @@ with the app block (stage 1). Each needs to know what to do with it:
 - Turn count and tokens-so-far columns on `app_sessions`
   (`turns INTEGER NOT NULL DEFAULT 0`, `tokens_used INTEGER NOT NULL
   DEFAULT 0`), updated by the stage endpoint from `detail`, so the modal's
-  hidden ceiling never needs the ledger.
+  hidden ceiling reads the server alone. **The BROKER's check-3 ceiling does
+  not** (pre-flip amendment, Gable #2358/#2370): it takes the larger of this
+  column and the session's highest ledgered `tokens_after`, because a stage
+  post that never landed would otherwise buy a free turn, and a `late` line's
+  tokens exist nowhere but the ledger.
 - Client: filenames scroll in the preview panel from `files_written`
   detail; the halted chip; nothing else.
 

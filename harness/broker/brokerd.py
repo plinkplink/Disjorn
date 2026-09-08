@@ -4534,8 +4534,19 @@ class Broker:
         grace period was supposed to avoid (Claudette #2361). So: ledger it
         `late`, never post it, and drop the ticket either way."""
         session, turn = int(rec["session"]), int(rec["turn"])
-        result, _bad = self._apps_read_result(
+        result, bad = self._apps_read_result(
             os.path.join(self._apps_turn_dir(session, turn), "result.json"))
+        if bad:
+            # A late record that will not parse is still a fact about this
+            # turn, and dropping it with its ticket would leave no line
+            # anywhere (Gable #2370). It cannot be ledgered — there is nothing
+            # to ledger — so it is audited, which is the one place left that a
+            # human reads.
+            self._audit(
+                "broker", "apps-build", {"session": session, "turn": turn},
+                True,
+                "a result landed after this turn's halt was synthesized but "
+                "would not parse — nothing ledgered, ticket dropped")
         if result is not None:
             exit_code = result.get("exit")
             self._apps_ledger(self._apps_ledger_record(
