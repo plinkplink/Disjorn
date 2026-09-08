@@ -28,6 +28,17 @@ def _fmt_actions(action_count: Optional[int]) -> str:
     return f"{action_count} actions" if action_count is not None else "actions n/a"
 
 
+def _fmt_posted(seq: Optional[int], chars: Optional[int]) -> str:
+    """What this summon put in the room, as the server confirmed it. `posted
+    none` is a statement, not an omission: a summon whose send failed, or
+    whose reply was never sent, says so in the same field every served summon
+    fills, so the next session reading this line from backfill cannot mistake
+    a missing field for a missing post."""
+    if seq is None:
+        return "posted none"
+    return f"posted #{seq} ({chars if chars is not None else '?'} chars)"
+
+
 def format_summary(
     *,
     summoner: str,
@@ -36,16 +47,24 @@ def format_summary(
     duration_sec: float,
     ok: bool,
     model: Optional[str] = None,
+    posted_seq: Optional[int] = None,
+    posted_chars: Optional[int] = None,
 ) -> str:
     """One-line #custodian audit of a served summon.
 
     ``model`` (WP-L5) is the model this session ran under — appended so the
     audit trail records what actually served every summon. Omitted only for an
     unpinned deployment where no model is knowable.
+
+    ``posted_seq`` / ``posted_chars`` are the send's own evidence: the seq the
+    server answered with and the size of what went. This line is what the next
+    summon reads from #custodian backfill to know whether its last reply
+    landed; no memory of posting is needed, or trusted.
     """
     status = "ok" if ok else "error"
     line = (
         f"summon | {summoner} in {where} | {status} | "
+        f"{_fmt_posted(posted_seq, posted_chars)} | "
         f"{_fmt_actions(action_count)} | {duration_sec:.1f}s"
     )
     if model:

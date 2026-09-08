@@ -52,7 +52,8 @@ from detector import (
 )
 from hops import HopArbiter
 from launcher import ContainerLauncher
-from prompt import assemble_prompt
+from posts import PostLedger
+from prompt import assemble_prompt, describe_room
 from summary import (
     format_chain_refusal_summary,
     format_drift_alert,
@@ -78,6 +79,7 @@ class SummonAdapter:
         budget: Optional[BudgetLedger] = None,
         cursor: Optional[CursorStore] = None,
         hops: Optional[HopArbiter] = None,
+        posts: Optional[PostLedger] = None,
     ) -> None:
         self.client = client
         self.config = config
@@ -88,6 +90,7 @@ class SummonAdapter:
         )
         self.cursor = cursor or CursorStore(config.cursor.state_path)
         self.hops = hops or HopArbiter(config.hops)
+        self.posts = posts or PostLedger(config.posts.state_path)
 
     # --------------------------------------------------------------- run loop
 
@@ -163,9 +166,15 @@ class SummonAdapter:
 
     # --------------------------------------------------------------- summon
 
-    def _where(self, channel_id: int) -> str:
-        name = self.config.summon.channel_names.get(channel_id)
-        return name if name else f"channel {channel_id}"
+    def _where(self, channel_id: int, context=None) -> str:
+        """The room, for the prompt header and the audit line. The server's
+        name on the summoning message wins; the config's pretty label is the
+        fallback; the bare number is the last resort. One renderer for both
+        places (prompt.describe_room), so the audit line a later summon reads
+        from backfill names the room the way its own header did."""
+        return describe_room(
+            channel_id, context,
+            self.config.summon.channel_names.get(channel_id) or "")
 
     async def _refuse(self, event: MessageCreate, trigger: Trigger, *,
                       line: str, by: str, summary: str) -> None:
@@ -176,7 +185,7 @@ class SummonAdapter:
         summoner retries — which is the loop the refusal exists to stop.
         """
         channel_id = event.channel_id
-        where = self._where(channel_id)
+        where = self._where(channel_id, event.context)
         logger.info("summon refused: %s in %s (%s)", trigger.summoner, where,
                     summary)
         suffix = format_refusal_suffix(
@@ -233,7 +242,7 @@ class SummonAdapter:
         channel_id = event.channel_id
         trigger_id = msg.get("id")
         summoner = trigger.summoner
-        where = self._where(channel_id)
+        where = self._where(channel_id, event.context)
 
         if not self.budget.can_spend():
             logger.info("summon over budget: %s in %s", summoner, where)
@@ -296,9 +305,9 @@ class SummonAdapter:
                 summoner, where, result.gate_expected,
                 result.gate_actual or "no model id", result.gate_stage,
             )
-            await self._safe_send(
-                channel_id, self.config.text.model_gate_line, reply_to=trigger_id
-            )
+            posted = await self._post_reply(
+                channel_id, self.config.text.model_gate_line, where,
+                reply_to=trigger_id)
             await self._safe_send(
                 self.config.summon.custodian_channel_id,
                 format_gate_refusal_alert(
@@ -314,6 +323,7 @@ class SummonAdapter:
                     action_count=result.action_count,
                     duration_sec=result.duration_sec, ok=False,
                     model=result.gate_actual,
+                    posted_seq=posted[0], posted_chars=posted[1],
                 ),
             )
             return
@@ -357,7 +367,8 @@ class SummonAdapter:
         # only thing in the channel that says whose turn this was.
         if display_model or trigger.summoner_type == "bot":
             text = f"{text}\n\n{format_reply_suffix(self.config.summon.bot_name, display_model, verified=verified, summoner=summoner)}"
-        await self._safe_send(channel_id, text, reply_to=trigger_id)
+        posted = await self._post_reply(channel_id, text, where,
+                                        reply_to=trigger_id)
 
         # Fail-loud, never fail-over: on drift the reply still went out above;
         # here the house gets a loud alert naming expected vs actual.
@@ -376,8 +387,30 @@ class SummonAdapter:
                 action_count=result.action_count,
                 duration_sec=result.duration_sec, ok=result.ok,
                 model=display_model,
+                posted_seq=posted[0], posted_chars=posted[1],
             ),
         )
+
+    async def _post_reply(self, channel_id: int, text: str, where: str, *,
+                          reply_to=None) -> tuple[Optional[int], Optional[int]]:
+        """Post this summon's reply and return (seq, chars) as the SERVER
+        answered — the evidence the audit line carries and the ledger keeps.
+        (None, None) when the send failed: nothing is recorded, and the audit
+        line says `posted none`, because a post that did not happen must not
+        leave a trace that reads as if it did."""
+        sent = await self._safe_send(channel_id, text, reply_to=reply_to)
+        if not sent:
+            return None, None
+        seq = sent.get("seq") if isinstance(sent, dict) else None
+        chars = len(text)
+        try:
+            self.posts.record(channel_id=channel_id, name=_room_name(where),
+                              seq=seq, chars=chars,
+                              utc=(sent.get("created_at")
+                                   if isinstance(sent, dict) else None))
+        except OSError:
+            logger.warning("failed to record own post", exc_info=True)
+        return seq, chars
 
     def _end_the_chain(self, text: str, trigger: Trigger) -> str:
         """GUARD 1: a bot-triggered summon's reply does not re-trigger any bot.
@@ -407,9 +440,15 @@ class SummonAdapter:
             recent = []
         # before_seq mode returns newest-first; make it chronological.
         backfill = list(reversed(recent))
+        try:
+            posts = self.posts.recent(5)
+        except Exception:  # noqa: BLE001 — a ledger is a convenience
+            logger.warning("own-posts ledger unreadable", exc_info=True)
+            posts = []
         return assemble_prompt(
             backfill, event.message or {}, summoner=trigger.summoner,
-            where=where, how=trigger.describe(),
+            where=where, how=trigger.describe(), context=event.context,
+            posts=posts,
         )
 
     # --------------------------------------------------------------- helpers
@@ -427,8 +466,23 @@ class SummonAdapter:
         except Exception:  # noqa: BLE001 — no live WS / rate limit: keep going
             logger.debug("typing failed for channel %s", channel_id, exc_info=True)
 
-    async def _safe_send(self, channel_id: int, content: str, *, reply_to=None) -> None:
+    async def _safe_send(self, channel_id: int, content: str, *, reply_to=None):
+        """Send, never raise. Returns the server's message dict (seq included)
+        so a caller that needs evidence of the post has it; None on failure."""
         try:
-            await self.client.send(channel_id, content, reply_to=reply_to)
+            return await self.client.send(channel_id, content, reply_to=reply_to)
         except Exception:  # noqa: BLE001 — a failed post never crashes the daemon
             logger.warning("send to channel %s failed", channel_id, exc_info=True)
+            return None
+
+
+def _room_name(where: str) -> str:
+    """The bare name out of a describe_room string, for the ledger: `room
+    "dev" (11)` -> `dev`; `channel 11` -> empty. The ledger re-renders it
+    through the same function, so a quoted, capped name goes in and comes
+    out the same shape."""
+    if where.startswith('room "'):
+        end = where.rfind('" (')
+        if end > 6:
+            return where[6:end]
+    return ""
