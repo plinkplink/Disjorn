@@ -287,6 +287,22 @@ launcher's harvest, on exit:
   something or it means "wait forever" (Claudette #2329). Slice (ii) owns
   this branch; the harvest makes it reachable only when `result.json`
   itself cannot be written, which the unit's journal records loudly.
+  **Slice (ii) pre-flip amendment (Gable #2358, Claudette #2361/#2366): the
+  deadline does not fire over a unit that is still alive** — `RuntimeMaxSec`
+  SIGTERMs at `turn_max` and the wrapper then harvests, so a harvest slower
+  than the grace is still writing when `turn_max + grace` passes — but it
+  waits no longer than the unit's own `TimeoutStopSec`, past which systemd
+  has killed the cgroup. **A `result.json` that lands after a halt was
+  synthesized is LEDGERED (`late: true`) and NEVER POSTED: the room's last
+  word about that turn stays the synthesized halt.** That is a ruling, not a
+  bug — posting twice would tell the room a turn died and then did not, and
+  the ledger is where the contradiction belongs. The synthesized ticket is
+  kept and marked so the sweep can find it, and it is swept at the next
+  handoff for that app as well as at broker start, so the record lands within
+  one turn rather than at the next restart. The token ceiling reads the
+  larger of the server's `tokens_used` and the session's highest ledgered
+  `tokens_after`, because a stage post that never landed would otherwise buy
+  a free turn.
 The broker then parses usage from the spool, appends the ledger line, and
 posts the stage events with the §H detail. The verb returns immediately
 after spawn with `{turn: N, unit: …}`; the resident does not wait on it (a

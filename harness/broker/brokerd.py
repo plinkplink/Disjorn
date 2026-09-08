@@ -4122,6 +4122,12 @@ class Broker:
             raise VerbError("apps-refused",
                             "this session belongs to another builder")
 
+        # Any late result this app is still owed lands on the record NOW,
+        # before the ceiling reads the ledger — a late line carries tokens the
+        # server was never told about, and check 3 is the reader that needs
+        # them (Claudette #2366).
+        self._apps_sweep_synthesized(app_id)
+
         # 3. the ceiling. A refusal still POSTS (D-1.2b): the room and the bar
         #    have to see why nothing is going to happen, even though nothing ran.
         ceiling = self._apps_int("build_token_ceiling")
@@ -4486,6 +4492,37 @@ class Broker:
                         {"session": session, "turn": turn}, True,
                         f"could not mark the synthesized ticket: {exc}")
             self._apps_remove_sidecar(session, turn)
+
+    def _apps_sweep_synthesized(self, app_id: str) -> None:
+        """Resolve this app's marked tickets before its next turn starts.
+
+        The startup sweep alone would record a late result "at the next broker
+        restart, which could be days" (Claudette #2366) — and "ledgered
+        eventually, if someone restarts something" is a third word, not the
+        ruling. So the contradiction lands within one turn of anyone caring
+        about this app, which is the moment someone asks it to build again.
+        Scoped to the app being handed off: another app's ticket is another
+        caller's turn to resolve, and a verb should not do unrelated work.
+        Never raises — a sweep that failed must not refuse a good handoff."""
+        try:
+            entries = sorted(os.listdir(self._apps_log_dir()))
+        except OSError:
+            return
+        for name in entries:
+            if not name.endswith(APPS_SIDECAR_SUFFIX):
+                continue
+            path = os.path.join(self._apps_log_dir(), name)
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    rec = json.load(fh)
+                if not rec.get("synthesized"):
+                    continue
+                if str(rec.get("app_id") or "") != app_id:
+                    continue
+                self._apps_resolve_synthesized(rec)
+            except Exception as exc:  # noqa: BLE001 — never refuse over a sweep
+                self._audit("broker", "apps-build", {"app_id": app_id}, True,
+                            f"could not sweep a synthesized ticket: {exc!r}")
 
     def _apps_resolve_synthesized(self, rec: dict) -> None:
         """Close out a turn whose halt this house SYNTHESIZED.

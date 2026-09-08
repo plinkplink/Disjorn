@@ -440,6 +440,53 @@ def test_the_ceiling_reads_the_larger_of_the_server_and_the_ledger(apps):
     assert apps.spawn.calls == []
 
 
+def test_the_ledger_arm_is_a_max_not_the_last_line(apps):
+    """Claudette #2366 Q1: check 3 must take the MAX `tokens_after` across the
+    session's lines. A ceiling refusal writes its own line, and a `late` line
+    holds tokens the server was never told about — a later line with a lower
+    number must not shadow either, or the guard holds exactly once."""
+    apps.broker._apps_ledger({"session": SESSION, "tokens_after": 10_000_000})
+    apps.view["tokens_used"] = 0
+    assert _handoff(apps)["error"]["code"] == "apps-refused"
+
+    # The refusal wrote a line of its own. A SECOND handoff, server still at 0,
+    # must still be refused — the guard cannot decay to the last line written.
+    resp = _handoff(apps)
+    assert resp["error"]["message"] == (
+        "this build has hit its token ceiling (10000000 of 10000000)")
+    # and a lower line afterwards does not lower the ceiling's reading either
+    apps.broker._apps_ledger({"session": SESSION, "tokens_after": 5})
+    assert _handoff(apps)["error"]["code"] == "apps-refused"
+    assert apps.spawn.calls == []
+
+
+def test_a_late_result_is_swept_at_the_next_handoff_for_that_app(apps):
+    """Claudette #2366 Q2: the startup sweep alone means "ledgered eventually,
+    if someone restarts something". The contradiction lands within one turn of
+    someone caring — the next handoff for that app."""
+    proc = FakeAppsProc()
+    apps.broker._apps_spawn = FakeAppsSpawn(lambda: proc)
+    _handoff(apps)
+    proc.finish(rc=143)
+    apps.broker.join_apps(timeout=5)
+    assert apps.ledger()[0]["synthesized"] is True
+    apps.write_result()                       # the harvest lands late
+    posted = len(apps.stages)
+
+    # no restart, no adopt sweep — just the next handoff for this app
+    proc2 = FakeAppsProc()
+    apps.broker._apps_spawn = FakeAppsSpawn(lambda: proc2)
+    apps.view["turns"] = 1
+    assert _handoff(apps, prompt=apps.prompt(name=f"{SESSION}-2.md"))["ok"] is True
+    late = [ln for ln in apps.ledger() if ln.get("late")]
+    assert len(late) == 1 and late[0]["commit"] == "e01a4eb1234"
+    # swept, not re-posted: the room's last word on turn 1 stays the halt
+    assert [st for st in apps.stages[posted:]
+            if st["detail"].get("turn") == 1] == []
+    proc2.finish(rc=0)
+    apps.broker.join_apps(timeout=5)
+
+
 def test_a_ceiling_refusal_with_no_stage_yet_posts_scoped(apps):
     apps.view["tokens_used"] = 10_000_001
     apps.view["stage"] = None
