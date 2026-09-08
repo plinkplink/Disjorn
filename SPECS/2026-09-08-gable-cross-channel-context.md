@@ -146,9 +146,9 @@ One build slot each.
   (iii) gate; option (a) backed.
 
 ## Confirm record
-- **Confirmed by**:
-- **#custodian seq**:
-- **Confirmed at**:
+- **Confirmed by**: plink
+- **#custodian seq**: 2411
+- **Confirmed at**: 9/8/2026
 
 ## Status
-`draft`
+`confirmed`
