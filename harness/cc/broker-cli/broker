@@ -421,7 +421,7 @@ VERB_SURFACE = {
                 "flag": "--prompt-file",
                 "type": "string",
                 "required": True,
-                "help": "Absolute path to the prompt file you just wrote, inside your own ~/apps-prompts/ and named `<session_id>-<turn>.md`. Anywhere else is refused.",
+                "help": "Absolute path to the prompt file you just wrote, inside your own ~/apps-prompts/ — a file OUTSIDE that directory is refused. The `<session_id>-<turn>.md` name is a convention that keeps the directory readable, not a rule the harness checks; the turn number of record is the one this verb answers with.",
                 "min_len": 1,
                 "max_len": 4000,
                 "absolute_path": True,

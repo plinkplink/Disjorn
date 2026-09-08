@@ -213,6 +213,13 @@ APPS_DEFAULTS: dict = {
     "log_dir": "/var/log/disjorn-broker/apps-logs",
     "poll_sec": 2,
     "result_grace_sec": 30,
+    # systemd's own TimeoutStopSec default. The reaper will not synthesize a
+    # halt over a unit that is still ACTIVE past its deadline — the harvest
+    # runs after the SIGTERM RuntimeMaxSec sends, and it can outlast the grace
+    # (Gable #2358) — but it will not wait past this either, because at
+    # TimeoutStopSec systemd SIGKILLs the cgroup and there is nothing left to
+    # write the record.
+    "unit_stop_timeout_sec": 90,
     "chat_markers": ["[[CHAT]]", "[[/CHAT]]"],
 }
 # The app id is a positional argument to a privileged launcher and a directory
@@ -3942,10 +3949,42 @@ class Broker:
                         {"session": record.get("session")}, True,
                         f"apps ledger unwritable: {exc}")
 
+    def _apps_ledger_tokens_after(self, session: int) -> int:
+        """The highest `tokens_after` this house has LOGGED for a session.
+
+        The ceiling reads the server, and the server only learns a turn's usage
+        if the stage post lands. Two failed posts and the ceiling drifts below
+        what was actually spent while the ledger — written by this process, on
+        this disk, before any network call — has the truth (Gable #2358). So
+        check 3 takes the larger of the two and lets the two records correct
+        each other instead of diverging silently. Unreadable or absent ledger
+        answers 0, which is exactly "I know nothing more than the server does".
+        """
+        path = str(self.apps.get("ledger_path") or APPS_DEFAULTS["ledger_path"])
+        best = 0
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue
+                    if rec.get("session") != session:
+                        continue
+                    after = rec.get("tokens_after")
+                    if isinstance(after, int) and not isinstance(after, bool):
+                        best = max(best, after)
+        except OSError:
+            return 0
+        return best
+
     def _apps_ledger_record(self, rec: dict, *, result: Optional[dict],
                             exit_code: Optional[int], halted: Optional[str],
                             tokens: int, synthesized: bool,
-                            spawned: bool = True) -> dict:
+                            spawned: bool = True, late: bool = False) -> dict:
         """One ledger line's fields, from the sidecar and result.json together.
         Built in ONE place so the ceiling refusal, the harvested turn and the
         synthesized absence cannot describe the same session differently."""
@@ -4003,6 +4042,10 @@ class Broker:
             # (Gable #2347, Claudette #2349). The server keys the turn counter
             # off this too.
             "spawned": spawned,
+            # True only on a record found AFTER its turn's halt was
+            # synthesized: the turn finished, the room was already told it had
+            # not, and this line is the contradiction on the record.
+            "late": late,
         }
 
     # -- the sidecar -------------------------------------------------------
@@ -4082,7 +4125,11 @@ class Broker:
         # 3. the ceiling. A refusal still POSTS (D-1.2b): the room and the bar
         #    have to see why nothing is going to happen, even though nothing ran.
         ceiling = self._apps_int("build_token_ceiling")
-        tokens_used = int(view.get("tokens_used") or 0)
+        # The larger of what the SERVER was told and what this house LOGGED: a
+        # stage post that never landed would otherwise buy a free turn against
+        # the ceiling (Gable #2358, Claudette #2361).
+        tokens_used = max(int(view.get("tokens_used") or 0),
+                          self._apps_ledger_tokens_after(session))
         turns = int(view.get("turns") or 0)
         turn = turns + 1
         if tokens_used >= ceiling:
@@ -4092,9 +4139,10 @@ class Broker:
             # turn has no stages, and re-posting turn N-1's files_written with a
             # ceiling chip would label the wrong turn. spawned:false keeps N
             # unconsumed for the next real handoff.
-            detail = {"turn": turn, "halted": "ceiling", "spawned": False,
-                      "reason": "the session reached its token ceiling before "
-                                "this turn"}
+            # No `reason`: §H already renders "build hit its ceiling", and a
+            # reason restating that sentence in lowercase reads as a stutter
+            # (Gable #2358, cosmetic).
+            detail = {"turn": turn, "halted": "ceiling", "spawned": False}
             self._apps_post_stage(session, "scoped", detail)
             self._apps_ledger(self._apps_ledger_record(
                 {"session": session, "turn": turn, "app_id": app_id,
@@ -4285,9 +4333,31 @@ class Broker:
                             "the turn ended without a result")
                         return
                 if time.time() > float(rec.get("deadline") or 0):
-                    self._apps_synthesize(rec, proc, scaffolded,
-                                          "the turn passed its deadline")
-                    return
+                    # THE DEADLINE MUST NOT FIRE OVER A LIVE UNIT (Gable
+                    # #2358, Claudette #2361). RuntimeMaxSec fires AT
+                    # turn_max_sec; run-apps.sh then catches the SIGTERM and
+                    # HARVESTS — commit, secret scan, preview publish — and a
+                    # harvest slower than the grace is still writing
+                    # result.json when deadline (turn_max + grace) passes.
+                    # Synthesizing there strands a real turn's commit, preview
+                    # and tokens with no room line and nothing on the ceiling.
+                    # So while the unit is still active we keep waiting, bounded
+                    # by its own stop timeout so "wait" still cannot mean
+                    # forever: systemd will SIGKILL the cgroup at
+                    # TimeoutStopSec, and past that the unit is gone whatever
+                    # it claims.
+                    hard = (float(rec.get("deadline") or 0)
+                            + self._apps_num("unit_stop_timeout_sec"))
+                    if not alive:
+                        self._apps_synthesize(rec, proc, scaffolded,
+                                              "the turn passed its deadline")
+                        return
+                    if time.time() > hard:
+                        self._apps_synthesize(
+                            rec, proc, scaffolded,
+                            "the turn passed its deadline and its unit did "
+                            "not stop")
+                        return
                 time.sleep(poll)
         except Exception as exc:  # noqa: BLE001 — never die silently
             self._audit("broker", "apps-build",
@@ -4400,6 +4470,49 @@ class Broker:
             exit_code=exit_code if isinstance(exit_code, int) else None,
             halted="error", tokens=0, synthesized=True))
         self._apps_release(str(rec.get("app_id") or ""))
+        # The ticket is KEPT, marked, rather than torn up: synthesizing is only
+        # safe to be wrong about because being wrong is RECORDED, and a
+        # result.json that lands after the synthesis would otherwise be dropped
+        # silently — dropped and ledgered are different words (Gable #2358,
+        # Claudette #2361). The next adopt sweep resolves it: a result beside a
+        # synthesized ticket is ledgered `late`, never posted, and the ticket
+        # goes then.
+        rec = {**rec, "synthesized": True,
+               "synthesized_at": _dt.datetime.now(_dt.timezone.utc).isoformat()}
+        try:
+            self._apps_write_sidecar(rec)
+        except OSError as exc:
+            self._audit("broker", "apps-build",
+                        {"session": session, "turn": turn}, True,
+                        f"could not mark the synthesized ticket: {exc}")
+            self._apps_remove_sidecar(session, turn)
+
+    def _apps_resolve_synthesized(self, rec: dict) -> None:
+        """Close out a turn whose halt this house SYNTHESIZED.
+
+        The room already heard the halt and cannot be told twice, so nothing is
+        posted here — but if the harvest did finish and wrote its record after
+        we gave up on it, that record is the contradiction of a line already in
+        the ledger, and a contradiction nobody wrote down is the failure the
+        grace period was supposed to avoid (Claudette #2361). So: ledger it
+        `late`, never post it, and drop the ticket either way."""
+        session, turn = int(rec["session"]), int(rec["turn"])
+        result, _bad = self._apps_read_result(
+            os.path.join(self._apps_turn_dir(session, turn), "result.json"))
+        if result is not None:
+            exit_code = result.get("exit")
+            self._apps_ledger(self._apps_ledger_record(
+                rec, result=result,
+                exit_code=exit_code if isinstance(exit_code, int) else None,
+                halted=(str(result.get("halted")) if result.get("halted")
+                        else None),
+                tokens=apps_tokens(result.get("usage")),
+                synthesized=False, late=True))
+            self._audit(
+                "broker", "apps-build", {"session": session, "turn": turn},
+                True,
+                "a result landed after this turn's halt was synthesized — "
+                f"ledgered late (commit {result.get('commit')})")
         self._apps_remove_sidecar(session, turn)
 
     # -- reattachment after a restart --------------------------------------
@@ -4445,6 +4558,12 @@ class Broker:
                     os.unlink(path)
                 except OSError:
                     pass
+                continue
+            if rec.get("synthesized"):
+                # This turn already got its synthesized halt in the room. All
+                # that is left is to say, on the record, whether the harvest
+                # eventually wrote one after all (Gable #2358).
+                self._apps_resolve_synthesized(rec)
                 continue
             app_id = str(rec.get("app_id") or "")
             with self._apps_lock:

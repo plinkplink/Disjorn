@@ -415,13 +415,29 @@ def test_the_ceiling_refuses_and_still_tells_the_room(apps):
     assert event["detail"]["turn"] == 4
     assert event["detail"]["halted"] == "ceiling"
     assert event["detail"]["spawned"] is False   # N is not consumed
-    assert event["detail"]["reason"]
+    # no `reason`: §H already says "build hit its ceiling", and a reason
+    # restating it in lowercase is a stutter (Gable #2358).
+    assert "reason" not in event["detail"]
     (line,) = apps.ledger()
     assert line["halted"] == "ceiling"
     assert line["exit"] is None
     assert line["tokens"] == 0
     assert line["spawned"] is False
     assert line["ceiling"] == 10_000_000
+
+
+def test_the_ceiling_reads_the_larger_of_the_server_and_the_ledger(apps):
+    """Gable #2358: check 3 reads the SERVER, and the server only learns a
+    turn's usage if the stage post landed. Two failed posts and the ceiling
+    drifts below what was actually spent, while the ledger — written on this
+    disk before any network call — has the truth."""
+    apps.broker._apps_ledger({"session": SESSION, "tokens_after": 10_000_000})
+    apps.view["tokens_used"] = 0             # the server was never told
+    resp = _handoff(apps)
+    assert resp["error"]["code"] == "apps-refused"
+    assert resp["error"]["message"] == (
+        "this build has hit its token ceiling (10000000 of 10000000)")
+    assert apps.spawn.calls == []
 
 
 def test_a_ceiling_refusal_with_no_stage_yet_posts_scoped(apps):
@@ -740,7 +756,10 @@ def test_a_turn_that_ends_with_no_result_is_a_halt(apps):
     assert line["exit"] == 143
     assert line["tokens"] == 0
     assert apps.broker._active_apps == {}
-    assert apps.sidecars() == []
+    # The ticket is KEPT and MARKED rather than torn up, so a result that
+    # lands after the synthesis can still be ledgered late (Gable #2358).
+    (ticket,) = apps.sidecars()
+    assert json.loads(ticket.read_text())["synthesized"] is True
 
 
 def test_a_result_that_never_becomes_json_is_the_same_halt(apps):
@@ -754,18 +773,102 @@ def test_a_result_that_never_becomes_json_is_the_same_halt(apps):
     assert apps.ledger()[0]["synthesized"] is True
 
 
-def test_a_turn_past_its_deadline_is_halted_even_while_the_unit_lives(apps):
+def test_a_turn_past_its_deadline_with_a_dead_unit_is_halted(apps):
     proc = FakeAppsProc()
     apps.broker._apps_spawn = FakeAppsSpawn(lambda: proc)
     _handoff(apps)
     (path,) = apps.sidecars()
     rec = json.loads(path.read_text())
-    # Re-adopt the same ticket with a deadline that has already passed: the
-    # live turn's own reaper is still watching a process that never ends.
     rec["deadline"] = time.time() - 1
-    apps.broker._apps_release(SESSION)
+    apps.broker._apps_release(APP_ID)
+    # proc=None is the adopted path, and the stub systemctl answers `unknown`,
+    # which is not an active state: the unit is gone and the deadline stands.
     apps.broker._reap_apps(rec, None)
     assert apps.stages[-1]["detail"]["reason"] == "the turn passed its deadline"
+
+
+def test_the_deadline_does_not_fire_over_a_unit_that_is_still_harvesting(apps):
+    """Gable #2358, Claudette #2361 — the BLOCK on the go-live flip.
+
+    RuntimeMaxSec fires AT turn_max; run-apps.sh catches the SIGTERM and
+    HARVESTS (commit, secret scan, preview publish). A harvest slower than the
+    grace is still writing result.json when deadline = turn_max + grace passes,
+    and synthesizing there strands a real turn's commit, preview and tokens
+    with no room line and nothing on the ceiling. So while the unit is still
+    alive, the deadline waits."""
+    proc = FakeAppsProc()                    # still running: harvesting
+    apps.broker._apps_spawn = FakeAppsSpawn(lambda: proc)
+    _handoff(apps)
+    (path,) = apps.sidecars()
+    rec = json.loads(path.read_text())
+    rec["deadline"] = time.time() - 1        # past, but inside the stop timeout
+    apps.broker._apps_release(APP_ID)
+
+    before = len(apps.stages)
+    t = threading.Thread(target=apps.broker._reap_apps, args=(rec, proc),
+                         daemon=True)
+    t.start()
+    time.sleep(0.3)
+    assert len(apps.stages) == before        # it waited; nothing synthesized
+
+    apps.write_result()                      # the harvest finally lands
+    t.join(timeout=5)
+    assert apps.stage_names()[-2:] == ["files_written", "deployed"]
+    assert apps.ledger()[-1]["synthesized"] is False
+    assert apps.ledger()[-1]["commit"] == "e01a4eb1234"
+
+
+def test_a_unit_that_will_not_stop_is_halted_at_its_stop_timeout(apps):
+    """"Wait while it is alive" still cannot mean forever: past the unit's own
+    TimeoutStopSec systemd has SIGKILLed the cgroup and nothing is left to
+    write the record."""
+    proc = FakeAppsProc()
+    apps.broker._apps_spawn = FakeAppsSpawn(lambda: proc)
+    _handoff(apps)
+    (path,) = apps.sidecars()
+    rec = json.loads(path.read_text())
+    rec["deadline"] = time.time() - 10_000   # past even the stop timeout
+    apps.broker._apps_release(APP_ID)
+    apps.broker._reap_apps(rec, proc)
+    assert apps.stages[-1]["detail"]["reason"] == (
+        "the turn passed its deadline and its unit did not stop")
+    assert apps.ledger()[-1]["synthesized"] is True
+
+
+def test_a_result_that_lands_after_a_synthesized_halt_is_ledgered_late(apps):
+    """Gable #2358, Claudette #2361: dropped and ledgered are different words.
+    Synthesizing is only safe to be wrong about because being wrong is
+    RECORDED, so a result that arrives after the halt is written down — and
+    never posted, because the room cannot be told twice."""
+    proc = FakeAppsProc()
+    apps.broker._apps_spawn = FakeAppsSpawn(lambda: proc)
+    _handoff(apps)
+    proc.finish(rc=143)
+    apps.broker.join_apps(timeout=5)
+    assert apps.ledger()[0]["synthesized"] is True
+    # the ticket is KEPT, marked, so the contradiction can still be recorded
+    (path,) = apps.sidecars()
+    assert json.loads(path.read_text())["synthesized"] is True
+
+    posted = len(apps.stages)
+    apps.write_result()                      # the harvest finished after all
+    assert apps.broker.adopt_inflight_apps() == []   # not re-reaped
+    assert len(apps.stages) == posted                # and never posted
+    late = apps.ledger()[-1]
+    assert late["late"] is True and late["synthesized"] is False
+    assert late["commit"] == "e01a4eb1234"
+    assert apps.sidecars() == []
+
+
+def test_a_synthesized_turn_with_no_late_result_just_drops_its_ticket(apps):
+    proc = FakeAppsProc()
+    apps.broker._apps_spawn = FakeAppsSpawn(lambda: proc)
+    _handoff(apps)
+    proc.finish(rc=143)
+    apps.broker.join_apps(timeout=5)
+    assert apps.broker.adopt_inflight_apps() == []
+    assert apps.sidecars() == []
+    assert len(apps.ledger()) == 1           # nothing invented
 
 
 # ------------------------------------------------------------ the 2000 bound
