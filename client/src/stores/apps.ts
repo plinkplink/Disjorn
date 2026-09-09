@@ -141,11 +141,12 @@ function withTurn(session: AppSession): AppSession {
  * turn that halts is caught by `lastTurn.done` instead, whatever stage it
  * reached.
  */
-const TURN_SETTLED_STAGES: readonly AppStage[] = [
-  "files_written",
-  "deployed",
-  "live",
-];
+// `files_written` is NOT settled: a turn that wrote files is still being
+// published, and `deployed` follows it with a reload. Thawing between the two
+// would change the app under the mouse (Round 5). A turn that wrote nothing
+// ends at `files_written` with `no_changes`, and a halt ends wherever it was —
+// both of those set `lastTurn.done`, which is checked first.
+const TURN_SETTLED_STAGES: readonly AppStage[] = ["deployed", "live"];
 
 /**
  * Is a turn running right now? — the one input to the preview's freeze/thaw
