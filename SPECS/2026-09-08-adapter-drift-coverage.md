@@ -53,4 +53,5 @@ Broker suite green, AND a run showing the five adapter-drift tests executed rath
 - **Confirmed at**: 2026-09-09 12:13Z (plink, #custodian seq 2455)
 
 ## Status
-`confirmed`
+building
+<!-- set by the broker on 2026-09-09 19:11Z (start-build, 2026-09-08-adapter-drift-coverage): build running as disjorn-build-2026-09-08-adapter-drift-coverage.service -> loop/2026-09-08-adapter-drift-coverage, launched by gable (confirmed by plink, #custodian seq 2455). Not buildable again until this line moves. -->
