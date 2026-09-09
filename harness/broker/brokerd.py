@@ -214,8 +214,8 @@ _PUBLISH_LINE_RES = (
         rf"^PUBLISH-FAILED[ \t]+({_PUBLISH_REPO_RE}\.git)[ \t]+(\S.*)$")),
     ("no_commits", re.compile(
         rf"^NO-COMMITS[ \t]+({_PUBLISH_REPO_RE}\.git)[ \t]*$")),
-    # The quarantine line names the repo WITHOUT.git (it is a workspace clone, not a
-    # bare repo) and carries a path we only ever echo, never open.
+    # The quarantine line names the repo WITHOUT .git (it is a workspace clone, not
+    # a bare repo) and carries a path we only ever echo, never open.
     ("quarantined", re.compile(
         rf"^QUARANTINED[ \t]+({_PUBLISH_REPO_RE})[ \t]+(\S.*)$")),
 )
@@ -679,8 +679,15 @@ def _status_comment_text(text: str, cap: int = 300) -> str:
 
 
 def build_outcome_class(publish: dict, unit_reason: "str | None") -> str:
-    """'failed' or 'done', from the harvest lines — THE ladder, in this order: 1.
-    the unit itself failed (`unit_reason`) -> failed 2."""
+    """'failed' or 'done', from the harvest lines — THE ladder, in this order:
+      1. the unit itself failed (`unit_reason`)      -> failed
+      2. ANY PUBLISH-FAILED line                     -> failed
+      3. at least one PUBLISHED or NO-COMMITS line   -> done
+      4. nothing at all                              -> failed (never assume
+         success from silence).
+    format_build_outcome narrates from it and spec_status_after_build stamps
+    the spec from it: one ladder, so the banner and the file can never disagree
+    about whether a build failed."""
     if unit_reason is not None or publish.get("failed"):
         return "failed"
     if publish.get("published") or publish.get("no_commits"):
@@ -2071,7 +2078,7 @@ class Broker:
         """Map caller input to a real spec file, CONFINED to the configured SPECS/
         dir. realpath() resolves BOTH `..` traversal and symlink escape, then we
         require the resolved file to sit DIRECTLY in SPECS/ (the flat
-        one-file-per-spec layout) and end in.md."""
+        one-file-per-spec layout) and end in .md."""
         if spec.startswith("-") or "\x00" in spec:
             raise _bad("spec must not start with '-' or contain NUL")
         specs_dir = self._specs_dir()
