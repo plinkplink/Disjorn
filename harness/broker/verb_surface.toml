@@ -586,15 +586,25 @@ description = "Absolute path to the prompt file you just wrote, inside your own 
 #
 # WHAT KEEPS IT HONEST. test_verb_surface.py reads the adapter's core.py and
 # checks both directions: a tool described here that the adapter does not
-# register, and a tool the adapter registers that nobody described. That check
-# needs the adapter repo on disk; where it is not, the test says so and skips
-# rather than passing quietly.
+# register, and a tool the adapter registers that nobody described.
 #
-# SCOPE. Tools DECLARED IN core.py, which is what a static read of that file
-# can see. Memory tools arrive from the memory package through a loop over
-# MEMORY_TOOLS, and `search_topic` is registered by the platform adapter
-# (disjorn_bot.py) — both are out of scope here and named so nobody reads
-# their absence as drift.
+# WHERE core.py IS, so nobody guesses it again. THE GATEHOUSE REPO'S ROOT IS
+# THE BOT DIRECTORY: core.py is at the TOP of gatehouse/claudette/<branch>, and
+# the canonical read is
+#     read_repo_file(path="core.py", rev="gatehouse/claudette/<branch>")
+# `bots/claudette/` is the HOST layout under /home/plink — not a path inside
+# any repo, and reachable from no resident seat. The test reads the mirror's
+# object store for the same reason, and an unresolvable pin FAILS the suite
+# naming what it tried; before 2026-09-09 it skipped, and the skip read as
+# green for weeks.
+#
+# SCOPE. Tools DECLARED IN core.py as module-level literals, which is what a
+# static read of that file can see. Three kinds of tool are out of scope and
+# named here so nobody reads their absence as drift: memory tools (a loop over
+# MEMORY_TOOLS from the memory package), `search_topic` (registered by the
+# platform adapter, disjorn_bot.py), and the BROKER VERBS — since the seat
+# started registering them from generated broker_tools.py they are a loop too,
+# and the [verbs] table above is what covers them.
 #
 # GRAMMAR: seat, module, args (list), description. All four required.
 
