@@ -3616,6 +3616,13 @@
   line-height: 1.6;
 }
 
+/* The stop confirm (slice (iv)) borrows the delete-channel dialog's frame —
+   same shape of question, same weight — and only needs to sit above the
+   build modal it was opened from. */
+.app-build-confirm {
+  z-index: 1;
+}
+
 .app-build-chip--halted {
   color: var(--danger);
   background: rgba(240, 84, 108, 0.14);

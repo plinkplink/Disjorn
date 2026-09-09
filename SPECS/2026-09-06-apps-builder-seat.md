@@ -243,7 +243,9 @@ Broker checks, in order, each a flat-sentence refusal in the audit log:
    Usage lands when the runner finishes, so the ceiling is checked before
    a turn and recorded after: a trip blocks the NEXT handoff, and one turn
    can overshoot. That is a runaway kill under parent Round 6, not a
-   budget, and no UI may promise a mid-turn stop (Claudette #2284);
+   budget; the UI may offer a stop that ends the turn within the unit's
+   stop timeout, and it is not a budget either (Claudette #2284; amended
+   by 2026-09-08-apps-stop-turn.md, confirmed 2444);
 4. one turn at a time per session (in-memory claim, sidecar JSON like
    builds, adopted on restart).
 Then: post `scoped`; spawn the turn through the launcher (which inits the

@@ -51,7 +51,16 @@ Wire, in order of the click:
      "stopped"` is accepted after `ended_at` is set **only for the turn
      that was running when `end` was called** (the record of the stop
      must land; nothing else gets through the 410). Reset
-     `stop_requested_at` to NULL on any terminal event.
+     `stop_requested_at` to NULL on any terminal event. Residue, bounded
+     and recorded (Claudette #2447): if that turn's terminal event never
+     arrives — harvest dies before `result.json` AND the broker's
+     synthesized halt fails to post — `stop_requested_at` stays set on the
+     ended session and that ONE turn number keeps its 410 exemption. It is
+     keyed on the turn, so nothing else can use it; the exemption admits
+     one terminal event and spends itself.
+   - `stop` 410s on `ended_at` only, never on a lapsed lock (#2447): the
+     lock is chat exclusivity, and the owner back from a lapse is the one
+     most likely to be looking at a runaway turn.
 2. **Broker** (`brokerd.py`, apps reaper): each poll already reads the
    result dir; add one `harness-view` read per poll (the reader exists
    for check 1). If `stop_requested_at` is set and the unit is alive,

@@ -55,7 +55,17 @@ const HALT_CHIP_TEXT: Record<HaltReason, string> = {
   timeout: "timed out",
   error: "failed",
   secret: "closed: credential",
+  stopped: "stopped by you",
 };
+
+/* The dialog's words ARE the promise (spec: "Its words are the promise,
+   exactly"). Nothing here says instant: the hard bound is the unit's stop
+   timeout, and "about a minute and a half" is that number said plainly. */
+const STOP_PROMISE =
+  "Stop this turn? The builder gets a moment to save what it has. Files " +
+  "written so far stay in the project; the preview does not change. This " +
+  "ends the turn, not the session. Takes up to about a minute and a half.";
+const END_STOPS_FIRST = "Ending the session stops the turn first.";
 
 /** How many files the turn actually touched.
 
@@ -96,6 +106,12 @@ export function AppBuildModal({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [ended, setEnded] = useState(false);
   const [ending, setEnding] = useState(false);
+  /* Stop (slice (iv)). `stopping` holds from the click until the turn's
+     terminal event lands — cleared by the store deriving `done`, never by a
+     timer, because the server's record is the only thing that says the turn
+     ended. `confirming` is which verb the open dialog is for. */
+  const [stopping, setStopping] = useState(false);
+  const [confirming, setConfirming] = useState<"stop" | "end" | null>(null);
   const [renaming, setRenaming] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
   const [now, setNow] = useState(() => Date.now());
@@ -207,8 +223,47 @@ export function AppBuildModal({
       });
   };
 
+  /* A turn is running from its `scoped` until its terminal event: the store
+     folds the events and `done` is that terminal fact. Idle sessions (no
+     turn yet, or the last one finished) show no Stop. */
+  const turnRunning =
+    session?.lastTurn !== null &&
+    session?.lastTurn !== undefined &&
+    session.lastTurn.done !== true;
+
+  const stopNow = () => {
+    if (session === undefined || stopping) return;
+    setConfirming(null);
+    setStopping(true);
+    useApps
+      .getState()
+      .stopTurn(sessionId)
+      .catch((err: unknown) => {
+        // 409: nothing was running by the time the click landed — the turn
+        // ended on its own, which is the outcome asked for. 410: the session
+        // is over, same answer. Anything else is a failure to say.
+        if (err instanceof ApiError && (err.status === 409 || err.status === 410)) {
+          setStopping(false);
+          if (err.status === 410) setEnded(true);
+          return;
+        }
+        setStopping(false);
+        setLoadError(
+          err instanceof ApiError ? err.detail : "Failed to stop the turn",
+        );
+      });
+  };
+
+  /* The store clears `stopping` for us: the turn's terminal event flips
+     `done`, and a button that stayed "Stopping…" past that would be promising
+     something that already happened. */
+  useEffect(() => {
+    if (stopping && !turnRunning) setStopping(false);
+  }, [stopping, turnRunning]);
+
   const endNow = () => {
     if (session === undefined || ending) return;
+    setConfirming(null);
     setEnding(true);
     useApps
       .getState()
@@ -285,6 +340,37 @@ export function AppBuildModal({
      close the whole build modal behind it. */
   return (
     <>
+    {confirming !== null && (
+      <div
+        className="modal-backdrop"
+        onClick={() => setConfirming(null)}
+      >
+        <div
+          className="delete-channel-modal app-build-confirm"
+          role="alertdialog"
+          aria-modal="true"
+          aria-label={confirming === "stop" ? "Stop this turn?" : "End the session?"}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <p className="member-modal-note">
+            {STOP_PROMISE}
+            {confirming === "end" ? ` ${END_STOPS_FIRST}` : ""}
+          </p>
+          <div className="member-modal-actions">
+            <button className="btn" onClick={() => setConfirming(null)}>
+              Cancel
+            </button>
+            <button
+              className="btn btn-danger"
+              autoFocus
+              onClick={confirming === "stop" ? stopNow : endNow}
+            >
+              {confirming === "stop" ? "Stop this turn" : "Stop and end"}
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
     <div className="modal-backdrop app-build-backdrop" onClick={onClose}>
       <div
         className="app-build-modal"
@@ -329,7 +415,20 @@ export function AppBuildModal({
           >
             {showPreview ? "Chat" : "Progress"}
           </button>
-          <button className="btn" disabled={ended || ending} onClick={endNow}>
+          {turnRunning && !ended && (
+            <button
+              className="btn btn-danger"
+              disabled={stopping}
+              onClick={() => setConfirming("stop")}
+            >
+              {stopping ? "Stopping…" : "Stop"}
+            </button>
+          )}
+          <button
+            className="btn"
+            disabled={ended || ending}
+            onClick={() => (turnRunning ? setConfirming("end") : endNow())}
+          >
             {ending ? "Ending…" : ended ? "Ended" : "End session"}
           </button>
           <button

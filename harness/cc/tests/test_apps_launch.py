@@ -181,10 +181,107 @@ def test_no_arguments_is_refused(seat):
     refuse(seat)
 
 
-def test_stop_mode_does_not_exist(seat):
-    """The build launcher has run|stop; this one has run only. A turn is
-    bounded by RuntimeMaxSec, and killing one early is a keyboard act."""
-    refuse(seat, "stop", *GOOD, str(seat["prompt"]))
+# ── stop (slice (iv), SPECS/2026-09-08-apps-stop-turn.md, 2444) ────────────
+
+def test_stop_argv_byte_for_byte(seat):
+    """`stop` names a turn and nothing else; the unit name is derived from the
+    same charsets `run` enforces, so a caller can never aim systemctl at a
+    unit it did not launch."""
+    assert accept(seat, "stop", "res-gable", "12", "3") == [
+        "/usr/bin/systemctl", "stop", "disjorn-apps-12-3"]
+
+
+@pytest.mark.parametrize("args", [
+    [],                                   # nothing
+    ["res-gable", "12"],                  # too few
+    ["res-gable", "12", "3", "extra"],    # too many (run's shape)
+    ["keyboard", "12", "3"],              # the retired principal
+    ["res-gable", "0", "3"],              # session charset
+    ["res-gable", "12", "03"],            # turn charset
+    ["res-gable", "12", "3 --now"],       # a flag riding in an argument
+    ["res-gable", "../12", "3"],          # a path riding in an argument
+])
+def test_stop_refuses_every_bad_shape(seat, args):
+    refuse(seat, "stop", *args)
+
+
+def test_stop_drops_the_marker_in_the_seats_turn_dir(seat, tmp_path):
+    """The marker is how the harvest tells the user's stop from the clock:
+    both arrive as one SIGTERM. Created once; a second stop finds it and says
+    so rather than failing."""
+    # The walk refuses any dir the seat does not own, so the fake seat here
+    # IS this test's uid: tmp_path is ours, and that is the case being proved.
+    mine = ":".join([str(os.getuid()), *FAKE_SEAT.split(":")[1:]])
+    turn_dir = tmp_path / "turns" / "12" / "3"
+    turn_dir.mkdir(parents=True)
+    env = {"DISJORN_APPS_LAUNCH_TURNS_ROOT": str(tmp_path / "turns"),
+           "DISJORN_APPS_LAUNCH_FAKE_SEAT": mine}
+    first = json.loads(run(seat, "stop", "res-gable", "12", "3",
+                           env_extra=env).stdout)
+    assert first == {"argv": ["/usr/bin/systemctl", "stop", "disjorn-apps-12-3"],
+                     "marker": True}
+    marker = turn_dir / "stop-requested"
+    assert marker.is_file() and marker.stat().st_size == 0
+    again = json.loads(run(seat, "stop", "res-gable", "12", "3",
+                           env_extra=env).stdout)
+    assert again["marker"] is False
+
+
+STOP_ARGV = ["/usr/bin/systemctl", "stop", "disjorn-apps-12-3"]
+
+
+def _stop_dry(seat, env):
+    """A dry stop on a named turns root: exit 0 and the JSON, whatever the
+    marker did. The argv being present in every case IS the property."""
+    proc = run(seat, "stop", "res-gable", "12", "3", env_extra=env)
+    assert proc.returncode == 0, f"a marker problem must not exit:\n{proc.stderr}"
+    return json.loads(proc.stdout), proc.stderr
+
+
+def test_a_stop_with_no_turn_dir_yet_still_sends_the_stop(seat, tmp_path):
+    """THE gate test (Claudette #2447). run-apps.sh makes the turn dir inside
+    the unit, after systemd has started it, so a stop pressed in the first
+    moments of a turn finds no dir. The marker is a label; the stop is the
+    act. No dir: the argv is still built and the exec still happens, and the
+    unit's journal keeps one warning saying the room will read it as a
+    timeout. Root still creates nothing."""
+    (tmp_path / "turns").mkdir()
+    out, err = _stop_dry(seat, {"DISJORN_APPS_LAUNCH_TURNS_ROOT": str(tmp_path / "turns")})
+    assert out["argv"] == STOP_ARGV
+    assert out["marker"].startswith("no turn dir yet: 12/3")
+    assert "stop marker not written" in err and "sent regardless" in err
+    assert not (tmp_path / "turns" / "12").exists()
+
+
+def test_a_turn_dir_the_seat_does_not_own_gets_no_marker_but_the_stop(seat, tmp_path):
+    """Root never writes by name into a tree the seat controls. The walk
+    fstat's each component and refuses a directory not owned by the seat —
+    which, with a fake seat uid that is not ours, is every directory here.
+    Refused means not written; it does not mean not stopped."""
+    other = FAKE_SEAT.split(":")
+    turn_dir = tmp_path / "turns" / "12" / "3"
+    turn_dir.mkdir(parents=True)
+    env = {"DISJORN_APPS_LAUNCH_TURNS_ROOT": str(tmp_path / "turns"),
+           "DISJORN_APPS_LAUNCH_FAKE_SEAT": ":".join([str(os.getuid() + 1), *other[1:]])}
+    out, _ = _stop_dry(seat, env)
+    assert out["argv"] == STOP_ARGV
+    assert "not the seat's own" in out["marker"]
+    assert not (turn_dir / "stop-requested").exists()
+
+
+def test_a_symlinked_turn_dir_gets_no_marker_anywhere_but_the_stop(seat, tmp_path):
+    """A seat that replaces its turn dir with a symlink to somewhere root can
+    write gets no file at the far end — and its turn still stops."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (tmp_path / "turns" / "12").mkdir(parents=True)
+    (tmp_path / "turns" / "12" / "3").symlink_to(elsewhere)
+    mine = ":".join([str(os.getuid()), *FAKE_SEAT.split(":")[1:]])
+    out, _ = _stop_dry(seat, {"DISJORN_APPS_LAUNCH_TURNS_ROOT": str(tmp_path / "turns"),
+                              "DISJORN_APPS_LAUNCH_FAKE_SEAT": mine})
+    assert out["argv"] == STOP_ARGV
+    assert not (elsewhere / "stop-requested").exists()
+    assert not (tmp_path / "turns" / "12" / "3" / "stop-requested").exists()
 
 
 def test_unknown_mode_is_refused(seat):

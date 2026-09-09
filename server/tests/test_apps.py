@@ -1090,6 +1090,7 @@ async def test_harness_view_is_publisher_gated_and_answers_the_four_checks(
         "lock_lapsed": False,
         "ended_at": None,
         "locked_until": session["locked_until"],
+        "stop_requested_at": None,
     }
 
     # A session nobody minted is 404, not an empty view.
@@ -1540,3 +1541,149 @@ def test_the_turn_line_renders_without_a_database():
     assert _turn_line({"turn": 2, "no_changes": True, "summary": "\n\t "}) == (
         "Turn 2: no changes."
     )
+
+
+# ---------------------------------------------------------------------------
+# Slice (iv): stop a running turn (SPECS/2026-09-08-apps-stop-turn.md, 2444)
+# ---------------------------------------------------------------------------
+
+
+async def _stage(client, sid: int, stage: str, detail: dict):
+    r = await client.post(
+        f"/apps/sessions/{sid}/stage", json={"stage": stage, "detail": detail},
+        headers=as_bot(client, BROKER_KEY),
+    )
+    return r
+
+
+async def _owner_post(client, path: str):
+    """The owner's click. as_bot cleared the jar on the last harness call, so
+    every owner call re-logs in first — the same user build_fixture used."""
+    await login(client, "alice")
+    return await client.post(path)
+
+
+async def _view(client, sid: int) -> dict:
+    return (
+        await client.get(f"/apps/sessions/{sid}/harness-view",
+                         headers=as_bot(client, BROKER_KEY))
+    ).json()
+
+
+async def test_stop_needs_a_running_turn_and_is_idempotent(
+    client, app, settings_env, seat_toml
+):
+    """409 with nothing running: a request that would otherwise sit on the row
+    until some later turn inherited it. Once a turn is scoped the stop lands,
+    a second click keeps the first timestamp, and harness-view carries it."""
+    session = await build_fixture(client, settings_env, seat_toml)
+    sid = session["id"]
+    nothing = await _owner_post(client, f"/apps/sessions/{sid}/stop")
+    assert nothing.status_code == 409
+    assert (await _view(client, sid))["stop_requested_at"] is None
+
+    assert (await _stage(client, sid, "scoped", {"turn": 1})).status_code == 200
+    first = await _owner_post(client, f"/apps/sessions/{sid}/stop")
+    assert first.status_code == 200
+    stamp = first.json()["stop_requested_at"]
+    assert stamp and first.json()["id"] == sid
+    again = await _owner_post(client, f"/apps/sessions/{sid}/stop")
+    assert again.status_code == 200 and again.json()["stop_requested_at"] == stamp
+    assert (await _view(client, sid))["stop_requested_at"] == stamp
+
+
+async def test_a_terminal_event_consumes_the_stop_and_the_room_says_stopped(
+    client, app, settings_env, seat_toml
+):
+    """The harvest's record is the terminal event; `stopped` is a closed-set
+    reason with its own sentence, and it clears the request so the next turn
+    starts unasked."""
+    session = await build_fixture(client, settings_env, seat_toml)
+    sid = session["id"]
+    await _stage(client, sid, "scoped", {"turn": 1})
+    await _owner_post(client, f"/apps/sessions/{sid}/stop")
+    r = await _stage(client, sid, "scaffolded", {
+        "turn": 1, "halted": "stopped", "files": ["index.html"], "tokens": 12,
+    })
+    assert r.status_code == 200, r.text
+    assert (await _view(client, sid))["stop_requested_at"] is None
+    lines = await channel_lines(session["channel_id"])
+    assert lines[-1].startswith("Turn 1 halted — stopped by the user. Wrote index.html."), lines
+    # a second turn is a fresh start: stop is 409 until it is scoped again
+    assert (await _owner_post(client, f"/apps/sessions/{sid}/stop")).status_code == 409
+
+
+async def test_end_while_running_stops_first_and_that_turns_record_still_lands(
+    client, app, settings_env, seat_toml
+):
+    """`end` used to set only `ended_at`; the unit ran to turn_max and its
+    record 410'd. Now the stop is recorded first, and the ONE turn that was
+    running may still post its terminal event through the closed door — no
+    other turn can."""
+    session = await build_fixture(client, settings_env, seat_toml)
+    sid = session["id"]
+    await _stage(client, sid, "scoped", {"turn": 2})
+    ended = await _owner_post(client, f"/apps/sessions/{sid}/end")
+    assert ended.status_code == 200
+    view = await _view(client, sid)
+    assert view["open"] is False
+    assert view["stop_requested_at"] == view["ended_at"]
+
+    # a different turn's event: the door is shut
+    other = await _stage(client, sid, "scoped", {"turn": 3})
+    assert other.status_code == 410
+    # the running turn's terminal event: accepted, and it consumes the stop
+    landed = await _stage(client, sid, "scaffolded", {"turn": 2, "halted": "stopped"})
+    assert landed.status_code == 200, landed.text
+    assert (await _view(client, sid))["stop_requested_at"] is None
+    # and now even that turn is shut out: the stop was the key, and it is spent
+    assert (await _stage(client, sid, "scaffolded",
+                         {"turn": 2, "halted": "stopped"})).status_code == 410
+    # stop on an ended session is 410, like everything else on one
+    assert (await _owner_post(client, f"/apps/sessions/{sid}/stop")).status_code == 410
+
+
+async def test_a_lapsed_lock_does_not_bar_the_owner_from_stopping(
+    client, app, settings_env, seat_toml
+):
+    """The lock is chat exclusivity, not a door (Claudette #2447). An owner
+    who walked away and came back to a runaway turn can still stop it."""
+    session = await build_fixture(client, settings_env, seat_toml)
+    sid = session["id"]
+    await _stage(client, sid, "scoped", {"turn": 1})
+    await db.execute(
+        "UPDATE app_sessions SET locked_until = '2000-01-01T00:00:00.000Z' WHERE id = ?",
+        (sid,),
+    )
+    r = await _owner_post(client, f"/apps/sessions/{sid}/stop")
+    assert r.status_code == 200, r.text
+    assert (await _view(client, sid))["stop_requested_at"] == r.json()["stop_requested_at"]
+
+
+async def test_end_with_nothing_running_requests_no_stop(
+    client, app, settings_env, seat_toml
+):
+    session = await build_fixture(client, settings_env, seat_toml)
+    sid = session["id"]
+    await _stage(client, sid, "scoped", {"turn": 1})
+    await _stage(client, sid, "files_written", {"turn": 1, "files": [], "tokens": 1})
+    await _owner_post(client, f"/apps/sessions/{sid}/end")
+    assert (await _view(client, sid))["stop_requested_at"] is None
+
+
+async def test_a_ceiling_refusal_is_not_a_running_turn(
+    client, app, settings_env, seat_toml
+):
+    """`spawned: false` never started anything, so there is nothing to stop."""
+    session = await build_fixture(client, settings_env, seat_toml)
+    sid = session["id"]
+    await _stage(client, sid, "scoped", {"turn": 1, "spawned": False, "halted": "ceiling"})
+    assert (await _owner_post(client, f"/apps/sessions/{sid}/stop")).status_code == 409
+
+
+def test_the_stopped_turn_line_reads_like_the_other_halts():
+    from app.routers.apps import _turn_line
+    line = _turn_line({"turn": 4, "halted": "stopped", "files": ["a.js", "b.js"],
+                       "summary": "was halfway through the header"})
+    assert line == ('Turn 4 halted — stopped by the user. Wrote a.js, b.js. '
+                    '"was halfway through the header"')
