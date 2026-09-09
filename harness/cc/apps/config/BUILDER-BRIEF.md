@@ -95,10 +95,11 @@ run:
 `BLOB_VERSION` is **1**. Read `version` before you read anything else and
 degrade politely if it is a number you do not know.
 
-**It may be absent.** In the preview — which is where the user sees your work
-during a build — there is no gate, so `window.__DISJORN__` is `undefined`.
-Guard every access, supply sensible defaults, and never let a missing blob be
-the reason the app renders nothing:
+**It may be absent.** The preview is served by the same gate the live app is,
+with the owner's blob, so `window.__DISJORN__` is normally there in both. The
+guard still matters: an app opened straight off disk — or from anywhere else
+that is not the gate — has no blob at all. Guard every access, supply sensible
+defaults, and never let a missing blob be the reason the app renders nothing:
 
 ```js
 const ctx = window.__DISJORN__ ?? { version: 1, user: null, shared_with: [], theme: {} };

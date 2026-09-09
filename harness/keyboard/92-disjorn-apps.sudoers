@@ -1,5 +1,7 @@
 # /etc/sudoers.d/92-disjorn-apps — the THIRD (and only other) privileged escape
-# hatch of the disjorn-broker daemon. Sibling of 90-disjorn-broker and
+# hatch of the disjorn-broker daemon, and since stage 3 the FIRST one the
+# disjorn server uses too (see "THE SERVER IS NOW A CALLER" below; both daemons
+# run as plink). Sibling of 90-disjorn-broker and
 # 91-disjorn-build; read 91's header first, because the reasoning about sudoers
 # wildcards is identical and is not repeated in full here.
 #
@@ -34,17 +36,42 @@
 #   stop only ever ends one sooner, and only the unit this helper's own `run`
 #   could have started. There is no second program.
 #
+#   Three SERVING modes (stage 3, SPECS/2026-09-09-apps-serving-gate.md D6),
+#   each taking app ids and nothing else: `publish <app>` promotes that app's
+#   preview tree to its `live` tree (keeping one `live.prev`), `revert <app>`
+#   swaps those two back, and `remix <parent> <child>` clones one app's git
+#   repository into a new app id and copies the parent's preview to the
+#   child's. The helper does none of it as root: it validates, then execs
+#   systemd-run to re-enter ITSELF as res-appsbuilding inside a transient unit
+#   (`<mode>-as-seat`, a mode no line below can name), which is the account
+#   that owns /srv/apps and /srv/apps-www in the first place.
+#
+# THE SERVER IS NOW A CALLER OF THIS FILE — the first one that is not the
+# broker. `POST /apps/sessions/{sid}/live`, `/apps/{id}/revert` and
+# `/apps/{id}/remix` shell out to `sudo -n <helper> <mode> <ids...>` from the
+# disjorn server, which runs as plink (deploy/disjorn.service) exactly as the
+# broker does. So the plink line below serves two daemons, and both of them
+# reach exactly the modes named here. Noted for review in D6: the alternative
+# was the broker's mark-and-poll shape, which adds a poll to an action a user
+# is waiting on.
+#
 # ONE LINE FOR ONE CALLER, ON PURPOSE. The `apps-build` verb is called by the
 # broker, which already runs as plink, so this one line serves every turn and
-# nothing needs widening. If the broker is ever given its own uid, that is a
-# NEW line here with a visible diff — never a wildcard.
+# nothing needs widening. If the broker or the server is ever given its own
+# uid, that is a NEW line here with a visible diff — never a wildcard.
 #
 # WHAT AN ATTACKER WHO OWNS THE plink UID GAINS: the ability to run
 # run-apps.sh — and nothing else — as res-appsbuilding, on a prompt file that
-# must already live in a directory /etc/disjorn-apps/launch.toml names. That is
-# a LATERAL step into a contained seat that holds one metered, revocable API
-# key and one app's source. Nothing here can start a root process, set a unit
-# property, or name a program.
+# must already live in a directory /etc/disjorn-apps/launch.toml names; plus
+# the ability to promote or roll back ONE APP'S STATIC TREE, or to clone one
+# app id into another. Never a program, never a path: every root the serving
+# modes touch is a constant compiled into the helper, and the only names a
+# caller supplies are twelve-character app ids that become directory names
+# under /srv/apps and /srv/apps-www. The worst of it is serving app A's files
+# at app A's URL a deploy early or a deploy late. That is a LATERAL step into
+# a contained seat that holds one metered, revocable API key and one app's
+# source. Nothing here can start a root process, set a unit property, or name
+# a program.
 #
 # HOW FAR THE REGEX ACTUALLY GOES: sudo matches the arguments JOINED BY SPACES,
 # so it cannot tell "five arguments" from "one argument containing four
@@ -65,10 +92,28 @@
 #
 #   stop <principal> <session> <turn>
 #     the same three shapes, and nothing after them.
+#
+#   publish <app-id>          promote preview → live
+#   revert  <app-id>          swap live ↔ live.prev
+#   remix   <parent> <child>  clone the repo, copy the preview
+#     app ids only, [a-z2-7]{12} each, anchored at both ends so nothing rides
+#     in after them. NO principal: a serving operation is the HOUSE's, decided
+#     by the server against its own tables (who owns the app, whether the
+#     builder is idle, whether a previous deploy exists) — the helper's job is
+#     that the ids are ids and the seat is the seat. NO `-as-seat` mode is
+#     reachable from here, which is what keeps the unit's half unprivileged.
 
 Cmnd_Alias DISJORN_APPS_LAUNCH = \
     /usr/local/lib/disjorn/disjorn-apps-launch ^run res-[a-z]{1,24} [1-9][0-9]{0,8} [1-9][0-9]{0,3} [a-z2-7]{12} /[^ ]{1,4000}$
 Cmnd_Alias DISJORN_APPS_STOP = \
     /usr/local/lib/disjorn/disjorn-apps-launch ^stop res-[a-z]{1,24} [1-9][0-9]{0,8} [1-9][0-9]{0,3}$
+Cmnd_Alias DISJORN_APPS_PUBLISH = \
+    /usr/local/lib/disjorn/disjorn-apps-launch ^publish [a-z2-7]{12}$
+Cmnd_Alias DISJORN_APPS_REVERT = \
+    /usr/local/lib/disjorn/disjorn-apps-launch ^revert [a-z2-7]{12}$
+Cmnd_Alias DISJORN_APPS_REMIX = \
+    /usr/local/lib/disjorn/disjorn-apps-launch ^remix [a-z2-7]{12} [a-z2-7]{12}$
 
-plink ALL=(root) NOPASSWD: DISJORN_APPS_LAUNCH, DISJORN_APPS_STOP
+plink ALL=(root) NOPASSWD: DISJORN_APPS_LAUNCH, DISJORN_APPS_STOP, \
+                           DISJORN_APPS_PUBLISH, DISJORN_APPS_REVERT, \
+                           DISJORN_APPS_REMIX
