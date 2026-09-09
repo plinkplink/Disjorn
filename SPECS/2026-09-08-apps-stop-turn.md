@@ -136,10 +136,9 @@ Independent of slice (iii) (no shared files). Builds in parallel; lands
 before the go-live flip so the first enabled verb ships with a stop.
 
 ## Confirm record
-- **Confirmed by**:
-- **#custodian seq**:
-- **Confirmed at**:
-<!-- No Confirm record → no build. This is the gate. -->
+- **Confirmed by**: plink
+- **#custodian seq**: 2444
+- **Confirmed at**: 2026-09-09 01:47Z (recorded at the keyboard on his behalf)
 
 ## Status
-`draft`
+`confirmed`
