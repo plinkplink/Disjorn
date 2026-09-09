@@ -77,7 +77,7 @@ SCARS = [
     re.compile(r"\(\s*[,;:]"),       # (, foo)
     re.compile(r"[,;:]\s*\)"),       # (H13-D4, )
     re.compile(r"[,;:]\s*[.;:]"),    # (§B,.
-    re.compile(r"\s[,;:.]"),         # a space before its own punctuation
+    re.compile(r"\s[,;:]|\s\.(?=\s|$)"),  # a space before its own punctuation (` .md` is a word)
     re.compile(r"[,;:]{2,}"),
     re.compile(r"^[\s,;:.)\]}]"),    # : the confirm gate's REAL...
 ]
@@ -159,12 +159,25 @@ def acceptable(text: str) -> bool:
         return False
     if any(s.search(t) for s in SCARS):
         return False
-    words = re.findall(r"[A-Za-z][A-Za-z.'’-]*", core)
+    # Numbers count as words here: "bounded at 3." ends on "3", not on "at".
+    words = re.findall(r"[A-Za-z0-9][A-Za-z0-9.'’-]*", core)
     if words:
         last = words[-1].lower().strip(".-'’")
         prev = words[-2].lower().strip(".-'’") if len(words) > 1 else ""
         if last in TERMINAL_ABBREV:
             return False
+    # A promised enumeration cut after its first rung ("…in this order: 1.")
+    # ends on a bare ordinal — an abbreviation wearing a different hat
+    # (Claudette #2475). Arabic or roman, with or without a closing paren.
+    m = re.search(r"(?:^|\s)\(?(?:\d{1,3}|[ivxlc]{1,6})[.)]?\.$", core, re.I)
+    if m:
+        before = core[:m.start()]
+        # "…in this order: 1." / "…-> failed 2." after a "1. the unit…" rung —
+        # but "bounded at 3." is a sentence that happens to end on a number.
+        if re.search(r"[:;]\s*$|->\s*\w+\s*$", before) or \
+           re.search(r"(?:^|\s)\(?(?:1|i)[.)]\s", core, re.I):
+            return False
+    if words:
         if last in DANGLING and not (last in PREPOSITIONS and _verbish(prev)):
             return False
     lead = re.match(r"[A-Za-z][A-Za-z'’-]*", t)
@@ -181,7 +194,11 @@ def _unbreak(text: str) -> str:
 
 def _tidy(s: str) -> str:
     s = " ".join(s.split())
-    s = re.sub(r"\s+([,.;:])", r"\1", s)
+    # Tighten the space a cut citation leaves before punctuation — but only
+    # before punctuation that IS punctuation. A dot that starts the next word
+    # (`.md`, `.env`, `.git`) is a word, and eating the space before it turned
+    # "end in .md" into "end in.md" (Claudette #2475).
+    s = re.sub(r"\s+([,.;:])(?=\s|$)", r"\1", s)
     s = re.sub(r"([,;:])\s*([,;:])", r"\2", s)
     return s.strip()
 

@@ -40,6 +40,9 @@ _spec.loader.exec_module(ps)
 # ---------------------------------------------------------------------------
 
 WHOLE = [
+    "Runs in order 2 and 3.",
+    "The count is bounded at 3.",
+    "It must sit directly in SPECS/ and end in .md.",
     "The status token under `## Status` (e.g. 'confirmed'), lowercased.",
     "The absence branch (§E): a unit that ended with no result.json is a HALT.",
     "None if `[apps].seat_bots` agrees with the table, else how it does not (§B).",
@@ -56,6 +59,9 @@ WHOLE = [
 ]
 
 FRAGMENTS = [
+    "THE ladder, in this order: 1.",
+    "1. the unit itself failed (unit_reason) -> failed 2.",
+    "The rungs, in order: iii.",
     # cut at an abbreviation that promises an example
     "The status token under `## Status` (e.g.",
     "The status token under `## Status` (i.e.",
@@ -329,3 +335,11 @@ def test_everything_the_sweep_emits_passes_its_own_gate():
             doc = ast.get_docstring(node, clean=False)
             if doc:
                 assert ps.acceptable(doc), doc
+
+
+def test_tidy_keeps_the_space_before_a_dot_that_starts_a_word():
+    """Claudette #2475: `end in .md` came out as `end in.md`. A dot that
+    begins the next word is a word, not punctuation."""
+    _tidy = ps._tidy
+    assert _tidy("and end in .md") == "and end in .md"
+    assert _tidy("reads .env , then .git .") == "reads .env, then .git."
