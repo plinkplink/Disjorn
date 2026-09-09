@@ -102,6 +102,45 @@ class Settings(BaseSettings):
     # publisher list is config a person edits, never something a caller claims.
     APPS_STAGE_PUBLISHER_BOT_NAMES: list[str] = ["broker"]
 
+    # APPS serving gate (SPECS/2026-09-09-apps-serving-gate.md, stage 3).
+    #
+    # These four are read by BOTH processes — the house mints grants with them,
+    # the gate verifies with them — which is the whole reason they are here and
+    # not in broker.toml: the gate is a second ASGI app in this package and
+    # reads this same server/.env.
+    #
+    # NONE of them is boot-critical for the house. A house with no gate
+    # configured still runs the APPS tab: builds work, the modal works, and the
+    # four endpoints that need an origin to point at (open / live / share /
+    # remix) answer 503 with a sentence saying so. An assertion at boot here
+    # would mean a house that cannot start because a feature nobody has turned
+    # on yet is not turned on.
+
+    # The HMAC secret shared with the gate. ≥32 bytes to mint; shorter (or
+    # empty) reads as "not configured". Generate with:
+    #   python3 -c "import secrets; print(secrets.token_urlsafe(48))"
+    APPS_GATE_SECRET: str = ""
+
+    # Scheme + host + port of the apps origin, no trailing slash, e.g.
+    # https://debian.tailca81ba.ts.net:10000 (D1: port 10000, Funnel →
+    # 127.0.0.1:8402). It is a DIFFERENT ORIGIN from the house on purpose and
+    # must never appear in HOUSE_ORIGINS.
+    APPS_ORIGIN_BASE: str = ""
+
+    # Where published app trees live: `<root>/<app-id>/live` and
+    # `…/preview`, with `…/live.prev` once a live deploy has been replaced.
+    # The house only ever READS this path (does `live.prev` exist?); the
+    # writing is the launch helper's, as the apps seat.
+    APPS_WWW_ROOT: str = "/srv/apps-www"
+
+    # The fixed argv prefix for the host helper's publish / revert / remix
+    # modes (D6). A LIST, never a string: it is spawned directly, never through
+    # a shell, and the app id is appended as its own argv element so nothing a
+    # caller sends can become a word of the command.
+    APPS_LAUNCH_HELPER: list[str] = [
+        "sudo", "-n", "/usr/local/lib/disjorn/disjorn-apps-launch",
+    ]
+
     @property
     def db_path(self) -> Path:
         return Path(self.DB_PATH)

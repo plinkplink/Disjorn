@@ -25,6 +25,8 @@ Exported access-rule helpers (consumed by WP4 messages and WP5 privacy/WS):
     is_member(channel_id, member_type, member_id) -> bool
     user_channel_ids(user_id) -> list[int]      # public main_feed/text implicit
     bot_channel_ids(bot_id)  -> list[int]       # explicit rows only
+    channel_user_ids(channel) -> list[int]      # the same rule, read sideways
+    require_not_app_build(channel) -> None      # the build-chat wall (apps share)
 
 Membership semantics (Architecture §4.1 + SPECS/2026-08-08-per-channel-membership):
 - A channel is `public` (the default, and what every pre-existing channel was
@@ -50,7 +52,7 @@ Membership semantics (Architecture §4.1 + SPECS/2026-08-08-per-channel-membersh
   with exactly two members: the app's owner and the builder bot. They are
   created by routers/apps.py, never by POST /channels, and every membership
   verb here (invite, leave, kick, add-bot, remove-bot) refuses them via
-  `_require_not_app_build` — the owner is `created_by` on the room, and
+  `require_not_app_build` — the owner is `created_by` on the room, and
   without that refusal the private-channel owner rule would let them add any
   bot in the house to a room where ws.py summons bots without a name match
   (Claudette's review block, #custodian 2026-09-06). GET /channels lists them for
@@ -138,6 +140,33 @@ async def is_member(channel_id: int, member_type: MemberType, member_id: int) ->
         (channel_id, member_type, member_id),
     )
     return row is not None
+
+
+async def channel_user_ids(channel: dict[str, Any]) -> list[int]:
+    """Every USER who is a member of this channel right now.
+
+    The membership rule of `is_member` read in the other direction: in a public
+    main_feed or text channel that is every user in the house (implicit
+    membership, no rows), everywhere else it is the explicit rows. Keyed off
+    IMPLICIT_MEMBER_TYPES rather than a second literal list, so a type added
+    there cannot mean two different things in two files.
+
+    Exported for apps sharing (SPECS/2026-09-09-apps-serving-gate.md D7):
+    sharing an app adds the channel's current members to `app_shares`, which
+    is a snapshot taken at share time and not a live subscription.
+    """
+    if (
+        channel["type"] in IMPLICIT_MEMBER_TYPES
+        and channel["visibility"] == "public"
+    ):
+        rows = await db.fetch_all("SELECT id FROM users ORDER BY id")
+        return [r["id"] for r in rows]
+    rows = await db.fetch_all(
+        """SELECT member_id AS id FROM channel_members
+            WHERE channel_id = ? AND member_type = 'user' ORDER BY member_id""",
+        (channel["id"],),
+    )
+    return [r["id"] for r in rows]
 
 
 async def user_channel_ids(user_id: int) -> list[int]:
@@ -828,7 +857,7 @@ async def invite_to_channel(
 ) -> dict[str, bool]:
     """Add a user to a private channel. Owner only; idempotent."""
     channel = await _get_channel(channel_id)
-    _require_not_app_build(channel)
+    require_not_app_build(channel)
     _require_private(channel)
     _require_owner(channel, user)
     target = await db.fetch_one("SELECT id FROM users WHERE id = ?", (body.user_id,))
@@ -873,7 +902,7 @@ async def leave_channel(channel_id: int, user: CurrentUser) -> dict[str, bool]:
     Leaving takes your last_read_seq with it — the row IS the membership.
     """
     channel = await _get_channel(channel_id)
-    _require_not_app_build(channel)
+    require_not_app_build(channel)
     _require_private(channel)
     cur = await db.execute(
         """DELETE FROM channel_members
@@ -896,7 +925,7 @@ async def kick_from_channel(
     never ends up with an owner it has evicted.
     """
     channel = await _get_channel(channel_id)
-    _require_not_app_build(channel)
+    require_not_app_build(channel)
     _require_private(channel)
     _require_owner(channel, user)
     if body.user_id == channel["created_by"]:
@@ -931,7 +960,7 @@ async def kick_from_channel(
 # reach exactly its two participants (plus the bot itself, as the subject).
 # ---------------------------------------------------------------------------
 
-def _require_not_app_build(channel: dict[str, Any]) -> None:
+def require_not_app_build(channel: dict[str, Any]) -> None:
     """Membership of a build chat is fixed at creation: one owner, one builder.
 
     Every membership verb in this router calls this first for `app_build`
@@ -952,7 +981,7 @@ def _require_not_app_build(channel: dict[str, Any]) -> None:
 
 async def _require_bot_manage_access(channel_id: int, user: User) -> dict[str, Any]:
     channel = await _get_channel(channel_id)
-    _require_not_app_build(channel)
+    require_not_app_build(channel)
     if channel["type"] != "main_feed" and not await is_member(
         channel_id, "user", user.id
     ):
