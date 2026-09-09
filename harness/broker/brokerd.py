@@ -4418,6 +4418,7 @@ class Broker:
         # even up (a broker restart mid-turn) must not wait a whole interval.
         view_every = max(poll, self._apps_num("stop_poll_sec"))
         last_view = time.monotonic() - view_every
+        stale_seen = False
         try:
             while not self._closed:
                 if not scaffolded and os.path.exists(
@@ -4425,6 +4426,27 @@ class Broker:
                     self._apps_post_stage(session, "scaffolded", {"turn": turn})
                     scaffolded = True
                 result, bad = self._apps_read_result(result_path)
+                if result is not None and not self._apps_result_is_ours(rec, result):
+                    # A record in the turn dir that is NOT this turn's. The
+                    # first APPS build after the flip (2026-09-09, session 1
+                    # turn 1) read the keyboard's 09-07 proving turn's
+                    # result.json — same session and turn numbers on a fresh
+                    # database, a turn dir on disk nobody had cleared — and
+                    # finished the turn 30 ms after launch with another app's
+                    # commit, files and tokens while the real build ran on
+                    # orphaned. A record is this turn's only if it names this
+                    # app, this session and this turn. Anything else is absent:
+                    # the real harvest writes over it by rename when it lands.
+                    if not stale_seen:
+                        stale_seen = True
+                        self._audit("broker", "apps-build",
+                                    {"session": session, "turn": turn}, True,
+                                    f"ignoring a result.json that is not this "
+                                    f"turn's (app {result.get('app_id')!r}, "
+                                    f"session {result.get('session')!r}, turn "
+                                    f"{result.get('turn')!r}); waiting for the "
+                                    f"real harvest")
+                    result = None
                 if result is not None:
                     self._apps_finish(rec, result, proc, scaffolded)
                     return
@@ -4527,6 +4549,28 @@ class Broker:
         # Shutting down: leave the sidecar exactly where the NEXT process looks
         # for it. Losing the ticket while a turn runs is the one way to strand
         # it for good.
+
+    @staticmethod
+    def _apps_result_is_ours(rec: dict, result: dict) -> bool:
+        """Does this result.json describe the turn on this ticket? Three ids
+        the harvest writes and the ticket holds: app, session, turn. A record
+        that fails any one is some other turn's — a stale file, a re-used
+        number — and must not be finished as this one.
+
+        The app id is the check that matters: 60 random bits, so a re-used
+        session number on a fresh database still names a different app. No
+        clock comparison — two clocks need not agree, and the id already
+        decides."""
+        try:
+            if str(result.get("app_id") or "") != str(rec.get("app_id") or ""):
+                return False
+            if int(result.get("session", -1)) != int(rec["session"]):
+                return False
+            if int(result.get("turn", -1)) != int(rec["turn"]):
+                return False
+        except (TypeError, ValueError):
+            return False
+        return True
 
     @staticmethod
     def _apps_read_result(path: str) -> tuple[Optional[dict], bool]:

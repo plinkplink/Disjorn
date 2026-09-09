@@ -84,6 +84,12 @@ umask 0022
 # halt on turn 1) must not leave an empty served root behind — "a preview
 # exists" and "a preview worked" are one observable (Claudette #2336).
 mkdir -p "$RESULT_DIR"
+# A result.json already here is some EARLIER turn's — a re-used session number
+# on a fresh database, a dir nobody cleared — and the broker's reaper reads
+# "result.json exists" as "this turn finished". It did, once (2026-09-09,
+# the first build after the flip finished in 30 ms with the 09-07 proving
+# turn's record). Clear it before anything runs; the harvest writes ours.
+rm -f "$RESULT_DIR/result.json" "$RESULT_DIR/scaffolded" "$RESULT_DIR/stop-requested"
 # The prompt: bounded bytes the launcher (root) read behind its path wall and
 # put on OUR stdin. We copy it into our own result directory, as the seat,
 # 0600 — root never writes here (Claudette's block, slice (i) review).

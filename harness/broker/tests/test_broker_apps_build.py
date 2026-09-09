@@ -1281,3 +1281,57 @@ def test_the_shipped_stop_default_is_the_same_helper_in_stop_mode(apps):
     apps.broker.apps.pop("stop_command", None)
     assert apps.broker._apps_argv("stop_command") == [
         "sudo", "-n", "/usr/local/lib/disjorn/disjorn-apps-launch", "stop"]
+
+
+# ------------------------------------------ a result.json that is not ours
+# 2026-09-09: the first build after the flip finished in 30 ms with the 09-07
+# proving turn's record — same session and turn numbers on a fresh database,
+# a turn dir nobody had cleared. The real build ran on orphaned.
+
+def test_a_stale_result_from_another_app_is_ignored_until_the_real_one_lands(apps):
+    """The record in the dir names a different app: not ours. The reaper says
+    so once, keeps waiting, and finishes on the harvest that IS ours."""
+    apps.write_result(app_id="smoketestapp", commit="c7d7df9",
+                      started_at="2026-09-07T19:46:07+00:00")
+    assert _handoff(apps)["ok"] is True
+    proc = apps.spawn.procs[-1]
+    time.sleep(0.3)
+    assert apps.stage_names() == ["scoped"], "nothing finished on the stale file"
+    assert apps.ledger() == []
+    stale = [a for a in apps.audit_lines()
+             if "not this turn's" in str(a.get("result_summary", ""))]
+    assert len(stale) == 1 and "'smoketestapp'" in stale[0]["result_summary"]
+    apps.write_result()                        # the real harvest, by rename
+    proc.finish(0)
+    apps.broker.join_apps(timeout=5)
+    assert apps.ledger()[-1]["commit"] == RESULT["commit"]
+    assert apps.stage_names()[-1] == "deployed"
+
+
+def test_a_stale_result_with_a_reused_session_number_is_not_ours(apps):
+    """The exact shape of the incident: the ticket says session 12 turn 1 for
+    THIS app; the file says session 12 turn 1 for the proving app. The id
+    decides, without a clock."""
+    apps.write_result(app_id="smoketestapp")
+    _handoff(apps)
+    proc = apps.spawn.procs[-1]
+    time.sleep(0.3)
+    assert apps.ledger() == []
+    apps.write_result()
+    proc.finish(0)
+    apps.broker.join_apps(timeout=5)
+    assert len(apps.ledger()) == 1
+
+
+def test_our_own_result_is_recognised():
+    from brokerd import Broker
+    rec = {"app_id": APP_ID, "session": SESSION, "turn": 1,
+           "started_at": "2026-09-09T02:47:00+00:00"}
+    ours = dict(RESULT)
+    assert Broker._apps_result_is_ours(rec, ours) is True
+    assert Broker._apps_result_is_ours(rec, dict(ours, app_id="other")) is False
+    assert Broker._apps_result_is_ours(rec, dict(ours, turn=2)) is False
+    assert Broker._apps_result_is_ours(rec, dict(ours, session=99)) is False
+    assert Broker._apps_result_is_ours(rec, dict(ours, session="x")) is False
+    # an old start with the right ids is still ours: the id decides, not a clock
+    assert Broker._apps_result_is_ours(rec, dict(ours, started_at="2026-09-07T00:00:00+00:00")) is True
