@@ -30,11 +30,17 @@ second fence, not the fence.
 marker in the turn's result dir and execs `systemctl stop disjorn-apps-<session>-
 <turn>`. The marker is how the harvest tells a user's stop from the clock: both
 arrive as the same SIGTERM. Fixed argv, same charsets as `run`, and the unit
-name is derived — a caller can name a turn, never a unit. The marker write is
-the one place this program touches the seat's tree, and it does so through an
-openat chain that refuses symlinks and dirs the seat does not own, so the worst
-a hostile seat can make root do is create an empty file inside the seat's own
-directory.
+name is derived — a caller can name a turn, never a unit.
+
+THE MARKER IS A LABEL AND MUST NEVER PREVENT THE STOP (Claudette #2447). The
+turn's result dir is made by run-apps.sh INSIDE the unit, after systemd has
+started it, so a stop pressed in the first moments of a turn finds no dir yet.
+A marker that cannot be written is reported on stderr and the stop is execed
+anyway; the cost is one wrong word in the room ("timed out" for a turn the
+user ended) and never a turn that ran on to its clock behind a "Stopping…"
+button. The write itself still goes through an openat chain that refuses
+symlinks and dirs the seat does not own, and root still creates no directory
+in the seat's tree — every refusal is kept, it just no longer exits.
 
 NOTHING HERE IS POLICY. The session lock, the quota, the token ceiling and the
 seat→bot map all live in the broker (slice ii). This program decides exactly
@@ -561,11 +567,18 @@ def build_stop_argv(principal: str, session: str, turn: str) -> "list":
     return [SYSTEMCTL, "stop", f"{UNIT_PREFIX}{session}-{turn}"]
 
 
+class MarkerRefused(Exception):
+    """The marker could not be written and the reason why. Never fatal on
+    the stop path — see the header. Raised instead of die()'d so main_stop
+    decides what a refusal costs."""
+
+
 def drop_stop_marker(session: str, turn: str, seat_uid: int, *,
                      turns_root: str = TURNS_ROOT) -> bool:
     """Create `<turns_root>/<session>/<turn>/stop-requested`, as root, without
     ever following a symlink or writing under a directory the seat does not
-    own. True if created, False if it already existed.
+    own. True if created, False if it already existed; MarkerRefused with the
+    reason when it cannot be written at all.
 
     The turn dir was created by the seat (run-apps.sh, mkdir -p) and the seat
     controls its contents; root writing there by name would follow whatever
@@ -576,30 +589,31 @@ def drop_stop_marker(session: str, turn: str, seat_uid: int, *,
     that never started (or already cleaned up) and is refused, not created —
     this program makes no directories in the seat's tree.
 
-    Wrapped so a refusal is a REFUSED line and exit 64, before any privilege
-    is used on the unit."""
+    Root still makes no directory here: a missing turn dir is refused, and
+    the caller decides whether that stops anything (it does not)."""
     flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(turns_root, flags)
     except OSError as exc:
-        die(f"turns root unavailable: {turns_root}: {exc.strerror}")
+        raise MarkerRefused(f"turns root unavailable: {turns_root}: {exc.strerror}")
     try:
         st = os.fstat(fd)
         if not stat.S_ISDIR(st.st_mode):
-            die(f"turns root is not a directory: {turns_root}")
+            raise MarkerRefused(f"turns root is not a directory: {turns_root}")
         for name in (session, turn):
             try:
                 nfd = os.open(name, flags, dir_fd=fd)
             except FileNotFoundError:
-                die(f"no such turn: {session}/{turn} (nothing to stop)")
+                raise MarkerRefused(f"no turn dir yet: {session}/{turn}")
             except OSError as exc:
-                die(f"cannot open {name} under the turns root: {exc.strerror}")
+                raise MarkerRefused(f"cannot open {name} under the turns root: {exc.strerror}")
             os.close(fd)
             fd = nfd
             st = os.fstat(fd)
             if not stat.S_ISDIR(st.st_mode) or st.st_uid != seat_uid:
-                die(f"{session}/{turn}: directory is not the seat's own "
-                    f"(uid {st.st_uid}, expected {seat_uid}) — refusing to write")
+                raise MarkerRefused(
+                    f"{session}/{turn}: directory is not the seat's own "
+                    f"(uid {st.st_uid}, expected {seat_uid}) — not writing")
         try:
             mfd = os.open(STOP_MARKER,
                           os.O_WRONLY | os.O_CREAT | os.O_EXCL
@@ -608,11 +622,25 @@ def drop_stop_marker(session: str, turn: str, seat_uid: int, *,
         except FileExistsError:
             return False
         except OSError as exc:
-            die(f"cannot drop the stop marker: {exc.strerror}")
+            raise MarkerRefused(f"cannot drop the stop marker: {exc.strerror}")
         os.close(mfd)
         return True
     finally:
         os.close(fd)
+
+
+def _marker_best_effort(session: str, turn: str, seat_uid: int, *,
+                        turns_root: str = TURNS_ROOT):
+    """The marker, or the reason there is none. Never raises: the stop is
+    sent either way, and a refusal here is a warning the unit's journal
+    keeps, not an exit."""
+    try:
+        return drop_stop_marker(session, turn, seat_uid, turns_root=turns_root)
+    except MarkerRefused as exc:
+        sys.stderr.write(f"disjorn-apps-launch: stop marker not written "
+                         f"({exc}); the stop is sent regardless and the room "
+                         f"will read this turn as timed out\n")
+        return str(exc)
 
 
 def main_stop(argv: "list", *, dry: bool, seat) -> int:
@@ -620,18 +648,20 @@ def main_stop(argv: "list", *, dry: bool, seat) -> int:
         die(f"stop takes exactly 3 arguments, got {len(argv) - 2}")
     out = build_stop_argv(argv[2], argv[3], argv[4])
     if dry:
-        # The marker is a real write; a dry run says what it WOULD do, on a
-        # root the test names, or skips the write when none is named.
+        # A dry run says what it WOULD do, writing the marker only on a root
+        # the test names. `marker` is True (created), False (already there),
+        # or the reason it was not written — and the argv is present in all
+        # three, which is the property the whole path rests on.
         root = os.environ.get("DISJORN_APPS_LAUNCH_TURNS_ROOT")
         if root:
-            created = drop_stop_marker(argv[3], argv[4], seat[0].pw_uid,
-                                       turns_root=root)
-            print(json.dumps({"argv": out, "marker": created}))
+            marker = _marker_best_effort(argv[3], argv[4], seat[0].pw_uid,
+                                         turns_root=root)
+            print(json.dumps({"argv": out, "marker": marker}))
         else:
             print(json.dumps(out))
         return 0
     pw, _group = seat
-    drop_stop_marker(argv[3], argv[4], pw.pw_uid)
+    _marker_best_effort(argv[3], argv[4], pw.pw_uid)
     os.execve(out[0], out, {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"})
     die(f"exec failed: {out[0]}")   # pragma: no cover
     return EXIT_REFUSED

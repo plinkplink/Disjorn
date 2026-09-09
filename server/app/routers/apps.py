@@ -1078,11 +1078,15 @@ async def stop_turn(session_id: int, user: CurrentUser) -> dict[str, Any]:
 
     Idempotent: a second click keeps the first timestamp. 409 when no turn is
     running (there is nothing to stop, and saying so beats a request that
-    would sit on the row until some later turn inherited it). 410 on an ended
-    session, like every other verb on one.
+    would sit on the row until some later turn inherited it). 410 on an ENDED
+    session only — not on a lapsed lock (Claudette #2447): the lock is chat
+    exclusivity, not a door, and the owner who walked away from a modal and
+    came back to a runaway turn is exactly the owner who needs this verb.
+    `end` gates the same way; publish_stage's harness path already did.
     """
     session = await _require_session(session_id, user)
-    _require_session_open(session)
+    if session["ended_at"] is not None:
+        raise HTTPException(status_code=410, detail="This build session has ended")
     async with db.transaction() as conn:
         if await _running_turn(conn, session_id) is None:
             raise HTTPException(status_code=409, detail="No turn is running")

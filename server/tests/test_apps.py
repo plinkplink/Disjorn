@@ -1643,6 +1643,23 @@ async def test_end_while_running_stops_first_and_that_turns_record_still_lands(
     assert (await _owner_post(client, f"/apps/sessions/{sid}/stop")).status_code == 410
 
 
+async def test_a_lapsed_lock_does_not_bar_the_owner_from_stopping(
+    client, app, settings_env, seat_toml
+):
+    """The lock is chat exclusivity, not a door (Claudette #2447). An owner
+    who walked away and came back to a runaway turn can still stop it."""
+    session = await build_fixture(client, settings_env, seat_toml)
+    sid = session["id"]
+    await _stage(client, sid, "scoped", {"turn": 1})
+    await db.execute(
+        "UPDATE app_sessions SET locked_until = '2000-01-01T00:00:00.000Z' WHERE id = ?",
+        (sid,),
+    )
+    r = await _owner_post(client, f"/apps/sessions/{sid}/stop")
+    assert r.status_code == 200, r.text
+    assert (await _view(client, sid))["stop_requested_at"] == r.json()["stop_requested_at"]
+
+
 async def test_end_with_nothing_running_requests_no_stop(
     client, app, settings_env, seat_toml
 ):

@@ -233,6 +233,9 @@ APPS_DEFAULTS: dict = {
 # name under /srv; it is held to the same shape the launcher enforces so a
 # broker that has been handed a bad one refuses before sudo does.
 APPS_APP_ID_RE = re.compile(r"^[a-z2-7]{12}$")
+# The launcher's own refusal code (its EXIT_REFUSED): a shape or path it would
+# not act on, before any privilege. Distinct from systemd's exits by design.
+APPS_LAUNCH_REFUSED = 64
 APPS_SEAT_RE = re.compile(r"^res-[a-z]{1,24}$")
 _APPS_MORE_RE = re.compile(r"^\+(\d+) more$")
 # The one sentence a resident that faithfully quoted a user gets to say back
@@ -3916,11 +3919,16 @@ class Broker:
         return bool(view.get("stop_requested_at"))
 
     def _apps_send_stop(self, rec: dict) -> bool:
-        """`disjorn-apps-launch stop <caller> <session> <turn>` through sudo,
-        once. Fixed argv from config, three validated scalars appended, no
-        shell. Audited either way; a refusal is loud and NOT retried — the
-        turn is still bounded by its own clock, and a stop the helper refused
-        (no turn dir, a shape it did not like) will not pass on a second ask."""
+        """`disjorn-apps-launch stop <caller> <session> <turn>` through sudo.
+        Fixed argv from config, three validated scalars appended, no shell.
+        Audited either way.
+
+        True means the helper got as far as `systemctl stop` — its exit is
+        then systemctl's, whatever that was, and the unit has been told. False
+        means the helper REFUSED (exit 64) before any privilege: nothing was
+        sent, the caller must not burn the ticket, and the next poll tries
+        again. The marker the helper drops is best-effort inside the helper
+        and never turns a stop into a refusal (Claudette #2447)."""
         session, turn = int(rec["session"]), int(rec["turn"])
         caller = str(rec.get("caller") or "")
         if not APPS_SEAT_RE.match(caller):
@@ -3936,13 +3944,16 @@ class Broker:
                         {"session": session, "turn": turn}, True,
                         f"stop failed to run: {exc.message}")
             return False
-        ok = cp.returncode == 0
+        sent = cp.returncode != APPS_LAUNCH_REFUSED
         tail = (cp.stderr or cp.stdout or "").strip()[-300:]
         self._audit("broker", "apps-build",
                     {"session": session, "turn": turn}, True,
-                    f"stop sent to {rec.get('unit')}: exit {cp.returncode}"
-                    + (f" — {tail}" if tail and not ok else ""))
-        return ok
+                    (f"stop sent to {rec.get('unit')}: exit {cp.returncode}"
+                     if sent else
+                     f"stop refused by the launcher for {rec.get('unit')}: "
+                     f"exit {cp.returncode}, will ask again")
+                    + (f" — {tail}" if tail and cp.returncode != 0 else ""))
+        return sent
 
     # -- the claim --------------------------------------------------------
 
@@ -4436,12 +4447,16 @@ class Broker:
                 # terminal event. After the send, this is the existing
                 # wait-on-a-live-unit path, bounded by unit_stop_timeout_sec.
                 # A unit already gone gets nothing: its harvest lands alone.
+                # The ticket burns ONLY once `systemctl stop` was actually
+                # issued (Claudette #2447): a launcher refusal — exit 64,
+                # before any privilege — sent nothing, so the next poll asks
+                # again. What burns is the send, not the attempt.
                 if alive and not rec.get("stop_sent"):
                     now = time.monotonic()
                     if now - last_view >= view_every:
                         last_view = now
-                        if self._apps_stop_requested(session):
-                            self._apps_send_stop(rec)
+                        if (self._apps_stop_requested(session)
+                                and self._apps_send_stop(rec)):
                             rec["stop_sent"] = True
                             self._apps_write_sidecar(rec)
                 if not alive:

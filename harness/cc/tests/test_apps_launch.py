@@ -227,42 +227,61 @@ def test_stop_drops_the_marker_in_the_seats_turn_dir(seat, tmp_path):
     assert again["marker"] is False
 
 
-def test_stop_refuses_a_turn_dir_the_seat_does_not_own(seat, tmp_path):
+STOP_ARGV = ["/usr/bin/systemctl", "stop", "disjorn-apps-12-3"]
+
+
+def _stop_dry(seat, env):
+    """A dry stop on a named turns root: exit 0 and the JSON, whatever the
+    marker did. The argv being present in every case IS the property."""
+    proc = run(seat, "stop", "res-gable", "12", "3", env_extra=env)
+    assert proc.returncode == 0, f"a marker problem must not exit:\n{proc.stderr}"
+    return json.loads(proc.stdout), proc.stderr
+
+
+def test_a_stop_with_no_turn_dir_yet_still_sends_the_stop(seat, tmp_path):
+    """THE gate test (Claudette #2447). run-apps.sh makes the turn dir inside
+    the unit, after systemd has started it, so a stop pressed in the first
+    moments of a turn finds no dir. The marker is a label; the stop is the
+    act. No dir: the argv is still built and the exec still happens, and the
+    unit's journal keeps one warning saying the room will read it as a
+    timeout. Root still creates nothing."""
+    (tmp_path / "turns").mkdir()
+    out, err = _stop_dry(seat, {"DISJORN_APPS_LAUNCH_TURNS_ROOT": str(tmp_path / "turns")})
+    assert out["argv"] == STOP_ARGV
+    assert out["marker"].startswith("no turn dir yet: 12/3")
+    assert "stop marker not written" in err and "sent regardless" in err
+    assert not (tmp_path / "turns" / "12").exists()
+
+
+def test_a_turn_dir_the_seat_does_not_own_gets_no_marker_but_the_stop(seat, tmp_path):
     """Root never writes by name into a tree the seat controls. The walk
     fstat's each component and refuses a directory not owned by the seat —
-    which, with a fake seat uid that is not ours, is every directory here."""
+    which, with a fake seat uid that is not ours, is every directory here.
+    Refused means not written; it does not mean not stopped."""
     other = FAKE_SEAT.split(":")
-    other_uid = str(os.getuid() + 1)
     turn_dir = tmp_path / "turns" / "12" / "3"
     turn_dir.mkdir(parents=True)
     env = {"DISJORN_APPS_LAUNCH_TURNS_ROOT": str(tmp_path / "turns"),
-           "DISJORN_APPS_LAUNCH_FAKE_SEAT": ":".join([other_uid, *other[1:]])}
-    proc = refuse(seat, "stop", "res-gable", "12", "3", env_extra=env)
-    assert "not the seat's own" in proc.stderr
+           "DISJORN_APPS_LAUNCH_FAKE_SEAT": ":".join([str(os.getuid() + 1), *other[1:]])}
+    out, _ = _stop_dry(seat, env)
+    assert out["argv"] == STOP_ARGV
+    assert "not the seat's own" in out["marker"]
     assert not (turn_dir / "stop-requested").exists()
 
 
-def test_stop_refuses_a_symlinked_turn_dir(seat, tmp_path):
+def test_a_symlinked_turn_dir_gets_no_marker_anywhere_but_the_stop(seat, tmp_path):
     """A seat that replaces its turn dir with a symlink to somewhere root can
-    write gets a refusal, not a root-created file at the other end."""
+    write gets no file at the far end — and its turn still stops."""
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     (tmp_path / "turns" / "12").mkdir(parents=True)
     (tmp_path / "turns" / "12" / "3").symlink_to(elsewhere)
     mine = ":".join([str(os.getuid()), *FAKE_SEAT.split(":")[1:]])
-    env = {"DISJORN_APPS_LAUNCH_TURNS_ROOT": str(tmp_path / "turns"),
-           "DISJORN_APPS_LAUNCH_FAKE_SEAT": mine}
-    refuse(seat, "stop", "res-gable", "12", "3", env_extra=env)
+    out, _ = _stop_dry(seat, {"DISJORN_APPS_LAUNCH_TURNS_ROOT": str(tmp_path / "turns"),
+                              "DISJORN_APPS_LAUNCH_FAKE_SEAT": mine})
+    assert out["argv"] == STOP_ARGV
     assert not (elsewhere / "stop-requested").exists()
-
-
-def test_stop_refuses_a_turn_that_never_started(seat, tmp_path):
-    """No turn dir means nothing is running; the launcher makes no directories
-    in the seat's tree, so it refuses rather than creating one to mark."""
-    (tmp_path / "turns").mkdir()
-    env = {"DISJORN_APPS_LAUNCH_TURNS_ROOT": str(tmp_path / "turns")}
-    proc = refuse(seat, "stop", "res-gable", "12", "3", env_extra=env)
-    assert "nothing to stop" in proc.stderr
+    assert not (tmp_path / "turns" / "12" / "3" / "stop-requested").exists()
 
 
 def test_unknown_mode_is_refused(seat):

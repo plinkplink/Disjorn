@@ -1199,11 +1199,36 @@ def test_a_stop_after_the_unit_has_gone_sends_nothing(apps, tmp_path):
     assert apps.ledger()[-1]["halted"] == "timeout"
 
 
-def test_a_refused_stop_is_loud_and_not_retried(apps, tmp_path):
-    """The helper said no (exit 64). One audit line naming the exit and its
-    stderr; no second ask — the turn is still bounded by its own clock, and a
-    shape the helper refused once it will refuse again."""
+def test_a_refused_stop_does_not_burn_the_ticket_and_is_asked_again(apps, tmp_path):
+    """The helper refused (exit 64) — nothing was sent, so the ticket must not
+    say it was (Claudette #2447): the next poll asks again, loudly each time,
+    until the helper acts or the turn ends on its own clock."""
     argv, record = _stop_stub(tmp_path, rc=64)
+    apps.broker.apps["stop_command"] = argv
+    apps.broker.apps["stop_poll_sec"] = 0.02
+    _handoff(apps)
+    proc = apps.spawn.procs[-1]
+    apps.view["stop_requested_at"] = "2026-09-08T23:59:00.000Z"
+    _wait_for(lambda: len(_stop_calls(record)) >= 3)
+    assert len(_stop_calls(record)) >= 3
+    ticket = json.loads(apps.sidecars()[0].read_text())
+    assert ticket.get("stop_sent") is not True
+    apps.write_result()
+    proc.finish(0)
+    apps.broker.join_apps(timeout=5)
+    refused = [a["result_summary"] for a in apps.audit_lines()
+               if str(a.get("result_summary", "")).startswith("stop refused by the launcher")]
+    assert refused and "exit 64" in refused[0] and "no such turn" in refused[0]
+    assert "will ask again" in refused[0]
+    assert not [a for a in apps.audit_lines()
+                if str(a.get("result_summary", "")).startswith("stop sent to ")]
+
+
+def test_a_stop_that_reached_systemctl_burns_the_ticket_whatever_systemctl_said(apps, tmp_path):
+    """Exit 5 is systemctl's ("unit not loaded"): the helper acted, the unit
+    was told or is already gone, and asking again would aim a second stop at
+    a name that may be reused. One send, ticket burned, exit recorded."""
+    argv, record = _stop_stub(tmp_path, rc=5)
     apps.broker.apps["stop_command"] = argv
     apps.broker.apps["stop_poll_sec"] = 0.02
     _handoff(apps)
@@ -1217,8 +1242,7 @@ def test_a_refused_stop_is_loud_and_not_retried(apps, tmp_path):
     apps.broker.join_apps(timeout=5)
     sent = [a["result_summary"] for a in apps.audit_lines()
             if str(a.get("result_summary", "")).startswith("stop sent to ")]
-    assert len(sent) == 1
-    assert "exit 64" in sent[0] and "no such turn" in sent[0]
+    assert len(sent) == 1 and "exit 5" in sent[0]
 
 
 def test_the_stop_survives_a_broker_restart_on_the_ticket(apps, tmp_path):
