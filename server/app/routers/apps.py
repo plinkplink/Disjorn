@@ -2123,7 +2123,11 @@ async def app_card(app_id: str, user: CurrentUser) -> CardOut:
     unknown id gets. This endpoint is fetched from a rendered message body, so
     it is the one apps read that a stranger can aim at a guessed id — and
     "forbidden" would confirm the app exists, which on an origin every app
-    shares is the one thing a probe is after.
+    shares is the one thing a probe is after. `open`, `share` and `remix` say
+    403 instead, deliberately (Claudette #2477): they are reached from a UI
+    that already showed the app, by someone who already holds its id, and a
+    403 there tells the person the true reason a button did nothing. The
+    line is "what a stranger can aim at a guess": only this read.
     """
     app = await _require_app(app_id)
     if not await _visible_to(app, user):

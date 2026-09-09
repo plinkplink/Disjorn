@@ -215,7 +215,8 @@ def test_load_settings_reads_the_four_keys(www_root):
     )
     assert loaded.secret == SECRET
     assert str(loaded.www_root) == str(www_root)
-    assert loaded.house_origin == HOUSE  # first entry only
+    # Every entry may frame an app (Claudette #2477), space-joined as CSP wants.
+    assert loaded.house_origin == f"{HOUSE} https://second"
     assert loaded.origin_base == ORIGIN_BASE
 
 
@@ -237,6 +238,29 @@ def test_entry_sets_the_cookie_and_strips_the_token(client):
     assert "SameSite=lax" in cookie or "SameSite=Lax" in cookie
     assert f"Path=/{APP_A}/" in cookie
     assert "Max-Age=" in cookie
+
+
+def test_entry_redirect_is_rebuilt_from_the_parsed_path_never_the_raw_one(client):
+    """Claudette #2477: a raw `//<app>/` survives parsing (empties dropped)
+    and would come back as a protocol-relative Location — another host to a
+    browser. The target is rebuilt from the parsed parts, so it cannot."""
+    # An absolute URL, or httpx reads `//<app>` as an authority, not a path.
+    response = client.get(f"https://apps.example//{APP_A}/?t={grant()}")
+    assert response.status_code == 302
+    assert response.headers["location"] == f"/{APP_A}/"
+    response = client.get(f"/{APP_A}//preview//sub/?t={grant(roots=('live', 'preview'))}")
+    assert response.status_code == 302
+    assert response.headers["location"] == f"/{APP_A}/preview/sub/"
+
+
+def test_the_blob_path_is_traversal_checked_like_every_other(client):
+    """The dotfile loop runs before the blob shortcut, so no path shape skips
+    it — `..` before the blob name is a 404, not a 200 with a blob."""
+    enter(client)
+    assert client.get(f"/{APP_A}/../../{gate.BLOB_FILENAME}").status_code in (403, 404)
+    response = client.get(f"/{APP_A}/sub/..hidden/{gate.BLOB_FILENAME}")
+    assert response.status_code == 404
+    assert_walls(response)
 
 
 def test_entry_keeps_other_query_params(client):

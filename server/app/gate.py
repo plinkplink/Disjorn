@@ -125,7 +125,7 @@ class GateSettings:
             )
         if not self.house_origin:
             raise ConfigError(
-                "HOUSE_ORIGINS must have at least one entry: its first entry is the "
+                "HOUSE_ORIGINS must have at least one entry: its entries are the "
                 "CSP frame-ancestors value, and an empty one would let any site frame "
                 "every app in the house."
             )
@@ -153,7 +153,10 @@ def load_settings(env: dict[str, str] | None = None) -> GateSettings:
     return GateSettings(
         secret=secret,
         www_root=Path(env.get("APPS_WWW_ROOT") or DEFAULT_WWW_ROOT),
-        house_origin=origins[0] if origins else "",
+        # Every configured house origin may frame an app, not only the first
+        # (Claudette #2477): a second origin added to HOUSE_ORIGINS later would
+        # otherwise silently be unable to frame anything.
+        house_origin=" ".join(origins),
         origin_base=env.get("APPS_ORIGIN_BASE") or "",
     )
 
@@ -296,7 +299,17 @@ def _enter(
 
     params = parse_qsl(request.url.query, keep_blank_values=True)
     remaining = [(k, v) for k, v in params if k != "t"]
-    target = request.url.path + (f"?{urlencode(remaining)}" if remaining else "")
+    # The redirect target is rebuilt from what _parse_path parsed, never from
+    # the raw path (Claudette #2477): a raw `//host/x` would survive parsing
+    # (empties are dropped) and come back as a protocol-relative Location,
+    # which a browser reads as another host. Structurally impossible now,
+    # rather than safe only because no grant names a hostname — and the
+    # double-slash aliasing goes with it.
+    _, _, segments = _parse_path(request.url.path)
+    path = "/" + "/".join([app_id, *(["preview"] if root == "preview" else []), *segments])
+    if request.url.path.endswith("/") and not path.endswith("/"):
+        path += "/"
+    target = path + (f"?{urlencode(remaining)}" if remaining else "")
 
     response = RedirectResponse(target, status_code=302)
     response.set_cookie(
@@ -366,6 +379,14 @@ def _read(
             _text(404, "This app is not live yet." if root == "live" else "No preview yet.")
         )
 
+    for segment in segments:
+        # Refused before resolution, so `..` never reaches the filesystem and
+        # a dotfile never leaks by being resolvable. Runs on EVERY path, the
+        # blob's included (Claudette #2477): the traversal check has no
+        # exceptions, which is a nicer invariant than "harmless where skipped".
+        if segment.startswith("."):
+            raise _Refused(_text(404, "Not found."))
+
     # A path ending in the blob name is always the generated blob, at any depth.
     # D5 names it "at either root"; serving it at every depth as well is a
     # deliberate widening, because the injected tag is relative and a nested
@@ -373,12 +394,6 @@ def _read(
     # means an app cannot ship a file by that name and shadow the real blob.
     if segments and segments[-1] == BLOB_FILENAME:
         return _blob(payload.get("ctx") or {})
-
-    for segment in segments:
-        # Refused before resolution, so `..` never reaches the filesystem and
-        # a dotfile never leaks by being resolvable.
-        if segment.startswith("."):
-            raise _Refused(_text(404, "Not found."))
 
     target = root_dir.joinpath(*segments) if segments else root_dir
     real_root = os.path.realpath(root_dir)
