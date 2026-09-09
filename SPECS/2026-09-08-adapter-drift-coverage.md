@@ -53,5 +53,6 @@ Broker suite green, AND a run showing the five adapter-drift tests executed rath
 - **Confirmed at**: 2026-09-09 12:13Z (plink, #custodian seq 2455)
 
 ## Status
-building
+failed
+<!-- set by the broker on 2026-09-09 19:11Z (start-build, 2026-09-08-adapter-drift-coverage): build failed: exit 1: Running as unit: disjorn-build-2026-09-08-adapter-drift-coverage.service; invocation ID: 3b227ca67e7241698e059b496fbf3d66 run-build: build config dir missing: /srv/disjorn-build-config/gable. To allow another build, set this back to `confirmed` (the confirm record above still stands). -->
 <!-- set by the broker on 2026-09-09 19:11Z (start-build, 2026-09-08-adapter-drift-coverage): build running as disjorn-build-2026-09-08-adapter-drift-coverage.service -> loop/2026-09-08-adapter-drift-coverage, launched by gable (confirmed by plink, #custodian seq 2455). Not buildable again until this line moves. -->
