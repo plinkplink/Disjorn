@@ -53,6 +53,7 @@ Broker suite green, AND a run showing the five adapter-drift tests executed rath
 - **Confirmed at**: 2026-09-09 12:13Z (plink, #custodian seq 2455)
 
 ## Status
-building
+built@loop/2026-09-08-adapter-drift-coverage
+<!-- set by the broker on 2026-09-09 19:34Z (start-build, 2026-09-08-adapter-drift-coverage): build published: disjorn.git f5c59810f641d3172f1abb759d679d733354ccb3 — on the branch for review, nothing merged. `board --mark-merged` advances this to `merged` once the merge lands. -->
 <!-- set by the broker on 2026-09-09 19:19Z (start-build, 2026-09-08-adapter-drift-coverage): build running as disjorn-build-2026-09-08-adapter-drift-coverage.service -> loop/2026-09-08-adapter-drift-coverage, launched by gable (confirmed by plink, #custodian seq 2455). Not buildable again until this line moves. -->
 <!-- reset at the keyboard 2026-09-09 19:40Z after the broker's `failed` (#custodian #2488): the build died in run-build's config-dir check because /srv/disjorn-build-config had been re-installed 0750 root:res-appsbuilding by 10-appsbuilding.sh on 2026-09-06, locking res-gable out of gable/ (a host regression, nothing in this spec). Host restored to 0755 root:root; script fixed on fix/2026-09-09-build-config-parent-perms (b74b3ef). The confirm record above stands; buildable again. -->
