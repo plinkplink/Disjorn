@@ -36,7 +36,7 @@ Out of scope: regenerating `broker_tools.py`. Still two verbs stale, still corre
 - **Surfaces by lane**:
   - custodian: adapter tool catalogue, `verb_surface.toml` adapter-tools header, BotNotes → review owner Claudette
   - builder: `harness/broker/tests/test_verb_surface.py`, adapter-core config resolution → review owner Gable
-- **Split agreed in #custodian**: <pending>
+- **Split agreed in #custodian**: 2455
 
 ## Expected diff tier
 Tier 1 — tests, one config key, two doc sentences. No production code path. Classifier gates at merge.
@@ -48,9 +48,9 @@ Small. One file of real work, two of prose.
 Broker suite green, AND a run showing the five adapter-drift tests executed rather than skipped. A pass count alone doesn't gate this one, for the obvious reason.
 
 ## Confirm record
-- **Confirmed by**: <none>
-- **#custodian seq**: <none>
-- **Confirmed at**: <none>
+- **Confirmed by**: plink
+- **#custodian seq**: 2455
+- **Confirmed at**: 2026-09-09 12:13Z (plink, #custodian seq 2455)
 
 ## Status
-`draft`
+`confirmed`
