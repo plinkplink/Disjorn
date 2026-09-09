@@ -4482,8 +4482,11 @@ class Broker:
                 # missing seat account, a shape the broker derived wrong —
                 # and a poll that asked forever would write one identical
                 # audit line every five seconds for half an hour. Three
-                # asks, then the ticket burns with a line that says so.
-                if alive and not rec.get("stop_sent"):
+                # asks, then the ticket burns with a line that says so — as
+                # `stop_abandoned`, not `stop_sent` (Claudette #2461): the
+                # ticket must not say a stop went out when the launcher
+                # refused three times and nothing did.
+                if alive and not (rec.get("stop_sent") or rec.get("stop_abandoned")):
                     now = time.monotonic()
                     if now - last_view >= view_every:
                         last_view = now
@@ -4494,7 +4497,7 @@ class Broker:
                                 tries = int(rec.get("stop_refusals") or 0) + 1
                                 rec["stop_refusals"] = tries
                                 if tries >= APPS_STOP_MAX_REFUSALS:
-                                    rec["stop_sent"] = True
+                                    rec["stop_abandoned"] = True
                                     self._audit(
                                         "broker", "apps-build",
                                         {"session": session, "turn": turn},
@@ -4728,10 +4731,27 @@ class Broker:
         we gave up on it, that record is the contradiction of a line already in
         the ledger, and a contradiction nobody wrote down is the failure the
         grace period was supposed to avoid (Claudette #2361). So: ledger it
-        `late`, never post it, and drop the ticket either way."""
+        `late`, never post it, and drop the ticket either way.
+
+        The record must be THIS turn's (Claudette #2461). This is the second
+        reader of the same file the reaper guards, and the durable one: a
+        stale result.json from another app — the 09-07 proving turn's,
+        surviving on disk across a fresh database that re-used its session
+        number — would otherwise be ledgered `late` under this ticket with
+        another app's commit, files and tokens. Same predicate as the reaper;
+        a foreign record is audited and the ticket dropped, nothing ledgered."""
         session, turn = int(rec["session"]), int(rec["turn"])
         result, bad = self._apps_read_result(
             os.path.join(self._apps_turn_dir(session, turn), "result.json"))
+        if result is not None and not self._apps_result_is_ours(rec, result):
+            self._audit(
+                "broker", "apps-build", {"session": session, "turn": turn},
+                True,
+                "a result.json in this turn's dir is not this turn's (app "
+                f"{result.get('app_id')!r}, session {result.get('session')!r}, "
+                f"turn {result.get('turn')!r}) — nothing ledgered, ticket "
+                "dropped")
+            result = None
         if bad:
             # A late record that will not parse is still a fact about this
             # turn, and dropping it with its ticket would leave no line
