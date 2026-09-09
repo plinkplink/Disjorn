@@ -33,6 +33,16 @@
 #   code     /usr/local/lib/disjorn/{disjorn-apps-launch,run-apps.sh,
 #            apps_harvest.py}, root:root 0755.
 #   sudoers  /etc/sudoers.d/92-disjorn-apps, 0440, visudo -c'd BEFORE install.
+#   unit     /etc/systemd/system/disjorn-apps-gate.service from
+#            deploy/disjorn-apps-gate.service, if that file is in the repo —
+#            the stage-3 serving gate (SPECS/2026-09-09-apps-serving-gate.md
+#            D1), a second ASGI app run as plink on 127.0.0.1:8402. It is
+#            installed HERE and not by deploy/install.sh because the thing it
+#            serves is this seat's /srv/apps-www, and the drift block below is
+#            the only place on the box that says out loud whether what is
+#            running is what is in the repo. GUARDED: the file arrives with the
+#            gate hand's branch, and this script must keep working before it
+#            does.
 #   image    localhost/disjorn-apps-builder:latest, built in plink's store (the
 #            only one with registry egress) and loaded into the seat's.
 set -euo pipefail
@@ -47,6 +57,9 @@ ETCDIR=/etc/disjorn-apps
 CONFIG_DIR=/srv/disjorn-build-config/appsbuilding
 SUDOERS_SRC="$REPO/harness/keyboard/92-disjorn-apps.sudoers"
 SUDOERS_DST=/etc/sudoers.d/92-disjorn-apps
+GATE_UNIT_SRC="$REPO/deploy/disjorn-apps-gate.service"   # written by the gate hand
+GATE_UNIT_DST=/etc/systemd/system/disjorn-apps-gate.service
+GATE_UNIT_NAME=disjorn-apps-gate.service
 BROKER_TOML=/etc/disjorn-broker/broker.toml       # read-only, for the drift block
 
 DRIFT_ONLY=0
@@ -196,6 +209,30 @@ READMEEOF
   install -o root -g root -m 0440 "$SUDOERS_SRC" "$SUDOERS_DST"
   say "installed $SUDOERS_DST (0440)"
 
+  # --- the serving gate's unit (stage 3, D1) -------------------------------
+  # IDEMPOTENT and GUARDED. `install` overwrites, daemon-reload makes systemd
+  # read it, and `restart` is used rather than `start` so a re-run of this
+  # script picks up new gate code instead of quietly leaving the old process
+  # running — the stale-deploy shape this whole script exists to catch.
+  # `enable` is separate from `restart` so the boot behaviour is set even if
+  # the gate itself fails to come up (a missing APPS_GATE_SECRET, which the
+  # gate refuses to boot without, is exactly that case and must not abort the
+  # provisioning run).
+  if [ -f "$GATE_UNIT_SRC" ]; then
+    install -o root -g root -m 0644 "$GATE_UNIT_SRC" "$GATE_UNIT_DST"
+    systemctl daemon-reload
+    systemctl enable "$GATE_UNIT_NAME" >/dev/null 2>&1 \
+      || say "NOTE could not enable $GATE_UNIT_NAME — see systemctl status"
+    if systemctl restart "$GATE_UNIT_NAME"; then
+      say "installed and restarted $GATE_UNIT_NAME"
+    else
+      say "NOTE $GATE_UNIT_NAME installed but did NOT start — journalctl -u $GATE_UNIT_NAME"
+      say "     (the gate refuses to boot without APPS_GATE_SECRET in server/.env)"
+    fi
+  else
+    say "NOTE no $GATE_UNIT_SRC in the repo yet — skipping the serving gate's unit"
+  fi
+
   # --- the image -----------------------------------------------------------
   # Built in PLINK's store (podman stores are per-user, and the WP-H2 egress
   # wall blocks registry pulls from res-* uids, deliberately), then saved and
@@ -265,6 +302,30 @@ for pair in \
     echo "  DIFFERS  $installed  (vs $source)"; drift=1
   fi
 done
+
+# The serving gate's unit, on the same terms as the four files above — but
+# only once the gate hand's file exists in the repo, because "MISSING" for a
+# file nobody has written yet is noise, and noise is how a drift block stops
+# being read. Reported as its own line either way, and the RUNNING state is
+# reported too: a unit file that matches the repo while the service is dead is
+# the exact stale-deploy shape this block exists for.
+if [ -f "$GATE_UNIT_SRC" ]; then
+  if [ ! -e "$GATE_UNIT_DST" ]; then
+    echo "  MISSING  $GATE_UNIT_DST"; drift=1
+  elif diff -q "$GATE_UNIT_DST" "$GATE_UNIT_SRC" >/dev/null; then
+    echo "  same     $GATE_UNIT_DST"
+  else
+    echo "  DIFFERS  $GATE_UNIT_DST  (vs $GATE_UNIT_SRC)"; drift=1
+  fi
+  gate_state="$(systemctl is-active "$GATE_UNIT_NAME" 2>/dev/null || true)"
+  if [ "$gate_state" = "active" ]; then
+    echo "  running  $GATE_UNIT_NAME"
+  else
+    echo "  NOT UP   $GATE_UNIT_NAME (systemctl is-active: ${gate_state:-unknown})"; drift=1
+  fi
+else
+  echo "  n/a      $GATE_UNIT_NAME — no $GATE_UNIT_SRC in the repo yet"
+fi
 
 # launch.toml is deliberately NOT overwritten by this script, so a difference
 # here is expected the moment plink edits a prompt dir. Reported, not judged.

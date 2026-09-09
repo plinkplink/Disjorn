@@ -756,3 +756,621 @@ def test_prompt_on_stdin_puts_exactly_the_bytes_on_fd_zero():
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert r.stdout == "hello prompt\n" * 3
+
+
+# ═══════════════════════════════ stage 3: publish, revert, remix (D6) ═══════
+#
+# SPECS/2026-09-09-apps-serving-gate.md D6. Three modes whose caller is the
+# HOUSE SERVER, not the broker, and whose whole job is moving directories under
+# /srv/apps-www as res-appsbuilding. Two halves, tested two ways:
+#
+#   the ROOT half   — shapes, pre-flight refusals, and the systemd-run argv,
+#                     asserted through the real program under DRY_RUN like
+#                     every other mode here;
+#   the SEAT half   — the rotate itself, called as plain functions against a
+#                     tmp tree. No privilege, no systemd, and the ORDER of the
+#                     renames — the only part of this that can eat a deploy —
+#                     is asserted directly.
+
+import importlib.util
+import shutil as _shutil
+import stat
+import subprocess as _subprocess
+from importlib.machinery import SourceFileLoader
+
+APP_A = "abc234567xyz"
+APP_B = "zzz234567abc"
+HAVE_RSYNC = _shutil.which("rsync")
+HAVE_GIT = _shutil.which("git")
+SUDOERS = CC_DIR.parent / "keyboard" / "92-disjorn-apps.sudoers"
+
+
+@pytest.fixture(scope="module")
+def launcher():
+    """The launcher imported as a module (the script has no .py extension), so
+    the seat half's functions can be called directly. Importing it runs no
+    code: everything below `if __name__ == "__main__"` is a def."""
+    loader = SourceFileLoader("disjorn_apps_launch", str(LAUNCH))
+    spec = importlib.util.spec_from_loader("disjorn_apps_launch", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+@pytest.fixture()
+def www(tmp_path):
+    """A scratch /srv/apps-www with one app that has a preview."""
+    root = tmp_path / "apps-www"
+    preview = root / APP_A / "preview"
+    (preview / "sub").mkdir(parents=True)
+    (preview / "index.html").write_text("<h1>v1</h1>\n", encoding="utf-8")
+    (preview / "sub" / "a.txt").write_text("one\n", encoding="utf-8")
+    return root
+
+
+@pytest.fixture()
+def apps(tmp_path):
+    """A scratch /srv/apps with one real git repo holding one commit."""
+    root = tmp_path / "apps"
+    repo = root / APP_A
+    repo.mkdir(parents=True)
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(tmp_path),
+           "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"}
+    for args in (["init", "-q", "-b", "main"],
+                 ["config", "user.name", "apps-builder"],
+                 ["config", "user.email", "apps-builder@disjorn.local"]):
+        _subprocess.run(["git", "-C", str(repo), *args], check=True, env=env)
+    (repo / "index.html").write_text("<h1>v1</h1>\n", encoding="utf-8")
+    _subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, env=env)
+    _subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "turn 1"],
+                    check=True, env=env)
+    return root
+
+
+def op(seat, *args, www_root=None, apps_root=None, systemctl=None, self_path=None):
+    """A serving mode through the real program, dry-run, with the two /srv
+    roots pointed at a scratch tree."""
+    extra = {}
+    if www_root is not None:
+        extra["DISJORN_APPS_LAUNCH_WWW_ROOT"] = str(www_root)
+    if apps_root is not None:
+        extra["DISJORN_APPS_LAUNCH_APPS_ROOT"] = str(apps_root)
+    if systemctl is not None:
+        extra["DISJORN_APPS_LAUNCH_SYSTEMCTL"] = str(systemctl)
+    extra["DISJORN_APPS_LAUNCH_SELF"] = str(
+        self_path or "/usr/local/lib/disjorn/disjorn-apps-launch")
+    return run(seat, *args, env_extra=extra)
+
+
+def op_argv(seat, *args, **kw):
+    proc = op(seat, *args, **kw)
+    assert proc.returncode == 0, f"expected exit 0:\n{proc.stderr}"
+    return json.loads(proc.stdout)
+
+
+def op_refuse(seat, *args, **kw):
+    proc = op(seat, *args, **kw)
+    assert proc.returncode == 64, (
+        f"expected exit 64, got {proc.returncode}\n{proc.stderr}{proc.stdout}")
+    assert proc.stderr.startswith("disjorn-apps-launch: REFUSED:")
+    # ONE sentence, which is what the server puts in front of the user.
+    assert len(proc.stderr.strip().splitlines()) == 1
+    assert proc.stdout.strip() == ""
+    return proc
+
+
+# ───────────────────────────────────────────── the argv, byte for byte ──────
+
+def test_publish_argv_byte_for_byte(seat, www):
+    """The argv IS the contract, exactly as it is for `run`. Note what is NOT
+    in it: no path, no www root, no rsync, no program the caller named. The
+    unit re-enters THIS file in a mode no sudoers line can say, as the seat."""
+    assert op_argv(seat, "publish", APP_A, www_root=www) == [
+        "/usr/bin/systemd-run",
+        f"--unit=disjorn-apps-publish-{APP_A}",
+        f"--description=Disjorn apps publish {APP_A}",
+        "--uid=res-appsbuilding",
+        "--gid=res-appsbuilding",
+        "--collect",
+        "--wait",
+        "--pipe",
+        "--quiet",
+        "--property=RuntimeMaxSec=300",
+        "--property=MemoryMax=1G",
+        "--property=LimitFSIZE=268435456",
+        "--property=LimitCORE=0",
+        "--property=TasksMax=64",
+        "--setenv=HOME=/home/res-appsbuilding",
+        "--",
+        "/usr/local/lib/disjorn/disjorn-apps-launch", "publish-as-seat", APP_A,
+    ]
+
+
+def test_revert_argv_byte_for_byte(seat, www, launcher):
+    launcher.publish_app(www, APP_A, rsync_bin=HAVE_RSYNC or "rsync")
+    launcher.publish_app(www, APP_A, rsync_bin=HAVE_RSYNC or "rsync")
+    assert op_argv(seat, "revert", APP_A, www_root=www) == [
+        "/usr/bin/systemd-run",
+        f"--unit=disjorn-apps-revert-{APP_A}",
+        f"--description=Disjorn apps revert {APP_A}",
+        "--uid=res-appsbuilding",
+        "--gid=res-appsbuilding",
+        "--collect", "--wait", "--pipe", "--quiet",
+        "--property=RuntimeMaxSec=300",
+        "--property=MemoryMax=1G",
+        "--property=LimitFSIZE=268435456",
+        "--property=LimitCORE=0",
+        "--property=TasksMax=64",
+        "--setenv=HOME=/home/res-appsbuilding",
+        "--",
+        "/usr/local/lib/disjorn/disjorn-apps-launch", "revert-as-seat", APP_A,
+    ]
+
+
+@pytest.mark.skipif(not HAVE_RSYNC, reason="rsync is not installed")
+def test_revert_argv_needs_a_real_publish_first(seat, www, launcher):
+    """Belt and braces on the fixture above: the argv test would pass on an
+    empty tree if the pre-flight were not real."""
+    launcher.publish_app(www, APP_A, rsync_bin=HAVE_RSYNC)
+    op_refuse(seat, "revert", APP_A, www_root=www)   # one deploy, no previous
+
+
+def test_remix_argv_byte_for_byte(seat, www, apps):
+    assert op_argv(seat, "remix", APP_A, APP_B, www_root=www, apps_root=apps) == [
+        "/usr/bin/systemd-run",
+        f"--unit=disjorn-apps-remix-{APP_A}-{APP_B}",
+        f"--description=Disjorn apps remix {APP_A} to {APP_B}",
+        "--uid=res-appsbuilding",
+        "--gid=res-appsbuilding",
+        "--collect", "--wait", "--pipe", "--quiet",
+        "--property=RuntimeMaxSec=300",
+        "--property=MemoryMax=1G",
+        "--property=LimitFSIZE=268435456",
+        "--property=LimitCORE=0",
+        "--property=TasksMax=64",
+        "--setenv=HOME=/home/res-appsbuilding",
+        "--",
+        "/usr/local/lib/disjorn/disjorn-apps-launch", "remix-as-seat",
+        APP_A, APP_B,
+    ]
+
+
+def test_the_seat_uid_is_never_an_argument_for_a_serving_mode(seat, www, apps):
+    for argv in (op_argv(seat, "publish", APP_A, www_root=www),
+                 op_argv(seat, "remix", APP_A, APP_B, www_root=www, apps_root=apps)):
+        assert "--uid=res-appsbuilding" in argv
+        assert not any(a.startswith("--uid=") and a != "--uid=res-appsbuilding"
+                       for a in argv)
+        assert not any(a.startswith("--property=Exec") for a in argv)
+
+
+# ─────────────────────────────────────────────── every bad shape refused ────
+
+BAD_IDS = ["", "aaaaaaaaaaa", "aaaaaaaaaaaaa", "ABCDEFGHIJKL", "abcdefghijk0",
+           "abcdefghijk1", "abcdefghij-k", "../../etc/pa", "aaaaaaaaaaa/",
+           "aaaa aaaaaaa", "aaaaaaaaaaa\n", "--uid=0", "aaaaaaaaaaaa;id"]
+
+
+@pytest.mark.parametrize("app_id", BAD_IDS)
+@pytest.mark.parametrize("mode", ["publish", "revert"])
+def test_one_id_modes_refuse_every_bad_id(seat, www, mode, app_id):
+    op_refuse(seat, mode, app_id, www_root=www)
+
+
+@pytest.mark.parametrize("app_id", BAD_IDS)
+def test_remix_refuses_a_bad_id_on_either_side(seat, www, apps, app_id):
+    op_refuse(seat, "remix", app_id, APP_B, www_root=www, apps_root=apps)
+    op_refuse(seat, "remix", APP_A, app_id, www_root=www, apps_root=apps)
+
+
+@pytest.mark.parametrize("mode", ["publish", "revert"])
+@pytest.mark.parametrize("args", [
+    [],                              # missing
+    [APP_A, APP_B],                  # one too many
+    [APP_A, "--uid=0"],              # a flag riding behind a good id
+    [f"{APP_A} {APP_B}"],            # sudo joins with spaces; the helper does not
+])
+def test_one_id_modes_refuse_wrong_argument_counts(seat, www, mode, args):
+    op_refuse(seat, mode, *args, www_root=www)
+
+
+@pytest.mark.parametrize("args", [
+    [],
+    [APP_A],                         # one short
+    [APP_A, APP_B, APP_A],           # one long
+    [APP_A, APP_B, "--uid=0"],
+    [f"{APP_A} {APP_B}"],
+])
+def test_remix_refuses_wrong_argument_counts(seat, www, apps, args):
+    op_refuse(seat, "remix", *args, www_root=www, apps_root=apps)
+
+
+def test_remix_refuses_a_self_remix(seat, www, apps):
+    proc = op_refuse(seat, "remix", APP_A, APP_A, www_root=www, apps_root=apps)
+    assert "same app" in proc.stderr
+
+
+def test_the_as_seat_modes_are_not_reachable_through_sudo():
+    """The regexes are anchored on the mode word, so `publish-as-seat` — the
+    only mode that moves a file — cannot be named by any caller of the sudoers
+    file. This is the whole reason the split is safe."""
+    text = SUDOERS.read_text(encoding="utf-8")
+    for mode in ("publish", "revert", "remix"):
+        assert f"^{mode} " in text
+        assert f"{mode}-as-seat" not in text.split("Cmnd_Alias")[-1]
+
+
+@pytest.mark.skipif(not HAVE_RSYNC or os.geteuid() == 0,
+                    reason="rsync missing, or running as root")
+def test_the_as_seat_half_is_wired_end_to_end(seat, www):
+    """The mode the transient unit actually runs, run as an ordinary uid: it
+    does the work and prints one JSON line, which is what comes back through
+    `--pipe` to the server. The rotate's own properties are asserted against
+    the functions below; this is the wiring."""
+    proc = op(seat, "publish-as-seat", APP_A, www_root=www)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {
+        "mode": "publish", "app": APP_A,
+        "live": str(www / APP_A / "live"), "previous": False}
+    assert (www / APP_A / "live" / "index.html").exists()
+
+
+@pytest.mark.parametrize("args", [[], [APP_A, APP_B], ["AAAAAAAAAAAA"]])
+def test_the_as_seat_half_checks_the_shapes_again(seat, www, args):
+    """A second fence, not the fence — the same discipline run-apps.sh follows
+    when it re-asserts the charsets the launcher already checked."""
+    proc = op(seat, "publish-as-seat", *args, www_root=www)
+    assert proc.returncode == 64 and "REFUSED" in proc.stderr
+
+
+def test_the_as_seat_half_refuses_to_be_root():
+    """Root has no business moving directories in the seat's own trees, which
+    is the ruling the whole serving half is built on. Asserted by reading the
+    guard: this suite must never need root to run."""
+    src = LAUNCH.read_text(encoding="utf-8")
+    assert "if os.geteuid() == 0:" in src
+    assert "never runs as root" in src
+
+
+# ───────────────────────────────────────────── the pre-flight refusals ──────
+
+def test_publish_refuses_an_app_with_no_preview(seat, tmp_path):
+    empty = tmp_path / "empty-www"
+    (empty / APP_A).mkdir(parents=True)
+    proc = op_refuse(seat, "publish", APP_A, www_root=empty)
+    assert "no preview" in proc.stderr
+
+
+def test_publish_refuses_a_preview_that_is_a_symlink(seat, tmp_path, www):
+    """rsync's --no-links drops links INSIDE a transfer; a source path that is
+    itself a link is followed. `preview -> /etc` must not become `live`."""
+    app = www / "aaaaaaaaaaaa"
+    app.mkdir()
+    (app / "preview").symlink_to(tmp_path)
+    op_refuse(seat, "publish", "aaaaaaaaaaaa", www_root=www)
+
+
+def test_revert_refuses_when_there_is_nothing_to_go_back_to(seat, www):
+    proc = op_refuse(seat, "revert", APP_A, www_root=www)
+    assert "not live" in proc.stderr
+
+
+def test_remix_refuses_a_parent_that_is_not_a_repo(seat, www, apps):
+    (apps / APP_B).mkdir()           # a directory, but no .git
+    proc = op_refuse(seat, "remix", APP_B, "aaaaaaaaaaaa",
+                     www_root=www, apps_root=apps)
+    assert "no app repository" in proc.stderr
+
+
+def test_remix_refuses_an_existing_child(seat, www, apps):
+    (apps / APP_B).mkdir()
+    proc = op_refuse(seat, "remix", APP_A, APP_B, www_root=www, apps_root=apps)
+    assert "already exists" in proc.stderr
+
+
+def _fake_systemctl(tmp_path, description):
+    """A systemctl that reports one active apps unit with the given
+    Description. Two subcommands, the two this program uses."""
+    path = tmp_path / "fake-systemctl"
+    path.write_text(
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        '  list-units) echo "disjorn-apps-12-3.service loaded active running x";;\n'
+        f'  show) echo {description!r};;\n'
+        "esac\n", encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+def test_publish_refuses_while_a_turn_of_that_app_is_running(seat, www, tmp_path):
+    """A turn's own harvest publishes by renaming `preview` into place, so an
+    rsync out of it mid-turn can read a tree that is about to stop existing.
+    The unit name carries no app id — `stop` is handed the session and turn —
+    so the id is read off the unit's Description, which build_run_argv sets."""
+    fake = _fake_systemctl(tmp_path, f"Disjorn apps turn 12/3 ({APP_A})")
+    proc = op_refuse(seat, "publish", APP_A, www_root=www, systemctl=fake)
+    assert "has a turn running" in proc.stderr and "disjorn-apps-12-3" in proc.stderr
+
+
+def test_a_turn_of_a_DIFFERENT_app_does_not_block_a_publish(seat, www, tmp_path):
+    fake = _fake_systemctl(tmp_path, f"Disjorn apps turn 12/3 ({APP_B})")
+    op_argv(seat, "publish", APP_A, www_root=www, systemctl=fake)
+
+
+def test_systemd_not_answering_is_not_evidence_of_a_running_turn(seat, www, tmp_path):
+    """Advisory, deliberately: a failed query warns and publishes. Guessing
+    'yes' would mean a Live button that never works on a box where the query
+    is broken, which is worse than the race it closes."""
+    broken = tmp_path / "broken-systemctl"
+    broken.write_text("#!/bin/sh\nexit 3\n", encoding="utf-8")
+    broken.chmod(0o755)
+    proc = op(seat, "publish", APP_A, www_root=www, systemctl=broken)
+    assert proc.returncode == 0
+    assert "cannot ask systemd" in proc.stderr
+
+
+# ═══════════════════════════════ the seat half: the rotate itself ═══════════
+
+@pytest.mark.skipif(not HAVE_RSYNC, reason="rsync is not installed")
+def test_first_publish_creates_live_and_no_previous(www, launcher):
+    out = launcher.publish_app(www, APP_A, rsync_bin=HAVE_RSYNC)
+    live = www / APP_A / "live"
+    assert out["previous"] is False
+    assert (live / "index.html").read_text() == "<h1>v1</h1>\n"
+    assert (live / "sub" / "a.txt").read_text() == "one\n"
+    assert not (www / APP_A / "live.prev").exists()
+    # The preview is a COPY source, not a move source: the owner goes on
+    # building after pressing Live.
+    assert (www / APP_A / "preview" / "index.html").exists()
+
+
+@pytest.mark.skipif(not HAVE_RSYNC, reason="rsync is not installed")
+def test_the_published_tree_carries_the_modes_the_gate_serves(www, launcher):
+    launcher.publish_app(www, APP_A, rsync_bin=HAVE_RSYNC)
+    live = www / APP_A / "live"
+    assert stat.S_IMODE(live.stat().st_mode) == 0o755
+    assert stat.S_IMODE((live / "sub").stat().st_mode) == 0o755
+    assert stat.S_IMODE((live / "index.html").stat().st_mode) == 0o644
+    # The staging root is nobody's business but the seat's.
+    assert stat.S_IMODE((www / ".staging").stat().st_mode) == 0o700
+
+
+@pytest.mark.skipif(not HAVE_RSYNC, reason="rsync is not installed")
+def test_second_publish_rotates_the_old_live_into_live_prev(www, launcher):
+    launcher.publish_app(www, APP_A, rsync_bin=HAVE_RSYNC)
+    (www / APP_A / "preview" / "index.html").write_text("<h1>v2</h1>\n",
+                                                        encoding="utf-8")
+    out = launcher.publish_app(www, APP_A, rsync_bin=HAVE_RSYNC)
+    assert out["previous"] is True
+    assert (www / APP_A / "live" / "index.html").read_text() == "<h1>v2</h1>\n"
+    assert (www / APP_A / "live.prev" / "index.html").read_text() == "<h1>v1</h1>\n"
+
+
+@pytest.mark.skipif(not HAVE_RSYNC, reason="rsync is not installed")
+def test_only_one_deploy_is_kept_behind(www, launcher):
+    """`revert` reaches back exactly one, so the third publish drops the
+    first. A www root that grew a copy per deploy would fill the disk."""
+    for n in range(1, 4):
+        (www / APP_A / "preview" / "index.html").write_text(
+            f"<h1>v{n}</h1>\n", encoding="utf-8")
+        launcher.publish_app(www, APP_A, rsync_bin=HAVE_RSYNC)
+    assert (www / APP_A / "live" / "index.html").read_text() == "<h1>v3</h1>\n"
+    assert (www / APP_A / "live.prev" / "index.html").read_text() == "<h1>v2</h1>\n"
+    assert sorted(p.name for p in (www / APP_A).iterdir()) == [
+        "live", "live.prev", "preview"]
+
+
+@pytest.mark.skipif(not HAVE_RSYNC, reason="rsync is not installed")
+def test_publish_leaves_nothing_in_the_staging_root(www, launcher):
+    launcher.publish_app(www, APP_A, rsync_bin=HAVE_RSYNC)
+    launcher.publish_app(www, APP_A, rsync_bin=HAVE_RSYNC)
+    assert list((www / ".staging" / APP_A).iterdir()) == []
+
+
+def test_publish_refuses_before_it_copies_anything(www, launcher, tmp_path):
+    """The refusal is the FIRST thing, so a publish of an app with no preview
+    leaves no staging tree behind to be cleaned up later."""
+    with pytest.raises(SystemExit) as exc:
+        launcher.publish_app(www, "aaaaaaaaaaaa", rsync_bin="/bin/false")
+    assert exc.value.code == 64
+    assert not (www / ".staging").exists()
+
+
+def test_a_failed_rsync_never_touches_the_live_tree(www, launcher):
+    """`live` is only ever replaced by a rename of a tree that copied
+    completely. A broken copy is a failure (exit 1), not a refusal, and the
+    tree that was serving is still serving."""
+    (www / APP_A / "live").mkdir()
+    (www / APP_A / "live" / "index.html").write_text("served\n", encoding="utf-8")
+    with pytest.raises(SystemExit) as exc:
+        launcher.publish_app(www, APP_A, rsync_bin="/bin/false")
+    assert exc.value.code == 1
+    assert (www / APP_A / "live" / "index.html").read_text() == "served\n"
+    assert not (www / APP_A / "live.prev").exists()
+
+
+def test_the_snapshot_argv_is_the_harvests_flags(launcher):
+    """The publisher's flags, verbatim: symlinks dropped as a class, no
+    devices or FIFOs, modes applied by rsync itself. A dropped flag here is a
+    symlink or a 0600 file in a world-served tree."""
+    argv = launcher.snapshot_argv("/srv/apps-www/x/preview",
+                                  "/srv/apps-www/.staging/x/live.tmp.1",
+                                  rsync_bin="/usr/bin/rsync")
+    assert argv == ["/usr/bin/rsync", "-a", "--no-links", "--no-D",
+                    "--chmod=D0755,F0644",
+                    "/srv/apps-www/x/preview/",
+                    "/srv/apps-www/.staging/x/live.tmp.1/"]
+
+
+# ───────────────────────────────────────────────────────────── revert ───────
+
+@pytest.mark.skipif(not HAVE_RSYNC, reason="rsync is not installed")
+def test_revert_swaps_live_and_live_prev(www, launcher):
+    launcher.publish_app(www, APP_A, rsync_bin=HAVE_RSYNC)
+    (www / APP_A / "preview" / "index.html").write_text("<h1>v2</h1>\n",
+                                                        encoding="utf-8")
+    launcher.publish_app(www, APP_A, rsync_bin=HAVE_RSYNC)
+    launcher.revert_app(www, APP_A)
+    assert (www / APP_A / "live" / "index.html").read_text() == "<h1>v1</h1>\n"
+    assert (www / APP_A / "live.prev" / "index.html").read_text() == "<h1>v2</h1>\n"
+
+
+@pytest.mark.skipif(not HAVE_RSYNC, reason="rsync is not installed")
+def test_a_revert_is_its_own_undo(www, launcher):
+    """The swap is symmetric — the superseded tree is kept, not deleted — so a
+    user who reverts by mistake presses it again."""
+    launcher.publish_app(www, APP_A, rsync_bin=HAVE_RSYNC)
+    (www / APP_A / "preview" / "index.html").write_text("<h1>v2</h1>\n",
+                                                        encoding="utf-8")
+    launcher.publish_app(www, APP_A, rsync_bin=HAVE_RSYNC)
+    launcher.revert_app(www, APP_A)
+    launcher.revert_app(www, APP_A)
+    assert (www / APP_A / "live" / "index.html").read_text() == "<h1>v2</h1>\n"
+
+
+@pytest.mark.skipif(not HAVE_RSYNC, reason="rsync is not installed")
+def test_revert_leaves_nothing_in_the_staging_root(www, launcher):
+    launcher.publish_app(www, APP_A, rsync_bin=HAVE_RSYNC)
+    launcher.publish_app(www, APP_A, rsync_bin=HAVE_RSYNC)
+    launcher.revert_app(www, APP_A)
+    assert list((www / ".staging" / APP_A).iterdir()) == []
+
+
+@pytest.mark.parametrize("shape", ["neither", "live only", "prev only"])
+def test_revert_refuses_unless_both_trees_exist(www, launcher, shape):
+    app = www / APP_A
+    if shape in ("live only",):
+        (app / "live").mkdir()
+    if shape in ("prev only",):
+        (app / "live.prev").mkdir()
+    with pytest.raises(SystemExit) as exc:
+        launcher.revert_app(www, APP_A)
+    assert exc.value.code == 64
+
+
+# ────────────────────────────────────────────────────────────── remix ───────
+
+@pytest.mark.skipif(not (HAVE_GIT and HAVE_RSYNC), reason="git/rsync missing")
+def test_remix_clones_the_repo_and_records_the_lineage(www, apps, launcher):
+    out = launcher.remix_app(apps, www, APP_A, APP_B,
+                             git_bin=HAVE_GIT, rsync_bin=HAVE_RSYNC)
+    child = apps / APP_B
+    assert out["child"] == APP_B and out["preview"] is True
+    assert (child / "index.html").read_text() == "<h1>v1</h1>\n"
+    log = _subprocess.run(["git", "-C", str(child), "log", "--format=%s|%an|%ae"],
+                          capture_output=True, text=True, check=True).stdout
+    lines = log.strip().splitlines()
+    # The lineage is the FIRST thing in the log and the parent's history is
+    # under it: `git log` in the child says where it came from.
+    assert lines[0] == f"remix of {APP_A}|apps-builder|apps-builder@disjorn.local"
+    assert lines[-1].startswith("turn 1|")
+
+
+@pytest.mark.skipif(not (HAVE_GIT and HAVE_RSYNC), reason="git/rsync missing")
+def test_remix_shares_no_objects_with_its_parent(www, apps, launcher):
+    """--no-hardlinks. Two separately writable apps must not share a byte on
+    disk: `git gc` in one would be reaching into the other's history."""
+    launcher.remix_app(apps, www, APP_A, APP_B,
+                       git_bin=HAVE_GIT, rsync_bin=HAVE_RSYNC)
+    child = apps / APP_B
+    assert not (child / ".git" / "objects" / "info" / "alternates").exists()
+    for obj in (child / ".git" / "objects").rglob("*"):
+        if obj.is_file():
+            assert obj.stat().st_nlink == 1, f"{obj} is hardlinked to the parent"
+
+
+@pytest.mark.skipif(not (HAVE_GIT and HAVE_RSYNC), reason="git/rsync missing")
+def test_remix_gives_the_child_the_parents_preview(www, apps, launcher):
+    launcher.remix_app(apps, www, APP_A, APP_B,
+                       git_bin=HAVE_GIT, rsync_bin=HAVE_RSYNC)
+    child_preview = www / APP_B / "preview"
+    assert (child_preview / "index.html").read_text() == "<h1>v1</h1>\n"
+    assert (child_preview / "sub" / "a.txt").read_text() == "one\n"
+    assert stat.S_IMODE((www / APP_B).stat().st_mode) == 0o755
+    assert stat.S_IMODE(child_preview.stat().st_mode) == 0o755
+    # A remix is a build session, not a deploy: nothing is live yet.
+    assert not (www / APP_B / "live").exists()
+
+
+@pytest.mark.skipif(not HAVE_GIT, reason="git is not installed")
+def test_remix_of_an_app_that_has_never_deployed_still_clones(www, apps, launcher):
+    """No preview is not a refusal: the app exists, it just has nothing served
+    yet. The child gets the repo and no preview root at all."""
+    _shutil.rmtree(www / APP_A / "preview")
+    out = launcher.remix_app(apps, www, APP_A, APP_B, git_bin=HAVE_GIT)
+    assert out["preview"] is False
+    assert (apps / APP_B / ".git").is_dir()
+    assert not (www / APP_B).exists()
+
+
+@pytest.mark.skipif(not HAVE_GIT, reason="git is not installed")
+def test_the_child_repo_is_the_seats_own(www, apps, launcher):
+    launcher.remix_app(apps, www, APP_A, APP_B,
+                       git_bin=HAVE_GIT, rsync_bin=HAVE_RSYNC or "rsync")
+    assert stat.S_IMODE((apps / APP_B).stat().st_mode) == 0o750
+
+
+@pytest.mark.parametrize("bad", ["parent missing", "parent not a repo",
+                                 "child exists", "same id"])
+def test_remix_refusals(www, apps, launcher, bad):
+    parent, child = APP_A, APP_B
+    if bad == "parent missing":
+        parent = "aaaaaaaaaaaa"
+    if bad == "parent not a repo":
+        parent = "aaaaaaaaaaaa"
+        (apps / parent).mkdir()
+    if bad == "child exists":
+        (apps / child).mkdir()
+    if bad == "same id":
+        child = APP_A
+    with pytest.raises(SystemExit) as exc:
+        launcher.remix_app(apps, www, parent, child, git_bin=HAVE_GIT or "git")
+    assert exc.value.code == 64
+    assert not (apps / APP_B / ".git").exists()
+
+
+# ───────────────────────────────── the constants that live in two files ─────
+
+def test_the_lineage_commit_is_authored_by_the_app_builder(launcher):
+    """apps_harvest writes every turn's commit and the launcher writes the
+    remix's; the two identities are the same string in two files, which is
+    this project's most expensive defect shape, so it is pinned."""
+    loader = SourceFileLoader("apps_harvest_pin", str(CC_DIR / "apps" / "apps_harvest.py"))
+    spec = importlib.util.spec_from_loader("apps_harvest_pin", loader)
+    harvest = importlib.util.module_from_spec(spec)
+    loader.exec_module(harvest)
+    assert launcher.GIT_USER_NAME == harvest.GIT_USER_NAME
+    assert launcher.GIT_USER_EMAIL == harvest.GIT_USER_EMAIL
+    assert launcher.STAGING_NAME == harvest.STAGING_NAME
+
+
+def test_the_sudoers_file_grants_exactly_the_five_modes():
+    """One alias per mode, anchored at both ends, and the plink line names all
+    five. A sixth alias, or a wildcard, is a diff someone has to defend."""
+    text = SUDOERS.read_text(encoding="utf-8")
+    aliases = dict(re.findall(r"^Cmnd_Alias (\w+) = \\\n\s*(\S.*)$", text, re.M))
+    assert set(aliases) == {"DISJORN_APPS_LAUNCH", "DISJORN_APPS_STOP",
+                            "DISJORN_APPS_PUBLISH", "DISJORN_APPS_REVERT",
+                            "DISJORN_APPS_REMIX"}
+    assert aliases["DISJORN_APPS_PUBLISH"].endswith("^publish [a-z2-7]{12}$")
+    assert aliases["DISJORN_APPS_REVERT"].endswith("^revert [a-z2-7]{12}$")
+    assert aliases["DISJORN_APPS_REMIX"].endswith(
+        "^remix [a-z2-7]{12} [a-z2-7]{12}$")
+    for name, rule in aliases.items():
+        assert rule.startswith("/usr/local/lib/disjorn/disjorn-apps-launch ")
+        assert "*" not in rule, f"{name} has a wildcard"
+    grant = re.search(r"^plink ALL=\(root\) NOPASSWD: (.+?)$",
+                      text.replace("\\\n", " "), re.M).group(1)
+    assert set(x.strip() for x in grant.split(",")) == set(aliases)
+
+
+def test_the_publisher_is_installed_and_drift_checked_by_the_keyboard_script():
+    """The gate's unit is the fifth thing 10-appsbuilding.sh installs and the
+    fifth thing its drift block compares. A file that is deployed but not
+    drift-checked is a stale deploy waiting to happen."""
+    script = (CC_DIR.parent / "keyboard" / "10-appsbuilding.sh").read_text(
+        encoding="utf-8")
+    assert "deploy/disjorn-apps-gate.service" in script
+    assert "/etc/systemd/system/disjorn-apps-gate.service" in script
+    assert "systemctl daemon-reload" in script
+    assert 'if [ -f "$GATE_UNIT_SRC" ]; then' in script      # guarded both ways
