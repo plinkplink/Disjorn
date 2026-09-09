@@ -652,6 +652,15 @@ export function endAppSession(
   return request("POST", `/apps/sessions/${sessionId}/end`);
 }
 
+/** POST /apps/sessions/{id}/stop — ask for the running turn to stop (slice
+    (iv)). Records a request the broker acts on; nothing here promises when.
+    409 with no turn running, 410 on an ended session, idempotent otherwise. */
+export function stopAppTurn(
+  sessionId: number,
+): Promise<{ id: number; stop_requested_at: string }> {
+  return request("POST", `/apps/sessions/${sessionId}/stop`);
+}
+
 /**
  * POST /apps/sessions/{id}/stage — the ONLY stage publisher in stage 1, and
  * it is not for this client: the server admits the `broker` bot (or an admin

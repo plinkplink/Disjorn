@@ -36,6 +36,7 @@ import sys
 import time
 from pathlib import Path
 
+import pathlib
 import pytest
 
 CC_DIR = Path(__file__).resolve().parent.parent
@@ -153,6 +154,37 @@ def test_timed_out_flag_wins_over_a_plain_exit_code(ah, turn):
     to report a tidy status; the flag is that knowledge."""
     (turn["repo"] / "app.js").write_text("// x\n", encoding="utf-8")
     assert do_harvest(ah, turn, exit_code=1, timed_out=True)["halted"] == "timeout"
+
+
+# ── slice (iv): a stop is the same SIGTERM as the clock, told apart by the
+# marker the launcher dropped (SPECS/2026-09-08-apps-stop-turn.md, 2444).
+
+@pytest.mark.parametrize("exit_code", [143, 137, 124])
+def test_a_timeout_exit_with_the_stop_marker_is_stopped(ah, turn, exit_code):
+    (pathlib.Path(turn["result_dir"]) / ah.STOP_MARKER).touch()
+    (pathlib.Path(turn["repo"]) / "index.html").write_text("<h1>half</h1>")
+    result = do_harvest(ah, turn, exit_code=exit_code)
+    assert result["halted"] == "stopped"
+    # everything else is the halt path as before: the work is kept
+    assert result["commit"] and result["files"] == ["index.html"]
+
+
+def test_the_same_exit_without_the_marker_is_still_a_timeout(ah, turn):
+    assert do_harvest(ah, turn, exit_code=143)["halted"] == "timeout"
+
+
+def test_the_timed_out_flag_with_the_marker_is_stopped(ah, turn):
+    """run-apps.sh reports the trap as timed_out=1 whichever signal sent it;
+    the marker is what tells the two apart."""
+    (pathlib.Path(turn["result_dir"]) / ah.STOP_MARKER).touch()
+    assert do_harvest(ah, turn, exit_code=1, timed_out=True)["halted"] == "stopped"
+
+
+def test_a_plain_error_exit_ignores_the_marker(ah, turn):
+    """A stop that arrived after the runner had already failed on its own is
+    still the runner's failure; the marker only reads a SIGTERM."""
+    (pathlib.Path(turn["result_dir"]) / ah.STOP_MARKER).touch()
+    assert do_harvest(ah, turn, exit_code=1)["halted"] == "error"
 
 
 def test_halted_turn_that_changed_nothing_commits_nothing(ah, turn):

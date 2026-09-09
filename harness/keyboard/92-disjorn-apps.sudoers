@@ -26,11 +26,13 @@
 #   fixed systemd-run argv that runs the turn AS res-appsbuilding, never as
 #   root.
 #
-#   There is no `stop` mode and no second program. A turn is bounded by the
-#   unit's RuntimeMaxSec, which the helper sets and no caller can widen; if a
-#   human needs a turn dead sooner, that is `systemctl stop
-#   disjorn-apps-<session>-<turn>` at the keyboard, with plink's own sudo, and
-#   it should stay that deliberate.
+#   A second mode, `stop` (slice (iv), SPECS/2026-09-08-apps-stop-turn.md),
+#   with three shape-checked arguments: the helper drops a marker in the
+#   turn's result dir and execs `systemctl stop disjorn-apps-<session>-<turn>`,
+#   the unit name derived from the arguments and never named by the caller.
+#   A turn is still bounded by RuntimeMaxSec, which no caller can widen; the
+#   stop only ever ends one sooner, and only the unit this helper's own `run`
+#   could have started. There is no second program.
 #
 # ONE LINE FOR ONE CALLER, ON PURPOSE. The `apps-build` verb is called by the
 # broker, which already runs as plink, so this one line serves every turn and
@@ -60,8 +62,13 @@
 #     app-id      [a-z2-7]{12}          (stage 1 D4, base32 lower)
 #     prompt-path an absolute path with no spaces; the helper confines it, by
 #                 realpath, to that principal's mapped prompt directory
+#
+#   stop <principal> <session> <turn>
+#     the same three shapes, and nothing after them.
 
 Cmnd_Alias DISJORN_APPS_LAUNCH = \
     /usr/local/lib/disjorn/disjorn-apps-launch ^run res-[a-z]{1,24} [1-9][0-9]{0,8} [1-9][0-9]{0,3} [a-z2-7]{12} /[^ ]{1,4000}$
+Cmnd_Alias DISJORN_APPS_STOP = \
+    /usr/local/lib/disjorn/disjorn-apps-launch ^stop res-[a-z]{1,24} [1-9][0-9]{0,8} [1-9][0-9]{0,3}$
 
-plink ALL=(root) NOPASSWD: DISJORN_APPS_LAUNCH
+plink ALL=(root) NOPASSWD: DISJORN_APPS_LAUNCH, DISJORN_APPS_STOP

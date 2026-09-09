@@ -107,7 +107,7 @@ STAGE_LINE_FILES = 8
 
 # Why a turn stopped. A CLOSED set, because each value picks a sentence: an
 # unknown reason would be a turn that halted with nothing said about it.
-HaltReason = Literal["timeout", "error", "secret", "ceiling"]
+HaltReason = Literal["timeout", "error", "secret", "ceiling", "stopped"]
 
 # One sentence per halt, keyed by the reason. `ceiling` is the only one the
 # broker posts without anything having run (D-1.2b): the refusal still reaches
@@ -117,6 +117,9 @@ HALT_SENTENCES: dict[str, str] = {
     "ceiling": "build hit its ceiling.",
     "timeout": "the build timed out.",
     "error": "the build failed.",
+    # Slice (iv): the user pressed Stop. The harvest tells this from the clock
+    # by the marker the launcher's `stop` dropped before `systemctl stop`.
+    "stopped": "stopped by the user.",
     "secret": (
         "the build tried to write a credential; this session is closed and an "
         "admin has been notified."
@@ -330,6 +333,9 @@ class HarnessView(BaseModel):
     lock_lapsed: bool
     ended_at: Optional[str] = None
     locked_until: str
+    # Slice (iv): set when the owner asked for the running turn to stop. The
+    # broker's reaper reads it each poll and sends the unit its stop once.
+    stop_requested_at: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -763,6 +769,49 @@ async def _close_session(conn: Any, session_id: int, moment: str) -> None:
     )
 
 
+async def _running_turn(conn: Any, session_id: int) -> Optional[int]:
+    """The turn number of the turn that is running NOW, or None.
+
+    A turn is running from its `scoped` event until its terminal event: a
+    `files_written`, or any event carrying `detail.halted`. Derived from the
+    stage stream rather than kept as a column, so it cannot disagree with the
+    events the modal and the room already saw. A ceiling refusal
+    (`spawned: false`) never started a turn and does not count as one.
+    """
+    scoped = await (await conn.execute(
+        """SELECT id, detail FROM app_stage_events
+            WHERE session_id = ? AND stage = 'scoped'
+              AND COALESCE(json_extract(detail, '$.spawned'), 1) != 0
+            ORDER BY id DESC LIMIT 1""",
+        (session_id,),
+    )).fetchone()
+    if scoped is None:
+        return None
+    terminal = await (await conn.execute(
+        """SELECT id FROM app_stage_events
+            WHERE session_id = ? AND (stage = 'files_written'
+                  OR json_extract(detail, '$.halted') IS NOT NULL)
+            ORDER BY id DESC LIMIT 1""",
+        (session_id,),
+    )).fetchone()
+    if terminal is not None and terminal["id"] > scoped["id"]:
+        return None
+    try:
+        turn = json.loads(scoped["detail"] or "{}").get("turn")
+    except (TypeError, ValueError):
+        return None
+    return turn if isinstance(turn, int) and not isinstance(turn, bool) else None
+
+
+async def _request_stop(conn: Any, session_id: int, moment: str) -> None:
+    """Record the stop, keeping the FIRST request (idempotent, like ending)."""
+    await conn.execute(
+        """UPDATE app_sessions SET stop_requested_at = ?
+            WHERE id = ? AND stop_requested_at IS NULL""",
+        (moment, session_id),
+    )
+
+
 # ---------------------------------------------------------------------------
 # GET /apps, /apps/discover, /apps/builders, /apps/quota
 # ---------------------------------------------------------------------------
@@ -995,14 +1044,54 @@ async def heartbeat_session(session_id: int, user: CurrentUser) -> dict[str, Any
 
 @router.post("/apps/sessions/{session_id}/end")
 async def end_session(session_id: int, user: CurrentUser) -> dict[str, Any]:
-    """Close the session and release the lock. Idempotent (_close_session)."""
+    """Close the session and release the lock. Idempotent (_close_session).
+
+    Ending while a turn runs STOPS THE TURN FIRST (slice (iv)): the stop is
+    recorded before `ended_at`, in one transaction, so the reaper's next
+    harness-view read sees both and the unit gets its `systemctl stop`. Before
+    this, `end` only set `ended_at`, the unit ran to `turn_max`, and its own
+    record 410'd on arrival (Gable #2393).
+    """
     session = await _require_session(session_id, user)
     if session["ended_at"] is None:
         ended_at = _now()
-        await _close_session(db, session_id, ended_at)
+        async with db.transaction() as conn:
+            if await _running_turn(conn, session_id) is not None:
+                await _request_stop(conn, session_id, ended_at)
+            await _close_session(conn, session_id, ended_at)
     else:
         ended_at = session["ended_at"]
     return {"id": session_id, "ended_at": ended_at}
+
+
+@router.post("/apps/sessions/{session_id}/stop")
+async def stop_turn(session_id: int, user: CurrentUser) -> dict[str, Any]:
+    """Ask for the running turn to stop (slice (iv)). Owner-only, same auth
+    as `end`.
+
+    This records a request; it does not stop anything itself. The broker's
+    reaper reads `stop_requested_at` off harness-view and sends the unit ONE
+    `systemctl stop`; the unit's TERM trap harvests; the harvest's record is
+    the turn's terminal event and lands in the room as `stopped by the user`.
+    Nothing here promises when — the hard bound is the unit's stop timeout,
+    and the dialog says "about a minute and a half" for that reason.
+
+    Idempotent: a second click keeps the first timestamp. 409 when no turn is
+    running (there is nothing to stop, and saying so beats a request that
+    would sit on the row until some later turn inherited it). 410 on an ended
+    session, like every other verb on one.
+    """
+    session = await _require_session(session_id, user)
+    _require_session_open(session)
+    async with db.transaction() as conn:
+        if await _running_turn(conn, session_id) is None:
+            raise HTTPException(status_code=409, detail="No turn is running")
+        if session["stop_requested_at"] is None:
+            await _request_stop(conn, session_id, _now())
+    row = await db.fetch_one(
+        "SELECT stop_requested_at FROM app_sessions WHERE id = ?", (session_id,)
+    )
+    return {"id": session_id, "stop_requested_at": row["stop_requested_at"]}
 
 
 # ---------------------------------------------------------------------------
@@ -1071,6 +1160,7 @@ async def harness_view(session_id: int, actor: CurrentActor) -> HarnessView:
         lock_lapsed=session["locked_until"] <= _now(),
         ended_at=session["ended_at"],
         locked_until=session["locked_until"],
+        stop_requested_at=session["stop_requested_at"],
     )
 
 
@@ -1105,7 +1195,16 @@ async def publish_stage(
     session = await _publisher_session(session_id)
     if from_harness:
         if session["ended_at"] is not None:
-            raise HTTPException(status_code=410, detail="This build session has ended")
+            # Slice (iv): `end` while a turn ran stopped the turn first, and
+            # the record of THAT turn must still land — it is the room's only
+            # account of what the stop kept. Only that turn gets through the
+            # 410: the one still running per the stream, and only while the
+            # stop it was given is still on the row.
+            running = (await _running_turn(db, session_id)
+                       if session["stop_requested_at"] is not None else None)
+            if running is None or body.detail.turn != running:
+                raise HTTPException(status_code=410,
+                                    detail="This build session has ended")
     else:
         _require_session_open(session)
 
@@ -1113,6 +1212,7 @@ async def publish_stage(
     detail_json = json.dumps(detail)
     created_at = _now()
     halted = body.detail.halted
+    terminal = body.stage == "files_written" or halted is not None
     async with db.transaction() as conn:
         cur = await conn.execute(
             """INSERT INTO app_stage_events (session_id, stage, detail, created_at)
@@ -1172,6 +1272,13 @@ async def publish_stage(
                 )
         if halted == "secret":
             await _close_session(conn, session_id, created_at)
+        # A terminal event consumes the stop request, whatever the reason the
+        # turn ended for: the next turn of this session starts unasked.
+        if terminal and body.detail.spawned is not False:
+            await conn.execute(
+                "UPDATE app_sessions SET stop_requested_at = NULL WHERE id = ?",
+                (session_id,),
+            )
         if body.stage == "live":
             await conn.execute(
                 "UPDATE apps SET status = 'live', updated_at = ? WHERE id = ?",

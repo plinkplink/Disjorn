@@ -7,9 +7,10 @@ for line on its elder brother `harness/broker/disjorn-build-launch` (WP-L4) — 
 about sudoers wildcards, fixed argv and "the validation below is the actual
 boundary" is identical here and is not repeated in full.
 
-    disjorn-apps-launch run <resident> <session> <turn> <app-id> <prompt-path>
+    disjorn-apps-launch run  <resident> <session> <turn> <app-id> <prompt-path>
+    disjorn-apps-launch stop <resident> <session> <turn>
 
-execs, with stdin/stdout/stderr passed through untouched (`--pipe`):
+`run` execs, with stdin/stdout/stderr passed through untouched (`--pipe`):
 
     systemd-run --unit=disjorn-apps-<session>-<turn>
                 --uid=res-appsbuilding --gid=res-appsbuilding
@@ -24,6 +25,16 @@ spaces — which makes it a grant of `--uid=0 --property=ExecStartPre=...`, i.e.
 full root. The privileged surface has to be a fixed-argv program that validates
 its own inputs. This is that program. The regexes in the sudoers file are a
 second fence, not the fence.
+
+`stop` (slice (iv), SPECS/2026-09-08-apps-stop-turn.md) drops a `stop-requested`
+marker in the turn's result dir and execs `systemctl stop disjorn-apps-<session>-
+<turn>`. The marker is how the harvest tells a user's stop from the clock: both
+arrive as the same SIGTERM. Fixed argv, same charsets as `run`, and the unit
+name is derived — a caller can name a turn, never a unit. The marker write is
+the one place this program touches the seat's tree, and it does so through an
+openat chain that refuses symlinks and dirs the seat does not own, so the worst
+a hostile seat can make root do is create an empty file inside the seat's own
+directory.
 
 NOTHING HERE IS POLICY. The session lock, the quota, the token ceiling and the
 seat→bot map all live in the broker (slice ii). This program decides exactly
@@ -84,6 +95,8 @@ except ModuleNotFoundError:                              # pragma: no cover
 
 # ---------------------------------------------------------------- fixed paths
 SYSTEMD_RUN = "/usr/bin/systemd-run"
+SYSTEMCTL = "/usr/bin/systemctl"
+STOP_MARKER = "stop-requested"
 # The ONLY program this helper will ever start. Not an argument: a caller that
 # could name the program could run anything as the apps-builder.
 WRAPPER = "/usr/local/lib/disjorn/run-apps.sh"
@@ -535,6 +548,95 @@ def build_run_argv(principal: str, session: str, turn: str, app_id: str,
     ]
 
 
+# ------------------------------------------------------------------ stop
+
+def build_stop_argv(principal: str, session: str, turn: str) -> "list":
+    """Every check, then the exact systemctl argv. The principal is validated
+    and otherwise unused: `stop` takes it so the sudoers line and the audit
+    trail name the same caller `run` did, and so the argument shapes are one
+    set, not two."""
+    check_principal(principal)
+    session = check_session(session)
+    turn = check_turn(turn)
+    return [SYSTEMCTL, "stop", f"{UNIT_PREFIX}{session}-{turn}"]
+
+
+def drop_stop_marker(session: str, turn: str, seat_uid: int, *,
+                     turns_root: str = TURNS_ROOT) -> bool:
+    """Create `<turns_root>/<session>/<turn>/stop-requested`, as root, without
+    ever following a symlink or writing under a directory the seat does not
+    own. True if created, False if it already existed.
+
+    The turn dir was created by the seat (run-apps.sh, mkdir -p) and the seat
+    controls its contents; root writing there by name would follow whatever
+    the seat planted. So: open the root with O_DIRECTORY|O_NOFOLLOW, walk one
+    component at a time with openat under the same flags, fstat each and
+    refuse anything not a directory owned by the seat, then create the marker
+    O_CREAT|O_EXCL|O_NOFOLLOW at the final fd. A missing turn dir is a turn
+    that never started (or already cleaned up) and is refused, not created —
+    this program makes no directories in the seat's tree.
+
+    Wrapped so a refusal is a REFUSED line and exit 64, before any privilege
+    is used on the unit."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(turns_root, flags)
+    except OSError as exc:
+        die(f"turns root unavailable: {turns_root}: {exc.strerror}")
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISDIR(st.st_mode):
+            die(f"turns root is not a directory: {turns_root}")
+        for name in (session, turn):
+            try:
+                nfd = os.open(name, flags, dir_fd=fd)
+            except FileNotFoundError:
+                die(f"no such turn: {session}/{turn} (nothing to stop)")
+            except OSError as exc:
+                die(f"cannot open {name} under the turns root: {exc.strerror}")
+            os.close(fd)
+            fd = nfd
+            st = os.fstat(fd)
+            if not stat.S_ISDIR(st.st_mode) or st.st_uid != seat_uid:
+                die(f"{session}/{turn}: directory is not the seat's own "
+                    f"(uid {st.st_uid}, expected {seat_uid}) — refusing to write")
+        try:
+            mfd = os.open(STOP_MARKER,
+                          os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                          | getattr(os, "O_NOFOLLOW", 0),
+                          0o644, dir_fd=fd)
+        except FileExistsError:
+            return False
+        except OSError as exc:
+            die(f"cannot drop the stop marker: {exc.strerror}")
+        os.close(mfd)
+        return True
+    finally:
+        os.close(fd)
+
+
+def main_stop(argv: "list", *, dry: bool, seat) -> int:
+    if len(argv) != 5:
+        die(f"stop takes exactly 3 arguments, got {len(argv) - 2}")
+    out = build_stop_argv(argv[2], argv[3], argv[4])
+    if dry:
+        # The marker is a real write; a dry run says what it WOULD do, on a
+        # root the test names, or skips the write when none is named.
+        root = os.environ.get("DISJORN_APPS_LAUNCH_TURNS_ROOT")
+        if root:
+            created = drop_stop_marker(argv[3], argv[4], seat[0].pw_uid,
+                                       turns_root=root)
+            print(json.dumps({"argv": out, "marker": created}))
+        else:
+            print(json.dumps(out))
+        return 0
+    pw, _group = seat
+    drop_stop_marker(argv[3], argv[4], pw.pw_uid)
+    os.execve(out[0], out, {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"})
+    die(f"exec failed: {out[0]}")   # pragma: no cover
+    return EXIT_REFUSED
+
+
 def main(argv: "list") -> int:
     # DRY RUN is for the test suite and for reading the argv at the keyboard.
     # It is UNREACHABLE through the privileged path: sudo's env_reset (Debian
@@ -552,20 +654,27 @@ def main(argv: "list") -> int:
     if dry and os.environ.get("DISJORN_APPS_LAUNCH_HARVEST"):
         harvest = os.environ["DISJORN_APPS_LAUNCH_HARVEST"]
 
-    if len(argv) < 2 or argv[1] != "run":
+    if len(argv) < 2 or argv[1] not in ("run", "stop"):
         die("usage: disjorn-apps-launch run <resident> <session> <turn> "
-            "<app-id> <prompt-path>")
-    if len(argv) != 7:
-        die(f"run takes exactly 5 arguments, got {len(argv) - 2}")
+            "<app-id> <prompt-path> | stop <resident> <session> <turn>")
 
-    config = load_config(config_path)
     seat = None
     if dry and os.environ.get("DISJORN_APPS_LAUNCH_FAKE_SEAT"):
         # A test box has no res-appsbuilding. The FAKE_SEAT override is
         # dry-run-only for the same reason every other override is.
         uid, home, group = os.environ["DISJORN_APPS_LAUNCH_FAKE_SEAT"].split(":")
         seat = (type("pw", (), {"pw_uid": int(uid), "pw_dir": home})(), group)
-    elif not dry:
+
+    if argv[1] == "stop":
+        # No config, no wrapper, no prompt: a stop names a turn and nothing
+        # else, and the only thing it reads is the seat's uid for the marker.
+        return main_stop(argv, dry=dry, seat=seat or check_seat())
+
+    if len(argv) != 7:
+        die(f"run takes exactly 5 arguments, got {len(argv) - 2}")
+
+    config = load_config(config_path)
+    if seat is None and not dry:
         check_wrapper(wrapper)
 
     # ONE open of the prompt, before anything else, and the argv is built

@@ -299,7 +299,7 @@ export interface Quota {
 
 /** Why a turn stopped. A closed set: each value is a sentence the server
     already wrote into the room, and the chip below is its short form. */
-export type HaltReason = "timeout" | "error" | "secret" | "ceiling";
+export type HaltReason = "timeout" | "error" | "secret" | "ceiling" | "stopped";
 
 /**
  * What a stage event says about the turn that produced it (stage 2, §1.2).

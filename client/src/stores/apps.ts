@@ -23,6 +23,7 @@ import { create } from "zustand";
 import {
   addAppToMenu,
   endAppSession,
+  stopAppTurn,
   fetchAppSession,
   heartbeatAppSession,
   listApps,
@@ -64,6 +65,7 @@ const HALT_REASONS: readonly HaltReason[] = [
   "error",
   "secret",
   "ceiling",
+  "stopped",
 ];
 
 function haltOf(value: unknown): HaltReason | null {
@@ -144,6 +146,9 @@ interface AppsState {
   /** Extends the lock. Rethrows so the caller can see a 410 (ended/lapsed). */
   heartbeat: (sessionId: number) => Promise<void>;
   endSession: (sessionId: number) => Promise<void>;
+  /** POST /apps/sessions/{id}/stop. Rethrows so the modal can read a 409 (no
+      turn running) or 410 (ended) as the outcome it is. */
+  stopTurn: (sessionId: number) => Promise<void>;
   renameApp: (appId: string, name: string) => Promise<void>;
   addToMenu: (appId: string) => Promise<void>;
   removeFromMenu: (appId: string) => Promise<void>;
@@ -212,6 +217,10 @@ export const useApps = create<AppsState>()((set, get) => {
 
     heartbeat: async (sessionId) => {
       await heartbeatAppSession(sessionId);
+    },
+
+    stopTurn: async (sessionId) => {
+      await stopAppTurn(sessionId);
     },
 
     endSession: async (sessionId) => {

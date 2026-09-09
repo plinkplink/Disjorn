@@ -181,10 +181,88 @@ def test_no_arguments_is_refused(seat):
     refuse(seat)
 
 
-def test_stop_mode_does_not_exist(seat):
-    """The build launcher has run|stop; this one has run only. A turn is
-    bounded by RuntimeMaxSec, and killing one early is a keyboard act."""
-    refuse(seat, "stop", *GOOD, str(seat["prompt"]))
+# ── stop (slice (iv), SPECS/2026-09-08-apps-stop-turn.md, 2444) ────────────
+
+def test_stop_argv_byte_for_byte(seat):
+    """`stop` names a turn and nothing else; the unit name is derived from the
+    same charsets `run` enforces, so a caller can never aim systemctl at a
+    unit it did not launch."""
+    assert accept(seat, "stop", "res-gable", "12", "3") == [
+        "/usr/bin/systemctl", "stop", "disjorn-apps-12-3"]
+
+
+@pytest.mark.parametrize("args", [
+    [],                                   # nothing
+    ["res-gable", "12"],                  # too few
+    ["res-gable", "12", "3", "extra"],    # too many (run's shape)
+    ["keyboard", "12", "3"],              # the retired principal
+    ["res-gable", "0", "3"],              # session charset
+    ["res-gable", "12", "03"],            # turn charset
+    ["res-gable", "12", "3 --now"],       # a flag riding in an argument
+    ["res-gable", "../12", "3"],          # a path riding in an argument
+])
+def test_stop_refuses_every_bad_shape(seat, args):
+    refuse(seat, "stop", *args)
+
+
+def test_stop_drops_the_marker_in_the_seats_turn_dir(seat, tmp_path):
+    """The marker is how the harvest tells the user's stop from the clock:
+    both arrive as one SIGTERM. Created once; a second stop finds it and says
+    so rather than failing."""
+    # The walk refuses any dir the seat does not own, so the fake seat here
+    # IS this test's uid: tmp_path is ours, and that is the case being proved.
+    mine = ":".join([str(os.getuid()), *FAKE_SEAT.split(":")[1:]])
+    turn_dir = tmp_path / "turns" / "12" / "3"
+    turn_dir.mkdir(parents=True)
+    env = {"DISJORN_APPS_LAUNCH_TURNS_ROOT": str(tmp_path / "turns"),
+           "DISJORN_APPS_LAUNCH_FAKE_SEAT": mine}
+    first = json.loads(run(seat, "stop", "res-gable", "12", "3",
+                           env_extra=env).stdout)
+    assert first == {"argv": ["/usr/bin/systemctl", "stop", "disjorn-apps-12-3"],
+                     "marker": True}
+    marker = turn_dir / "stop-requested"
+    assert marker.is_file() and marker.stat().st_size == 0
+    again = json.loads(run(seat, "stop", "res-gable", "12", "3",
+                           env_extra=env).stdout)
+    assert again["marker"] is False
+
+
+def test_stop_refuses_a_turn_dir_the_seat_does_not_own(seat, tmp_path):
+    """Root never writes by name into a tree the seat controls. The walk
+    fstat's each component and refuses a directory not owned by the seat —
+    which, with a fake seat uid that is not ours, is every directory here."""
+    other = FAKE_SEAT.split(":")
+    other_uid = str(os.getuid() + 1)
+    turn_dir = tmp_path / "turns" / "12" / "3"
+    turn_dir.mkdir(parents=True)
+    env = {"DISJORN_APPS_LAUNCH_TURNS_ROOT": str(tmp_path / "turns"),
+           "DISJORN_APPS_LAUNCH_FAKE_SEAT": ":".join([other_uid, *other[1:]])}
+    proc = refuse(seat, "stop", "res-gable", "12", "3", env_extra=env)
+    assert "not the seat's own" in proc.stderr
+    assert not (turn_dir / "stop-requested").exists()
+
+
+def test_stop_refuses_a_symlinked_turn_dir(seat, tmp_path):
+    """A seat that replaces its turn dir with a symlink to somewhere root can
+    write gets a refusal, not a root-created file at the other end."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (tmp_path / "turns" / "12").mkdir(parents=True)
+    (tmp_path / "turns" / "12" / "3").symlink_to(elsewhere)
+    mine = ":".join([str(os.getuid()), *FAKE_SEAT.split(":")[1:]])
+    env = {"DISJORN_APPS_LAUNCH_TURNS_ROOT": str(tmp_path / "turns"),
+           "DISJORN_APPS_LAUNCH_FAKE_SEAT": mine}
+    refuse(seat, "stop", "res-gable", "12", "3", env_extra=env)
+    assert not (elsewhere / "stop-requested").exists()
+
+
+def test_stop_refuses_a_turn_that_never_started(seat, tmp_path):
+    """No turn dir means nothing is running; the launcher makes no directories
+    in the seat's tree, so it refuses rather than creating one to mark."""
+    (tmp_path / "turns").mkdir()
+    env = {"DISJORN_APPS_LAUNCH_TURNS_ROOT": str(tmp_path / "turns")}
+    proc = refuse(seat, "stop", "res-gable", "12", "3", env_extra=env)
+    assert "nothing to stop" in proc.stderr
 
 
 def test_unknown_mode_is_refused(seat):

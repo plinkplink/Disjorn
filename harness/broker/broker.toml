@@ -533,8 +533,15 @@ custodian_channel_id = 4
 # THE HIDDEN CEILING (parent Round 6). Summed across a session's turns and
 # checked BEFORE a turn, because usage lands when the runner finishes: a trip
 # blocks the NEXT handoff and one turn can overshoot. That is a runaway kill,
-# not a budget, and no UI may promise a mid-turn stop.
+# not a budget. The user CAN stop a turn from the modal (slice (iv)); that ends
+# the turn within the unit's stop timeout and is not a budget either.
 # build_token_ceiling = 10000000
+# THE USER'S STOP (SPECS/2026-09-08-apps-stop-turn.md). The reaper reads
+# harness-view every stop_poll_sec while a turn runs and, on a request, runs
+# the launcher's `stop` mode once — same helper, same sudoers file, the unit
+# name derived from the turn. Defaults are right for a keyboard install.
+# stop_command = ["sudo", "-n", "/usr/local/lib/disjorn/disjorn-apps-launch", "stop"]
+# stop_poll_sec = 5
 # prompt_max_bytes = 65536        # the broker's courtesy check; the launcher
 #                                 # enforces its own bound on the same file
 # turn_max_sec = 1800             # mirrors launch.toml [apps].turn_max_sec —

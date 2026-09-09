@@ -207,6 +207,13 @@ APPS_DEFAULTS: dict = {
     "turns_root": "/srv/apps-turns",
     "launch_command": ["sudo", "-n",
                        "/usr/local/lib/disjorn/disjorn-apps-launch", "run"],
+    # Slice (iv): the user's stop. Same helper, its `stop` mode, the same
+    # sudoers file; the handler appends <caller> <session> <turn>.
+    "stop_command": ["sudo", "-n",
+                     "/usr/local/lib/disjorn/disjorn-apps-launch", "stop"],
+    # How often a live turn's reaper asks harness-view whether the owner has
+    # pressed Stop. The reaper's own poll (`poll_sec`) is the floor.
+    "stop_poll_sec": 5,
     "unit_state_command": ["systemctl", "show", "--property=ActiveState",
                            "--value"],
     "ledger_path": "/var/log/disjorn-broker/apps-ledger.jsonl",
@@ -3897,6 +3904,46 @@ class Broker:
             return "unknown"
         return (cp.stdout or "").strip().lower() or "unknown"
 
+    def _apps_stop_requested(self, session: int) -> bool:
+        """Has the owner asked for the running turn to stop? Read off the
+        server's harness-view, best-effort: a read that fails answers "not
+        yet" and the next poll asks again, because a reaper must not die over
+        a question it can repeat."""
+        try:
+            view = self._apps_harness_view(session)
+        except Exception:  # noqa: BLE001 — see docstring
+            return False
+        return bool(view.get("stop_requested_at"))
+
+    def _apps_send_stop(self, rec: dict) -> bool:
+        """`disjorn-apps-launch stop <caller> <session> <turn>` through sudo,
+        once. Fixed argv from config, three validated scalars appended, no
+        shell. Audited either way; a refusal is loud and NOT retried — the
+        turn is still bounded by its own clock, and a stop the helper refused
+        (no turn dir, a shape it did not like) will not pass on a second ask."""
+        session, turn = int(rec["session"]), int(rec["turn"])
+        caller = str(rec.get("caller") or "")
+        if not APPS_SEAT_RE.match(caller):
+            self._audit("broker", "apps-build",
+                        {"session": session, "turn": turn}, True,
+                        f"stop not sent: ticket names no seat ({caller!r})")
+            return False
+        argv = [*self._apps_argv("stop_command"), caller, str(session), str(turn)]
+        try:
+            cp = self._run(argv, 30)
+        except VerbError as exc:
+            self._audit("broker", "apps-build",
+                        {"session": session, "turn": turn}, True,
+                        f"stop failed to run: {exc.message}")
+            return False
+        ok = cp.returncode == 0
+        tail = (cp.stderr or cp.stdout or "").strip()[-300:]
+        self._audit("broker", "apps-build",
+                    {"session": session, "turn": turn}, True,
+                    f"stop sent to {rec.get('unit')}: exit {cp.returncode}"
+                    + (f" — {tail}" if tail and not ok else ""))
+        return ok
+
     # -- the claim --------------------------------------------------------
 
     def _apps_claim(self, app_id: str, session: int, turn: int) -> None:
@@ -4351,6 +4398,12 @@ class Broker:
         scaffolded = False
         ended_at: Optional[float] = None      # when the process/unit went away
         unparseable_since: Optional[float] = None
+        # Slice (iv): one harness-view read per `stop_poll_sec` while the unit
+        # is alive and no stop has been sent yet. Anchored in the past so the
+        # first poll asks immediately — a stop pressed before the reaper was
+        # even up (a broker restart mid-turn) must not wait a whole interval.
+        view_every = max(poll, self._apps_num("stop_poll_sec"))
+        last_view = time.monotonic() - view_every
         try:
             while not self._closed:
                 if not scaffolded and os.path.exists(
@@ -4375,6 +4428,22 @@ class Broker:
                 else:
                     alive = self._apps_unit_state(
                         str(rec.get("unit"))) in BUILD_ACTIVE_STATES
+                # THE USER'S STOP (slice (iv)). The server holds the request;
+                # this reaper is the only thing that can act on it, and it acts
+                # ONCE: the launcher's `stop` drops the marker and runs
+                # `systemctl stop`, the unit's TERM trap harvests, and the
+                # harvest's record — not a synthesized one — is the turn's
+                # terminal event. After the send, this is the existing
+                # wait-on-a-live-unit path, bounded by unit_stop_timeout_sec.
+                # A unit already gone gets nothing: its harvest lands alone.
+                if alive and not rec.get("stop_sent"):
+                    now = time.monotonic()
+                    if now - last_view >= view_every:
+                        last_view = now
+                        if self._apps_stop_requested(session):
+                            self._apps_send_stop(rec)
+                            rec["stop_sent"] = True
+                            self._apps_write_sidecar(rec)
                 if not alive:
                     now = time.monotonic()
                     ended_at = ended_at if ended_at is not None else now

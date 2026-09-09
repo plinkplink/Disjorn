@@ -1127,3 +1127,123 @@ def test_an_unreadable_ticket_is_swept(apps):
     mislabelled.write_text(json.dumps({"session": 8, "turn": 1}))
     assert apps.broker.adopt_inflight_apps() == []
     assert not junk.exists() and not mislabelled.exists()
+
+
+# ------------------------------------------- slice (iv): the user's stop
+# SPECS/2026-09-08-apps-stop-turn.md (confirmed 2444). The server holds the
+# request; the reaper is the only thing that can act on it, and it acts once.
+
+def _stop_stub(tmp_path: Path, rc: int = 0) -> tuple[list[str], Path]:
+    """A stand-in for `disjorn-apps-launch stop`: records its argv, exits rc."""
+    record = tmp_path / "stop-calls.jsonl"
+    stub = tmp_path / "apps-stop.py"
+    stub.write_text(
+        "#!/usr/bin/env python3\nimport json, sys\n"
+        f"open({str(record)!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n"
+        f"sys.stderr.write('REFUSED: no such turn\\n' if {rc} else '')\n"
+        f"raise SystemExit({rc})\n")
+    stub.chmod(0o755)
+    return [sys.executable, str(stub)], record
+
+
+def _stop_calls(record: Path) -> list[list[str]]:
+    if not record.exists():
+        return []
+    return [json.loads(ln) for ln in record.read_text().splitlines() if ln.strip()]
+
+
+def _wait_for(pred, timeout: float = 5.0) -> None:
+    deadline = time.time() + timeout
+    while not pred() and time.time() < deadline:
+        time.sleep(0.01)
+
+
+def test_a_stop_request_sends_the_launcher_stop_once_and_the_harvest_lands_it(apps, tmp_path):
+    """The whole wire, broker side: harness-view says stop; the reaper runs the
+    launcher's `stop` with the ticket's caller and the turn — exactly once,
+    however many polls follow — and then waits for the unit's own harvest,
+    which is what says `stopped`. Nothing is synthesized."""
+    argv, record = _stop_stub(tmp_path)
+    apps.broker.apps["stop_command"] = argv
+    apps.broker.apps["stop_poll_sec"] = 0.02
+    assert _handoff(apps)["ok"] is True
+    proc = apps.spawn.procs[-1]
+    apps.view["stop_requested_at"] = "2026-09-08T23:59:00.000Z"
+    _wait_for(lambda: _stop_calls(record))
+    time.sleep(0.2)                       # several more polls go by
+    assert _stop_calls(record) == [["res-gable", str(SESSION), "1"]]
+    # the unit's TERM trap harvests: marker present, so the harvest says stopped
+    apps.write_scaffolded()
+    apps.write_result(halted="stopped", exit=143, files=["index.html"])
+    proc.finish(143)
+    apps.broker.join_apps(timeout=5)
+    assert apps.stages[-1]["detail"]["halted"] == "stopped"
+    assert apps.ledger()[-1]["halted"] == "stopped"
+    assert apps.sidecars() == []
+    sent = [a for a in apps.audit_lines()
+            if str(a.get("result_summary", "")).startswith("stop sent to ")]
+    assert len(sent) == 1 and "exit 0" in sent[0]["result_summary"]
+
+
+def test_a_stop_after_the_unit_has_gone_sends_nothing(apps, tmp_path):
+    """A unit that already exited harvests on its own; the reaper must not aim
+    a stop at a unit name that is now free to be reused."""
+    argv, record = _stop_stub(tmp_path)
+    apps.broker.apps["stop_command"] = argv
+    apps.broker.apps["stop_poll_sec"] = 0.02
+    apps.write_result(halted="timeout", exit=143, commit=None, files=[])
+    apps.view["stop_requested_at"] = "2026-09-08T23:59:00.000Z"
+    _handoff(apps)
+    apps.broker.join_apps(timeout=5)
+    assert _stop_calls(record) == []
+    assert apps.ledger()[-1]["halted"] == "timeout"
+
+
+def test_a_refused_stop_is_loud_and_not_retried(apps, tmp_path):
+    """The helper said no (exit 64). One audit line naming the exit and its
+    stderr; no second ask — the turn is still bounded by its own clock, and a
+    shape the helper refused once it will refuse again."""
+    argv, record = _stop_stub(tmp_path, rc=64)
+    apps.broker.apps["stop_command"] = argv
+    apps.broker.apps["stop_poll_sec"] = 0.02
+    _handoff(apps)
+    proc = apps.spawn.procs[-1]
+    apps.view["stop_requested_at"] = "2026-09-08T23:59:00.000Z"
+    _wait_for(lambda: _stop_calls(record))
+    time.sleep(0.2)
+    assert len(_stop_calls(record)) == 1
+    apps.write_result()
+    proc.finish(0)
+    apps.broker.join_apps(timeout=5)
+    sent = [a["result_summary"] for a in apps.audit_lines()
+            if str(a.get("result_summary", "")).startswith("stop sent to ")]
+    assert len(sent) == 1
+    assert "exit 64" in sent[0] and "no such turn" in sent[0]
+
+
+def test_the_stop_survives_a_broker_restart_on_the_ticket(apps, tmp_path):
+    """`stop_sent` rides on the sidecar, so a reaper that re-adopts the turn
+    after a restart does not send the unit a second stop."""
+    argv, record = _stop_stub(tmp_path)
+    apps.broker.apps["stop_command"] = argv
+    apps.broker.apps["stop_poll_sec"] = 0.02
+    _handoff(apps)
+    proc = apps.spawn.procs[-1]
+    apps.view["stop_requested_at"] = "2026-09-08T23:59:00.000Z"
+    # The stub records its argv before the reaper rewrites the ticket, so
+    # wait on the ticket itself, not on the call.
+    def ticket_says_sent() -> bool:
+        cards = apps.sidecars()
+        return bool(cards) and json.loads(cards[0].read_text()).get("stop_sent") is True
+    _wait_for(ticket_says_sent)
+    assert ticket_says_sent()
+    assert _stop_calls(record) == [["res-gable", str(SESSION), "1"]]
+    apps.write_result(halted="stopped", exit=143, commit=None, files=[])
+    proc.finish(143)
+    apps.broker.join_apps(timeout=5)
+
+
+def test_the_shipped_stop_default_is_the_same_helper_in_stop_mode(apps):
+    apps.broker.apps.pop("stop_command", None)
+    assert apps.broker._apps_argv("stop_command") == [
+        "sudo", "-n", "/usr/local/lib/disjorn/disjorn-apps-launch", "stop"]

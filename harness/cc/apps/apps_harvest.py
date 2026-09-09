@@ -21,7 +21,9 @@ THE ORDER IS THE CONTRACT (§E, restated so nothing is invented):
   exit != 0      commit the tree as `turn N (halted)` so the NEXT turn can see
                  the work; leave the preview root UNTOUCHED (a half-built app
                  must never replace a preview that worked);
-                 halted = "timeout" (RuntimeMaxSec fired) or "error".
+                 halted = "timeout" (RuntimeMaxSec fired), "stopped" (the
+                 same SIGTERM, with the launcher's `stop-requested` marker in
+                 the result dir — slice (iv)), or "error".
   exit 0, clean  no_changes = True. Nothing committed, nothing copied.
   exit 0, dirty  SECRET SCAN first (raw key, its standard base64, its lowercase
                  hex). A hit: NO commit (the value must not enter history), NO
@@ -118,6 +120,10 @@ MIN_SCANNABLE_KEY_LEN = 12
 # child as 128+signum, and GNU `timeout` uses 124. Either means the clock ran
 # out rather than the runner deciding to stop.
 TIMEOUT_EXIT_CODES = frozenset({124, 137, 143})
+# Slice (iv): the launcher's `stop` drops this in the result dir before
+# `systemctl stop`. A SIGTERM with the marker present is the user's stop; the
+# same SIGTERM without it is the clock. Existence is the whole signal.
+STOP_MARKER = "stop-requested"
 
 RESULT_NAME = "result.json"
 SCAFFOLDED_NAME = "scaffolded"
@@ -897,9 +903,12 @@ def harvest(repo: str | os.PathLike, exit_code: int,
 
     halted_reason = None
     if exit_code != 0:
-        halted_reason = ("timeout"
-                         if timed_out or exit_code in TIMEOUT_EXIT_CODES
-                         else "error")
+        if timed_out or exit_code in TIMEOUT_EXIT_CODES:
+            halted_reason = ("stopped"
+                             if (Path(result_dir) / STOP_MARKER).exists()
+                             else "timeout")
+        else:
+            halted_reason = "error"
 
     patterns = secret_patterns(read_key(key_file)) if key_file else []
     try:
