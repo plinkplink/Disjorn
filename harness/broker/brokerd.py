@@ -236,6 +236,9 @@ APPS_APP_ID_RE = re.compile(r"^[a-z2-7]{12}$")
 # The launcher's own refusal code (its EXIT_REFUSED): a shape or path it would
 # not act on, before any privilege. Distinct from systemd's exits by design.
 APPS_LAUNCH_REFUSED = 64
+# How many launcher refusals a stop request survives before the reaper stops
+# asking. A refusal is a shape problem, and shapes do not heal between polls.
+APPS_STOP_MAX_REFUSALS = 3
 APPS_SEAT_RE = re.compile(r"^res-[a-z]{1,24}$")
 _APPS_MORE_RE = re.compile(r"^\+(\d+) more$")
 # The one sentence a resident that faithfully quoted a user gets to say back
@@ -4451,13 +4454,33 @@ class Broker:
                 # issued (Claudette #2447): a launcher refusal — exit 64,
                 # before any privilege — sent nothing, so the next poll asks
                 # again. What burns is the send, not the attempt.
+                # …and a refusal is asked again a BOUNDED number of times
+                # (Claudette #2449): with the transient path refusals gone
+                # from the exit path, what a 64 now means is permanent — a
+                # missing seat account, a shape the broker derived wrong —
+                # and a poll that asked forever would write one identical
+                # audit line every five seconds for half an hour. Three
+                # asks, then the ticket burns with a line that says so.
                 if alive and not rec.get("stop_sent"):
                     now = time.monotonic()
                     if now - last_view >= view_every:
                         last_view = now
-                        if (self._apps_stop_requested(session)
-                                and self._apps_send_stop(rec)):
-                            rec["stop_sent"] = True
+                        if self._apps_stop_requested(session):
+                            if self._apps_send_stop(rec):
+                                rec["stop_sent"] = True
+                            else:
+                                tries = int(rec.get("stop_refusals") or 0) + 1
+                                rec["stop_refusals"] = tries
+                                if tries >= APPS_STOP_MAX_REFUSALS:
+                                    rec["stop_sent"] = True
+                                    self._audit(
+                                        "broker", "apps-build",
+                                        {"session": session, "turn": turn},
+                                        True,
+                                        f"stop abandoned for {rec.get('unit')}: "
+                                        f"the launcher refused {tries} times, "
+                                        f"which is permanent; the turn runs to "
+                                        f"its own clock")
                             self._apps_write_sidecar(rec)
                 if not alive:
                     now = time.monotonic()

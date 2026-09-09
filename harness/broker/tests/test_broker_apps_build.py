@@ -1199,27 +1199,37 @@ def test_a_stop_after_the_unit_has_gone_sends_nothing(apps, tmp_path):
     assert apps.ledger()[-1]["halted"] == "timeout"
 
 
-def test_a_refused_stop_does_not_burn_the_ticket_and_is_asked_again(apps, tmp_path):
-    """The helper refused (exit 64) — nothing was sent, so the ticket must not
-    say it was (Claudette #2447): the next poll asks again, loudly each time,
-    until the helper acts or the turn ends on its own clock."""
+def test_a_refused_stop_is_asked_again_three_times_then_abandoned_loudly(apps, tmp_path):
+    """The helper refused (exit 64) — nothing was sent, so the first refusals
+    do not burn the ticket (Claudette #2447): the next poll asks again. But a
+    refusal is a shape problem and shapes do not heal, so the asking is
+    bounded (Claudette #2449): three, then one line saying the launcher
+    refuses this turn permanently, and the ticket burns so the audit log
+    stops repeating itself for the rest of the turn's clock."""
     argv, record = _stop_stub(tmp_path, rc=64)
     apps.broker.apps["stop_command"] = argv
     apps.broker.apps["stop_poll_sec"] = 0.02
     _handoff(apps)
     proc = apps.spawn.procs[-1]
     apps.view["stop_requested_at"] = "2026-09-08T23:59:00.000Z"
-    _wait_for(lambda: len(_stop_calls(record)) >= 3)
-    assert len(_stop_calls(record)) >= 3
+
+    def abandoned() -> bool:
+        return any(str(a.get("result_summary", "")).startswith("stop abandoned for ")
+                   for a in apps.audit_lines())
+    _wait_for(abandoned)
+    time.sleep(0.2)                       # more polls: no further asks
+    assert len(_stop_calls(record)) == 3
     ticket = json.loads(apps.sidecars()[0].read_text())
-    assert ticket.get("stop_sent") is not True
+    assert ticket["stop_sent"] is True and ticket["stop_refusals"] == 3
     apps.write_result()
     proc.finish(0)
     apps.broker.join_apps(timeout=5)
     refused = [a["result_summary"] for a in apps.audit_lines()
                if str(a.get("result_summary", "")).startswith("stop refused by the launcher")]
-    assert refused and "exit 64" in refused[0] and "no such turn" in refused[0]
-    assert "will ask again" in refused[0]
+    assert len(refused) == 3 and "exit 64" in refused[0] and "no such turn" in refused[0]
+    gone = [a["result_summary"] for a in apps.audit_lines()
+            if str(a.get("result_summary", "")).startswith("stop abandoned for ")]
+    assert len(gone) == 1 and "refused 3 times" in gone[0] and "permanent" in gone[0]
     assert not [a for a in apps.audit_lines()
                 if str(a.get("result_summary", "")).startswith("stop sent to ")]
 
