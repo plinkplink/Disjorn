@@ -669,7 +669,14 @@ def _one_line(text: Any) -> str:
     if not isinstance(text, str):
         return ""
     flattened = "".join(" " if ch < " " or ch == "\x7f" else ch for ch in text)
-    return " ".join(flattened.split())[:MAX_STAGE_LINE_CHARS]
+    line = " ".join(flattened.split())
+    if len(line) > MAX_STAGE_LINE_CHARS:
+        # Capped WITH an ellipsis: the first real build's summary was cut
+        # mid-word inside its quotes and read as a message that had hung
+        # (plink, 2026-09-09). A cut that says it is a cut is a cap; a cut
+        # that does not is a bug report.
+        line = line[: MAX_STAGE_LINE_CHARS - 1] + "\u2026"
+    return line
 
 
 def _tokens_word(tokens: int) -> str:
