@@ -12,11 +12,13 @@ import { useEffect } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 
 import { ApiError, deleteMessage } from "../api";
+import { useApps } from "../stores/apps";
 import { useChannels } from "../stores/channels";
 import { useMembers } from "../stores/members";
 import { useMessages } from "../stores/messages";
 import { useSession } from "../stores/session";
 import type { Attachment, Message } from "../types";
+import { AppCard, appIdFromUrl } from "./AppCard";
 import { Avatar, BotAvatar } from "./Avatar";
 import {
   countEmotionTags,
@@ -236,6 +238,10 @@ interface RowProps {
   hasReplies: boolean;
   original: Message | undefined;
   mentionNames: string[];
+  /** The serving gate's origin, subscribed ONCE by the list rather than by
+      every row: it is one string for the whole house and a per-row
+      subscription would be a hundred listeners on a value that never moves. */
+  originBase: string;
   onReply: (m: Message) => void;
   onEdit: (m: Message) => void;
   onOpenImage: (att: Attachment) => void;
@@ -250,6 +256,7 @@ function MessageRow({
   hasReplies,
   original,
   mentionNames,
+  originBase,
   onReply,
   onEdit,
   onOpenImage,
@@ -273,6 +280,13 @@ function MessageRow({
   const unfurlUrl = useMemo(
     () => firstHttpUrl(message.content),
     [message.content],
+  );
+  /* A shared app is an ordinary message whose first link is on the gate
+     (D8). It gets the app card INSTEAD of an unfurl: unfurling it would ask
+     the gate for OG tags with no grant and get a 403 for its trouble. */
+  const appLinkId = useMemo(
+    () => appIdFromUrl(unfurlUrl, originBase),
+    [unfurlUrl, originBase],
   );
   const hasText = message.content.trim().length > 0;
   // Touch: no hover — tapping the row (not a control inside it) shows/hides
@@ -414,8 +428,12 @@ function MessageRow({
               ))}
             </div>
           )}
-          {unfurlUrl !== null && (
-            <UnfurlCard url={unfurlUrl} onSummarize={onSummarize} />
+          {appLinkId !== null ? (
+            <AppCard appId={appLinkId} />
+          ) : (
+            unfurlUrl !== null && (
+              <UnfurlCard url={unfurlUrl} onSummarize={onSummarize} />
+            )
           )}
         </div>
       </div>
@@ -448,6 +466,10 @@ export function MessageList({
   const loaded = cm?.loaded ?? false;
   const reachedStart = cm?.reachedStart ?? false;
   const gaps = cm?.gaps ?? EMPTY_GAPS;
+
+  /* One subscription for the whole feed; every row reads it as a prop. "" is
+     a house with no serving gate, and then no link is ever an app link. */
+  const originBase = useApps((s) => s.originBase);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const innerRef = useRef<HTMLDivElement | null>(null);
@@ -656,6 +678,7 @@ export function MessageList({
                   : undefined
               }
               mentionNames={mentionNames}
+              originBase={originBase}
               onReply={onReply}
               onEdit={onEdit}
               onOpenImage={onOpenImage}

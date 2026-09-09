@@ -75,6 +75,12 @@ export function AppsChooserModal({
   const [discover, setDiscover] = useState<App[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | number | null>(null);
+  /** WHICH verb is in flight — two buttons share one row and one busy id, and
+      an Add that said "Adding…" while a remix ran would be reporting the
+      wrong thing. */
+  const [busyVerb, setBusyVerb] = useState<"add" | "remix" | "start" | null>(
+    null,
+  );
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -108,6 +114,7 @@ export function AppsChooserModal({
   const pickBuilder = (builder: Builder) => {
     if (busyId !== null || exhausted) return;
     setBusyId(builder.bot_id);
+    setBusyVerb("start");
     setError(null);
     useApps
       .getState()
@@ -115,10 +122,12 @@ export function AppsChooserModal({
       .then(
         (session) => {
           setBusyId(null);
+          setBusyVerb(null);
           onStarted(session);
         },
         (err: unknown) => {
           setBusyId(null);
+          setBusyVerb(null);
           // Includes the 429 and the 409 — the server's sentence, as written.
           setError(
             err instanceof ApiError ? err.detail : "Failed to start the build",
@@ -127,9 +136,41 @@ export function AppsChooserModal({
       );
   };
 
+  /* Remix from the chooser (stage 3 D10). It is the card's verb too, and it
+     is the same call: copy the app into one the remixer owns, lineage
+     recorded, and open a build session on the copy — which is why it hands
+     the session to the same `onStarted` a fresh build uses. Offered on any
+     LIVE app, the owner's own included: "this, but for my book club" is a
+     thing to want about your own app, and a remix of your own is still a new
+     app rather than an edit of the one people already have open. */
+  const remix = (app: App) => {
+    if (busyId !== null) return;
+    setBusyId(app.id);
+    setBusyVerb("remix");
+    setError(null);
+    useApps
+      .getState()
+      .remixApp(app.id)
+      .then(
+        (session) => {
+          setBusyId(null);
+          setBusyVerb(null);
+          onStarted(session);
+        },
+        (err: unknown) => {
+          setBusyId(null);
+          setBusyVerb(null);
+          setError(
+            err instanceof ApiError ? err.detail : "Failed to remix the app",
+          );
+        },
+      );
+  };
+
   const addApp = (app: App) => {
     if (busyId !== null) return;
     setBusyId(app.id);
+    setBusyVerb("add");
     setError(null);
     useApps
       .getState()
@@ -137,10 +178,12 @@ export function AppsChooserModal({
       .then(
         () => {
           setBusyId(null);
+          setBusyVerb(null);
           setDiscover((prev) => (prev ?? []).filter((a) => a.id !== app.id));
         },
         (err: unknown) => {
           setBusyId(null);
+          setBusyVerb(null);
           setError(
             err instanceof ApiError ? err.detail : "Failed to add the app",
           );
@@ -207,17 +250,32 @@ export function AppsChooserModal({
             {(discover ?? []).map((app) => (
               <div className="app-discover-row" key={app.id}>
                 <span className="app-discover-text">
-                  <span className="app-discover-name">{app.name}</span>
+                  <span className="app-discover-name">
+                    {app.name}
+                    <span className={`app-status-chip ${app.status}`}>
+                      {app.status}
+                    </span>
+                  </span>
                   {app.description.length > 0 && (
                     <span className="app-discover-desc">{app.description}</span>
                   )}
                 </span>
+                {app.status === "live" && (
+                  <button
+                    className="btn"
+                    disabled={busyId !== null}
+                    title="Copy it into an app of your own and build on that"
+                    onClick={() => remix(app)}
+                  >
+                    {busyId === app.id && busyVerb === "remix" ? "Remixing…" : "Remix"}
+                  </button>
+                )}
                 <button
                   className="btn"
                   disabled={busyId !== null}
                   onClick={() => addApp(app)}
                 >
-                  {busyId === app.id ? "Adding…" : "Add"}
+                  {busyId === app.id && busyVerb === "add" ? "Adding…" : "Add"}
                 </button>
               </div>
             ))}
