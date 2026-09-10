@@ -198,6 +198,30 @@ if [ ! -d "$_cfg" ]; then
   bad "build config dir missing: $_cfg — run-build.sh exits before podman without it"
 else
   ok "build config dir present: $_cfg"
+  # ASKED OF THE SEAT, NOT OF ROOT (Claudette #2498). Root traverses
+  # everything, so a root-run stat of the parent's mode tests the wrong
+  # subject: on 2026-09-06 10-appsbuilding.sh re-installed the PARENT
+  # 0750 root:res-appsbuilding, both resident seats lost their own build
+  # configs, and this script would have stayed green for three days. The
+  # only check that catches the class is the seat reading its credential.
+  if [ "$(id -u)" -ne 0 ]; then
+    bad "NOT ROOT: cannot ask $ACCT whether it can read $_cfg/env. Re-run with sudo."
+  elif ! id "$ACCT" >/dev/null 2>&1; then
+    bad "$ACCT does not exist — cannot verify the credential route from its seat"
+  elif ! sudo -u "$ACCT" test -r "$_cfg/env" 2>/dev/null; then
+    _anc="$_cfg"; _blk=""
+    while [ "$_anc" != "/" ]; do
+      _anc="$(dirname "$_anc")"
+      sudo -u "$ACCT" test -x "$_anc" 2>/dev/null || _blk="$_anc"
+    done
+    if [ -n "$_blk" ]; then
+      bad "$ACCT cannot READ $_cfg/env: locked out at $_blk (mode $(stat -c '%a %U:%G' "$_blk")) — a seat script changed shared ground; the parent must be 0755 root:root"
+    else
+      bad "$ACCT cannot READ $_cfg/env ($(stat -c '%a %U:%G' "$_cfg/env" 2>/dev/null || echo absent)) — run-build.sh will refuse to launch"
+    fi
+  else
+    ok "$ACCT can read $_cfg/env (asked $ACCT, not reported)"
+  fi
   if [ ! -f "$_cfg/settings.json" ]; then
     note "$_cfg/settings.json absent — the build seat has no permission set of its own (template: harness/cc/build-config/settings.json)"
   else
