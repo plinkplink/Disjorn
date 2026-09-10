@@ -125,10 +125,17 @@ if [ "$DRIFT_ONLY" = 0 ]; then
   say "/srv/apps, /srv/apps-www, /srv/apps-turns, /srv/apps-quarantine ready"
 
   # --- the credential drop point (spec §D) --------------------------------
-  # root:res-appsbuilding 0750 — the seat can traverse it and read the file
-  # plink puts there; it cannot write it, and nothing else on the box can read
-  # it. THIS SCRIPT NEVER WRITES `env`.
-  install -d -o root -g "$SEAT" -m 0750 /srv/disjorn-build-config
+  # The PARENT is shared by every seat (gable/, claudette/, appsbuilding/),
+  # each subdirectory carrying its own wall, so the parent is plain 0755
+  # root:root and only THIS seat's directory is root:res-appsbuilding 0750.
+  # 2026-09-06 this line installed the parent 0750 root:res-appsbuilding
+  # and silently locked res-gable and res-claudette out of their own build
+  # configs; every resident build then died with "build config dir missing"
+  # (Gable's first adapter-drift build, #custodian #2488, 2026-09-09).
+  # The seat can traverse its own directory and read the file plink puts
+  # there; it cannot write it, and nothing else on the box can read it.
+  # THIS SCRIPT NEVER WRITES `env`.
+  install -d -o root -g root -m 0755 /srv/disjorn-build-config
   install -d -o root -g "$SEAT" -m 0750 "$CONFIG_DIR"
   cat > "$CONFIG_DIR/README" <<'READMEEOF'
 The apps-builder seat's credential goes in this directory, in a file named
