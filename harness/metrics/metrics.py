@@ -1149,6 +1149,29 @@ def guarded_hits_for(mirror: str, sha: str) -> list:
 
 # -- deploy drift -----------------------------------------------------------
 
+def _dirty_paths(status: Optional[str]) -> list:
+    """Repo-relative paths from `git status --porcelain`, renames as their
+    new name, untracked included. Empty for a clean or unreadable tree."""
+    paths = []
+    for line in (status or "").splitlines():
+        if len(line) < 4:
+            continue
+        path = line[3:]
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        paths.append(path.strip().strip('"'))
+    return paths
+
+
+def _dirty_sentence(paths: list) -> str:
+    """The DIRTY line with an address on it: how many paths and where."""
+    n = len(paths)
+    tops = sorted({(p.split("/", 1)[0] if "/" in p else "(root)") for p in paths})
+    where = ", ".join(tops[:6]) + (f", +{len(tops) - 6} more" if len(tops) > 6 else "")
+    return (f"prod's working tree is DIRTY: {n} path{'s' if n != 1 else ''} "
+            f"under {where} — code is running that was never published")
+
+
 def deploy_state(config: Optional[dict] = None, *, mirror: Optional[str] = None,
                  deploy_tree: Optional[str] = None,
                  branch: str = "main") -> dict:
@@ -1184,6 +1207,11 @@ def deploy_state(config: Optional[dict] = None, *, mirror: Optional[str] = None,
     out["deployed_head"] = deployed_head.strip()
     status = _git(deploy_tree, "status", "--porcelain")
     out["dirty"] = None if status is None else bool(status.strip())
+    # What is dirty, not only that it is (Claudette's wording card, third
+    # data point #2502): the count and the top-level directories, so the
+    # reader can tell "an unmerged fix on the tree" from "someone edited
+    # prod" without a shell. Paths only, never contents.
+    out["dirty_paths"] = _dirty_paths(status)
     # Ask whichever repo can resolve BOTH commits. The mirror usually can (prod
     # deploys from it); prod cannot, the moment the mirror moves ahead — which
     # is precisely the case this line exists to describe.
@@ -1208,8 +1236,7 @@ def deploy_state(config: Optional[dict] = None, *, mirror: Optional[str] = None,
             bits.append(f"prod is {out['behind']} behind and {out['ahead']} "
                         f"ahead of the mirror")
     if out["dirty"]:
-        bits.append("prod's working tree is DIRTY — code is running that was "
-                    "never published")
+        bits.append(_dirty_sentence(out["dirty_paths"]))
     elif out["dirty"] is None:
         bits.append("could not read prod's working tree state")
     out["detail"] = "; ".join(bits)
