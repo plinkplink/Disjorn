@@ -173,13 +173,14 @@ GATEHOUSE="${RESIDENT_GATEHOUSE:-/var/lib/disjorn-broker/gatehouse}"
 # see a directory there", and from a uid locked out of the parent that is
 # false for a directory that exists — 2026-09-09 that read as "missing" and
 # sent the human to provisioning when it was a mode on the parent. So the
-# parent is walked first, and the line names the first ancestor this uid
-# cannot enter; then the credential itself must be READABLE, not just there.
+# parent is walked upward and the line names the INNERMOST ancestor this
+# uid cannot enter (the one to fix first); then the credential itself must
+# be READABLE, not just there.
 _p="$CONFIG_DIR"
 while [ "$_p" != "/" ]; do
   _p="$(dirname "$_p")"
   [ -e "$_p" ] || continue
-  [ -x "$_p" ] || { echo "run-build: build config dir UNREACHABLE: $(id -un) cannot traverse $_p (mode $(stat -c %a "$_p" 2>/dev/null || echo ?)) — $CONFIG_DIR may well exist" >&2; exit 1; }
+  [ -x "$_p" ] || { echo "run-build: build config dir UNREACHABLE: $(id -un) cannot traverse $_p, the innermost ancestor it cannot enter (mode $(stat -c %a "$_p" 2>/dev/null || echo ?)) — $CONFIG_DIR may well exist" >&2; exit 1; }
 done
 [ -d "$CONFIG_DIR" ] || { echo "run-build: build config dir missing: $CONFIG_DIR" >&2; exit 1; }
 # An ABSENT env is the documented warning further down (a session with no

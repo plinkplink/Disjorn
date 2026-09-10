@@ -209,13 +209,16 @@ else
   elif ! id "$ACCT" >/dev/null 2>&1; then
     bad "$ACCT does not exist — cannot verify the credential route from its seat"
   elif ! sudo -u "$ACCT" test -r "$_cfg/env" 2>/dev/null; then
+    # Walk upward and stop at the INNERMOST ancestor the seat cannot enter
+    # (Claudette #2506): that is the one to fix first, and an outer one that
+    # is also wrong shows up on the next run.
     _anc="$_cfg"; _blk=""
     while [ "$_anc" != "/" ]; do
       _anc="$(dirname "$_anc")"
-      sudo -u "$ACCT" test -x "$_anc" 2>/dev/null || _blk="$_anc"
+      if ! sudo -u "$ACCT" test -x "$_anc" 2>/dev/null; then _blk="$_anc"; break; fi
     done
     if [ -n "$_blk" ]; then
-      bad "$ACCT cannot READ $_cfg/env: locked out at $_blk (mode $(stat -c '%a %U:%G' "$_blk")) — a seat script changed shared ground; the parent must be 0755 root:root"
+      bad "$ACCT cannot READ $_cfg/env: locked out at $_blk, the innermost ancestor it cannot enter (mode $(stat -c '%a %U:%G' "$_blk")) — a seat script changed shared ground; the parent must be 0755 root:root"
     else
       bad "$ACCT cannot READ $_cfg/env ($(stat -c '%a %U:%G' "$_cfg/env" 2>/dev/null || echo absent)) — run-build.sh will refuse to launch"
     fi
