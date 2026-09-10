@@ -4418,6 +4418,7 @@ class Broker:
         # even up (a broker restart mid-turn) must not wait a whole interval.
         view_every = max(poll, self._apps_num("stop_poll_sec"))
         last_view = time.monotonic() - view_every
+        stale_seen = False
         try:
             while not self._closed:
                 if not scaffolded and os.path.exists(
@@ -4425,6 +4426,27 @@ class Broker:
                     self._apps_post_stage(session, "scaffolded", {"turn": turn})
                     scaffolded = True
                 result, bad = self._apps_read_result(result_path)
+                if result is not None and not self._apps_result_is_ours(rec, result):
+                    # A record in the turn dir that is NOT this turn's. The
+                    # first APPS build after the flip (2026-09-09, session 1
+                    # turn 1) read the keyboard's 09-07 proving turn's
+                    # result.json — same session and turn numbers on a fresh
+                    # database, a turn dir on disk nobody had cleared — and
+                    # finished the turn 30 ms after launch with another app's
+                    # commit, files and tokens while the real build ran on
+                    # orphaned. A record is this turn's only if it names this
+                    # app, this session and this turn. Anything else is absent:
+                    # the real harvest writes over it by rename when it lands.
+                    if not stale_seen:
+                        stale_seen = True
+                        self._audit("broker", "apps-build",
+                                    {"session": session, "turn": turn}, True,
+                                    f"ignoring a result.json that is not this "
+                                    f"turn's (app {result.get('app_id')!r}, "
+                                    f"session {result.get('session')!r}, turn "
+                                    f"{result.get('turn')!r}); waiting for the "
+                                    f"real harvest")
+                    result = None
                 if result is not None:
                     self._apps_finish(rec, result, proc, scaffolded)
                     return
@@ -4460,8 +4482,11 @@ class Broker:
                 # missing seat account, a shape the broker derived wrong —
                 # and a poll that asked forever would write one identical
                 # audit line every five seconds for half an hour. Three
-                # asks, then the ticket burns with a line that says so.
-                if alive and not rec.get("stop_sent"):
+                # asks, then the ticket burns with a line that says so — as
+                # `stop_abandoned`, not `stop_sent` (Claudette #2461): the
+                # ticket must not say a stop went out when the launcher
+                # refused three times and nothing did.
+                if alive and not (rec.get("stop_sent") or rec.get("stop_abandoned")):
                     now = time.monotonic()
                     if now - last_view >= view_every:
                         last_view = now
@@ -4472,7 +4497,7 @@ class Broker:
                                 tries = int(rec.get("stop_refusals") or 0) + 1
                                 rec["stop_refusals"] = tries
                                 if tries >= APPS_STOP_MAX_REFUSALS:
-                                    rec["stop_sent"] = True
+                                    rec["stop_abandoned"] = True
                                     self._audit(
                                         "broker", "apps-build",
                                         {"session": session, "turn": turn},
@@ -4527,6 +4552,28 @@ class Broker:
         # Shutting down: leave the sidecar exactly where the NEXT process looks
         # for it. Losing the ticket while a turn runs is the one way to strand
         # it for good.
+
+    @staticmethod
+    def _apps_result_is_ours(rec: dict, result: dict) -> bool:
+        """Does this result.json describe the turn on this ticket? Three ids
+        the harvest writes and the ticket holds: app, session, turn. A record
+        that fails any one is some other turn's — a stale file, a re-used
+        number — and must not be finished as this one.
+
+        The app id is the check that matters: 60 random bits, so a re-used
+        session number on a fresh database still names a different app. No
+        clock comparison — two clocks need not agree, and the id already
+        decides."""
+        try:
+            if str(result.get("app_id") or "") != str(rec.get("app_id") or ""):
+                return False
+            if int(result.get("session", -1)) != int(rec["session"]):
+                return False
+            if int(result.get("turn", -1)) != int(rec["turn"]):
+                return False
+        except (TypeError, ValueError):
+            return False
+        return True
 
     @staticmethod
     def _apps_read_result(path: str) -> tuple[Optional[dict], bool]:
@@ -4684,10 +4731,27 @@ class Broker:
         we gave up on it, that record is the contradiction of a line already in
         the ledger, and a contradiction nobody wrote down is the failure the
         grace period was supposed to avoid (Claudette #2361). So: ledger it
-        `late`, never post it, and drop the ticket either way."""
+        `late`, never post it, and drop the ticket either way.
+
+        The record must be THIS turn's (Claudette #2461). This is the second
+        reader of the same file the reaper guards, and the durable one: a
+        stale result.json from another app — the 09-07 proving turn's,
+        surviving on disk across a fresh database that re-used its session
+        number — would otherwise be ledgered `late` under this ticket with
+        another app's commit, files and tokens. Same predicate as the reaper;
+        a foreign record is audited and the ticket dropped, nothing ledgered."""
         session, turn = int(rec["session"]), int(rec["turn"])
         result, bad = self._apps_read_result(
             os.path.join(self._apps_turn_dir(session, turn), "result.json"))
+        if result is not None and not self._apps_result_is_ours(rec, result):
+            self._audit(
+                "broker", "apps-build", {"session": session, "turn": turn},
+                True,
+                "a result.json in this turn's dir is not this turn's (app "
+                f"{result.get('app_id')!r}, session {result.get('session')!r}, "
+                f"turn {result.get('turn')!r}) — nothing ledgered, ticket "
+                "dropped")
+            result = None
         if bad:
             # A late record that will not parse is still a fact about this
             # turn, and dropping it with its ticket would leave no line

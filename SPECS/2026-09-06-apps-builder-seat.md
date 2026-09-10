@@ -305,6 +305,22 @@ launcher's harvest, on exit:
   larger of the server's `tokens_used` and the session's highest ledgered
   `tokens_after`, because a stage post that never landed would otherwise buy
   a free turn.
+  **Post-flip amendment (incident 2026-09-09 02:47Z; Claudette #2457/#2461):
+  a `result.json` is this turn's only if it names this app, this session and
+  this turn.** The first build after the flip finished in 30 ms on the 09-07
+  proving turn's record — same session and turn numbers on a fresh database,
+  a turn dir on disk nobody had cleared. Both readers of the file apply the
+  match (the reaper, and the late-result resolver the sweep and adoption
+  call): a foreign record is audited once and treated as absent; the wrapper
+  clears `result.json`/`scaffolded`/`stop-requested` on entry BEFORE its
+  `mkdir -p`. **Transitional skew (Claudette #2461), checked at the
+  keyboard 2026-09-09:** the match refuses a record with no `app_id`, so a
+  turn launched before the fix and adopted after it would have its own
+  record refused and be synthesized `error` on a turn that succeeded. The
+  harvest has written `app_id` into every record since slice (i)
+  (`f9b1d8f`), so no pre-fix record lacks it and the window was never open;
+  the note stands here so the next reader of the predicate knows the
+  question was asked.
 The broker then parses usage from the spool, appends the ledger line, and
 posts the stage events with the §H detail. The verb returns immediately
 after spawn with `{turn: N, unit: …}`; the resident does not wait on it (a

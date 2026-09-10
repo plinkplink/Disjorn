@@ -1687,3 +1687,16 @@ def test_the_stopped_turn_line_reads_like_the_other_halts():
                        "summary": "was halfway through the header"})
     assert line == ('Turn 4 halted — stopped by the user. Wrote a.js, b.js. '
                     '"was halfway through the header"')
+
+
+def test_a_capped_summary_says_it_was_capped():
+    """The builder's summary is bounded to one sentence's worth; a cut that
+    ends mid-word with no ellipsis reads as a hung message, not a cap."""
+    from app.routers.apps import MAX_STAGE_LINE_CHARS, _one_line, _turn_line
+    long = "word " * 200
+    capped = _one_line(long)
+    assert len(capped) == MAX_STAGE_LINE_CHARS and capped.endswith("\u2026")
+    line = _turn_line({"turn": 1, "files": ["a.js"], "tokens": 5, "model": "m",
+                       "summary": long})
+    assert line.endswith('\u2026"')
+    assert _one_line("short") == "short"

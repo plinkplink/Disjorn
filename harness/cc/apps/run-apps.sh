@@ -83,6 +83,17 @@ umask 0022
 # on the first publish, never here: a turn that never publishes (a secret
 # halt on turn 1) must not leave an empty served root behind — "a preview
 # exists" and "a preview worked" are one observable (Claudette #2336).
+# A result.json already here is some EARLIER turn's — a re-used session number
+# on a fresh database, a dir nobody cleared — and the broker's reaper reads
+# "result.json exists" as "this turn finished". It did, once (2026-09-09,
+# the first build after the flip finished in 30 ms with the 09-07 proving
+# turn's record). Clear it before anything runs; the harvest writes ours.
+# BEFORE the mkdir, not after (Claudette #2457): hygiene only has work to do
+# when the dir pre-existed, and an rm that runs after the mkdir opens a
+# window in which a stop marker the launcher just legitimately dropped —
+# the early-stop case — is eaten, and the room says "timed out" on a turn
+# the user stopped. On a fresh dir this is a silent no-op.
+rm -f "$RESULT_DIR/result.json" "$RESULT_DIR/scaffolded" "$RESULT_DIR/stop-requested"
 mkdir -p "$RESULT_DIR"
 # The prompt: bounded bytes the launcher (root) read behind its path wall and
 # put on OUR stdin. We copy it into our own result directory, as the seat,
