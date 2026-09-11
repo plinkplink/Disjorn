@@ -68,7 +68,7 @@ nothing it did not already have as itself.
                      the copy).
     revert <app>     swap live and live.prev through a sibling temp name; both
                      must exist. Three renames, no copy.
-    remix <p> <c>    git clone --no-hardlinks <p> into /srv/apps/<c>, one empty
+    remix <p> <c>    git clone --no-local <p> into /srv/apps/<c>, one empty
                      commit "remix of <p>" so lineage is in the log, and the
                      parent's preview copied to the child's by the same
                      staged-rename discipline. Refused if <c> exists.
@@ -181,7 +181,14 @@ DEFAULT_TURN_MAX_SEC = 1800      # RuntimeMaxSec; overridable by [apps] only
 # not tunable at all: a publish is an rsync of a static tree, a revert is three
 # renames, a remix is a local clone. Anything that needs more than this is
 # wrong, and a clock is how it stops being wrong quietly.
-OP_MAX_SEC = 300
+# MUST STAY UNDER server/app/routers/apps.py's HELPER_TIMEOUT_SEC (120), and
+# the suite pins that (test_the_op_clock_is_under_the_servers). At 300 the unit
+# outlived the request that was waiting on it: the server gave up at two
+# minutes and returned a 502 while the publish went on rotating directories
+# behind it — the worst shape available, because the user is told it failed
+# while it succeeds. 100 leaves the server twenty seconds to notice the helper
+# died and say so itself.
+OP_MAX_SEC = 100
 OP_MEMORY_MAX = "1G"
 OP_TASKS_MAX = 64
 
@@ -791,6 +798,34 @@ def _real_dir(path: Path) -> bool:
     return path.is_dir() and not path.is_symlink()
 
 
+def _is_a_real_repo(src: Path) -> bool:
+    """`<src>/.git` is a real DIRECTORY that lives inside `<src>` itself.
+
+    THE SENTENCE THIS FILE KEEPS RELEARNING (Gable #2546; Claudette #2325,
+    #2329 before it): we keep validating WHERE a thing is instead of WHAT it
+    is. `(src / ".git").exists()` was the whole parent check, and `.git` is
+    allowed to be a FILE — forty bytes reading `gitdir: /srv/apps/<other>/.git`
+    makes any directory a working tree of somebody else's repository. A turn
+    writes /work, so a builder turn could have written those forty bytes and
+    turned "remix this app" into "clone that one". A symlinked `.git` is the
+    same trick with a different syscall.
+
+    So: not a symlink, a directory by lstat rather than by follow, and its
+    realpath lands under the realpath of the app's own directory. A repo the
+    seat owns and points somewhere else is not a repo this remix will read."""
+    dot_git = src / ".git"
+    if dot_git.is_symlink():
+        return False
+    if not dot_git.is_dir():                 # a `gitdir:` pointer file is not
+        return False
+    try:
+        real_src = os.path.realpath(src)
+        real_git = os.path.realpath(dot_git)
+    except OSError:                          # pragma: no cover — lstat'd above
+        return False
+    return _under(real_src, real_git) and real_git != real_src
+
+
 def _staging(www_root, app_id: str) -> Path:
     """`<www-root>/.staging/<app-id>/`, created 0700 at the `.staging` level.
 
@@ -960,9 +995,11 @@ def remix_app(apps_root, www_root, parent: str, child: str, *,
               stamp: "str | None" = None) -> dict:
     """Clone one app into a new one, lineage in the git log.
 
-    `--no-hardlinks`: a local clone shares objects by hardlink by default, and
-    two apps that are separately writable must not share a byte on disk —
-    `git gc` in one would be reaching into the other's history.
+    `--no-local --no-hardlinks`: a local clone shares objects by hardlink by
+    default, and two apps that are separately writable must not share a byte on
+    disk — `git gc` in one would be reaching into the other's history. And the
+    parent's `.git` must be the parent's OWN directory, not a `gitdir:` pointer
+    file a turn wrote into /work (`_is_a_real_repo` above, Gable #2546).
 
     The empty commit is the lineage record. Not a note, not a file the next
     turn can rewrite, not a row only the database knows: `git log` in the
@@ -981,13 +1018,21 @@ def remix_app(apps_root, www_root, parent: str, child: str, *,
 
     src = Path(apps_root) / parent
     dst = Path(apps_root) / child
-    if not _real_dir(src) or not (src / ".git").exists():
-        die(f"no app repository to remix from: {parent}")
+    if not _real_dir(src) or not _is_a_real_repo(src):
+        die(f"no app repository to remix from: {parent} "
+            f"(its .git must be a real directory of its own)")
     if dst.exists() or dst.is_symlink():
         die(f"{child} already exists — a remix never writes over an app")
 
-    _git(["clone", "--no-hardlinks", "--quiet", str(src), str(dst)],
-         git_bin=git_bin)
+    # `--no-local`: without it git clones a local path by copying the object
+    # store directly, which is how an `objects/info/alternates` in the parent
+    # would travel into the child and make the child's history depend on a
+    # tree the child does not own. `--no-local` makes even a path on this disk
+    # go through the pack protocol, which carries objects and nothing else.
+    # `--no-hardlinks` is kept: it is what --no-local implies, said out loud,
+    # and it is the one that survives if this ever stops being a local clone.
+    _git(["clone", "--no-local", "--no-hardlinks", "--quiet",
+          str(src), str(dst)], git_bin=git_bin)
     # 0750, the mode every app repo has: an app's SOURCE is the seat's own and
     # the served copy is the world-readable one (spec §C).
     os.chmod(dst, 0o750)
@@ -1089,8 +1134,9 @@ def preflight_remix(parent: str, child: str, *, apps_root: str = APPS_ROOT) -> N
     if parent == child:
         die("a remix's parent and child cannot be the same app")
     src = Path(apps_root) / parent
-    if not _real_dir(src) or not (src / ".git").exists():
-        die(f"no app repository to remix from: {parent}")
+    if not _real_dir(src) or not _is_a_real_repo(src):
+        die(f"no app repository to remix from: {parent} "
+            f"(its .git must be a real directory of its own)")
     dst = Path(apps_root) / child
     if dst.exists() or dst.is_symlink():
         die(f"{child} already exists — a remix never writes over an app")

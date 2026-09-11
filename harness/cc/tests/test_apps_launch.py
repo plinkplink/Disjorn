@@ -875,7 +875,7 @@ def test_publish_argv_byte_for_byte(seat, www):
         "--wait",
         "--pipe",
         "--quiet",
-        "--property=RuntimeMaxSec=300",
+        "--property=RuntimeMaxSec=100",
         "--property=MemoryMax=1G",
         "--property=LimitFSIZE=268435456",
         "--property=LimitCORE=0",
@@ -886,9 +886,10 @@ def test_publish_argv_byte_for_byte(seat, www):
     ]
 
 
+@pytest.mark.skipif(not HAVE_RSYNC, reason="rsync is not installed")
 def test_revert_argv_byte_for_byte(seat, www, launcher):
-    launcher.publish_app(www, APP_A, rsync_bin=HAVE_RSYNC or "rsync")
-    launcher.publish_app(www, APP_A, rsync_bin=HAVE_RSYNC or "rsync")
+    launcher.publish_app(www, APP_A, rsync_bin=HAVE_RSYNC)
+    launcher.publish_app(www, APP_A, rsync_bin=HAVE_RSYNC)
     assert op_argv(seat, "revert", APP_A, www_root=www) == [
         "/usr/bin/systemd-run",
         f"--unit=disjorn-apps-revert-{APP_A}",
@@ -896,7 +897,7 @@ def test_revert_argv_byte_for_byte(seat, www, launcher):
         "--uid=res-appsbuilding",
         "--gid=res-appsbuilding",
         "--collect", "--wait", "--pipe", "--quiet",
-        "--property=RuntimeMaxSec=300",
+        "--property=RuntimeMaxSec=100",
         "--property=MemoryMax=1G",
         "--property=LimitFSIZE=268435456",
         "--property=LimitCORE=0",
@@ -923,7 +924,7 @@ def test_remix_argv_byte_for_byte(seat, www, apps):
         "--uid=res-appsbuilding",
         "--gid=res-appsbuilding",
         "--collect", "--wait", "--pipe", "--quiet",
-        "--property=RuntimeMaxSec=300",
+        "--property=RuntimeMaxSec=100",
         "--property=MemoryMax=1G",
         "--property=LimitFSIZE=268435456",
         "--property=LimitCORE=0",
@@ -1303,10 +1304,10 @@ def test_remix_of_an_app_that_has_never_deployed_still_clones(www, apps, launche
     assert not (www / APP_B).exists()
 
 
-@pytest.mark.skipif(not HAVE_GIT, reason="git is not installed")
+@pytest.mark.skipif(not (HAVE_GIT and HAVE_RSYNC), reason="git/rsync missing")
 def test_the_child_repo_is_the_seats_own(www, apps, launcher):
     launcher.remix_app(apps, www, APP_A, APP_B,
-                       git_bin=HAVE_GIT, rsync_bin=HAVE_RSYNC or "rsync")
+                       git_bin=HAVE_GIT, rsync_bin=HAVE_RSYNC)
     assert stat.S_IMODE((apps / APP_B).stat().st_mode) == 0o750
 
 
@@ -1374,3 +1375,344 @@ def test_the_publisher_is_installed_and_drift_checked_by_the_keyboard_script():
     assert "/etc/systemd/system/disjorn-apps-gate.service" in script
     assert "systemctl daemon-reload" in script
     assert 'if [ -f "$GATE_UNIT_SRC" ]; then' in script      # guarded both ways
+
+
+# ═══════════════════════ wall 5: the gate's environment and its trees ═══════
+#
+# Gable #2546, BLOCK 1. "The gate has no database and no house credential" was
+# a sentence in two comments while the unit read the house's own server/.env —
+# SECRET_KEY, the VAPID private key, DB_PATH, all of it — and ProtectHome=
+# read-only left server/data/disjorn.db one open() away. The wall is now three
+# directives and one keyboard step, and this is where they are pinned.
+
+import grp as _grp
+import pwd as _pwd
+
+REPO = CC_DIR.parent.parent
+KEYBOARD = CC_DIR.parent / "keyboard"
+APPSBUILDING = KEYBOARD / "10-appsbuilding.sh"
+GATE_UNIT = REPO / "deploy" / "disjorn-apps-gate.service"
+SERVER_APPS_ROUTER = REPO / "server" / "app" / "routers" / "apps.py"
+
+GATE_KEYS = {"APPS_GATE_SECRET", "APPS_WWW_ROOT", "HOUSE_ORIGINS",
+             "APPS_ORIGIN_BASE"}
+# A secret that is 40 bytes (over the gate's 32) and unmistakable in a diff.
+FIXTURE_SECRET = "SECRETSECRETSECRETSECRETSECRETSECRETABCD"
+HOUSE_ENV = f"""# the house's own .env, abridged
+SECRET_KEY=house-signing-key-that-must-never-reach-the-gate
+DB_PATH=data/disjorn.db
+DATA_DIR=data
+VAPID_PRIVATE_KEY=vapid-private-key-that-must-never-reach-the-gate
+COOKIE_SECURE=true
+HOUSE_ORIGINS=["https://house.example.ts.net"]
+APPS_GATE_SECRET={FIXTURE_SECRET}
+APPS_WWW_ROOT=/srv/apps-www
+APPS_ORIGIN_BASE=https://house.example.ts.net:10000
+"""
+
+ME_USER = _pwd.getpwuid(os.getuid()).pw_name
+ME_GROUP = _grp.getgrgid(os.getgid()).gr_name
+
+
+def extract(tmp_path, env_text, name="gate.env"):
+    """Run the REAL keyboard script's extraction against a fixture .env.
+
+    Same discipline as tests/test_gatehouse_repo.py for 08-gatehouse-repo.sh:
+    the script's paths and the owner it installs as are env-overridable ONLY
+    so an unprivileged test can point them at a scratch tree; on the house
+    every one of them is the default. Returns (CompletedProcess, dst Path)."""
+    src = tmp_path / "server.env"
+    src.write_text(env_text, encoding="utf-8")
+    dst = tmp_path / name
+    env = dict(os.environ)
+    env.update(SERVER_ENV=str(src), GATE_ENV=str(dst),
+               GATE_ENV_OWNER=ME_USER, GATE_ENV_GROUP=ME_GROUP)
+    proc = _subprocess.run(["bash", str(APPSBUILDING), "--gate-env"],
+                           capture_output=True, text=True, env=env)
+    return proc, dst
+
+
+def env_keys(path: Path) -> dict:
+    out = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, _, value = line.partition("=")
+        out[key] = value
+    return out
+
+
+def test_the_extraction_carries_exactly_the_four_gate_keys(tmp_path):
+    """THE FOLD. Four keys go across; the house's credential and its database
+    path stay on the house's side of the wall."""
+    proc, dst = extract(tmp_path, HOUSE_ENV)
+    assert proc.returncode == 0, proc.stderr
+    assert set(env_keys(dst)) == GATE_KEYS
+    # Two checks, because they fail for different reasons. No house KEY is in
+    # the environment the gate gets (the header names three of them in prose,
+    # which is why this reads the parsed keys and not the raw text) —
+    for house_key in ("SECRET_KEY", "VAPID_PRIVATE_KEY", "DB_PATH", "DATA_DIR",
+                      "COOKIE_SECURE"):
+        assert house_key not in env_keys(dst), f"{house_key} reached the gate"
+    # — and no house VALUE is anywhere in the file at all.
+    raw = dst.read_text(encoding="utf-8")
+    for secret in ("house-signing-key-that-must-never-reach-the-gate",
+                   "vapid-private-key-that-must-never-reach-the-gate",
+                   "data/disjorn.db"):
+        assert secret not in raw, f"{secret!r} is in the gate's environment file"
+
+
+def test_the_extracted_values_are_the_houses_own(tmp_path):
+    """Shared secret, not a new one: the house mints with it and the gate
+    verifies with it, so they have to be the same string."""
+    _, dst = extract(tmp_path, HOUSE_ENV)
+    keys = env_keys(dst)
+    assert keys["APPS_GATE_SECRET"] == FIXTURE_SECRET
+    assert keys["HOUSE_ORIGINS"] == '["https://house.example.ts.net"]'
+    assert keys["APPS_WWW_ROOT"] == "/srv/apps-www"
+
+
+def test_the_extraction_never_prints_the_secret(tmp_path):
+    """It says how long the secret is, never what it is: this runs at plink's
+    keyboard, in a terminal with scrollback, often into a transcript."""
+    proc, _ = extract(tmp_path, HOUSE_ENV)
+    assert FIXTURE_SECRET not in proc.stdout + proc.stderr
+    assert "40 bytes" in proc.stdout
+
+
+def test_the_extracted_file_is_not_world_readable(tmp_path):
+    _, dst = extract(tmp_path, HOUSE_ENV)
+    assert stat.S_IMODE(dst.stat().st_mode) == 0o640
+
+
+@pytest.mark.parametrize("bad", ["short", "missing", "empty"])
+def test_the_extraction_refuses_a_secret_the_gate_would_refuse(tmp_path, bad):
+    """32 bytes is server/app/gate.py's floor. A gate.env written under it is
+    a file whose only effect is a unit that will not start, so the refusal
+    happens here, where somebody is reading the output."""
+    if bad == "short":
+        text = HOUSE_ENV.replace(FIXTURE_SECRET, "tooshort")
+    elif bad == "empty":
+        text = HOUSE_ENV.replace(FIXTURE_SECRET, "")
+    else:
+        text = "\n".join(l for l in HOUSE_ENV.splitlines()
+                         if not l.startswith("APPS_GATE_SECRET"))
+    proc, dst = extract(tmp_path, text)
+    assert proc.returncode != 0
+    assert "REFUSED" in proc.stderr
+    assert not dst.exists(), "a refused extraction wrote a file anyway"
+
+
+def test_a_refusal_leaves_the_file_that_is_already_there_alone(tmp_path):
+    """The gate is running off the old file. A re-run against a broken .env
+    must not take it away."""
+    proc, dst = extract(tmp_path, HOUSE_ENV)
+    assert proc.returncode == 0
+    before = dst.read_text(encoding="utf-8")
+    src = tmp_path / "server.env"
+    src.write_text(HOUSE_ENV.replace(FIXTURE_SECRET, "tooshort"),
+                   encoding="utf-8")
+    env = dict(os.environ)
+    env.update(SERVER_ENV=str(src), GATE_ENV=str(dst),
+               GATE_ENV_OWNER=ME_USER, GATE_ENV_GROUP=ME_GROUP)
+    again = _subprocess.run(["bash", str(APPSBUILDING), "--gate-env"],
+                            capture_output=True, text=True, env=env)
+    assert again.returncode != 0
+    assert dst.read_text(encoding="utf-8") == before
+
+
+def test_the_extraction_is_byte_deterministic(tmp_path):
+    """The drift block re-extracts and diffs, which only means anything if two
+    extractions of one .env are the same bytes. No timestamp, no hostname."""
+    _, first = extract(tmp_path, HOUSE_ENV, name="one.env")
+    _, second = extract(tmp_path, HOUSE_ENV, name="two.env")
+    assert first.read_bytes() == second.read_bytes()
+
+
+def test_last_wins_the_way_every_env_parser_reads_it(tmp_path):
+    """A .env with the key twice is the house's problem, but the gate must end
+    up with the value the HOUSE is using — dotenv and systemd both take the
+    last one, so this does too."""
+    _, dst = extract(tmp_path, HOUSE_ENV + f"APPS_GATE_SECRET={FIXTURE_SECRET}X\n")
+    assert env_keys(dst)["APPS_GATE_SECRET"] == FIXTURE_SECRET + "X"
+
+
+def test_an_absent_optional_key_is_left_absent(tmp_path):
+    """APPS_WWW_ROOT and APPS_ORIGIN_BASE have defaults in the gate; a missing
+    HOUSE_ORIGINS is a refusal the GATE makes at boot. Either way this script
+    does not invent a line."""
+    text = "\n".join(l for l in HOUSE_ENV.splitlines()
+                     if not l.startswith("APPS_WWW_ROOT"))
+    _, dst = extract(tmp_path, text)
+    assert set(env_keys(dst)) == GATE_KEYS - {"APPS_WWW_ROOT"}
+
+
+# ─────────────────────────────────────────────── the unit's own directives ──
+
+def test_the_gate_unit_does_not_read_the_houses_env():
+    """The BLOCK, stated as the diff that would bring it back."""
+    text = GATE_UNIT.read_text(encoding="utf-8")
+    directives = [l.strip() for l in text.splitlines()
+                  if l.strip().startswith("EnvironmentFile=")]
+    assert directives == ["EnvironmentFile=/etc/disjorn-apps/gate.env"]
+    assert not re.search(r"^EnvironmentFile=.*server/\.env\s*$", text, re.M)
+
+
+def test_the_gate_unit_cannot_see_the_house_database_or_credential():
+    text = GATE_UNIT.read_text(encoding="utf-8")
+    blocked = {l.strip() for l in text.splitlines()
+               if l.strip().startswith("InaccessiblePaths=")}
+    assert blocked == {
+        "InaccessiblePaths=/home/plink/Disjorn/Disjorn/server/data",
+        "InaccessiblePaths=/home/plink/Disjorn/Disjorn/server/.env",
+    }
+
+
+def test_the_gate_unit_still_only_reads_the_apps_tree():
+    """Wall 5's other half, unchanged and pinned so a later fold cannot quietly
+    hand the gate somewhere to write."""
+    text = GATE_UNIT.read_text(encoding="utf-8")
+    assert re.search(r"^ReadOnlyPaths=/srv/apps-www\s*$", text, re.M)
+    assert not re.search(r"^ReadWritePaths=", text, re.M)
+
+
+def test_the_gate_env_is_installed_and_drift_checked_by_the_keyboard_script():
+    """Same claim as the unit's: a file that is deployed but not drift-checked
+    is a stale deploy waiting to happen — and this one holds a secret, so a
+    stale copy is a gate verifying against a key the house stopped minting
+    with."""
+    script = APPSBUILDING.read_text(encoding="utf-8")
+    assert "--gate-env" in script
+    assert "/etc/disjorn-apps" in script and "gate.env" in script
+    assert "extract_gate_env" in script
+    # installed BEFORE the unit it is the EnvironmentFile of
+    assert (script.index("extract_gate_env \"$SERVER_ENV\" \"$GATE_ENV\"")
+            < script.index('install -o root -g root -m 0644 "$GATE_UNIT_SRC"'))
+    # and re-extracted for the diff rather than trusted
+    assert "gate_env_probe" in script
+    assert 'diff -q "$GATE_ENV" "$gate_env_probe"' in script
+
+
+def test_the_keyboard_script_parses():
+    """bash -n. A syntax error in a script plink runs with sudo is a bad way
+    to find out (tests/test_build_lane_preflight.py makes the same check for
+    the lane's other scripts)."""
+    proc = _subprocess.run(["bash", "-n", str(APPSBUILDING)],
+                           capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+
+
+# ═══════════════════ a remix reads a repo, not a pointer to one (#2546) ═════
+#
+# Gable #2546, BLOCK 2. `(src / ".git").exists()` accepted a `.git` FILE, and
+# a `.git` file is forty bytes reading `gitdir: <somewhere else>`. A builder
+# turn writes /work. So "remix app A" was one write away from being "clone
+# whichever app the seat owns", and the clone would have been authorised by
+# the shapes of A's id.
+
+def plant(apps_root: Path, app_id: str) -> Path:
+    """An app directory that is NOT a repository of its own."""
+    d = apps_root / app_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+@pytest.mark.parametrize("kind", ["gitdir pointer", "empty file",
+                                  "symlink to the parent's git",
+                                  "symlink to a real dir elsewhere"])
+def test_a_git_that_is_not_a_real_directory_is_refused(www, apps, launcher,
+                                                       tmp_path, kind):
+    victim = "aaaaaaaaaaaa"
+    d = plant(apps, victim)
+    dot_git = d / ".git"
+    if kind == "gitdir pointer":
+        dot_git.write_text(f"gitdir: {apps / APP_A / '.git'}\n", encoding="utf-8")
+    elif kind == "empty file":
+        dot_git.write_text("", encoding="utf-8")
+    elif kind == "symlink to the parent's git":
+        dot_git.symlink_to(apps / APP_A / ".git")
+    else:
+        elsewhere = tmp_path / "elsewhere.git"
+        elsewhere.mkdir()
+        dot_git.symlink_to(elsewhere)
+    with pytest.raises(SystemExit) as exc:
+        launcher.remix_app(apps, www, victim, APP_B, git_bin=HAVE_GIT or "git")
+    assert exc.value.code == 64
+    assert not (apps / APP_B).exists(), "a refused remix cloned anyway"
+
+
+@pytest.mark.parametrize("kind", ["gitdir pointer", "symlink"])
+def test_root_refuses_the_pointer_before_it_starts_a_unit(seat, www, apps, kind):
+    """The pre-flight makes the same call, so the refusal costs a stat rather
+    than a transient service — and the caller never gets an argv back."""
+    victim = "aaaaaaaaaaaa"
+    d = plant(apps, victim)
+    if kind == "gitdir pointer":
+        (d / ".git").write_text(f"gitdir: {apps / APP_A / '.git'}\n",
+                                encoding="utf-8")
+    else:
+        (d / ".git").symlink_to(apps / APP_A / ".git")
+    op_refuse(seat, "remix", victim, APP_B, www_root=www, apps_root=apps)
+
+
+@pytest.mark.skipif(not HAVE_GIT, reason="git is not installed")
+def test_a_real_repo_is_still_a_real_repo(www, apps, launcher):
+    """The other half of the fold: the check refuses pointers, not apps."""
+    assert launcher._is_a_real_repo(apps / APP_A) is True
+    out = launcher.remix_app(apps, www, APP_A, APP_B, git_bin=HAVE_GIT,
+                             rsync_bin=HAVE_RSYNC or "rsync")
+    assert out["child"] == APP_B
+
+
+@pytest.mark.skipif(not (HAVE_GIT and HAVE_RSYNC), reason="git/rsync missing")
+def test_the_clone_is_never_a_local_object_copy(www, apps, launcher, monkeypatch):
+    """`--no-local`. Without it git copies the object store directly, which is
+    how an `objects/info/alternates` in the parent would travel into the child
+    and make the child's history depend on a tree it does not own."""
+    seen = []
+    real = launcher._git
+
+    def spy(args, **kw):
+        seen.append(list(args))
+        return real(args, **kw)
+
+    monkeypatch.setattr(launcher, "_git", spy)
+    launcher.remix_app(apps, www, APP_A, APP_B, git_bin=HAVE_GIT,
+                       rsync_bin=HAVE_RSYNC)
+    clone = next(a for a in seen if a and a[0] == "clone")
+    assert "--no-local" in clone
+    assert "--no-hardlinks" in clone
+
+
+@pytest.mark.skipif(not (HAVE_GIT and HAVE_RSYNC), reason="git/rsync missing")
+def test_an_alternates_file_in_the_parent_does_not_travel(www, apps, launcher,
+                                                          tmp_path):
+    """What --no-local buys, proved rather than asserted: the child's object
+    store stands on its own even when the parent's does not."""
+    donor = tmp_path / "donor.git"
+    _subprocess.run(["git", "init", "-q", "--bare", str(donor)], check=True)
+    alt = apps / APP_A / ".git" / "objects" / "info" / "alternates"
+    alt.parent.mkdir(parents=True, exist_ok=True)
+    alt.write_text(f"{donor}/objects\n", encoding="utf-8")
+    launcher.remix_app(apps, www, APP_A, APP_B, git_bin=HAVE_GIT,
+                       rsync_bin=HAVE_RSYNC)
+    child_alt = apps / APP_B / ".git" / "objects" / "info" / "alternates"
+    assert not child_alt.exists()
+
+
+# ═══════════════════ the clock the server is waiting behind (#2546) ═════════
+
+def test_the_op_clock_is_under_the_servers(launcher):
+    """NOTE 3. The serving op's RuntimeMaxSec and the server's helper timeout
+    are two numbers in two files describing one wait, which is this project's
+    most expensive defect shape. At 300 against 120 the server gave up first:
+    a 502 in the user's face while the publish went on rotating directories
+    behind it. The unit must die while somebody is still listening."""
+    text = SERVER_APPS_ROUTER.read_text(encoding="utf-8")
+    server = int(re.search(r"^HELPER_TIMEOUT_SEC = (\d+)$", text, re.M).group(1))
+    assert launcher.OP_MAX_SEC < server, (
+        f"RuntimeMaxSec={launcher.OP_MAX_SEC} outlives the server's "
+        f"HELPER_TIMEOUT_SEC={server}")
+    # And not so far under that a slow rsync is killed for being slow.
+    assert launcher.OP_MAX_SEC >= 60
