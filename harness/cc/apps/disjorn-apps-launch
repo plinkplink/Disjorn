@@ -7,8 +7,11 @@ for line on its elder brother `harness/broker/disjorn-build-launch` (WP-L4) — 
 about sudoers wildcards, fixed argv and "the validation below is the actual
 boundary" is identical here and is not repeated in full.
 
-    disjorn-apps-launch run  <resident> <session> <turn> <app-id> <prompt-path>
-    disjorn-apps-launch stop <resident> <session> <turn>
+    disjorn-apps-launch run     <resident> <session> <turn> <app-id> <prompt-path>
+    disjorn-apps-launch stop    <resident> <session> <turn>
+    disjorn-apps-launch publish <app-id>
+    disjorn-apps-launch revert  <app-id>
+    disjorn-apps-launch remix   <parent-id> <child-id>
 
 `run` execs, with stdin/stdout/stderr passed through untouched (`--pipe`):
 
@@ -42,9 +45,38 @@ button. The write itself still goes through an openat chain that refuses
 symlinks and dirs the seat does not own, and root still creates no directory
 in the seat's tree — every refusal is kept, it just no longer exits.
 
+`publish`, `revert` and `remix` (stage 3, SPECS/2026-09-09-apps-serving-gate.md
+D6) are the SERVING half: they move directories under /srv/apps-www and clone a
+repo under /srv/apps, and their caller is the HOUSE SERVER — the first caller of
+this file that is not the broker, and the reason 92-disjorn-apps.sudoers now
+names three more aliases. Each one takes ids and NOTHING ELSE: no path, no
+program, no unit name, no root. The privileged step is identical in shape to
+`run` — validate, then hand a FIXED argv to systemd-run with the seat's
+credentials — and the work itself happens in a `<mode>-as-seat` re-entry of this
+same file inside that transient unit, as res-appsbuilding. One program, one
+place the shapes are checked, and the work runs as the account that owns the
+trees it moves. The `-as-seat` modes are not in the sudoers regexes (anchored
+`^publish <id>$` and friends), refuse to run as root outright, and give a caller
+nothing it did not already have as itself.
+
+    publish <app>    snapshot <www>/<app>/preview/ into the unserved staging
+                     root by rsync (the harvest's flags, verbatim), then rotate:
+                     live.prev removed, live → live.prev, staged → live. Every
+                     step is a rename, so a reader sees the old tree or the new
+                     one. Refused if there is no preview, or if a turn of that
+                     app is running (a turn's own publish renames preview under
+                     the copy).
+    revert <app>     swap live and live.prev through a sibling temp name; both
+                     must exist. Three renames, no copy.
+    remix <p> <c>    git clone --no-local <p> into /srv/apps/<c>, one empty
+                     commit "remix of <p>" so lineage is in the log, and the
+                     parent's preview copied to the child's by the same
+                     staged-rename discipline. Refused if <c> exists.
+
 NOTHING HERE IS POLICY. The session lock, the quota, the token ceiling and the
-seat→bot map all live in the broker (slice ii). This program decides exactly
-one thing: that the identity, the unit name, the argument shapes, the prompt's
+seat→bot map all live in the broker (slice ii); who may press Live, who owns an
+app and who may remix it live in the server. This program decides exactly one
+thing: that the identity, the unit name, the argument shapes, the prompt's
 location and the resource envelope are the ones the design allows, or nothing
 runs.
 
@@ -55,6 +87,10 @@ EXIT CODES
         used"), and it differs deliberately from disjorn-build-launch's 2 so
         the broker can tell a validation refusal from a systemd failure
         without parsing stderr.
+    1   FAILED — a serving operation that was allowed and then broke (rsync,
+        git, a rename). Only the `-as-seat` half can produce it; the caller's
+        contract is "0 done, 64 refused, anything else failed", and a refusal
+        is never a failure.
 
 CHARSETS (spec §C — these are SPEC, not code, because they are the whole wall
 between a sudoers-scoped launcher and an arbitrary path):
@@ -91,8 +127,12 @@ import json
 import os
 import pwd
 import re
+import shutil
 import stat
+import subprocess
 import sys
+import time
+from pathlib import Path
 
 try:
     import tomllib
@@ -109,6 +149,13 @@ WRAPPER = "/usr/local/lib/disjorn/run-apps.sh"
 HARVEST = "/usr/local/lib/disjorn/apps_harvest.py"
 CONFIG_PATH = "/etc/disjorn-apps/launch.toml"
 UNIT_PREFIX = "disjorn-apps-"
+# THIS FILE, at its installed name. The serving modes re-enter it inside the
+# transient unit as res-appsbuilding, so the unit's program is still not an
+# argument — it is this one program, named by a constant, checked (root-owned,
+# not group- or world-writable) before it is handed to systemd-run.
+SELF = "/usr/local/lib/disjorn/disjorn-apps-launch"
+RSYNC = "/usr/bin/rsync"
+GIT = "/usr/bin/git"
 
 # The seat. Spec §C: one host identity owns everything under /srv/apps, and it
 # is never derived from an argument.
@@ -129,6 +176,29 @@ MEMORY_MAX = "4G"
 LIMIT_FSIZE = 268435456          # 256 MiB per file — bounds the spool too
 TASKS_MAX = 512
 DEFAULT_TURN_MAX_SEC = 1800      # RuntimeMaxSec; overridable by [apps] only
+
+# The serving operations' envelope. Smaller than a turn's on every axis and
+# not tunable at all: a publish is an rsync of a static tree, a revert is three
+# renames, a remix is a local clone. Anything that needs more than this is
+# wrong, and a clock is how it stops being wrong quietly.
+# MUST STAY UNDER server/app/routers/apps.py's HELPER_TIMEOUT_SEC (120), and
+# the suite pins that (test_the_op_clock_is_under_the_servers). At 300 the unit
+# outlived the request that was waiting on it: the server gave up at two
+# minutes and returned a 502 while the publish went on rotating directories
+# behind it — the worst shape available, because the user is told it failed
+# while it succeeds. 100 leaves the server twenty seconds to notice the helper
+# died and say so itself.
+OP_MAX_SEC = 100
+OP_MEMORY_MAX = "1G"
+OP_TASKS_MAX = 64
+
+# The identity every app commit already carries (apps_harvest.GIT_USER_*). The
+# launcher imports nothing seat-side — it is a root program and the harvest is
+# not — so the two constants are duplicated on purpose and pinned equal by
+# tests/test_apps_launch.py. A remix's empty commit must not be authored by
+# somebody else.
+GIT_USER_NAME = "apps-builder"
+GIT_USER_EMAIL = "apps-builder@disjorn.local"
 
 # Defaults for everything the config table may set. Present so a missing or
 # minimal launch.toml still produces a correct turn rather than a KeyError.
@@ -151,6 +221,13 @@ MAX_RUNNER_ARGS = 32
 MAX_ARG_LEN = 512
 
 EXIT_REFUSED = 64
+EXIT_FAILED = 1
+
+# Every mode this program answers to. The `-as-seat` three are the inside of a
+# transient unit and appear in no sudoers regex; everything else is a name a
+# caller may say through `sudo -n`.
+MODES = ("run", "stop", "publish", "revert", "remix",
+         "publish-as-seat", "revert-as-seat", "remix-as-seat")
 
 
 def die(msg: str) -> "None":
@@ -158,6 +235,19 @@ def die(msg: str) -> "None":
     any privilege is used (spec §C)."""
     sys.stderr.write(f"disjorn-apps-launch: REFUSED: {msg}\n")
     raise SystemExit(EXIT_REFUSED)
+
+
+def fail(msg: str) -> "None":
+    """A serving operation that was ALLOWED and then broke. Distinct from a
+    refusal because the caller's contract distinguishes them: 64 means the
+    house asked for something it may not have, anything else means the house
+    asked for something reasonable and the host could not do it."""
+    sys.stderr.write(f"disjorn-apps-launch: FAILED: {msg}\n")
+    raise SystemExit(EXIT_FAILED)
+
+
+def warn(msg: str) -> None:
+    sys.stderr.write(f"disjorn-apps-launch: {msg}\n")
 
 
 # ---------------------------------------------------------------- validation
@@ -667,6 +757,499 @@ def main_stop(argv: "list", *, dry: bool, seat) -> int:
     return EXIT_REFUSED
 
 
+# ------------------------------------------- publish / revert / remix (D6)
+#
+# THE SHAPE OF THIS HALF. Everything below either (a) validates and builds a
+# systemd-run argv — root's half, which touches no file — or (b) moves
+# directories, which only ever runs as res-appsbuilding inside that unit. The
+# functions in (b) all take their roots as arguments, so the whole rotate is
+# exercised by the test suite against a tmp tree with no privilege anywhere.
+
+STAGING_NAME = ".staging"                # apps_harvest.STAGING_NAME
+LIVE_NAME = "live"
+PREV_NAME = "live.prev"
+PREVIEW_NAME = "preview"
+
+
+def _stamp() -> str:
+    """A per-operation suffix for a staged tree. Nanoseconds, so two publishes
+    of one app cannot collide on the name even if the unit-name collision that
+    should have stopped the second one somehow did not."""
+    return str(time.time_ns())
+
+
+def _remove(path: Path) -> None:
+    """Remove a leftover of OURS, whatever shape it has — a symlink is
+    unlinked, never followed. Same function, same reasoning, as
+    apps_harvest._remove: it only ever runs on names this program creates
+    under the unserved staging root, or on the live.prev this program's own
+    rotate put there."""
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+
+
+def _real_dir(path: Path) -> bool:
+    """A directory, and not a symlink to one. The seat owns /srv/apps-www and
+    could put a link where a tree belongs; rsync's `--no-links` drops links
+    INSIDE a transfer but happily follows a source path that is one, so a
+    `preview -> /etc` would otherwise be published to the public root."""
+    return path.is_dir() and not path.is_symlink()
+
+
+def _is_a_real_repo(src: Path) -> bool:
+    """`<src>/.git` is a real DIRECTORY that lives inside `<src>` itself.
+
+    THE SENTENCE THIS FILE KEEPS RELEARNING (Gable #2546; Claudette #2325,
+    #2329 before it): we keep validating WHERE a thing is instead of WHAT it
+    is. `(src / ".git").exists()` was the whole parent check, and `.git` is
+    allowed to be a FILE — forty bytes reading `gitdir: /srv/apps/<other>/.git`
+    makes any directory a working tree of somebody else's repository. A turn
+    writes /work, so a builder turn could have written those forty bytes and
+    turned "remix this app" into "clone that one". A symlinked `.git` is the
+    same trick with a different syscall.
+
+    So: not a symlink, a directory by lstat rather than by follow, and its
+    realpath lands under the realpath of the app's own directory. A repo the
+    seat owns and points somewhere else is not a repo this remix will read."""
+    dot_git = src / ".git"
+    if dot_git.is_symlink():
+        return False
+    if not dot_git.is_dir():                 # a `gitdir:` pointer file is not
+        return False
+    try:
+        real_src = os.path.realpath(src)
+        real_git = os.path.realpath(dot_git)
+    except OSError:                          # pragma: no cover — lstat'd above
+        return False
+    return _under(real_src, real_git) and real_git != real_src
+
+
+def _staging(www_root, app_id: str) -> Path:
+    """`<www-root>/.staging/<app-id>/`, created 0700 at the `.staging` level.
+
+    NOT a sibling of `live` under `<app-id>/`: `<www-root>/<app-id>/` is a
+    served directory in stage 3, so a half-copied tree beside `live` would be
+    a URL for as long as it existed (Claudette #2336, the same ruling the
+    preview publisher was built on). `.staging` cannot collide with an app id
+    — `^[a-z2-7]{12}$` has no dot — and it is the same filesystem, so every
+    rename below is a rename."""
+    root = Path(www_root)
+    staging = root / STAGING_NAME / app_id
+    staging.mkdir(parents=True, exist_ok=True)
+    os.chmod(staging.parent, 0o700)
+    return staging
+
+
+def snapshot_argv(src, dest, rsync_bin: str = RSYNC) -> "list":
+    """The rsync argv for a served-tree snapshot, factored out so a test can
+    assert it without rsync installed.
+
+    The flags are apps_harvest.preview_argv's, and they are the same flags for
+    the same reasons: `--no-links` drops symlinks as a CLASS, `--no-D` drops
+    devices, FIFOs and sockets, `--chmod=D0755,F0644` sets the modes stage 3
+    serves rather than walking the tree with os.chmod afterwards. No
+    `--exclude` here: the SOURCE is a preview root the harvest already built
+    with those exclusions, and re-applying them would mean `live` could
+    silently differ from the `preview` the owner pressed Live on. No
+    `--delete`: the destination is a fresh empty directory. Trailing slashes:
+    the contents, not the directory."""
+    return [rsync_bin, "-a", "--no-links", "--no-D", "--chmod=D0755,F0644",
+            f"{str(src).rstrip('/')}/", f"{str(dest).rstrip('/')}/"]
+
+
+def _snapshot_into(src: Path, dest: Path, rsync_bin: str) -> None:
+    """A fresh 0755 `dest`, filled by rsync. On failure the destination is
+    removed and the caller fails: nothing has been renamed yet, so the served
+    tree is untouched."""
+    _remove(dest)
+    os.mkdir(dest, 0o755)
+    os.chmod(dest, 0o755)                # our own fresh directory, umask-proof
+    argv = snapshot_argv(src, dest, rsync_bin=rsync_bin)
+    proc = subprocess.run(argv, capture_output=True, text=True)
+    if proc.returncode != 0:
+        shutil.rmtree(dest, ignore_errors=True)
+        fail(f"rsync into the staging tree failed ({proc.returncode}): "
+             f"{(proc.stderr or proc.stdout).strip()}")
+
+
+def publish_app(www_root, app_id: str, *, rsync_bin: str = RSYNC,
+                stamp: "str | None" = None) -> dict:
+    """`preview/` → `live/`, by rename, keeping the old `live/` as `live.prev/`.
+
+    THE ROTATE, and the only reason this is a function and not four lines in
+    main: it is the part with an order that matters, and it is tested against
+    a tmp tree.
+
+      1. snapshot `preview/` into `<staging>/live.tmp.<ts>` (a COPY, because
+         `preview` must keep existing — the owner goes on building);
+      2. remove any `live.prev` (it is two deploys old; `revert` only ever
+         reaches back one);
+      3. `live` → `live.prev`, if there is a `live`;
+      4. staged tree → `live`.
+
+    Steps 3 and 4 are two renames because a rename cannot replace a non-empty
+    directory in one syscall. The window between them is the only instant a
+    reader sees no `live` at all, and it is the same instant either way. If
+    step 4 fails, step 3 is undone and the tree that was serving is serving
+    again."""
+    app_id = check_app_id(app_id)
+    root = Path(www_root)
+    app_dir = root / app_id
+    preview = app_dir / PREVIEW_NAME
+    live = app_dir / LIVE_NAME
+    prev = app_dir / PREV_NAME
+
+    if not _real_dir(preview):
+        die(f"{app_id} has no preview to publish "
+            f"(no turn of this app has deployed yet)")
+
+    staged = _staging(root, app_id) / f"{LIVE_NAME}.tmp.{stamp or _stamp()}"
+    _snapshot_into(preview, staged, rsync_bin)
+
+    if prev.exists() or prev.is_symlink():
+        _remove(prev)
+    had_live = live.exists() or live.is_symlink()
+    if had_live:
+        os.rename(live, prev)
+    try:
+        os.rename(staged, live)
+    except OSError:
+        if had_live:
+            os.rename(prev, live)
+        raise
+    return {"mode": "publish", "app": app_id, "live": str(live),
+            "previous": had_live}
+
+
+def revert_app(www_root, app_id: str, *, stamp: "str | None" = None) -> dict:
+    """Swap `live` and `live.prev`. Three renames through a name under the
+    staging root, because two directories cannot trade places in two.
+
+    Both must exist: a revert with no previous deploy is a refusal, not a
+    no-op, because the server offers the button only when there IS one and a
+    silent success would make a lie of the button. The swap is symmetric —
+    reverting a revert puts the newer tree back — which is why the old live
+    goes to `live.prev` rather than being removed."""
+    app_id = check_app_id(app_id)
+    root = Path(www_root)
+    app_dir = root / app_id
+    live = app_dir / LIVE_NAME
+    prev = app_dir / PREV_NAME
+    if not _real_dir(live):
+        die(f"{app_id} is not live, so there is nothing to revert")
+    if not _real_dir(prev):
+        die(f"{app_id} has no previous deploy to revert to")
+
+    tmp = _staging(root, app_id) / f"{LIVE_NAME}.swap.{stamp or _stamp()}"
+    _remove(tmp)
+    os.rename(live, tmp)
+    try:
+        os.rename(prev, live)
+    except OSError:
+        os.rename(tmp, live)             # nothing moved; the older tree stays
+        raise
+    try:
+        os.rename(tmp, prev)
+    except OSError as exc:
+        # `live` is already the tree the user asked for, which is the whole
+        # point of the button. Losing the far side of the swap costs the next
+        # revert, not this one, so it is a warning and not a failure.
+        warn(f"reverted, but the superseded tree is still at {tmp}: {exc}")
+    return {"mode": "revert", "app": app_id, "live": str(live)}
+
+
+def _git(args: "list", *, cwd=None, git_bin: str = GIT) -> str:
+    """git with an environment this program built, never one it inherited.
+
+    Same shape as apps_harvest.git: no system or global config (a config file
+    the seat can write is a config file that can name a program), hooks off
+    (`core.hooksPath=/dev/null` — a clone of a repo the seat controls must not
+    run the seat's shell scripts as anybody), C locale, and the author
+    identity fixed so the lineage commit is the app builder's."""
+    env = {
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "HOME": os.environ.get("HOME", "/tmp"),
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "LC_ALL": "C",
+        "GIT_AUTHOR_NAME": GIT_USER_NAME,
+        "GIT_AUTHOR_EMAIL": GIT_USER_EMAIL,
+        "GIT_COMMITTER_NAME": GIT_USER_NAME,
+        "GIT_COMMITTER_EMAIL": GIT_USER_EMAIL,
+    }
+    proc = subprocess.run([git_bin, "-c", "core.hooksPath=/dev/null", *args],
+                          cwd=cwd, capture_output=True, text=True, env=env)
+    if proc.returncode != 0:
+        # ONE sentence: the last line git said, or nothing if it said nothing.
+        said = (proc.stderr or proc.stdout).strip().splitlines()
+        fail(f"git {args[0]} failed ({proc.returncode}): "
+             f"{said[-1] if said else 'no output'}")
+    return proc.stdout
+
+
+def remix_app(apps_root, www_root, parent: str, child: str, *,
+              git_bin: str = GIT, rsync_bin: str = RSYNC,
+              stamp: "str | None" = None) -> dict:
+    """Clone one app into a new one, lineage in the git log.
+
+    `--no-local --no-hardlinks`: a local clone shares objects by hardlink by
+    default, and two apps that are separately writable must not share a byte on
+    disk — `git gc` in one would be reaching into the other's history. And the
+    parent's `.git` must be the parent's OWN directory, not a `gitdir:` pointer
+    file a turn wrote into /work (`_is_a_real_repo` above, Gable #2546).
+
+    The empty commit is the lineage record. Not a note, not a file the next
+    turn can rewrite, not a row only the database knows: `git log` in the
+    child says where it came from, and it says it inside the artefact that
+    gets copied around.
+
+    The parent's PREVIEW, not its `live`, is what the child starts from: a
+    remix opens a build session, and the thing a build session shows is a
+    preview. It is published by the same staged-rename discipline as
+    everything else here, so the child's preview root either exists complete
+    or does not exist."""
+    parent = check_app_id(parent)
+    child = check_app_id(child)
+    if parent == child:
+        die("a remix's parent and child cannot be the same app")
+
+    src = Path(apps_root) / parent
+    dst = Path(apps_root) / child
+    if not _real_dir(src) or not _is_a_real_repo(src):
+        die(f"no app repository to remix from: {parent} "
+            f"(its .git must be a real directory of its own)")
+    if dst.exists() or dst.is_symlink():
+        die(f"{child} already exists — a remix never writes over an app")
+
+    # `--no-local`: without it git clones a local path by copying the object
+    # store directly, which is how an `objects/info/alternates` in the parent
+    # would travel into the child and make the child's history depend on a
+    # tree the child does not own. `--no-local` makes even a path on this disk
+    # go through the pack protocol, which carries objects and nothing else.
+    # `--no-hardlinks` is kept: it is what --no-local implies, said out loud,
+    # and it is the one that survives if this ever stops being a local clone.
+    _git(["clone", "--no-local", "--no-hardlinks", "--quiet",
+          str(src), str(dst)], git_bin=git_bin)
+    # 0750, the mode every app repo has: an app's SOURCE is the seat's own and
+    # the served copy is the world-readable one (spec §C).
+    os.chmod(dst, 0o750)
+    _git(["config", "user.name", GIT_USER_NAME], cwd=dst, git_bin=git_bin)
+    _git(["config", "user.email", GIT_USER_EMAIL], cwd=dst, git_bin=git_bin)
+    _git(["commit", "--allow-empty", "-q", "-m", f"remix of {parent}"],
+         cwd=dst, git_bin=git_bin)
+
+    published = False
+    parent_preview = Path(www_root) / parent / PREVIEW_NAME
+    if _real_dir(parent_preview):
+        child_app = Path(www_root) / child
+        if not child_app.is_dir():
+            os.makedirs(child_app, exist_ok=True)
+            os.chmod(child_app, 0o755)   # the served path; the gate reads it
+        staged = (_staging(www_root, child)
+                  / f"{PREVIEW_NAME}.tmp.{stamp or _stamp()}")
+        _snapshot_into(parent_preview, staged, rsync_bin)
+        target = child_app / PREVIEW_NAME
+        if target.exists() or target.is_symlink():
+            _remove(target)              # child_app was ours a moment ago
+        os.rename(staged, target)
+        published = True
+    return {"mode": "remix", "parent": parent, "child": child,
+            "repo": str(dst), "preview": published}
+
+
+# ------------------------------------------------- the pre-flight refusals
+#
+# Read-only checks root makes BEFORE it starts a unit. Each of them is made
+# again by the seat inside the unit, on the same facts; these exist so the
+# common refusals cost a stat instead of a transient service, and so the house
+# gets its one sentence back in milliseconds.
+
+def active_turn_for_app(app_id: str, *, systemctl_bin: str = SYSTEMCTL) -> "str | None":
+    """The name of a RUNNING turn unit of this app, or None.
+
+    A turn's unit name is `disjorn-apps-<session>-<turn>` and carries no app
+    id — `stop` derives it from the session and turn it is handed, and a
+    publish is handed neither. So the id is read off the unit's Description,
+    which build_run_argv sets to `Disjorn apps turn <s>/<t> (<app>)`; the
+    serving units' descriptions carry no parentheses, so this can never match
+    itself.
+
+    ADVISORY, DELIBERATELY. A publish while a turn is mid-harvest could rsync
+    a preview root that is being renamed out from under it, and the answer to
+    that is a clear refusal rather than a half-copied `live`. But systemd not
+    answering is not evidence of a running turn, so a query that fails at all
+    reports None and says so: the failure mode of guessing "yes" is a Live
+    button that never works, and that is worse than the race this closes."""
+    try:
+        listing = subprocess.run(
+            [systemctl_bin, "list-units", "--no-legend", "--no-pager",
+             "--plain", "--state=active", f"{UNIT_PREFIX}*.service"],
+            capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as exc:
+        warn(f"cannot ask systemd which turns are running ({exc}); "
+             f"publishing without that check")
+        return None
+    if listing.returncode != 0:
+        warn("cannot ask systemd which turns are running "
+             f"({(listing.stderr or '').strip()}); publishing without that check")
+        return None
+    for line in listing.stdout.splitlines():
+        unit = line.split()[0] if line.split() else ""
+        if not unit.startswith(UNIT_PREFIX) or not unit.endswith(".service"):
+            continue
+        try:
+            shown = subprocess.run(
+                [systemctl_bin, "show", "--property=Description", "--value",
+                 unit], capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if shown.returncode == 0 and f"({app_id})" in shown.stdout:
+            return unit
+    return None
+
+
+def preflight_publish(app_id: str, *, www_root: str = WWW_ROOT,
+                      systemctl_bin: str = SYSTEMCTL) -> None:
+    preview = Path(www_root) / app_id / PREVIEW_NAME
+    if not _real_dir(preview):
+        die(f"{app_id} has no preview to publish "
+            f"(no turn of this app has deployed yet)")
+    unit = active_turn_for_app(app_id, systemctl_bin=systemctl_bin)
+    if unit:
+        die(f"{app_id} has a turn running ({unit}); publish when it idles")
+
+
+def preflight_revert(app_id: str, *, www_root: str = WWW_ROOT) -> None:
+    app_dir = Path(www_root) / app_id
+    if not _real_dir(app_dir / LIVE_NAME):
+        die(f"{app_id} is not live, so there is nothing to revert")
+    if not _real_dir(app_dir / PREV_NAME):
+        die(f"{app_id} has no previous deploy to revert to")
+
+
+def preflight_remix(parent: str, child: str, *, apps_root: str = APPS_ROOT) -> None:
+    if parent == child:
+        die("a remix's parent and child cannot be the same app")
+    src = Path(apps_root) / parent
+    if not _real_dir(src) or not _is_a_real_repo(src):
+        die(f"no app repository to remix from: {parent} "
+            f"(its .git must be a real directory of its own)")
+    dst = Path(apps_root) / child
+    if dst.exists() or dst.is_symlink():
+        die(f"{child} already exists — a remix never writes over an app")
+
+
+# --------------------------------------------------- the serving-mode argv
+
+def build_op_argv(mode: str, ids: "list", *, self_path: str = SELF,
+                  seat=None) -> "list":
+    """The exact systemd-run argv for a serving operation. Same contract as
+    build_run_argv: factored out so the suite asserts it byte for byte.
+
+    `--wait` (not `run`'s fire-and-forget) because the house server is holding
+    a request open on the answer, and `--pipe` so the seat's one sentence and
+    its exit code come back through sudo unchanged. `--quiet` because without
+    it systemd-run writes four lines of its own to stderr ("Running as unit",
+    "Finished with result", the CPU and memory it used) and the caller's
+    contract is ONE sentence — the server puts that sentence in front of a
+    user. `--collect` so a failed operation leaves no unit behind to collide
+    with the retry."""
+    pw, group = seat if seat is not None else check_seat()
+    unit = f"{UNIT_PREFIX}{mode}-{'-'.join(ids)}"
+    what = {"publish": f"Disjorn apps publish {ids[0]}",
+            "revert": f"Disjorn apps revert {ids[0]}",
+            "remix": f"Disjorn apps remix {' to '.join(ids)}"}[mode]
+    return [
+        SYSTEMD_RUN,
+        # One unit name per (mode, app): a second publish of the same app
+        # while the first is in flight collides LOUDLY instead of racing the
+        # rotate. The same reasoning as the turn unit's name.
+        f"--unit={unit}",
+        f"--description={what}",
+        # THE IDENTITY. Everything under /srv/apps and /srv/apps-www belongs
+        # to this account, and root moving directories inside a tree the seat
+        # controls is the shape this whole file exists to avoid.
+        f"--uid={SEAT_USER}",
+        f"--gid={group}",
+        "--collect",
+        "--wait",
+        "--pipe",
+        "--quiet",
+        f"--property=RuntimeMaxSec={OP_MAX_SEC}",
+        f"--property=MemoryMax={OP_MEMORY_MAX}",
+        f"--property=LimitFSIZE={LIMIT_FSIZE}",
+        "--property=LimitCORE=0",
+        f"--property=TasksMax={OP_TASKS_MAX}",
+        f"--setenv=HOME={pw.pw_dir}",
+        "--",
+        self_path, f"{mode}-as-seat", *ids,
+    ]
+
+
+def main_op(mode: str, argv: "list", *, dry: bool, seat, self_path: str,
+            systemctl_bin: str = SYSTEMCTL, www_root: str = WWW_ROOT,
+            apps_root: str = APPS_ROOT) -> int:
+    """The privileged half of publish/revert/remix: shapes, pre-flight, argv,
+    exec. No file is touched here — root's job is to decide, and the seat's is
+    to move."""
+    ids = argv[2:]
+    want = 2 if mode == "remix" else 1
+    if len(ids) != want:
+        die(f"{mode} takes exactly {want} argument{'s' if want > 1 else ''}, "
+            f"got {len(ids)}")
+    ids = [check_app_id(i) for i in ids]
+    if mode == "publish":
+        preflight_publish(ids[0], www_root=www_root, systemctl_bin=systemctl_bin)
+    elif mode == "revert":
+        preflight_revert(ids[0], www_root=www_root)
+    else:
+        preflight_remix(ids[0], ids[1], apps_root=apps_root)
+    if not dry:
+        check_wrapper(self_path)
+    out = build_op_argv(mode, ids, self_path=self_path, seat=seat)
+    if dry:
+        print(json.dumps(out))
+        return 0
+    os.execve(out[0], out, {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"})
+    die(f"exec failed: {out[0]}")   # pragma: no cover — execve does not return
+    return EXIT_REFUSED
+
+
+def main_as_seat(mode: str, argv: "list", *, www_root: str = WWW_ROOT,
+                 apps_root: str = APPS_ROOT) -> int:
+    """The unprivileged half, inside the transient unit, as res-appsbuilding.
+
+    Reachable by name only from build_op_argv above: the sudoers regexes are
+    anchored on `^publish <id>$` and friends, so no caller of this file through
+    sudo can ever name a `-as-seat` mode. Running it as yourself gives you
+    exactly your own privileges, and running it as root is refused — root has
+    no business moving directories in the seat's own trees, which is the
+    ruling the whole serving half is built on."""
+    if os.geteuid() == 0:
+        die(f"{mode} never runs as root; it is the seat's half of "
+            f"{mode.split('-')[0]}")
+    ids = argv[2:]
+    want = 2 if mode.startswith("remix") else 1
+    if len(ids) != want:
+        die(f"{mode} takes exactly {want} argument{'s' if want > 1 else ''}, "
+            f"got {len(ids)}")
+    ids = [check_app_id(i) for i in ids]
+    try:
+        if mode == "publish-as-seat":
+            out = publish_app(www_root, ids[0])
+        elif mode == "revert-as-seat":
+            out = revert_app(www_root, ids[0])
+        else:
+            out = remix_app(apps_root, www_root, ids[0], ids[1])
+    except OSError as exc:
+        fail(f"{mode}: {exc}")
+    print(json.dumps(out))
+    return 0
+
+
 def main(argv: "list") -> int:
     # DRY RUN is for the test suite and for reading the argv at the keyboard.
     # It is UNREACHABLE through the privileged path: sudo's env_reset (Debian
@@ -683,10 +1266,32 @@ def main(argv: "list") -> int:
         wrapper = os.environ["DISJORN_APPS_LAUNCH_WRAPPER"]
     if dry and os.environ.get("DISJORN_APPS_LAUNCH_HARVEST"):
         harvest = os.environ["DISJORN_APPS_LAUNCH_HARVEST"]
+    self_path = SELF
+    if dry and os.environ.get("DISJORN_APPS_LAUNCH_SELF"):
+        self_path = os.environ["DISJORN_APPS_LAUNCH_SELF"]
+    systemctl_bin = SYSTEMCTL
+    if dry and os.environ.get("DISJORN_APPS_LAUNCH_SYSTEMCTL"):
+        systemctl_bin = os.environ["DISJORN_APPS_LAUNCH_SYSTEMCTL"]
+    # The two /srv roots the serving modes move things in. Constants on the
+    # real path; a scratch tree under a dry run, so the suite proves the rotate
+    # on a tree it owns instead of on the house's.
+    www_root, apps_root = WWW_ROOT, APPS_ROOT
+    if dry and os.environ.get("DISJORN_APPS_LAUNCH_WWW_ROOT"):
+        www_root = os.environ["DISJORN_APPS_LAUNCH_WWW_ROOT"]
+    if dry and os.environ.get("DISJORN_APPS_LAUNCH_APPS_ROOT"):
+        apps_root = os.environ["DISJORN_APPS_LAUNCH_APPS_ROOT"]
 
-    if len(argv) < 2 or argv[1] not in ("run", "stop"):
+    if len(argv) < 2 or argv[1] not in MODES:
         die("usage: disjorn-apps-launch run <resident> <session> <turn> "
-            "<app-id> <prompt-path> | stop <resident> <session> <turn>")
+            "<app-id> <prompt-path> | stop <resident> <session> <turn> "
+            "| publish <app-id> | revert <app-id> | remix <parent> <child>")
+
+    # The seat's half of a serving operation, inside the transient unit. No
+    # seat lookup, no config, no privilege: it IS the seat, and it moves
+    # directories it owns.
+    if argv[1].endswith("-as-seat"):
+        return main_as_seat(argv[1], argv, www_root=www_root,
+                            apps_root=apps_root)
 
     seat = None
     if dry and os.environ.get("DISJORN_APPS_LAUNCH_FAKE_SEAT"):
@@ -694,6 +1299,13 @@ def main(argv: "list") -> int:
         # dry-run-only for the same reason every other override is.
         uid, home, group = os.environ["DISJORN_APPS_LAUNCH_FAKE_SEAT"].split(":")
         seat = (type("pw", (), {"pw_uid": int(uid), "pw_dir": home})(), group)
+
+    if argv[1] in ("publish", "revert", "remix"):
+        # No config and no prompt: a serving operation names apps, and every
+        # root it touches is a constant in this file.
+        return main_op(argv[1], argv, dry=dry, seat=seat or check_seat(),
+                       self_path=self_path, systemctl_bin=systemctl_bin,
+                       www_root=www_root, apps_root=apps_root)
 
     if argv[1] == "stop":
         # No config, no wrapper, no prompt: a stop names a turn and nothing

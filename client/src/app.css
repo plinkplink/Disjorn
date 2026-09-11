@@ -3676,9 +3676,10 @@
   white-space: pre;
 }
 
-/* The frozen preview. There is no iframe in here, in stage 1 or in this
-   stylesheet: nothing is served yet, and a framed blank would read as a
-   broken app rather than an absent one. */
+/* The preview panel. It holds a REAL iframe of the app's preview root once
+   the serving gate is configured (stage 3 D10); with no gate it keeps stage
+   1's hatched placeholder, because a framed blank reads as a broken app
+   rather than an absent one. */
 
 .app-preview-frozen {
   flex: 1 1 auto;
@@ -3692,11 +3693,36 @@
 }
 
 .app-preview-banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
   padding: var(--space-2) var(--space-3);
   border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-1);
   color: var(--text-1);
   font-size: var(--text-xs);
+}
+
+/* The hand-crank out of a send-freeze the builder never answered. It appears
+   in the banner after a minute of silence and does nothing until pressed —
+   the freeze has no timer, and this is not one (Claudette #2555). */
+.app-unfreeze {
+  margin-left: auto;
+  padding: 2px var(--space-2);
+  font-size: var(--text-xs);
+}
+
+/* The minted URL, when the browser refused us a tab for it. A link, because a
+   click on a link is a user gesture no popup blocker argues with. */
+.app-open-blocked {
+  margin: var(--space-1) 0 0;
+  font-size: var(--text-xs);
+  color: var(--text-2);
+}
+
+.app-open-blocked a {
+  color: var(--accent);
 }
 
 .app-preview-empty {
@@ -3717,6 +3743,177 @@
   flex-wrap: wrap;
 }
 
+/* The frame itself. `position: relative` so the freeze overlay can sit on top
+   of it: the overlay is what makes "no pointer events" true for the page
+   INSIDE the frame, where a CSS rule of ours cannot reach. */
+
+.app-preview-frame {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+.app-preview-iframe {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;              /* an app draws its own ground; this is paper */
+}
+
+.app-preview-frozen.frozen .app-preview-iframe {
+  pointer-events: none;
+}
+
+/* Frosted, not opaque: the user watches the app change while it is frozen —
+   that is the point of the panel — but cannot touch it. */
+.app-preview-overlay {
+  position: absolute;
+  inset: 0;
+  background: var(--bg-0);
+  opacity: 0.35;
+  cursor: progress;
+}
+
+.app-build-chip--ok {
+  color: var(--text-0);
+  background: var(--accent-muted);
+  border: 1px solid var(--accent);
+}
+
+/* share dialog — one channel, one visibility */
+
+.app-share-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.app-share-label {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-2);
+}
+
+.app-share-select {
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  background: var(--bg-0);
+  color: var(--text-0);
+  font-size: var(--text-md);
+}
+
+.app-share-check {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--text-1);
+}
+
+/* Why the Public box is checked and will not clear: sharing widens and never
+   narrows, so an app that is already public has nothing this dialog can undo
+   (Claudette #2555). */
+.app-share-locked {
+  margin: 0;
+  padding-left: calc(var(--space-2) + 1.1em);
+  font-size: var(--text-xs);
+  color: var(--text-2);
+}
+
+/* The app card in a channel (D8). Same footprint as an unfurl card — it sits
+   in the same place, under the same message — with the app's own tile where
+   an unfurl puts its thumbnail. */
+
+.app-link-card {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+  padding: var(--space-3);
+  max-width: 520px;
+  border: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-m);
+  background: var(--bg-2);
+}
+
+/* No screenshot exists yet (D9 deferred), so the tile IS the picture: the
+   app's initial on a colour hashed from its id, which makes it the same tile
+   in every room it is shared into. */
+.app-link-tile,
+.app-link-shot {
+  flex: 0 0 auto;
+  width: 56px;
+  height: 56px;
+  border-radius: var(--radius-m);
+  object-fit: cover;
+}
+
+.app-link-tile {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 26px;
+  font-weight: 700;
+}
+
+.app-link-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.app-link-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.app-link-name {
+  font-weight: 600;
+  color: var(--text-0);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-link-desc {
+  margin: 0;
+  color: var(--text-1);
+  font-size: var(--text-sm);
+  line-height: 1.4;
+}
+
+.app-link-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-2);
+  font-size: var(--text-xs);
+}
+
+.app-link-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+@media (max-width: 520px) {
+  .app-link-card {
+    flex-wrap: wrap;
+  }
+  .app-link-actions {
+    flex-direction: row;
+  }
+}
+
 @media (min-width: 1024px) {
   .app-build-body {
     flex-direction: row;
@@ -3727,6 +3924,10 @@
   .app-build-preview {
     flex: 1 1 42%;
     min-width: 320px;
+  }
+  /* Two columns: the frame gets room to be an app rather than a strip. */
+  .app-preview-frozen {
+    min-height: 280px;
   }
 }
 

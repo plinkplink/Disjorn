@@ -24,17 +24,27 @@ import {
   addAppToMenu,
   endAppSession,
   stopAppTurn,
+  fetchAppCard,
   fetchAppSession,
+  fetchAppsConfig,
+  goAppLive,
   heartbeatAppSession,
   listApps,
   listBuilders,
+  openAppUrl,
   patchApp,
+  remixApp,
   removeAppFromMenu,
+  revertAppLive,
+  shareApp,
   startAppSession,
 } from "../api";
 import type {
   App,
+  AppCardData,
+  AppRoot,
   AppSession,
+  AppStage,
   AppStageFrame,
   AppUpdateFrame,
   Builder,
@@ -123,6 +133,69 @@ function withTurn(session: AppSession): AppSession {
   return { ...session, lastTurn: turnFromStages(session.stages) };
 }
 
+/**
+ * Stages after which nothing is changing under the user's mouse.
+ *
+ * `files_written` is in here for the same reason it is the bar's terminal
+ * stage: the turn's diff is on disk. `deployed` and `live` are after it. A
+ * turn that halts is caught by `lastTurn.done` instead, whatever stage it
+ * reached.
+ */
+// `files_written` is NOT settled: a turn that wrote files is still being
+// published, and `deployed` follows it with a reload. Thawing between the two
+// would change the app under the mouse (Round 5). A turn that wrote nothing
+// ends at `files_written` with `no_changes`, and a halt ends wherever it was —
+// both of those set `lastTurn.done`, which is checked first.
+const TURN_SETTLED_STAGES: readonly AppStage[] = ["deployed", "live"];
+
+/**
+ * Is a turn running right now? — the one input to the preview's freeze/thaw
+ * (stage 3 D10).
+ *
+ * DERIVED from exactly what the stage bar reads: the session's current stage
+ * and the turn the store already folded out of the events. There is no
+ * running flag anywhere, on the wire or in this store, because a second
+ * source of truth for "is it building" is how a frozen frame and an idle bar
+ * end up on screen together.
+ *
+ * A turn starts at `scoped` and runs until it settles (files on disk, or
+ * further) or halts. Before the first turn — the talking phase — nothing is
+ * running: the frame is the user's to click.
+ */
+export function isTurnRunning(session: AppSession | undefined): boolean {
+  if (session === undefined) return false;
+  const turn = session.lastTurn ?? null;
+  if (turn === null || turn.done) return false;
+  const stage = session.stage;
+  if (stage === null) return false;
+  return !TURN_SETTLED_STAGES.includes(stage);
+}
+
+/**
+ * How many times this session has reached `deployed`.
+ *
+ * Two things read it and they must not drift: Live has nothing to publish
+ * until the count is at least one (the button says so rather than collecting
+ * a 409), and the preview reloads on each increment, a new deploy being new
+ * files behind the same URL.
+ */
+export function deployedTurnCount(session: AppSession | undefined): number {
+  return (session?.stages ?? []).filter((e) => e.stage === "deployed").length;
+}
+
+/**
+ * One app's card, as the message list sees it.
+ *
+ * `missing` is the 404 — not entitled, or gone — and it is CACHED like any
+ * other answer so a channel full of the same unreachable link does not
+ * re-ask once per row. The one thing that clears it is a status frame saying
+ * the app moved (`retryMissingCard`); nothing else, and no timer.
+ */
+export interface CardEntry {
+  status: "loading" | "done" | "missing";
+  data: AppCardData | null;
+}
+
 interface AppsState {
   /** The apps on my menu, as GET /apps returns them. */
   apps: App[];
@@ -133,6 +206,21 @@ interface AppsState {
   /** Sessions we have loaded or started, by session id. */
   sessions: Record<number, AppSession>;
   loaded: boolean;
+  /** The serving gate's origin, or "" when this house has no gate (D1).
+      Every URL-building path reads this first; nobody guesses one. */
+  originBase: string;
+  /** GET /apps/{id}/card answers, by app id. */
+  cards: Record<string, CardEntry>;
+  /**
+   * A session the shell should open the build modal on.
+   *
+   * A seam, not a router: Remix happens down inside a message row and inside
+   * the chooser, and neither of those can open a modal that AppShell owns.
+   * The alternative was threading a callback through MessageList — which is
+   * also rendered INSIDE the build modal, where "open another build modal" is
+   * not a thing that can happen. AppShell consumes this and clears it.
+   */
+  pendingSessionId: number | null;
 
   /** GET /apps — boot, after any menu change, and on WS reconnect resync. */
   refresh: () => Promise<void>;
@@ -152,6 +240,34 @@ interface AppsState {
   renameApp: (appId: string, name: string) => Promise<void>;
   addToMenu: (appId: string) => Promise<void>;
   removeFromMenu: (appId: string) => Promise<void>;
+
+  /* ---- the serving gate (stage 3) ---- */
+
+  /** GET /apps/config. Failure leaves `originBase` "" — the same state as a
+      house with no gate, which is the honest reading of "we could not ask". */
+  loadConfig: () => Promise<void>;
+  /** POST /apps/{id}/open → the URL to frame or open. Rethrows so a caller
+      can tell 503 (no gate) from 409 (not live) and say which. */
+  openApp: (appId: string, root?: AppRoot) => Promise<string>;
+  /** POST /apps/sessions/{id}/live. Rethrows the 409. */
+  goLive: (sessionId: number) => Promise<AppSession>;
+  /** POST /apps/{id}/revert. Rethrows the 409 (nothing to go back to). */
+  revertApp: (appId: string) => Promise<void>;
+  /** POST /apps/{id}/share → the id of the message that landed. */
+  shareApp: (
+    appId: string,
+    channelId: number,
+    visibility?: "shared" | "public",
+  ) => Promise<number>;
+  /** POST /apps/{id}/remix → a session on the CHILD app. */
+  remixApp: (appId: string, builderBotId?: number) => Promise<AppSession>;
+  /** GET /apps/{id}/card, once per app id. Never throws: a 404 is cached as
+      `missing`, and the card renders nothing rather than an error. `force`
+      re-asks after something the card reports has moved. */
+  loadCard: (appId: string, force?: boolean) => Promise<void>;
+  /** Hand a session to AppShell to open the build modal on. */
+  requestBuildModal: (sessionId: number) => void;
+  clearBuildModalRequest: () => void;
 
   /* ---- WS frame handlers (owner's sockets only) ---- */
   onStage: (frame: AppStageFrame) => void;
@@ -176,12 +292,50 @@ export const useApps = create<AppsState>()((set, get) => {
     });
   };
 
+  /**
+   * A card that failed once gets exactly one more chance, when a frame says
+   * the app moved.
+   *
+   * `missing` is cached deliberately — a channel full of the same unreachable
+   * link must not ask the gate once per row. But the cache had no way out
+   * (Claudette #2555): a card asked for during a network blip, or asked for
+   * while the app was still a draft, stayed blank for the rest of the session
+   * even after the app went live. A status frame is the one honest signal that
+   * the answer may have changed, so that — and ONLY that — clears the entry.
+   * Never a timer, never a re-render: a 404 that means "not entitled" is a
+   * permanent answer for a stranger, and a stranger gets no frames at all
+   * (both `app_stage` and `app_update` go to the owner's sockets only), so
+   * this cannot become a retry loop against the wall.
+   */
+  const retryMissingCard = (appId: string): void => {
+    if (get().cards[appId]?.status !== "missing") return;
+    void get().loadCard(appId, true);
+  };
+
+  /** Keep a cached card's status honest when the app row moves under it. A
+      card that says `draft` next to an Open button that works is worse than
+      no chip; the card endpoint is the source, this only follows it. */
+  const patchCardStatus = (appId: string, status: App["status"]): void => {
+    const entry = get().cards[appId];
+    if (entry === undefined || entry.data === null) return;
+    if (entry.data.status === status) return;
+    set({
+      cards: {
+        ...get().cards,
+        [appId]: { ...entry, data: { ...entry.data, status } },
+      },
+    });
+  };
+
   return {
     apps: [],
     quota: null,
     builders: [],
     sessions: {},
     loaded: false,
+    originBase: "",
+    cards: {},
+    pendingSessionId: null,
 
     refresh: async () => {
       const { apps, quota } = await listApps();
@@ -257,6 +411,94 @@ export const useApps = create<AppsState>()((set, get) => {
       await get().refresh();
     },
 
+    loadConfig: async () => {
+      try {
+        const config = await fetchAppsConfig();
+        set({ originBase: config.origin_base });
+      } catch {
+        // A house whose config cannot be read is, to this client, a house
+        // with no gate: nothing gets framed and every button says so.
+        set({ originBase: "" });
+      }
+    },
+
+    openApp: async (appId, root) => {
+      const { url } = await openAppUrl(appId, root);
+      return url;
+    },
+
+    goLive: async (sessionId) => {
+      const session = withTurn(await goAppLive(sessionId));
+      set({
+        sessions: { ...get().sessions, [session.id]: session },
+        quota: session.quota,
+      });
+      // The row's chip and any card on screen follow the app the server just
+      // published, without waiting for the next GET /apps.
+      patchAppEverywhere(session.app.id, () => session.app);
+      patchCardStatus(session.app.id, session.app.status);
+      // Publishing rotated `live` → `live.prev`, so `has_previous_live` moved
+      // and only the card endpoint knows the new answer.
+      if (get().cards[session.app.id] !== undefined) {
+        void get().loadCard(session.app.id, true);
+      }
+      return session;
+    },
+
+    revertApp: async (appId) => {
+      const { status } = await revertAppLive(appId);
+      patchAppEverywhere(appId, (app) => ({ ...app, status }));
+      patchCardStatus(appId, status);
+      // The swap consumed the previous live; re-ask rather than guess.
+      if (get().cards[appId] !== undefined) {
+        void get().loadCard(appId, true);
+      }
+    },
+
+    shareApp: async (appId, channelId, visibility) => {
+      const { message_id } = await shareApp(appId, channelId, visibility);
+      // Sharing changes the app's visibility server-side; the row carries it.
+      await get().refresh();
+      // The copy of that row a build session holds must follow, or the share
+      // dialog — which seeds its Public box from the app's visibility — would
+      // reopen showing the state it just changed (Claudette #2555).
+      const fresh = get().apps.find((a) => a.id === appId);
+      if (fresh !== undefined) patchAppEverywhere(appId, () => fresh);
+      return message_id;
+    },
+
+    remixApp: async (appId, builderBotId) => {
+      const session = withTurn(await remixApp(appId, builderBotId));
+      set({
+        sessions: { ...get().sessions, [session.id]: session },
+        quota: session.quota,
+      });
+      // The child app is mine and on my menu now.
+      await get().refresh();
+      return session;
+    },
+
+    loadCard: async (appId, force = false) => {
+      if (!force && get().cards[appId] !== undefined) return;
+      set({
+        cards: { ...get().cards, [appId]: { status: "loading", data: null } },
+      });
+      try {
+        const data = await fetchAppCard(appId);
+        set({ cards: { ...get().cards, [appId]: { status: "done", data } } });
+      } catch {
+        // 404 (not entitled) and every other failure land in the same place:
+        // the link stands on its own and the card renders nothing.
+        set({
+          cards: { ...get().cards, [appId]: { status: "missing", data: null } },
+        });
+      }
+    },
+
+    requestBuildModal: (sessionId) => set({ pendingSessionId: sessionId }),
+
+    clearBuildModalRequest: () => set({ pendingSessionId: null }),
+
     onStage: (frame) => {
       const session = get().sessions[frame.session_id];
       if (session !== undefined) {
@@ -281,10 +523,17 @@ export const useApps = create<AppsState>()((set, get) => {
             ? { ...app.open_session, stage: frame.stage }
             : app.open_session,
       }));
+      if (frame.stage === "live") patchCardStatus(frame.app_id, "live");
+      // A card that 404'd before this session got anywhere may answer now.
+      retryMissingCard(frame.app_id);
     },
 
     onAppUpdate: (frame) => {
       const { app } = frame;
+      // The frame carries the whole row, so a status change rides in on it;
+      // any card already on screen for this app follows it (stage 3).
+      patchCardStatus(app.id, app.status);
+      retryMissingCard(app.id);
       if (get().apps.some((a) => a.id === app.id)) {
         patchAppEverywhere(app.id, () => app);
         return;

@@ -1,0 +1,107 @@
+# Disjorn apps serving gate — systemd unit
+#
+# What this is: the second ASGI process of the Disjorn server package
+# (server/app/gate.py). It serves the static files of APPS-tab apps out of
+# /srv/apps-www, one origin per house, gated by a house-signed grant. It is a
+# SEPARATE process from disjorn.service on purpose — a separate origin
+# (scheme+host+port) is what makes the per-app CSP, the gate cookie and the
+# frame's localStorage actually separate from the house's.
+# See SPECS/2026-09-09-apps-serving-gate.md (D1) and the parent spec's Walls.
+#
+# WALL 5, WRITTEN AS UNIT DIRECTIVES (Gable #2546). The parent spec says "the
+# gate has no database and no house credential", and until this fold the unit
+# said the opposite in two places: it read the house's own server/.env, which
+# carries SECRET_KEY, the VAPID private key and the DB path, and ProtectHome=
+# read-only left server/data/disjorn.db a readable file away. Now the gate
+# holds exactly two things — one HMAC secret shared with the house
+# (APPS_GATE_SECRET) and a read-only view of /srv/apps-www — and the two ways
+# it could have reached further are named directives:
+#
+#   EnvironmentFile=/etc/disjorn-apps/gate.env   four keys, extracted from the
+#                                                house's .env by the keyboard
+#                                                script; no house credential
+#   InaccessiblePaths=…/server/data              the house DB is not there
+#   InaccessiblePaths=…/server/.env              nor is the file it came from
+#
+# It can verify grants and it can never mint them. If a change here ever wants
+# ReadWritePaths, a DB path, an API key or a broker socket, that change belongs
+# in disjorn.service or nowhere. A gate that can reach the house DB is a house
+# with a second front door.
+#
+# Install (gate.env FIRST — this unit does not start without it):
+#   sudo bash harness/keyboard/10-appsbuilding.sh --gate-env
+#   sudo cp deploy/disjorn-apps-gate.service /etc/systemd/system/disjorn-apps-gate.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now disjorn-apps-gate
+# (10-appsbuilding.sh does all four, and drift-checks both files afterwards.)
+#
+# Publish (Funnel; :8443 fronts Nextcloud on this host and stays untouched):
+#   tailscale funnel --bg --https=10000 http://127.0.0.1:8402
+#
+# Adjust before installing:
+#   * User=/Group=       — the account that owns the Disjorn checkout (default: plink).
+#   * All /home/plink/… paths — if your checkout lives elsewhere, update
+#     WorkingDirectory, ExecStart and BOTH InaccessiblePaths= lines to match.
+#     An InaccessiblePaths= that names a path this checkout does not have is a
+#     unit that refuses to start, which is the loud way round.
+#   * APPS_WWW_ROOT in gate.env and ReadOnlyPaths below must name the same
+#     directory.
+#
+# Config keys read (all four from /etc/disjorn-apps/gate.env, which
+# `10-appsbuilding.sh --gate-env` extracts from the house's server/.env so the
+# house and the gate share one secret without the gate sharing the house's
+# file): APPS_GATE_SECRET (required, ≥32 bytes — the gate refuses to start on a
+# shorter one), APPS_WWW_ROOT, HOUSE_ORIGINS (first entry = the CSP
+# frame-ancestors value; required), APPS_ORIGIN_BASE (informational, named in
+# the 403 body).
+
+[Unit]
+Description=Disjorn apps serving gate (static apps, house-signed grants)
+Documentation=file:///home/plink/Disjorn/Disjorn/SPECS/2026-09-09-apps-serving-gate.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=plink
+Group=plink
+WorkingDirectory=/home/plink/Disjorn/Disjorn/server
+EnvironmentFile=/etc/disjorn-apps/gate.env
+ExecStart=/home/plink/Disjorn/Disjorn/server/.venv/bin/uvicorn app.gate:app --host 127.0.0.1 --port 8402
+Restart=on-failure
+RestartSec=3
+
+# --- Hardening -------------------------------------------------------------
+# Stricter than disjorn.service, and it can afford to be: this process loads no
+# ML models, downloads nothing, and writes nowhere.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# Deliberately NOT set: MemoryDenyWriteExecute and SystemCallFilter. Both are
+# tempting here and both have bitten CPython deployments (ctypes closures, and
+# a filter that silently kills a C extension at import). Add them only with a
+# `systemctl start` proving the process still boots.
+# The apps tree, read-only. The launcher (running as res-appsbuilding) writes
+# it; the gate only ever reads it. There are deliberately no ReadWritePaths.
+ReadOnlyPaths=/srv/apps-www
+# WALL 5. ProtectHome=read-only makes the house's checkout readable, and the
+# gate's WorkingDirectory is inside it — so "read-only" would have left the
+# house database and the house's whole credential file one open() away. These
+# two are the wall: the gate imports nothing from app.db, and now it could not
+# reach the file even if a future import did. Not prefixed with `-`: if either
+# path is missing the checkout is not the one this unit was written for, and a
+# gate that refuses to start is better than a gate whose wall silently is not
+# there.
+InaccessiblePaths=/home/plink/Disjorn/Disjorn/server/data
+InaccessiblePaths=/home/plink/Disjorn/Disjorn/server/.env
+
+[Install]
+WantedBy=multi-user.target

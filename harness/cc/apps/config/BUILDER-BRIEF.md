@@ -56,7 +56,10 @@ served:
   no `location.search`, no `location.hash` routing, no origin sniffing. The
   URL the user sees is the house's, it changes, and it is not yours.
 - do not create a `.gitignore` that hides your own output, and do not write
-  anything you would not want committed.
+  anything you would not want committed;
+- **`preview/` at the root of `/work` is a reserved name.** The gate routes
+  `<app>/preview/…` to the owner's preview tree, so a file of yours at that
+  path is unreachable to a viewer.
 
 ## 4. The content security policy you will actually be served under
 
@@ -74,7 +77,14 @@ Consequences, stated plainly so you do not discover them in the user's face:
 - **no `fetch()` to anything but `'self'`** — and there is no server of yours
   at `'self'` to fetch from, so in practice: no network at all. Persist with
   the store shim (§7), not with a backend.
-- no inline handler that a strict policy would reject; wire events in JS.
+- **your CSS is a file and your JS is a file.** `default-src 'self'` with no
+  `style-src` blocks every `<style>` block and every `style="…"` attribute,
+  and every inline `<script>` block, so a single-file `index.html` renders as
+  unstyled text. Link `style.css`, load `app.js` with `<script src>`. Setting
+  styles from JS through the CSSOM (`el.style.color = …`, `classList`) is
+  fine; `setAttribute("style", …)` is not;
+- no inline handler (`onclick="…"`) — a strict policy rejects it; wire events
+  in JS with `addEventListener`.
 - the page runs in an iframe on the house's origin. That is the only place it
   runs.
 
@@ -95,10 +105,16 @@ run:
 `BLOB_VERSION` is **1**. Read `version` before you read anything else and
 degrade politely if it is a number you do not know.
 
-**It may be absent.** In the preview — which is where the user sees your work
-during a build — there is no gate, so `window.__DISJORN__` is `undefined`.
-Guard every access, supply sensible defaults, and never let a missing blob be
-the reason the app renders nothing:
+**`user.avatar_url` is metadata you cannot load.** It points at the house,
+and your CSP is `'self'` — an `<img src>` of it is a broken image on the
+user's screen. Show the name; use the URL for nothing until a later blob
+version says otherwise.
+
+**It may be absent.** The preview is served by the same gate the live app is,
+with the owner's blob, so `window.__DISJORN__` is normally there in both. The
+guard still matters: an app opened straight off disk — or from anywhere else
+that is not the gate — has no blob at all. Guard every access, supply sensible
+defaults, and never let a missing blob be the reason the app renders nothing:
 
 ```js
 const ctx = window.__DISJORN__ ?? { version: 1, user: null, shared_with: [], theme: {} };

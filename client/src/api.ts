@@ -4,8 +4,12 @@
 
 import type {
   App,
+  AppCardData,
+  AppRoot,
   AppSession,
+  AppsConfig,
   AppStage,
+  AppStatus,
   AvatarUploadResponse,
   BackfillItem,
   BacklogItem,
@@ -705,6 +709,95 @@ export function removeAppFromMenu(
   appId: string,
 ): Promise<Record<string, unknown>> {
   return request("DELETE", `/apps/${encodeURIComponent(appId)}/menu`);
+}
+
+/* ---- the serving gate (SPECS/2026-09-09-apps-serving-gate.md, stage 3) ---- */
+
+/** GET /apps/config — house-wide apps config. `origin_base` is "" when this
+    house has no serving gate; that is a state to render, not an error. */
+export function fetchAppsConfig(): Promise<AppsConfig> {
+  return request<AppsConfig>("GET", "/apps/config");
+}
+
+/**
+ * POST /apps/{id}/open — mint a grant and get the URL to point at.
+ *
+ * The URL carries the grant in `?t=`, so it is single-use-ish and short-lived
+ * by design (D2/D3): never cache it, never store it, mint again. 503 = no
+ * gate configured on this house, 403 = preview asked for by someone who is
+ * not the owner, 409 = the app has no live root yet.
+ */
+export function openAppUrl(
+  appId: string,
+  root?: AppRoot,
+): Promise<{ url: string }> {
+  return request<{ url: string }>(
+    "POST",
+    `/apps/${encodeURIComponent(appId)}/open`,
+    root !== undefined ? { root } : {},
+  );
+}
+
+/**
+ * POST /apps/sessions/{id}/live — the user's explicit "done" (D7).
+ *
+ * Publishes the preview to the live root and returns the session with its new
+ * stage. 409 while a turn is running or when no turn has deployed; the
+ * buttons mirror those conditions, the server enforces them.
+ */
+export function goAppLive(sessionId: number): Promise<AppSession> {
+  return request<AppSession>("POST", `/apps/sessions/${sessionId}/live`);
+}
+
+/** POST /apps/{id}/revert — swap `live` back to the previous deploy (D6).
+    Owner only; 409 when there is no previous live to go back to. */
+export function revertAppLive(
+  appId: string,
+): Promise<{ ok: boolean; status: AppStatus }> {
+  return request("POST", `/apps/${encodeURIComponent(appId)}/revert`);
+}
+
+/**
+ * POST /apps/{id}/share — post the app's card into a channel.
+ *
+ * The server adds that channel's current members to `app_shares` at share
+ * time and posts the message AS THE SHARING USER (D8), which is why the
+ * answer is a message id and not a card: what lands in the room is an
+ * ordinary message, and an older client shows it as a working link.
+ */
+export function shareApp(
+  appId: string,
+  channelId: number,
+  visibility?: "shared" | "public",
+): Promise<{ message_id: number }> {
+  return request<{ message_id: number }>(
+    "POST",
+    `/apps/${encodeURIComponent(appId)}/share`,
+    {
+      channel_id: channelId,
+      ...(visibility !== undefined ? { visibility } : {}),
+    },
+  );
+}
+
+/** POST /apps/{id}/remix — copy the app into a new one the caller owns, with
+    lineage recorded, and open a build session on the copy. The returned
+    session is opened exactly as a chooser-started one is. */
+export function remixApp(
+  appId: string,
+  builderBotId?: number,
+): Promise<AppSession> {
+  return request<AppSession>(
+    "POST",
+    `/apps/${encodeURIComponent(appId)}/remix`,
+    builderBotId !== undefined ? { builder_bot_id: builderBotId } : {},
+  );
+}
+
+/** GET /apps/{id}/card — what an in-channel card renders. 404 = not entitled,
+    which the card treats as "show the plain link", not as a failure. */
+export function fetchAppCard(appId: string): Promise<AppCardData> {
+  return request<AppCardData>("GET", `/apps/${encodeURIComponent(appId)}/card`);
 }
 
 /* ---- plan room (SPECS/2026-08-20-plan-room.md) ---- */
