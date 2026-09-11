@@ -1656,7 +1656,7 @@ def test_root_refuses_the_pointer_before_it_starts_a_unit(seat, www, apps, kind)
     op_refuse(seat, "remix", victim, APP_B, www_root=www, apps_root=apps)
 
 
-@pytest.mark.skipif(not HAVE_GIT, reason="git is not installed")
+@pytest.mark.skipif(not (HAVE_GIT and HAVE_RSYNC), reason="git and rsync are needed")
 def test_a_real_repo_is_still_a_real_repo(www, apps, launcher):
     """The other half of the fold: the check refuses pointers, not apps."""
     assert launcher._is_a_real_repo(apps / APP_A) is True

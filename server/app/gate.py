@@ -22,18 +22,25 @@ What it does, in order, for every request:
    redirects to the same URL without the token, so the grant leaves the address
    bar (and the referrer, and the user's history) immediately.
 4. Everything else reads that cookie and checks it names *this* app and grants
-   *this* root. A cookie scoped to one app can never ride to another's path,
-   and the check is repeated here anyway: the path is the authority, the cookie
-   is the claim.
+   *this* root. The check is repeated here even though the cookie is scoped
+   to the app's path: the path is the authority, the cookie is the claim. This
+   is NOT app isolation (Claudette #2555, backlog #25): cookies attach by
+   request path, not by initiator, so on this shared origin app A's script can
+   fetch app B's files with B's cookie if the viewer ever opened B, and all
+   apps share one localStorage. Per-app origins are the isolation; stage 4.
 5. Files come from `<APPS_WWW_ROOT>/<app>/<root>/`, resolved and prefix-checked
    so a symlink out of the tree is a 404 rather than a read.
 6. `__disjorn.js` is generated from the cookie's `ctx` and injected into HTML
    by a `<script src>` tag — never inline, because the CSP the builder brief
    promises has no `'unsafe-inline'` (D5).
 
-Config comes from the environment; the unit loads `server/.env` as its
-EnvironmentFile, the same file the house reads, because the house mints with
-the same secret.
+Config comes from the environment; the unit loads `/etc/disjorn-apps/gate.env`
+as its EnvironmentFile — exactly four keys, extracted from the house's
+`server/.env` by `10-appsbuilding.sh --gate-env`, because the house mints with
+the same secret this gate verifies with and nothing else in that file may
+reach this process. The unit also marks `server/data` and `server/.env`
+InaccessiblePaths= (Gable #2546): this is the only place a reviewer has to
+look to check wall 5, so it must not go stale.
 """
 
 import json
@@ -132,7 +139,7 @@ class GateSettings:
 
 
 def load_settings(env: dict[str, str] | None = None) -> GateSettings:
-    """Read config from the environment (systemd loads server/.env into it)."""
+    """Read config from the environment (systemd loads /etc/disjorn-apps/gate.env into it)."""
     env = os.environ if env is None else env
 
     secret = (env.get("APPS_GATE_SECRET") or "").encode("utf-8")
