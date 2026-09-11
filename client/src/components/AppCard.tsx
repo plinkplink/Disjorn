@@ -17,6 +17,7 @@
 import { useEffect, useState } from "react";
 
 import { ApiError } from "../api";
+import { POPUP_BLOCKED_NOTE, openMinted } from "../lib/openMinted";
 import { useApps } from "../stores/apps";
 import { BotAvatar } from "./Avatar";
 
@@ -71,6 +72,9 @@ export function AppCard({ appId }: { appId: string }) {
   const entry = useApps((s) => s.cards[appId]);
   const [busy, setBusy] = useState<"open" | "remix" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** The minted URL, when the browser would not give us a tab for it. Offered
+      as a link right here: the user's click on THAT is a gesture of its own. */
+  const [blockedUrl, setBlockedUrl] = useState<string | null>(null);
 
   useEffect(() => {
     void useApps.getState().loadCard(appId);
@@ -81,29 +85,34 @@ export function AppCard({ appId }: { appId: string }) {
   }
   const card = entry.data;
 
+  /* The tab is claimed synchronously inside this handler — see
+     `lib/openMinted`. A `window.open` after the mint lands is outside the
+     click's task and does nothing at all on Safari, Firefox and PWAs. */
   const open = () => {
     if (busy !== null) return;
     setBusy("open");
     setError(null);
-    useApps
-      .getState()
-      .openApp(card.id, "live")
-      .then(
-        (url) => {
-          setBusy(null);
-          window.open(url, "_blank", "noopener");
-        },
-        (err: unknown) => {
-          setBusy(null);
-          setError(err instanceof ApiError ? err.detail : "Could not open it");
-        },
-      );
+    setBlockedUrl(null);
+    void openMinted(() => useApps.getState().openApp(card.id, "live")).then(
+      (result) => {
+        setBusy(null);
+        if (result.kind === "blocked") setBlockedUrl(result.url);
+        if (result.kind === "failed") {
+          setError(
+            result.error instanceof ApiError
+              ? result.error.detail
+              : "Could not open it",
+          );
+        }
+      },
+    );
   };
 
   const remix = () => {
     if (busy !== null) return;
     setBusy("remix");
     setError(null);
+    setBlockedUrl(null);
     useApps
       .getState()
       .remixApp(card.id)
@@ -156,6 +165,14 @@ export function AppCard({ appId }: { appId: string }) {
           </span>
         </div>
         {error !== null && <p className="form-error">{error}</p>}
+        {blockedUrl !== null && (
+          <p className="app-open-blocked">
+            {POPUP_BLOCKED_NOTE}{" "}
+            <a href={blockedUrl} target="_blank" rel="noopener noreferrer">
+              {card.name}
+            </a>
+          </p>
+        )}
       </div>
       <div className="app-link-actions">
         <button

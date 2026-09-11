@@ -35,11 +35,17 @@
 import { useEffect, useRef, useState } from "react";
 
 import { ApiError } from "../api";
+import { POPUP_BLOCKED_NOTE, openMinted } from "../lib/openMinted";
 import { deployedTurnCount, isTurnRunning, useApps } from "../stores/apps";
 import { useChannels } from "../stores/channels";
 import { useMembers } from "../stores/members";
 import { useMessages } from "../stores/messages";
-import type { Attachment, HaltReason, Message } from "../types";
+import type {
+  AppVisibility,
+  Attachment,
+  HaltReason,
+  Message,
+} from "../types";
 import { APP_STAGE_LABELS, APP_STAGES, isChannelMember } from "../types";
 import { socket } from "../ws";
 import { QuotaMeter } from "./AppsChooserModal";
@@ -54,6 +60,16 @@ import { TypingLine } from "./TypingLine";
 const HEARTBEAT_MS = 60_000;
 /** Mirrors D10's bound. The server is the wall; this is only courtesy. */
 const NAME_MAX = 60;
+/**
+ * How long the send-freeze may sit in silence before the banner offers a way
+ * out by hand (Claudette #2555).
+ *
+ * NOT a timeout: nothing here thaws on its own. Round 5's rule is that nothing
+ * changes under the mouse, and a frame that unfroze itself a minute after a
+ * send would be exactly that. This only decides when a BUTTON appears, and the
+ * user decides whether to press it.
+ */
+const PENDING_SILENCE_MS = 60_000;
 
 /* What a halt says on the chip. Short forms of the sentences the server
    already wrote into the room — the room is where the detail lives, and the
@@ -102,15 +118,21 @@ const NO_GATE = "Serving is not configured on this house.";
  */
 function ShareDialog({
   appName,
+  visibility,
   busy,
   error,
   onShare,
   onClose,
 }: {
   appName: string;
+  /** The app's visibility RIGHT NOW. The checkbox is seeded from it and, when
+      it is already `public`, locked — see below. */
+  visibility: AppVisibility;
   busy: boolean;
   error: string | null;
-  onShare: (channelId: number, isPublic: boolean) => void;
+  /** `widenToPublic` is a request, not a setting: false means "say nothing
+      about visibility", never "make it shared again". */
+  onShare: (channelId: number, widenToPublic: boolean) => void;
   onClose: () => void;
 }) {
   const channels = useChannels((s) => s.channels);
@@ -120,7 +142,14 @@ function ShareDialog({
   const [channelId, setChannelId] = useState<number | null>(
     options[0]?.id ?? null,
   );
-  const [isPublic, setIsPublic] = useState(false);
+  /* Sharing only ever WIDENS on the server — there is no narrowing verb — so a
+     box that could be unchecked on an already-public app was a control that
+     did nothing, silently (Claudette #2555). Seeded from the app, and locked
+     on when the app is already public: the honest reading of "you cannot take
+     this back here" is a checked box you cannot clear, with the reason under
+     it. */
+  const alreadyPublic = visibility === "public";
+  const [isPublic, setIsPublic] = useState(alreadyPublic);
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -158,10 +187,16 @@ function ShareDialog({
           <input
             type="checkbox"
             checked={isPublic}
+            disabled={alreadyPublic}
             onChange={(e) => setIsPublic(e.target.checked)}
           />
           <span>Public — anyone in the house can open it</span>
         </label>
+        {alreadyPublic && (
+          <p className="app-share-locked">
+            already public — sharing can only widen
+          </p>
+        )}
         {error !== null && <p className="form-error">{error}</p>}
         <div className="member-modal-actions">
           <button className="btn" onClick={onClose}>
@@ -171,7 +206,12 @@ function ShareDialog({
             className="btn btn-primary"
             disabled={busy || channelId === null}
             onClick={() => {
-              if (channelId !== null) onShare(channelId, isPublic);
+              /* Only a real widening is sent. An app that is already public
+                 gets no `visibility` at all — the field would be a no-op the
+                 server would have to interpret. */
+              if (channelId !== null) {
+                onShare(channelId, isPublic && !alreadyPublic);
+              }
             }}
           >
             {busy ? "Sharing…" : "Share"}
@@ -239,17 +279,32 @@ export function AppBuildModal({
    * takes it from here) or the builder's reply (it answered in chat and no
    * turn is coming). No timer: a timer would thaw a frame while a build was
    * still spinning up, which is the exact thing being prevented.
+   *
+   * A builder that dies between the send and its first `scoped` sends neither
+   * answer, and until Claudette #2555 that left the panel frozen with Live and
+   * Change-something disabled and no way out but closing the modal. `at` is
+   * when the send went out, and after PENDING_SILENCE_MS the banner grows a
+   * button that clears this by hand. Still no timer that thaws anything: the
+   * clock decides when to OFFER, the user decides whether to take it.
    */
   const [pendingSend, setPendingSend] = useState<{
     afterSeq: number;
     afterStages: number;
+    at: number;
   } | null>(null);
+  /** How long the current send-freeze has been silent, in ms. Feeds the banner
+      text and the unfreeze button and NOTHING else — `frozen` never reads it,
+      so no interval of this component's can change what is under the mouse. */
+  const [pendingWaited, setPendingWaited] = useState(0);
   const [focusNonce, setFocusNonce] = useState(0);
   const [busy, setBusy] = useState<"live" | "open" | "share" | "revert" | null>(
     null,
   );
   /** One line under the buttons after a verb succeeded. */
   const [notice, setNotice] = useState<string | null>(null);
+  /** The minted live URL when the browser refused a tab for it — offered as a
+      link beside the buttons, which the user's own click can follow. */
+  const [blockedUrl, setBlockedUrl] = useState<string | null>(null);
   const [shareOpen, setShareOpen] = useState(false);
   const [shareError, setShareError] = useState<string | null>(null);
   const [revertArmed, setRevertArmed] = useState(false);
@@ -276,6 +331,11 @@ export function AppBuildModal({
      store's own helper; there is no second "is it building" flag anywhere. */
   const running = isTurnRunning(session);
   const frozen = running || pendingSend !== null;
+  /** The send-freeze is the ONLY thing holding the frame, and the room has
+      said nothing for a minute. The banner offers a hand-crank; nothing here
+      pulls it. */
+  const pendingStale =
+    pendingSend !== null && !running && pendingWaited >= PENDING_SILENCE_MS;
   const stageCount = session?.stages.length ?? 0;
   /** How many turns have DEPLOYED: the reload trigger, and Live's
       precondition. One rule, read twice — see the store. */
@@ -380,6 +440,20 @@ export function AppBuildModal({
       lastMessage.seq > pendingSend.afterSeq;
     if (ended || stageLanded || builderReplied) setPendingSend(null);
   }, [pendingSend, stageCount, lastMessage, ended]);
+
+  /* The silence clock. Its only consumer is the banner, which is why it is a
+     separate reading from the elapsed clock above: that one stops when a turn
+     does, and this one is counting the absence of a turn. */
+  useEffect(() => {
+    if (pendingSend === null) {
+      setPendingWaited(0);
+      return;
+    }
+    const { at } = pendingSend;
+    setPendingWaited(Date.now() - at);
+    const timer = setInterval(() => setPendingWaited(Date.now() - at), 1000);
+    return () => clearInterval(timer);
+  }, [pendingSend]);
 
   /* The frame's src. Minted per open and re-minted on every `deployed`, which
      is also what reloads the iframe: the URL carries a fresh grant, and the
@@ -529,6 +603,7 @@ export function AppBuildModal({
     setBusy("live");
     setLoadError(null);
     setNotice(null);
+    setBlockedUrl(null);
     useApps
       .getState()
       .goLive(sessionId)
@@ -544,32 +619,38 @@ export function AppBuildModal({
       );
   };
 
+  /* The tab is claimed on the click, inside this handler, and navigated when
+     the mint lands (`lib/openMinted`). Opening it from the promise callback —
+     what this did — is outside the user-gesture task, where Safari, Firefox
+     and installed PWAs hand back null and nothing happens (Claudette #2555). */
   const openLive = () => {
     if (busy !== null || appId === null) return;
     setBusy("open");
     setLoadError(null);
-    useApps
-      .getState()
-      .openApp(appId, "live")
-      .then(
-        (url) => {
-          setBusy(null);
-          window.open(url, "_blank", "noopener");
-        },
-        (err: unknown) => {
-          setBusy(null);
-          sayError(err, "Failed to open the app");
-        },
-      );
+    setBlockedUrl(null);
+    void openMinted(() => useApps.getState().openApp(appId, "live")).then(
+      (result) => {
+        setBusy(null);
+        if (result.kind === "blocked") setBlockedUrl(result.url);
+        if (result.kind === "failed") {
+          sayError(result.error, "Failed to open the app");
+        }
+      },
+    );
   };
 
-  const shareNow = (targetChannelId: number, isPublic: boolean) => {
+  /* `widenToPublic` false means the field is OMITTED, not set to `shared`.
+     The server only ever widens visibility, so sending `shared` for an app
+     that is already public asks for something that cannot happen, and sending
+     it for a private app is the server's own default anyway (Claudette
+     #2555). */
+  const shareNow = (targetChannelId: number, widenToPublic: boolean) => {
     if (busy !== null || appId === null) return;
     setBusy("share");
     setShareError(null);
     useApps
       .getState()
-      .shareApp(appId, targetChannelId, isPublic ? "public" : "shared")
+      .shareApp(appId, targetChannelId, widenToPublic ? "public" : undefined)
       .then(
         () => {
           setBusy(null);
@@ -597,6 +678,7 @@ export function AppBuildModal({
     setRevertArmed(false);
     setBusy("revert");
     setLoadError(null);
+    setBlockedUrl(null);
     useApps
       .getState()
       .revertApp(appId)
@@ -812,6 +894,7 @@ export function AppBuildModal({
                     setPendingSend({
                       afterSeq: m.seq,
                       afterStages: session.stages.length,
+                      at: Date.now(),
                     });
                   }}
                   focusNonce={focusNonce}
@@ -867,9 +950,22 @@ export function AppBuildModal({
             <div className={`app-preview-frozen${frozen ? " frozen" : ""}`}>
               {(frozen || previewUrl === null) && (
                 <div className="app-preview-banner">
-                  {frozen
-                    ? "Build in progress — the preview is frozen."
-                    : (previewNote ?? "No preview yet.")}
+                  {frozen ? (
+                    <>
+                      <span>Build in progress — the preview is frozen.</span>
+                      {pendingStale && (
+                        <button
+                          className="btn app-unfreeze"
+                          title="Nothing has come back from the builder; this puts the preview back in your hands."
+                          onClick={() => setPendingSend(null)}
+                        >
+                          the builder hasn’t answered — unfreeze
+                        </button>
+                      )}
+                    </>
+                  ) : (
+                    (previewNote ?? "No preview yet.")
+                  )}
                 </div>
               )}
               {previewUrl === null ? (
@@ -894,6 +990,14 @@ export function AppBuildModal({
               <div className="app-build-chip app-build-chip--ok" role="status">
                 {notice}
               </div>
+            )}
+            {blockedUrl !== null && (
+              <p className="app-open-blocked">
+                {POPUP_BLOCKED_NOTE}{" "}
+                <a href={blockedUrl} target="_blank" rel="noopener noreferrer">
+                  {app.name}
+                </a>
+              </p>
             )}
             <div className="app-preview-actions">
               <button
@@ -1014,6 +1118,7 @@ export function AppBuildModal({
       {shareOpen && (
         <ShareDialog
           appName={app.name}
+          visibility={app.visibility}
           busy={busy === "share"}
           error={shareError}
           onShare={shareNow}

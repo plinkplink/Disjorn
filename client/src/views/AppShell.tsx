@@ -18,6 +18,7 @@ import {
   channelIdFromHash,
   writeChannelHash,
 } from "../hashRoute";
+import { POPUP_BLOCKED_NOTE, openMinted } from "../lib/openMinted";
 import { useApps } from "../stores/apps";
 import { useChannels } from "../stores/channels";
 import { useMembers } from "../stores/members";
@@ -356,6 +357,9 @@ function AppCardModal({
   const [opening, setOpening] = useState(false);
   const [remixing, setRemixing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** The minted URL when the browser refused the tab — rendered as a link the
+      user can click, which is a gesture no popup blocker argues with. */
+  const [blockedUrl, setBlockedUrl] = useState<string | null>(null);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
@@ -364,29 +368,33 @@ function AppCardModal({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  /* Synchronous tab claim, then navigate when the mint lands — the shared
+     helper, for the same reason the other two Open buttons use it. */
   const open = () => {
     if (opening) return;
     setOpening(true);
     setError(null);
-    useApps
-      .getState()
-      .openApp(app.id, "live")
-      .then(
-        (url) => {
-          setOpening(false);
-          window.open(url, "_blank", "noopener");
-        },
-        (err: unknown) => {
-          setOpening(false);
-          setError(err instanceof ApiError ? err.detail : "Could not open it");
-        },
-      );
+    setBlockedUrl(null);
+    void openMinted(() => useApps.getState().openApp(app.id, "live")).then(
+      (result) => {
+        setOpening(false);
+        if (result.kind === "blocked") setBlockedUrl(result.url);
+        if (result.kind === "failed") {
+          setError(
+            result.error instanceof ApiError
+              ? result.error.detail
+              : "Could not open it",
+          );
+        }
+      },
+    );
   };
 
   const remix = () => {
     if (remixing) return;
     setRemixing(true);
     setError(null);
+    setBlockedUrl(null);
     useApps
       .getState()
       .remixApp(app.id)
@@ -432,6 +440,14 @@ function AppCardModal({
           <span className={`app-status-chip ${app.status}`}>{app.status}</span>
         </div>
         {error !== null && <p className="form-error">{error}</p>}
+        {blockedUrl !== null && (
+          <p className="app-open-blocked">
+            {POPUP_BLOCKED_NOTE}{" "}
+            <a href={blockedUrl} target="_blank" rel="noopener noreferrer">
+              {app.name}
+            </a>
+          </p>
+        )}
         <div className="member-modal-actions">
           {/* Remix is offered on any live app, your own included: a remix of
               your own app is a new app, not an edit of the one people already
