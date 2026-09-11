@@ -3,8 +3,9 @@
 #
 # RUN BY: plink, at his keyboard, with sudo:
 #
-#     sudo bash harness/keyboard/10-appsbuilding.sh          # provision + drift
-#     sudo bash harness/keyboard/10-appsbuilding.sh --drift  # drift block only
+#     sudo bash harness/keyboard/10-appsbuilding.sh            # provision + drift
+#     sudo bash harness/keyboard/10-appsbuilding.sh --drift    # drift block only
+#     sudo bash harness/keyboard/10-appsbuilding.sh --gate-env # gate.env only
 #
 # IDEMPOTENT. It never deletes anything, never overwrites an existing
 # /etc/disjorn-apps/launch.toml, and NEVER writes the credential — plink writes
@@ -33,6 +34,14 @@
 #   code     /usr/local/lib/disjorn/{disjorn-apps-launch,run-apps.sh,
 #            apps_harvest.py}, root:root 0755.
 #   sudoers  /etc/sudoers.d/92-disjorn-apps, 0440, visudo -c'd BEFORE install.
+#   gate.env /etc/disjorn-apps/gate.env, 0640 root:plink — EXACTLY the four
+#            keys the serving gate reads, extracted from the house's
+#            server/.env. Wall 5 of the parent spec ("the gate has no database
+#            and no house credential") used to be a sentence in a comment while
+#            the unit read the house's own .env, which carries SECRET_KEY, the
+#            VAPID private key and the DB path (Gable #2546). Now the gate gets
+#            one HMAC secret and three strings, and nothing else in that file
+#            exists as far as it is concerned.
 #   unit     /etc/systemd/system/disjorn-apps-gate.service from
 #            deploy/disjorn-apps-gate.service, if that file is in the repo —
 #            the stage-3 serving gate (SPECS/2026-09-09-apps-serving-gate.md
@@ -60,17 +69,117 @@ SUDOERS_DST=/etc/sudoers.d/92-disjorn-apps
 GATE_UNIT_SRC="$REPO/deploy/disjorn-apps-gate.service"   # written by the gate hand
 GATE_UNIT_DST=/etc/systemd/system/disjorn-apps-gate.service
 GATE_UNIT_NAME=disjorn-apps-gate.service
+# The gate's environment. Overridable ONLY so the test suite can run the
+# extraction against a fixture .env as an unprivileged user; on this box every
+# one of these is the default (the same discipline 08-gatehouse-repo.sh uses).
+SERVER_ENV="${SERVER_ENV:-$REPO/server/.env}"
+GATE_ENV="${GATE_ENV:-$ETCDIR/gate.env}"
+GATE_ENV_OWNER="${GATE_ENV_OWNER:-root}"
+GATE_ENV_GROUP="${GATE_ENV_GROUP:-plink}"   # the uid the gate unit runs as
+# THE WHOLE LIST. A fifth key here is a fifth thing the gate could learn about
+# the house, and it is a diff someone has to defend.
+GATE_ENV_KEYS=(APPS_GATE_SECRET APPS_WWW_ROOT HOUSE_ORIGINS APPS_ORIGIN_BASE)
+GATE_SECRET_MIN=32                # server/app/gate.py refuses a shorter one
 BROKER_TOML=/etc/disjorn-broker/broker.toml       # read-only, for the drift block
 
 DRIFT_ONLY=0
-[ "${1:-}" = "--drift" ] && DRIFT_ONLY=1
+GATE_ENV_ONLY=0
+case "${1:-}" in
+  --drift)    DRIFT_ONLY=1 ;;
+  --gate-env) GATE_ENV_ONLY=1 ;;
+  "")         ;;
+  *) echo "usage: 10-appsbuilding.sh [--drift|--gate-env]" >&2; exit 1 ;;
+esac
 
 if [[ $EUID -ne 0 ]] && [ "$DRIFT_ONLY" = 0 ]; then
-  echo "run with sudo: sudo bash harness/keyboard/10-appsbuilding.sh" >&2
-  exit 1
+  # The one unprivileged write: `--gate-env` with GATE_ENV pointed somewhere
+  # else, which is the test suite running the extraction against a fixture.
+  # Everything else here writes /etc, /srv and /usr/local.
+  if [ "$GATE_ENV_ONLY" = 0 ] || [ "$GATE_ENV" = "$ETCDIR/gate.env" ]; then
+    echo "run with sudo: sudo bash harness/keyboard/10-appsbuilding.sh" >&2
+    exit 1
+  fi
 fi
 
 say() { echo "== $*"; }
+
+# ──────────────────────────────────────────── the gate's own environment ────
+# WALL 5 (parent spec): "the gate has no database and no house credential."
+# The gate is a second ASGI process of the SAME package in the SAME checkout,
+# so until Gable #2546 it simply read the house's server/.env — a file that
+# carries SECRET_KEY, the VAPID private key and the path to disjorn.db. It only
+# ever wanted four keys. This extracts exactly those four into a file of the
+# gate's own, and the unit reads that instead.
+#
+# NEVER ECHOES A VALUE. Everything below moves whole lines around and measures
+# a length; the only thing it prints about the secret is how long it is not.
+# Writes through a temp file in the destination directory and one mv, so a
+# gate restarting mid-run reads the old file or the new one and never half of
+# either. The output is BYTE-DETERMINISTIC (fixed header, fixed key order, no
+# timestamp) — that is what lets the drift block below re-extract and diff.
+#
+#   extract_gate_env <src .env> <dst> [owner] [group]   -> 0 wrote, 1 refused
+extract_gate_env() {
+  local src="$1" dst="$2" owner="${3:-$GATE_ENV_OWNER}" group="${4:-$GATE_ENV_GROUP}"
+  local key line value secret_len tmp
+  if [ ! -r "$src" ]; then
+    echo "gate.env: cannot read $src — the house's .env is where the four gate keys come from" >&2
+    return 1
+  fi
+
+  # The secret first, because a missing or short one is a refusal and there is
+  # no point writing a file the gate will refuse to boot on. `tail -n1`: dotenv
+  # semantics are last-wins, and systemd's EnvironmentFile parser agrees.
+  line="$(grep -E "^[[:space:]]*APPS_GATE_SECRET=" "$src" | tail -n1 || true)"
+  if [ -z "$line" ]; then
+    echo "gate.env: REFUSED — no APPS_GATE_SECRET in $src; the gate verifies house-minted grants and cannot start without the house's signing secret" >&2
+    return 1
+  fi
+  value="${line#*=}"
+  value="${value%\"}"; value="${value#\"}"     # a quoted value is the string
+  value="${value%\'}"; value="${value#\'}"     # inside the quotes, not them
+  secret_len=${#value}
+  if [ "$secret_len" -lt "$GATE_SECRET_MIN" ]; then
+    echo "gate.env: REFUSED — APPS_GATE_SECRET is $secret_len bytes, under the $GATE_SECRET_MIN the gate requires (server/app/gate.py); generate one with: python3 -c 'import secrets; print(secrets.token_urlsafe(48))'" >&2
+    return 1
+  fi
+
+  mkdir -p "$(dirname "$dst")"
+  tmp="$dst.tmp.$$"
+  # install, not touch+chmod: the mode and ownership are on the file from the
+  # instant it exists, so the window where the secret is 0644 is no window.
+  install -o "$owner" -g "$group" -m 0640 /dev/null "$tmp"
+  {
+    echo "# /etc/disjorn-apps/gate.env — the serving gate's WHOLE environment."
+    echo "#"
+    echo "# GENERATED by harness/keyboard/10-appsbuilding.sh --gate-env from the"
+    echo "# house's server/.env. Do not hand-edit: the drift block re-extracts and"
+    echo "# diffs, so an edit here shows up as DRIFT rather than as behaviour."
+    echo "# Change the value in server/.env and re-run the script."
+    echo "#"
+    echo "# Four keys, and four is the point (Gable #2546, parent spec wall 5): the"
+    echo "# gate holds one HMAC secret it can verify with and never mint with, plus"
+    echo "# three strings. No SECRET_KEY, no VAPID key, no DB_PATH."
+    for key in "${GATE_ENV_KEYS[@]}"; do
+      line="$(grep -E "^[[:space:]]*${key}=" "$src" | tail -n1 || true)"
+      # An absent optional key is left absent: the gate has a default for
+      # APPS_WWW_ROOT and APPS_ORIGIN_BASE, and a missing HOUSE_ORIGINS is a
+      # refusal the GATE makes, out loud, at boot — not a line this script
+      # invents.
+      if [ -n "$line" ]; then
+        printf '%s\n' "${line#"${line%%[![:space:]]*}"}"   # leading blanks off
+      fi
+    done
+  } > "$tmp"
+  mv -f "$tmp" "$dst"
+  say "wrote $dst (0640 $owner:$group, ${#GATE_ENV_KEYS[@]} keys, secret $secret_len bytes)"
+  return 0
+}
+
+if [ "$GATE_ENV_ONLY" = 1 ]; then
+  extract_gate_env "$SERVER_ENV" "$GATE_ENV" || exit 1
+  exit 0
+fi
 
 # ─────────────────────────────────────────────────────────── provisioning ────
 if [ "$DRIFT_ONLY" = 0 ]; then
@@ -209,6 +318,15 @@ READMEEOF
   install -o root -g root -m 0440 "$SUDOERS_SRC" "$SUDOERS_DST"
   say "installed $SUDOERS_DST (0440)"
 
+  # --- the serving gate's environment (stage 3, D1; Gable #2546) -----------
+  # BEFORE the unit, because the unit's EnvironmentFile is this file and a
+  # restart without it is a gate that does not come up. A refusal here is a
+  # NOTE and not an abort, for the same reason the restart below is: a house
+  # whose server/.env has no APPS_GATE_SECRET yet still needs its seat, its
+  # launcher and its sudoers installed, and the gate says so itself at boot.
+  extract_gate_env "$SERVER_ENV" "$GATE_ENV" \
+    || say "NOTE $GATE_ENV NOT written — the gate will not start until it is"
+
   # --- the serving gate's unit (stage 3, D1) -------------------------------
   # IDEMPOTENT and GUARDED. `install` overwrites, daemon-reload makes systemd
   # read it, and `restart` is used rather than `start` so a re-run of this
@@ -217,7 +335,7 @@ READMEEOF
   # `enable` is separate from `restart` so the boot behaviour is set even if
   # the gate itself fails to come up (a missing APPS_GATE_SECRET, which the
   # gate refuses to boot without, is exactly that case and must not abort the
-  # provisioning run).
+  # provisioning run; so is a gate.env the step above refused to write).
   if [ -f "$GATE_UNIT_SRC" ]; then
     install -o root -g root -m 0644 "$GATE_UNIT_SRC" "$GATE_UNIT_DST"
     systemctl daemon-reload
@@ -227,7 +345,7 @@ READMEEOF
       say "installed and restarted $GATE_UNIT_NAME"
     else
       say "NOTE $GATE_UNIT_NAME installed but did NOT start — journalctl -u $GATE_UNIT_NAME"
-      say "     (the gate refuses to boot without APPS_GATE_SECRET in server/.env)"
+      say "     (the gate refuses to boot without APPS_GATE_SECRET in $GATE_ENV)"
     fi
   else
     say "NOTE no $GATE_UNIT_SRC in the repo yet — skipping the serving gate's unit"
@@ -326,6 +444,29 @@ if [ -f "$GATE_UNIT_SRC" ]; then
 else
   echo "  n/a      $GATE_UNIT_NAME — no $GATE_UNIT_SRC in the repo yet"
 fi
+
+# The gate's environment, on the SAME terms as the unit: what is installed is
+# compared against what a fresh extraction from server/.env would produce. The
+# fresh copy goes to a temp file owned by whoever is running this (so `--drift`
+# works unprivileged) and `diff -q` is used, so no value is ever printed — the
+# answer is "same" or "DIFFERS", which is the whole question.
+gate_env_probe="$(mktemp "${TMPDIR:-/tmp}/gate.env.probe.XXXXXX")"
+if extract_gate_env "$SERVER_ENV" "$gate_env_probe" "$(id -un)" "$(id -gn)" \
+     >/dev/null 2>&1; then
+  if [ ! -e "$GATE_ENV" ]; then
+    echo "  MISSING  $GATE_ENV"; drift=1
+  elif diff -q "$GATE_ENV" "$gate_env_probe" >/dev/null; then
+    echo "  same     $GATE_ENV (matches a fresh extraction from $SERVER_ENV)"
+  else
+    echo "  DIFFERS  $GATE_ENV  (vs a fresh extraction from $SERVER_ENV)"; drift=1
+  fi
+else
+  # The extraction refuses on a missing/short APPS_GATE_SECRET. Say so without
+  # re-running it noisily: the sentence it would print is on the provisioning
+  # path, and here the fact is enough.
+  echo "  REFUSED  $GATE_ENV — $SERVER_ENV has no usable APPS_GATE_SECRET (≥$GATE_SECRET_MIN bytes)"; drift=1
+fi
+rm -f "$gate_env_probe"
 
 # launch.toml is deliberately NOT overwritten by this script, so a difference
 # here is expected the moment plink edits a prompt dir. Reported, not judged.
