@@ -22,17 +22,23 @@ seat, the same `broker` publisher — because this is the same feature two stage
 later and a second set of fixtures would be a second thing to keep true.
 """
 
+import asyncio
 import base64
+import inspect
 import json
 import subprocess
+import threading
 
 import pytest
+from fastapi import HTTPException
 
 from app import db
+from app import main as house_main
 from app.routers import apps
 
 from tests.test_apps import (  # noqa: F401 — fixtures are used by name
     build_fixture,
+    channel_lines,
     login,
     make_user,
     post_stage,
@@ -94,9 +100,38 @@ class FakeHelper:
         return self.calls[0]
 
 
+class GatedHelper(FakeHelper):
+    """The same fake, held open so a second request lands while the first is
+    still inside the helper.
+
+    The real one takes as long as an rsync takes, which is the whole reason two
+    presses can overlap; this one takes exactly as long as the test says. It
+    records the argv on ENTRY, so what has been spawned is true while the spawn
+    is still running.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def __call__(self, argv):
+        result = super().__call__(argv)
+        self.entered.set()
+        assert self.release.wait(10), "the gated helper was never released"
+        return result
+
+
 @pytest.fixture
 def helper(monkeypatch):
     fake = FakeHelper()
+    monkeypatch.setattr(apps, "_run_launch_helper", fake)
+    return fake
+
+
+@pytest.fixture
+def gated_helper(monkeypatch):
+    fake = GatedHelper()
     monkeypatch.setattr(apps, "_run_launch_helper", fake)
     return fake
 
@@ -351,6 +386,76 @@ async def test_a_refused_publish_is_the_helpers_sentence_and_a_failure_is_not(
     assert events == []
 
 
+async def test_a_second_press_of_live_is_409_and_never_a_second_publish(
+    client, app, gate_env, settings_env, seat_toml, gated_helper
+):
+    """Claudette #2551. `publish` ROTATES the trees — live becomes live.prev,
+    preview becomes live — so two publishes back to back leave `live.prev` a
+    copy of `live`: Revert keeps its button and the tree behind it is the one
+    already being served. The previous deploy is gone and nothing says so.
+
+    So the second press is refused while the first is in flight, and refused by
+    the DATABASE (a conditional write on the session row, stop_requested_at's
+    shape) rather than by a read the two presses can both pass.
+    """
+    session = await a_session(client, settings_env, seat_toml)
+    gate_env()
+    sid, app_id = session["id"], session["app"]["id"]
+    await deployed_turn(client, sid, ["index.html"])
+
+    first = asyncio.create_task(client.post(f"/apps/sessions/{sid}/live"))
+    await asyncio.to_thread(gated_helper.entered.wait, 10)
+
+    # The first press is inside the helper right now. The second one arrives.
+    second = await client.post(f"/apps/sessions/{sid}/live")
+    assert second.status_code == 409, second.text
+    assert "already being published" in second.json()["detail"]
+    assert gated_helper.calls == [[*HELPER, "publish", app_id]]
+
+    gated_helper.release.set()
+    assert (await first).status_code == 200
+
+    # Exactly one rotation happened, and exactly one `live` event.
+    assert gated_helper.calls == [[*HELPER, "publish", app_id]]
+    events = await db.fetch_all(
+        "SELECT id FROM app_stage_events WHERE session_id = ? AND stage = 'live'",
+        (sid,),
+    )
+    assert len(events) == 1
+
+    # …and the flag is released, so pressing Live again LATER publishes again.
+    # That is a re-publish, which is the verb working, not the race.
+    row = await db.fetch_one(
+        "SELECT live_publishing_at FROM app_sessions WHERE id = ?", (sid,)
+    )
+    assert row["live_publishing_at"] is None
+    third = await client.post(f"/apps/sessions/{sid}/live")
+    assert third.status_code == 200, third.text
+    assert gated_helper.calls == [[*HELPER, "publish", app_id]] * 2
+
+
+async def test_the_publish_claim_is_released_when_the_helper_refuses(
+    client, app, gate_env, settings_env, seat_toml, helper
+):
+    """A refusal is the user's to fix and then press again — a flag left set
+    would meet them with a lie about a publish still in flight."""
+    session = await a_session(client, settings_env, seat_toml)
+    gate_env()
+    sid = session["id"]
+    await deployed_turn(client, sid, ["index.html"])
+
+    helper.returncode = 64
+    helper.stderr = "There is nothing in this app's preview to publish.\n"
+    assert (await client.post(f"/apps/sessions/{sid}/live")).status_code == 409
+    row = await db.fetch_one(
+        "SELECT live_publishing_at FROM app_sessions WHERE id = ?", (sid,)
+    )
+    assert row["live_publishing_at"] is None
+
+    helper.returncode = 0
+    assert (await client.post(f"/apps/sessions/{sid}/live")).status_code == 200
+
+
 # ---------------------------------------------------------------------------
 # 3. Revert
 # ---------------------------------------------------------------------------
@@ -376,6 +481,39 @@ async def test_revert_swaps_the_trees_for_the_owner_of_a_live_app(
     await make_user("bob", "Bob")
     await login(client, "bob")
     assert (await client.post(f"/apps/{app_id}/revert")).status_code == 403
+
+
+async def test_revert_writes_one_line_into_the_build_room(
+    client, app, gate_env, settings_env, seat_toml, helper
+):
+    """Claudette #2551. The app the room was talking about changed underneath
+    it: the transcript says a tree was published and the URL now serves a
+    different one. One `system` line, so it summons nobody, and only after the
+    helper has actually swapped the trees."""
+    session = await a_session(client, settings_env, seat_toml)
+    gate_env()
+    app_id = session["app"]["id"]
+    await client.patch(f"/apps/{app_id}", json={"name": "Tide clock"})
+
+    # A refused revert says nothing: there is nothing to report.
+    before = await channel_lines(session["channel_id"])
+    assert (await client.post(f"/apps/{app_id}/revert")).status_code == 409
+    assert await channel_lines(session["channel_id"]) == before
+
+    await make_live(app_id)
+    assert (await client.post(f"/apps/{app_id}/revert")).status_code == 200
+
+    lines = await channel_lines(session["channel_id"])
+    assert lines[-1] == "**Tide clock** was reverted to its previous live tree."
+    assert len(lines) == len(before) + 1
+
+    row = await db.fetch_one(
+        "SELECT author_type, author_id FROM messages WHERE channel_id = ? "
+        "ORDER BY seq DESC LIMIT 1",
+        (session["channel_id"],),
+    )
+    system = await db.fetch_one("SELECT id FROM bots WHERE name = 'system'")
+    assert (row["author_type"], row["author_id"]) == ("bot", system["id"])
 
 
 # ---------------------------------------------------------------------------
@@ -494,6 +632,44 @@ async def test_sharing_public_entitles_the_house_and_a_draft_cannot_be_shared(
     assert (await open_app(client, app_id)).status_code == 200
 
 
+async def test_sharing_widens_and_never_narrows_unless_it_is_asked_to(
+    client, app, gate_env, settings_env, seat_toml
+):
+    """Claudette #2551. Share is a widening verb. A default `visibility` of
+    "shared" made it a narrowing one for a public app: the owner who shared it
+    into one more room silently took it back off the house."""
+    session = await a_session(client, settings_env, seat_toml)
+    gate_env()
+    app_id = session["app"]["id"]
+    await make_live(app_id)
+    channel_id = await make_channel(client, "shed")
+
+    async def share(**body):
+        r = await client.post(
+            f"/apps/{app_id}/share", json={"channel_id": channel_id, **body}
+        )
+        assert r.status_code == 200, r.text
+        return r.json()["visibility"]
+
+    # Private, no visibility field: widened to shared — the room's members were
+    # just entitled by rows, and that IS shared.
+    assert await share() == "shared"
+
+    # The owner says public.
+    assert await share(visibility="public") == "public"
+
+    # Shared again into another room, no visibility field: STILL public.
+    other = await make_channel(client, "porch")
+    r = await client.post(f"/apps/{app_id}/share", json={"channel_id": other})
+    assert r.status_code == 200 and r.json()["visibility"] == "public"
+    row = await db.fetch_one("SELECT visibility FROM apps WHERE id = ?", (app_id,))
+    assert row["visibility"] == "public"
+
+    # Narrowing is possible, but only because the owner said the word.
+    assert await share(visibility="shared") == "shared"
+    assert await share(visibility="public") == "public"
+
+
 # ---------------------------------------------------------------------------
 # 5. Remix — a copy I own, with a session open on it
 # ---------------------------------------------------------------------------
@@ -594,6 +770,95 @@ async def test_remix_spends_the_same_daily_meter_as_the_chooser(
     assert r.status_code == 429
     assert helper.calls == []
     assert len(await db.fetch_all("SELECT 1 FROM apps")) == 1
+
+
+async def test_a_remix_that_fails_after_the_clone_leaves_no_app_row(
+    client, app, gate_env, settings_env, seat_toml, helper, monkeypatch
+):
+    """Claudette #2551. The rollback covers everything after the row, not only
+    the clone: a child app whose session could not be opened is a row nobody
+    asked for, on a menu, pointing at an app the chooser never saw."""
+    session = await a_session(client, settings_env, seat_toml)
+    gate_env()
+    parent_id = session["app"]["id"]
+    await make_live(parent_id)
+    before = {r["id"] for r in await db.fetch_all("SELECT id FROM apps")}
+
+    async def boom(*_args, **_kwargs):
+        raise HTTPException(status_code=500, detail="the session could not open")
+
+    monkeypatch.setattr(apps, "create_session", boom)
+    r = await client.post(f"/apps/{parent_id}/remix")
+    assert r.status_code == 500
+
+    # The clone DID run — this is the window the old `except` did not cover.
+    child_id = helper.argv[-1]
+    assert helper.argv == [*HELPER, "remix", parent_id, child_id]
+    assert child_id not in before
+
+    after = {r["id"] for r in await db.fetch_all("SELECT id FROM apps")}
+    assert after == before
+    assert (
+        await db.fetch_all("SELECT 1 FROM apps WHERE id = ?", (child_id,))
+    ) == []
+    # The tree the helper cloned is the helper's to reap; the house logs the id
+    # rather than reaching into a directory it is not the seat for.
+
+
+# ---------------------------------------------------------------------------
+# 5b. The two walls the gate's read side depends on
+# ---------------------------------------------------------------------------
+
+def test_the_house_installs_no_cors_middleware(app):
+    """The apps origin is FOREIGN to this house, and one `add_middleware(
+    CORSMiddleware, ...)` in a hurry is how that stops being true: CORS with
+    credentials is precisely the header that tells a browser to let app-served
+    JS read this API's cookie-authenticated responses. The origin wall blocks
+    the WRITE; nothing but the absence of CORS blocks the READ.
+
+    Asserted against the built stack AND the source, because the stack only
+    shows what was added and the source shows what somebody reached for.
+    """
+    names = [getattr(m, "cls", type(m)).__name__ for m in app.user_middleware]
+    assert not any("CORS" in name for name in names), names
+    # The positive control: the wall that IS supposed to be there.
+    assert "OriginWall" in names, names
+    assert "CORS" not in inspect.getsource(house_main)
+
+
+async def test_the_apps_origin_may_not_also_be_a_house_origin(
+    client, app, gate_env, settings_env, seat_toml, house_origin
+):
+    """Claudette #2551. The read side of the origin wall rests on the house
+    never treating the apps origin as itself: listed in HOUSE_ORIGINS, the wall
+    waves app-served JS through on every cookie the browser already attached,
+    and nothing anywhere says so. Minting fails closed instead — no grant, no
+    app in a frame, no JS to wave through."""
+    session = await a_session(client, settings_env, seat_toml)
+    gate_env()
+    sid, app_id = session["id"], session["app"]["id"]
+    await make_live(app_id)
+    channel_id = await make_channel(client, "shed")
+
+    # Configured, and correct: the verbs work.
+    assert (await open_app(client, app_id)).status_code == 200
+
+    for collision in (house_origin, house_origin + "/"):
+        settings_env(APPS_ORIGIN_BASE=collision)
+        for r in (
+            await open_app(client, app_id),
+            await client.post(f"/apps/sessions/{sid}/live"),
+            await client.post(f"/apps/{app_id}/share", json={"channel_id": channel_id}),
+            await client.post(f"/apps/{app_id}/remix"),
+        ):
+            assert r.status_code == 503, r.text
+            assert "not configured correctly" in r.json()["detail"]
+
+        # The client is told the gate is unusable rather than handed an origin
+        # it would then point a frame at.
+        assert (await client.get("/apps/config")).json()["configured"] is False
+        card = (await client.get(f"/apps/{app_id}/card")).json()
+        assert card["live_url"] is None and card["can_remix"] is False
 
 
 # ---------------------------------------------------------------------------

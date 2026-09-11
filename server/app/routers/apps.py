@@ -179,6 +179,15 @@ GATE_UNCONFIGURED = (
     "opened outside the build modal."
 )
 
+# The same answer, for the one misconfiguration that is WORSE than missing:
+# the apps origin listed as a house origin. Same 503, because to a user it is
+# the same fact — serving is not usable — and the detail that would tell them
+# more is a config line only an admin can act on.
+GATE_ORIGIN_COLLIDES = (
+    "App serving is not configured correctly on this house, so this app "
+    "cannot be opened outside the build modal; an admin has the log."
+)
+
 # Seconds the host helper gets. A publish is an rsync of a small static tree
 # and a rename; a remix is a local `git clone`. Two minutes is a wall, not a
 # budget — past it the request has been holding a socket for something that
@@ -1586,6 +1595,22 @@ def _gate_config() -> tuple[bytes, str]:
     origin = settings.APPS_ORIGIN_BASE.rstrip("/")
     if len(secret) < MIN_GATE_SECRET_BYTES or not origin:
         raise HTTPException(status_code=503, detail=GATE_UNCONFIGURED)
+    # …and it must not be one of US (Claudette #2551). The read side of the
+    # origin wall rests on the apps origin being FOREIGN to this house: that is
+    # what makes a cookie-bearing write from app-served JS a cross-origin
+    # request the wall rejects. Put the apps origin into HOUSE_ORIGINS and the
+    # wall waves that JS through on every cookie the browser already attached,
+    # and nothing anywhere says so. Refusing to mint is the fail-closed answer
+    # — no grant, no app in a frame, no JS to wave through — and it is checked
+    # here, at the mint, rather than at boot for the same reason nothing else
+    # about the gate is: a house with an unconfigured gate still builds apps.
+    if origin in {o.rstrip("/") for o in settings.HOUSE_ORIGINS}:
+        logger.error(
+            "APPS_ORIGIN_BASE %s is also in HOUSE_ORIGINS: the origin wall "
+            "would treat app-served JS as the house. Refusing to mint grants.",
+            origin,
+        )
+        raise HTTPException(status_code=503, detail=GATE_ORIGIN_COLLIDES)
     return secret, origin
 
 
@@ -1850,6 +1875,17 @@ async def publish_live(session_id: int, user: CurrentUser) -> SessionOut:
     process-global. Only once it reports done do we record `live`, which is the
     same write the broker's publisher makes: one path, so the modal's bar, the
     app's status and the room all move together.
+
+    AND EXACTLY ONE PUBLISH RUNS AT A TIME (Claudette #2551). A publish ROTATES
+    the trees — live becomes live.prev, preview becomes live — so two of them
+    racing leaves `live.prev` a copy of `live`: Revert keeps its button and the
+    tree behind it is the one already being served, with nothing in the house
+    saying the previous deploy is gone. The claim is a CONDITIONAL WRITE on the
+    session row, `stop_requested_at`'s shape (slice (iv)): the database decides
+    which press wins, not a read-then-check here that two requests can both
+    pass. The loser gets 409 and spawns nothing. The flag clears as soon as the
+    helper returns, success or failure, because pressing Live AGAIN later is a
+    re-publish and is allowed — what is refused is a second one now.
     """
     secret, origin = _gate_config()
     session = await _require_session(session_id, user)
@@ -1872,27 +1908,50 @@ async def publish_live(session_id: int, user: CurrentUser) -> SessionOut:
         )
     app = await _require_app(session["app_id"])
 
-    await _launch("publish", app["id"])
-
-    url = _app_url(origin, app["id"])
-    detail = {"url": url}
-    created_at = _now()
-    async with db.transaction() as conn:
-        await _write_stage_event(conn, session, "live", json.dumps(detail), created_at)
-    await _publish_stage_frame(session, "live", detail, created_at)
-
-    try:
-        await deliver_message(
-            session["channel_id"], "bot", await _system_bot_id(),
-            _live_line(
-                app["name"], url, session["turns"], await _session_files(session_id)
-            ),
+    # The claim. `WHERE live_publishing_at IS NULL` is the whole exclusion: a
+    # second press arrives, changes no rows, and is told so.
+    claim = await db.execute(
+        """UPDATE app_sessions SET live_publishing_at = ?
+            WHERE id = ? AND live_publishing_at IS NULL""",
+        (_now(), session_id),
+    )
+    if claim.rowcount == 0:
+        raise HTTPException(
+            status_code=409,
+            detail="This build is already being published; give it a moment",
         )
-    except Exception:  # noqa: BLE001
-        # The app IS live and the bar has moved; a failed transcript line is
-        # not a reason to tell the owner their publish failed (publish_stage's
-        # §H line is guarded the same way, for the same reason).
-        logger.exception("app live line failed for session %s", session_id)
+    try:
+        await _launch("publish", app["id"])
+
+        url = _app_url(origin, app["id"])
+        detail = {"url": url}
+        created_at = _now()
+        async with db.transaction() as conn:
+            await _write_stage_event(
+                conn, session, "live", json.dumps(detail), created_at
+            )
+        await _publish_stage_frame(session, "live", detail, created_at)
+
+        try:
+            await deliver_message(
+                session["channel_id"], "bot", await _system_bot_id(),
+                _live_line(
+                    app["name"], url, session["turns"], await _session_files(session_id)
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            # The app IS live and the bar has moved; a failed transcript line is
+            # not a reason to tell the owner their publish failed (publish_stage's
+            # §H line is guarded the same way, for the same reason).
+            logger.exception("app live line failed for session %s", session_id)
+    finally:
+        # Released whatever happened, including a refusal or a 502: the user
+        # who fixes what the helper complained about presses Live again, and a
+        # flag left set would meet them with a lie about a publish in flight.
+        await db.execute(
+            "UPDATE app_sessions SET live_publishing_at = NULL WHERE id = ?",
+            (session_id,),
+        )
 
     fresh = await db.fetch_one("SELECT * FROM app_sessions WHERE id = ?", (session_id,))
     assert fresh is not None
@@ -1902,6 +1961,29 @@ async def publish_live(session_id: int, user: CurrentUser) -> SessionOut:
 # ---------------------------------------------------------------------------
 # POST /apps/{id}/revert — back to the previous live deploy
 # ---------------------------------------------------------------------------
+
+async def _build_room(app_id: str) -> Optional[int]:
+    """The channel this app is built in — its open session's, or its last one's.
+
+    An app has at most one open session at a time, but it has a session
+    history, and a verb pressed between builds still has a transcript to land
+    in: the most recent room is the one the owner and the builder were last
+    talking in. None only when an app has never had a session, which the
+    registry cannot produce today and a caller must still survive.
+    """
+    row = await db.fetch_one(
+        """SELECT channel_id FROM app_sessions WHERE app_id = ?
+            ORDER BY (ended_at IS NULL) DESC, id DESC LIMIT 1""",
+        (app_id,),
+    )
+    return row["channel_id"] if row is not None else None
+
+
+def _revert_line(app_name: str) -> str:
+    """The one line a revert writes. Same authorship and shape as the B9 line:
+    `system`, so it carries no context block and summons nobody."""
+    return f"**{_one_line(app_name)}** was reverted to its previous live tree."
+
 
 @router.post("/apps/{app_id}/revert")
 async def revert_app(app_id: str, user: CurrentUser) -> dict[str, Any]:
@@ -1913,6 +1995,14 @@ async def revert_app(app_id: str, user: CurrentUser) -> dict[str, Any]:
     which is the one check this endpoint deliberately does not duplicate — the
     directory it would test is the helper's to own, and two answers to "is
     there a previous live" is one too many.
+
+    What it DOES write is one line into the build room (Claudette #2551). The
+    app the room was talking about changed underneath it: the builder's
+    transcript says a tree was published and the URL now serves a different
+    one, and a resident reading back would otherwise answer questions about
+    code that is no longer live. Posted after the helper returns, so the line
+    is a record of something that happened; guarded like the B9 line, because
+    the tree IS swapped and a failed message is not a failed revert.
     """
     app = await _require_app(app_id)
     _require_app_owner(app, user)
@@ -1921,6 +2011,15 @@ async def revert_app(app_id: str, user: CurrentUser) -> dict[str, Any]:
             status_code=409, detail="This app is not live, so there is nothing to undo"
         )
     await _launch("revert", app["id"])
+
+    channel_id = await _build_room(app["id"])
+    if channel_id is not None:
+        try:
+            await deliver_message(
+                channel_id, "bot", await _system_bot_id(), _revert_line(app["name"])
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("app revert line failed for app %s", app["id"])
     return {"ok": True, "status": app["status"]}
 
 
@@ -1929,8 +2028,33 @@ async def revert_app(app_id: str, user: CurrentUser) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 class ShareRequest(BaseModel):
+    """`visibility` is ABSENT by default, not `"shared"` (Claudette #2551).
+
+    Sharing is a widening verb — it hands an app to a room — and a default of
+    `"shared"` made it a narrowing one for any app that was already public: the
+    owner who pressed Share into one more channel silently took the app back
+    off the house. None means "at least shared, and never less than it is now";
+    a value means the owner said it, including when they said `"shared"` about
+    a public app.
+    """
+
     channel_id: int
-    visibility: Literal["shared", "public"] = "shared"
+    visibility: Optional[Literal["shared", "public"]] = None
+
+
+def _shared_visibility(current: str, requested: Optional[str]) -> str:
+    """What an app's visibility becomes when it is shared into a room.
+
+    Widen, never narrow, unless the owner said the narrower word themselves.
+    `private` and `shared` both become `shared` — the room's members were just
+    entitled by rows, and that IS shared. `public` stays public: it is already
+    wider than anything this verb grants, and quietly dropping back to `shared`
+    would un-entitle the whole house on a press the owner read as "share this
+    with one more room".
+    """
+    if requested is not None:
+        return requested
+    return "public" if current == "public" else "shared"
 
 
 @router.post("/apps/{app_id}/share")
@@ -1949,6 +2073,9 @@ async def share_app(
     same path every other message takes (deliver_message): seq allocation,
     fan-out, history, unreads. No new message type and no raw row — a client
     that predates the card renderer shows a link that works.
+
+    SHARING NEVER NARROWS (Claudette #2551). See ShareRequest: a public app
+    stays public unless this request explicitly asked for something else.
     """
     secret, origin = _gate_config()
     app = await _require_app(app_id)
@@ -1975,6 +2102,7 @@ async def share_app(
 
     member_ids = await channels.channel_user_ids(channel)
     now = _now()
+    visibility = _shared_visibility(app["visibility"], body.visibility)
     async with db.transaction() as conn:
         for member_id in member_ids:
             if member_id == app["owner_user_id"]:
@@ -1986,7 +2114,7 @@ async def share_app(
             )
         await conn.execute(
             "UPDATE apps SET visibility = ?, updated_at = ? WHERE id = ?",
-            (body.visibility, now, app["id"]),
+            (visibility, now, app["id"]),
         )
 
     payload = await deliver_message(
@@ -2044,11 +2172,13 @@ async def remix_app(
     the meter is checked BEFORE the clone so a refused remix leaves nothing on
     disk.
 
-    The row is written before the helper runs and DELETED if the helper does not
-    complete: an app row whose repo was never cloned is an app that opens a
-    session on nothing. Order the other way round (clone first) would leave the
-    directory instead, which the helper's own "refuses if the child exists"
-    rule then makes unrecoverable at that id.
+    The row is written before the helper runs and DELETED if ANYTHING after it
+    fails — the clone itself, or the session this endpoint opens on it
+    (Claudette #2551): an app row whose repo was never cloned is an app that
+    opens a session on nothing, and an app row whose session could not be
+    opened is a row nobody asked for on a menu. Order the other way round
+    (clone first) would leave the directory instead, which the helper's own
+    "refuses if the child exists" rule then makes unrecoverable at that id.
     """
     _gate_config()
     parent = await _require_app(app_id)
@@ -2074,19 +2204,26 @@ async def remix_app(
     )
     try:
         await _launch("remix", parent["id"], child_id)
+        # No `user_apps` row is written, and that is the menu being correct
+        # rather than the menu being skipped: the remixer OWNS the child, and
+        # an owner is on their own menu by construction (`_app_out`'s
+        # `on_menu`, and the reason add_to_menu writes nothing for an owner and
+        # remove_from_menu refuses). A row here would be the one state
+        # `remove_from_menu`'s 400 says cannot exist.
+        return await create_session(
+            SessionCreate(builder_bot_id=builder_bot_id, app_id=child_id), user
+        )
     except BaseException:
+        # The ROW goes. The clone on disk is the helper's — this process is not
+        # the apps seat and has no business rm-ing a tree it could not have
+        # written; what the house leaves behind is an audit line naming the id,
+        # which is what an operator needs to find the orphan.
         await db.execute("DELETE FROM apps WHERE id = ?", (child_id,))
+        logger.warning(
+            "remix of %s rolled back; app row %s deleted, any clone on disk is "
+            "the helper's to reap", parent["id"], child_id,
+        )
         raise
-
-    # No `user_apps` row is written, and that is the menu being correct rather
-    # than the menu being skipped: the remixer OWNS the child, and an owner is
-    # on their own menu by construction (`_app_out`'s `on_menu`, and the reason
-    # add_to_menu writes nothing for an owner and remove_from_menu refuses).
-    # A row here would be the one state `remove_from_menu`'s 400 says cannot
-    # exist.
-    return await create_session(
-        SessionCreate(builder_bot_id=builder_bot_id, app_id=child_id), user
-    )
 
 
 # ---------------------------------------------------------------------------

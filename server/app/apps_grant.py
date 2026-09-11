@@ -18,6 +18,19 @@ stable per-(user, app) handle under the same secret, so an app can recognise a
 returning visitor and can correlate nothing across apps by id alone. (V1's
 shared serving origin means apps can still correlate by other means — see the
 parent spec's stated v1 limitation; this function is not the wall for that.)
+
+ONE SECRET, TWO THINGS SIGNED, SO EACH SAYS WHICH IT IS (Claudette #2551).
+Every HMAC here is taken over a DOMAIN TAG plus the bytes: `b"grant\0"` for a
+token payload, `b"opaque\0"` for the per-app handle. Without the tag the two
+share a key and an attacker who could ever choose one input's bytes would be
+choosing the other's — a grant payload whose bytes happened to read
+`"7:egnnhtz3ppwi"` would carry that user's opaque id as its signature. The
+NUL is what makes the tag unambiguous: no tag is a prefix of another and no
+payload can start with one, so `domain + body` parses back one way only.
+
+Every entry point checks the secret's length, not only `mint`: a gate that
+booted with an empty or short `APPS_GATE_SECRET` must fail CLOSED rather than
+verify happily under a key that is not one (Claudette #2544).
 """
 
 import base64
@@ -47,6 +60,16 @@ ROOTS = ("live", "preview")
 # 12 hours (D2). The house re-mints on every Open, so this is the revocation
 # bound, not a session length.
 DEFAULT_TTL_SEC = 12 * 60 * 60
+
+# Below this a secret is not one. Same floor as gate.GateSettings and the
+# house's MIN_GATE_SECRET_BYTES; stated three times because all three are the
+# door to the same key and none of them may be the only one that checks.
+MIN_SECRET_BYTES = 32
+
+# Domain tags (see the module docstring). NUL-terminated so no tag can be the
+# prefix of another and no signed body can begin with one.
+DOMAIN_GRANT = b"grant\0"
+DOMAIN_OPAQUE = b"opaque\0"
 
 # Characters of lowercased base32 kept from the per-app HMAC. 16 base32 chars
 # is 80 bits — far past collision range for a house, short enough to read.
@@ -81,8 +104,7 @@ def mint(
     non-dict ctx). That is a house bug, not a caller's, so it is a ValueError
     and not the 403-shaped GrantError.
     """
-    if not isinstance(secret, (bytes, bytearray)) or len(secret) < 32:
-        raise ValueError("grant secret must be at least 32 bytes")
+    _require_secret(secret)
     if not APP_ID_RE.fullmatch(app_id or ""):
         raise ValueError(f"not an app id: {app_id!r}")
     root_list = list(roots)
@@ -105,7 +127,7 @@ def mint(
     # anywhere; the signature covers the bytes, not the dict, but a stable
     # encoding keeps tokens diffable and logs comparable.
     body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return f"{_b64e(body)}.{_b64e(_sign(secret, body))}"
+    return f"{_b64e(body)}.{_b64e(_sign(secret, DOMAIN_GRANT, body))}"
 
 
 def verify(secret: bytes, token: str, now: float | None = None) -> dict[str, Any]:
@@ -113,7 +135,13 @@ def verify(secret: bytes, token: str, now: float | None = None) -> dict[str, Any
 
     Checks run signature-first: the JSON is not parsed until the bytes are
     known to be ours, so a forged token never reaches the parser.
+
+    The secret is checked BEFORE the token, and it raises the same ValueError
+    `mint` does rather than a GrantError: a gate holding a key that is not one
+    has a configuration bug, not a visitor with a bad token, and answering 403
+    would hide it behind traffic (Claudette #2544).
     """
+    _require_secret(secret)
     if not isinstance(token, str) or token.count(".") != 1:
         raise GrantError("malformed token")
     body_b64, sig_b64 = token.split(".")
@@ -123,7 +151,7 @@ def verify(secret: bytes, token: str, now: float | None = None) -> dict[str, Any
     except (binascii.Error, ValueError):
         raise GrantError("malformed token") from None
 
-    if not hmac.compare_digest(sig, _sign(secret, body)):
+    if not hmac.compare_digest(sig, _sign(secret, DOMAIN_GRANT, body)):
         raise GrantError("bad signature")
 
     try:
@@ -165,7 +193,8 @@ def opaque_user_id(secret: bytes, user_id: int, app_id: str) -> str:
     Stable for one (user, app) pair, unrelated across apps, and not reversible
     without the gate secret.
     """
-    digest = _sign(secret, f"{user_id}:{app_id}".encode("utf-8"))
+    _require_secret(secret)
+    digest = _sign(secret, DOMAIN_OPAQUE, f"{user_id}:{app_id}".encode("utf-8"))
     return base64.b32encode(digest).decode("ascii").rstrip("=").lower()[:OPAQUE_ID_CHARS]
 
 
@@ -174,8 +203,16 @@ def opaque_user_id(secret: bytes, user_id: int, app_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _sign(secret: bytes, body: bytes) -> bytes:
-    return hmac.new(secret, body, hashlib.sha256).digest()
+def _require_secret(secret: bytes) -> None:
+    """Every path that touches the key asks this first, and asks it the same way."""
+    if not isinstance(secret, (bytes, bytearray)) or len(secret) < MIN_SECRET_BYTES:
+        raise ValueError("grant secret must be at least 32 bytes")
+
+
+def _sign(secret: bytes, domain: bytes, body: bytes) -> bytes:
+    """HMAC over `domain + body`. The domain is never optional — a call site
+    that has to pick one cannot forget that there are two."""
+    return hmac.new(secret, domain + body, hashlib.sha256).digest()
 
 
 def _b64e(raw: bytes) -> str:
@@ -184,4 +221,16 @@ def _b64e(raw: bytes) -> str:
 
 
 def _b64d(text: str) -> bytes:
-    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+    """base64url, strictly — an out-of-alphabet character is an error, not litter.
+
+    `urlsafe_b64decode` DISCARDS characters outside the alphabet, so a token
+    with four `!` spliced into its payload decodes to the same bytes as the
+    real one and verifies under the real signature (Claudette #2551). That is
+    two spellings of one grant, which is one spelling too many for anything
+    that gets logged, cached or compared. `validate=True` is only available on
+    `b64decode`, hence the explicit `altchars` — it translates `-_` to `+/`
+    before the alphabet check, so real base64url still decodes.
+    """
+    return base64.b64decode(
+        text + "=" * (-len(text) % 4), altchars=b"-_", validate=True
+    )

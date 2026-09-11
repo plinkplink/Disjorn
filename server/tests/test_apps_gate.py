@@ -17,7 +17,14 @@ import pytest
 from starlette.testclient import TestClient
 
 from app import gate
-from app.apps_grant import GrantError, mint, opaque_user_id, verify
+from app.apps_grant import (
+    DOMAIN_GRANT,
+    DOMAIN_OPAQUE,
+    GrantError,
+    mint,
+    opaque_user_id,
+    verify,
+)
 
 SECRET = b"gate-test-secret-at-least-32-bytes-long"
 HOUSE = "https://house.example"
@@ -169,6 +176,80 @@ def test_mint_refuses_bad_inputs():
         mint(SECRET, app_id=APP_A, roots=[], ctx=CTX)
     with pytest.raises(ValueError):
         mint(b"short", app_id=APP_A, roots=["live"], ctx=CTX)
+
+
+def test_verify_refuses_a_weak_secret_before_it_parses_anything():
+    """Claudette #2544. A gate booted on an empty or short secret must fail
+    CLOSED. It is the same ValueError and the same sentence `mint` raises,
+    because it is the same bug — config, not a visitor — and it is raised
+    before the token is even split, so nothing about the caller's bytes can
+    decide whether the check runs."""
+    token = grant()
+    for weak in (b"", b"short", b"x" * 31, None, "a string, not bytes"):
+        with pytest.raises(ValueError) as exc:
+            verify(weak, token)
+        assert str(exc.value) == "grant secret must be at least 32 bytes"
+        assert not isinstance(exc.value, GrantError)
+
+    # …and the same floor guards the opaque handle, which shares the key.
+    with pytest.raises(ValueError):
+        opaque_user_id(b"short", 7, APP_A)
+
+
+def test_out_of_alphabet_characters_are_refused_not_discarded():
+    """Claudette #2551. `urlsafe_b64decode` DROPS characters outside the
+    alphabet, so four `!` spliced into a payload (four keeps the padding
+    arithmetic intact) used to decode to the real bytes and verify under the
+    real signature — one grant with two spellings."""
+    token = grant()
+    body_b64, sig_b64 = token.split(".")
+    assert verify(SECRET, token)["app"] == APP_A
+
+    smuggled = f"{body_b64[:4]}!!!!{body_b64[4:]}.{sig_b64}"
+    import base64 as _b64
+
+    # It really is the same payload underneath — the old decoder's answer.
+    assert _b64.urlsafe_b64decode(
+        smuggled.split(".")[0] + "=" * (-len(smuggled.split(".")[0]) % 4)
+    ) == _decode(token)
+
+    with pytest.raises(GrantError) as exc:
+        verify(SECRET, smuggled)
+    assert exc.value.reason == "malformed token"
+
+    # The signature half is decoded by the same function and refuses the same.
+    with pytest.raises(GrantError):
+        verify(SECRET, f"{body_b64}.{sig_b64[:4]}!!!!{sig_b64[4:]}")
+
+
+def test_the_two_things_this_key_signs_are_domain_separated():
+    """Claudette #2551. One secret signs grant payloads and opaque handles, so
+    each signature says which it is: a payload whose bytes read like a
+    `user:app` pair must not carry that pair's handle as its signature."""
+    import hashlib
+    import hmac
+
+    pair = f"{7}:{APP_A}".encode()
+    handle = opaque_user_id(SECRET, 7, APP_A)
+
+    # The handle is the OPAQUE-domain digest, and nothing else.
+    expected = hmac.new(SECRET, DOMAIN_OPAQUE + pair, hashlib.sha256).digest()
+    import base64 as _b64
+
+    assert handle == _b64.b32encode(expected).decode().rstrip("=").lower()[:16]
+
+    # A grant payload that happens to be those very bytes signs differently.
+    undomained = hmac.new(SECRET, pair, hashlib.sha256).digest()
+    assert expected != undomained
+    assert DOMAIN_GRANT != DOMAIN_OPAQUE
+    assert DOMAIN_GRANT.endswith(b"\0") and DOMAIN_OPAQUE.endswith(b"\0")
+
+    # And a token signed without the grant tag does not verify.
+    body = _decode(grant())
+    forged = f"{_encode(body)}.{_encode(hmac.new(SECRET, body, hashlib.sha256).digest())}"
+    with pytest.raises(GrantError) as exc:
+        verify(SECRET, forged)
+    assert exc.value.reason == "bad signature"
 
 
 def test_opaque_user_id_is_stable_and_per_app():
@@ -591,7 +672,10 @@ def _decode(token: str) -> bytes:
 
 
 def _sign_token(body: bytes) -> str:
+    """A grant signed by hand. The domain tag is part of the format now
+    (Claudette #2551): a signature over the bare payload is not a grant."""
     import hashlib
     import hmac
 
-    return f"{_encode(body)}.{_encode(hmac.new(SECRET, body, hashlib.sha256).digest())}"
+    mac = hmac.new(SECRET, DOMAIN_GRANT + body, hashlib.sha256).digest()
+    return f"{_encode(body)}.{_encode(mac)}"
