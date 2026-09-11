@@ -22,12 +22,14 @@ What it does, in order, for every request:
    redirects to the same URL without the token, so the grant leaves the address
    bar (and the referrer, and the user's history) immediately.
 4. Everything else reads that cookie and checks it names *this* app and grants
-   *this* root. The check is repeated here even though the cookie is scoped
-   to the app's path: the path is the authority, the cookie is the claim. This
-   is NOT app isolation (Claudette #2555, backlog #25): cookies attach by
-   request path, not by initiator, so on this shared origin app A's script can
-   fetch app B's files with B's cookie if the viewer ever opened B, and all
-   apps share one localStorage. Per-app origins are the isolation; stage 4.
+   *this* root. The path is the authority, the cookie is the claim, and the
+   check is repeated here. ON ONE ORIGIN, PATH-SCOPED COOKIES ARE A CONVENIENCE,
+   NOT A BOUNDARY (Claudette #2555, backlog #25): cookies attach by request
+   path, not by initiator, so app A's script fetches app B's files with B's
+   cookie the moment the viewer has ever opened B, and every app shares one
+   localStorage. Nothing in this file isolates apps from each other. The
+   isolation is one origin per app — stage 4 — and until then the trust ring
+   (invite-only house, every app built by a house seat) is the wall.
 5. Files come from `<APPS_WWW_ROOT>/<app>/<root>/`, resolved and prefix-checked
    so a symlink out of the tree is a 404 rather than a read.
 6. `__disjorn.js` is generated from the cookie's `ctx` and injected into HTML
