@@ -3693,11 +3693,36 @@
 }
 
 .app-preview-banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
   padding: var(--space-2) var(--space-3);
   border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-1);
   color: var(--text-1);
   font-size: var(--text-xs);
+}
+
+/* The hand-crank out of a send-freeze the builder never answered. It appears
+   in the banner after a minute of silence and does nothing until pressed —
+   the freeze has no timer, and this is not one (Claudette #2555). */
+.app-unfreeze {
+  margin-left: auto;
+  padding: 2px var(--space-2);
+  font-size: var(--text-xs);
+}
+
+/* The minted URL, when the browser refused us a tab for it. A link, because a
+   click on a link is a user gesture no popup blocker argues with. */
+.app-open-blocked {
+  margin: var(--space-1) 0 0;
+  font-size: var(--text-xs);
+  color: var(--text-2);
+}
+
+.app-open-blocked a {
+  color: var(--accent);
 }
 
 .app-preview-empty {
@@ -3786,6 +3811,16 @@
   gap: var(--space-2);
   font-size: var(--text-sm);
   color: var(--text-1);
+}
+
+/* Why the Public box is checked and will not clear: sharing widens and never
+   narrows, so an app that is already public has nothing this dialog can undo
+   (Claudette #2555). */
+.app-share-locked {
+  margin: 0;
+  padding-left: calc(var(--space-2) + 1.1em);
+  font-size: var(--text-xs);
+  color: var(--text-2);
 }
 
 /* The app card in a channel (D8). Same footprint as an unfurl card — it sits

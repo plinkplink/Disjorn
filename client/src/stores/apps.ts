@@ -188,7 +188,8 @@ export function deployedTurnCount(session: AppSession | undefined): number {
  *
  * `missing` is the 404 — not entitled, or gone — and it is CACHED like any
  * other answer so a channel full of the same unreachable link does not
- * re-ask once per row.
+ * re-ask once per row. The one thing that clears it is a status frame saying
+ * the app moved (`retryMissingCard`); nothing else, and no timer.
  */
 export interface CardEntry {
   status: "loading" | "done" | "missing";
@@ -289,6 +290,26 @@ export const useApps = create<AppsState>()((set, get) => {
       apps: get().apps.map((a) => (a.id === appId ? patch(a) : a)),
       sessions,
     });
+  };
+
+  /**
+   * A card that failed once gets exactly one more chance, when a frame says
+   * the app moved.
+   *
+   * `missing` is cached deliberately — a channel full of the same unreachable
+   * link must not ask the gate once per row. But the cache had no way out
+   * (Claudette #2555): a card asked for during a network blip, or asked for
+   * while the app was still a draft, stayed blank for the rest of the session
+   * even after the app went live. A status frame is the one honest signal that
+   * the answer may have changed, so that — and ONLY that — clears the entry.
+   * Never a timer, never a re-render: a 404 that means "not entitled" is a
+   * permanent answer for a stranger, and a stranger gets no frames at all
+   * (both `app_stage` and `app_update` go to the owner's sockets only), so
+   * this cannot become a retry loop against the wall.
+   */
+  const retryMissingCard = (appId: string): void => {
+    if (get().cards[appId]?.status !== "missing") return;
+    void get().loadCard(appId, true);
   };
 
   /** Keep a cached card's status honest when the app row moves under it. A
@@ -438,6 +459,11 @@ export const useApps = create<AppsState>()((set, get) => {
       const { message_id } = await shareApp(appId, channelId, visibility);
       // Sharing changes the app's visibility server-side; the row carries it.
       await get().refresh();
+      // The copy of that row a build session holds must follow, or the share
+      // dialog — which seeds its Public box from the app's visibility — would
+      // reopen showing the state it just changed (Claudette #2555).
+      const fresh = get().apps.find((a) => a.id === appId);
+      if (fresh !== undefined) patchAppEverywhere(appId, () => fresh);
       return message_id;
     },
 
@@ -498,6 +524,8 @@ export const useApps = create<AppsState>()((set, get) => {
             : app.open_session,
       }));
       if (frame.stage === "live") patchCardStatus(frame.app_id, "live");
+      // A card that 404'd before this session got anywhere may answer now.
+      retryMissingCard(frame.app_id);
     },
 
     onAppUpdate: (frame) => {
@@ -505,6 +533,7 @@ export const useApps = create<AppsState>()((set, get) => {
       // The frame carries the whole row, so a status change rides in on it;
       // any card already on screen for this app follows it (stage 3).
       patchCardStatus(app.id, app.status);
+      retryMissingCard(app.id);
       if (get().apps.some((a) => a.id === app.id)) {
         patchAppEverywhere(app.id, () => app);
         return;
