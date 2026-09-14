@@ -68,10 +68,10 @@ Apps idle (no `disjorn-apps-*` unit active). Tar `/srv/apps` and back up the DB 
 One keyboard build, Opus 5. Comparable to stage 3's builder strip (three files + tests + one script).
 
 ## Confirm record
-- **Confirmed by**:
-- **#custodian seq**:
-- **Confirmed at**:
+- **Confirmed by**: plink
+- **#custodian seq**: 2595
+- **Confirmed at**: 9/13/2026
 <!-- No Confirm record → no build. This is the gate. -->
 
 ## Status
-`draft`
+`confirmed`
