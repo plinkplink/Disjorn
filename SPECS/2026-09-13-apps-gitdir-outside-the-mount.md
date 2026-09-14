@@ -103,4 +103,4 @@ One keyboard build, Opus 5. Comparable to stage 3's builder strip (three files +
 <!-- No Confirm record → no build. This is the gate. -->
 
 ## Status
-`built@loop/2026-09-13-apps-gitdir-outside-the-mount`
+`merged` <!-- main 9d72828, 2026-09-14, review-seq 2608; deployed the same sitting (migration run, audit in the merge commit body). The live proving turn is plink's keystroke through the APPS tab — the keyboard principal is gone by design. -->
