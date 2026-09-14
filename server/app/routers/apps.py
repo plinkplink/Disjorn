@@ -254,10 +254,15 @@ def _locked_until(now: str) -> str:
 # ---------------------------------------------------------------------------
 
 class Quota(BaseModel):
-    """The visible unit is SESSIONS STARTED per user per UTC day (D5).
+    """The visible unit is BUILDS per user per UTC day (D5, amended #26).
 
-    Counted straight off `app_sessions.started_at`; there is no counter table,
-    so there is nothing to drift out of agreement with the sessions themselves.
+    A session started today counts once it has spent a turn, or while it is
+    still open with a live lock — because the broker will hand it a turn until
+    it ends. A dialog opened and closed with no turn is not a build and is not
+    counted; a lock that lapsed reads as ended here exactly as D6 says it does
+    everywhere else. Counted straight off `app_sessions`; there is no counter
+    table, so there is nothing to drift out of agreement with the sessions
+    themselves.
     """
 
     cap: int
@@ -490,10 +495,21 @@ async def _require_quota(user_id: int) -> Quota:
 
 
 async def _quota_for(user_id: int) -> Quota:
+    """Builds used today: sessions that spent a turn, plus those still able to.
+
+    #26 (2026-09-14): this counted every `app_sessions` row started today, and
+    `create_session` writes the row when the dialog OPENS — so opening a
+    dialog and closing it cost a build, opening the same app twice cost two,
+    and a whole day's cap went on three sessions with zero turns between them.
+    `turns` is the signal (maintained from the stage stream, MAX per turn);
+    "open and unlapsed" is the same liveness `_open_sessions_by_app` uses.
+    """
     cap = int(get_settings().APPS_DAILY_SESSION_CAP)
     row = await db.fetch_one(
-        "SELECT COUNT(*) AS n FROM app_sessions WHERE user_id = ? AND started_at >= ?",
-        (user_id, _utc_day_start()),
+        """SELECT COUNT(*) AS n FROM app_sessions
+            WHERE user_id = ? AND started_at >= ?
+              AND (turns > 0 OR (ended_at IS NULL AND locked_until > ?))""",
+        (user_id, _utc_day_start(), _now()),
     )
     used = int(row["n"]) if row is not None else 0
     return Quota(

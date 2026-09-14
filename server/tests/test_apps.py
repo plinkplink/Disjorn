@@ -315,6 +315,73 @@ async def test_quota_caps_sessions_per_user_per_utc_day(
     }
 
 
+async def test_a_dialog_closed_without_a_turn_is_not_a_build(
+    client, app, settings_env, seat_toml
+):
+    """#26 (2026-09-14). The meter counted every session row started today,
+    and the row is written when the dialog OPENS — so plink's whole cap went
+    on three sessions with zero turns between them. A session counts once it
+    has spent a turn (forever, ended or not), or while it is still open with
+    a live lock (the broker will hand it a turn until it ends). Closed with no
+    turn: refunded. Lapsed with no turn: reads as ended, per D6."""
+    await make_user("alice", "Alice")
+    builder = await make_bot("gable")
+    await make_bot("broker", BROKER_KEY)
+    settings_env(
+        APPS_DAILY_SESSION_CAP="2",
+        APPS_BUILDERS=[{"bot_id": builder, "model_source": str(seat_toml)}],
+        APPS_STAGE_PUBLISHER_BOT_NAMES=["broker"],
+    )
+    await login(client, "alice")
+
+    async def used() -> int:
+        return (await client.get("/apps/quota")).json()["used"]
+
+    async def report(sid: int, detail: dict) -> None:
+        # as_bot clears the cookie jar, so the owner logs back in afterwards.
+        r = await post_stage(client, sid, "scoped", detail)
+        assert r.status_code == 200, r.text
+        await login(client, "alice")
+
+    # Open holds a slot; close without a turn gives it back.
+    first = (await start_session(client, builder)).json()
+    assert await used() == 1
+    assert (await client.post(f"/apps/sessions/{first['id']}/end")).status_code == 200
+    assert await used() == 0
+
+    # A turn spends the slot for good — ending the session does not refund it.
+    spent = (await start_session(client, builder)).json()
+    await report(spent["id"], {"turn": 1, "model": "claude-opus-5"})
+    assert await used() == 1
+    assert (await client.post(f"/apps/sessions/{spent['id']}/end")).status_code == 200
+    assert await used() == 1
+
+    # A ceiling refusal (spawned:false) is not a turn, so it is not a build.
+    refused = (await start_session(client, builder)).json()
+    await report(refused["id"], {"turn": 1, "halted": "ceiling", "spawned": False})
+    assert await used() == 2                       # open, so it holds a slot…
+    assert (await start_session(client, builder)).status_code == 429
+    await client.post(f"/apps/sessions/{refused['id']}/end")
+    assert await used() == 1                       # …and closing refunds it.
+
+    # An abandoned dialog (no /end, lock lapsed) reads as ended, per D6.
+    lapsed = (await start_session(client, builder)).json()
+    assert await used() == 2
+    await db.execute(
+        "UPDATE app_sessions SET locked_until = '2020-01-01T00:00:00.000Z' WHERE id = ?",
+        (lapsed["id"],),
+    )
+    assert await used() == 1
+    assert (await start_session(client, builder)).status_code == 200
+    assert await used() == 2
+
+    # …but if the broker fires a turn on that lapsed session anyway (it reads
+    # `open`, not `lock_lapsed`), the count catches up: turns > 0 wins.
+    await report(lapsed["id"], {"turn": 1, "model": "claude-opus-5"})
+    assert await used() == 3
+    assert (await start_session(client, builder)).status_code == 429
+
+
 # ---------------------------------------------------------------------------
 # 4. The session lock
 # ---------------------------------------------------------------------------
