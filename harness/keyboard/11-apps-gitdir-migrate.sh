@@ -29,12 +29,14 @@
 # whose repository moves out from under it is a lost turn, and there is no
 # hurry that is worth that.
 #
-# IT NEVER RE-INITS OVER HISTORY. Every branch that cannot keep an app's
-# history QUARANTINES the whole old .git first (0700, under
-# /srv/apps-quarantine/<id>/gitdir-migration/) and only then makes a fresh
-# repository. Nothing here deletes a git dir. The only files this script
-# removes are inside a git dir it has already moved: hooks/, the config it
-# replaces, and objects/info/alternates.
+# IT NEVER RE-INITS OVER HISTORY, AND IT DELETES NO GIT DIR. Every branch that
+# cannot keep an app's history QUARANTINES the whole old .git first (0700,
+# under /srv/apps-quarantine/<id>/gitdir-migration/) and only then makes a
+# fresh repository; a nested .git a turn left in the work tree is MOVED to
+# .../gitdir-migration/stray/<relpath> rather than removed, for the same
+# reason the audit exists (Gable #2608). The only files this script deletes
+# are inside a git dir it has already moved: every top-level entry outside
+# the allowlist (HEAD, refs, packed-refs, objects) and objects/info/.
 set -euo pipefail
 
 # Overridable ONLY so the test suite can run the real script against a scratch
@@ -110,7 +112,7 @@ own 0750 "$GIT_ROOT"
 # cannot make this print a file that is none of its business. It is named by
 # name in harness/cc/tests/test_apps_launch.py's grep pin.
 audit_app() {                # audit_app <app-id> <dot-git>
-  local id="$1" dot="$2" out
+  local id="$1" dot="$2" out entry name
   say "audit $id ($dot)"
   if [ -L "$dot" ]; then
     note "SHAPE: a SYMLINK -> $(readlink "$dot")   [history will be discarded]"
@@ -151,17 +153,28 @@ audit_app() {                # audit_app <app-id> <dot-git>
     note "alternates: none"
   fi
 
+  # `find`, not a glob: `"$dot"/*` plus `"$dot"/.[!.]*` misses every name
+  # beginning with TWO dots, and `..evil` was neither audited nor deleted
+  # (Gable #2608). Git reads no such name, so the wall held either way — but
+  # an audit that silently skips a class of name is the wrong kind of quiet.
+  #
+  # This list is DELIBERATELY WIDER than $GITDIR_KEEP below: it names what git
+  # itself would never have written, which is the question the audit is here
+  # to answer. The entries git DOES write — config, hooks/, info/, logs/,
+  # index — are deleted at the move as well (allowlist, D6.4), and they are
+  # audited by the config / hooks / alternates lines above rather than
+  # reprinted here as an anomaly for every honest app.
   out=""
-  for entry in "$dot"/* "$dot"/.[!.]*; do
-    [ -e "$entry" ] || [ -L "$entry" ] || continue
+  while IFS= read -r -d '' entry; do
+    name="${entry##*/}"
     case " HEAD refs packed-refs objects config hooks description info branches index logs FETCH_HEAD ORIG_HEAD COMMIT_EDITMSG " in
-      *" ${entry##*/} "*) ;;
-      *) out="$out ${entry##*/}" ;;
+      *" $name "*) ;;
+      *) out="$out $name" ;;
     esac
-    case "${entry##*/}" in commondir|gitdir|worktrees) out="$out ${entry##*/}!" ;; esac
-  done
+    case "$name" in commondir|gitdir|worktrees) out="$out $name!" ;; esac
+  done < <(find "$dot" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
   if [ -n "$out" ]; then
-    note "TOP-LEVEL ENTRIES OUTSIDE THE ALLOWLIST (! = redirects git elsewhere):$out"
+    note "TOP-LEVEL ENTRIES GIT ITSELF DOES NOT WRITE (! = redirects git elsewhere):$out"
     for entry in commondir gitdir; do
       [ -f "$dot/$entry" ] && note "     $entry: $(head -c 200 "$dot/$entry" | tr -d '\0' | tr '\n' ' ')"
     done
@@ -203,20 +216,36 @@ quarantine_gitdir() {        # quarantine_gitdir <app-id> <dot-git>
 # would land as a GITLINK in a fresh base commit, or make the next harvest's
 # `add -A` die on an empty nested repo (Gable #2604; the build's own finding
 # (i)). Swept on BOTH paths, moved and fresh, and named in the record.
-sweep_stray_gitdirs() {      # sweep_stray_gitdirs <work-tree>
-  local work="$1" stray
-  while IFS= read -r stray; do
-    [ -n "$stray" ] || continue
-    note "stray .git swept from the work tree: $stray"
-    rm -rf -- "$stray"
-  done < <(find "$work" -mindepth 2 -name .git -print -prune 2>/dev/null)
+sweep_stray_gitdirs() {      # sweep_stray_gitdirs <app-id> <work-tree>
+  # MOVED, NOT REMOVED (Gable #2608): a nested `.git` a turn wrote is the
+  # same evidence as the one at the top level, and this script's whole claim
+  # is that it deletes no git dir. Each one lands under the app's quarantine
+  # at stray/<path it had in the work tree>, so the shape AND the place are
+  # both still readable afterwards.
+  local id="$1" work="$2" stray rel dest
+  local root="$QUARANTINE_ROOT/$id/gitdir-migration/stray"
+  while IFS= read -r -d '' stray; do
+    rel="${stray#"$work"/}"
+    dest="$root/$rel"
+    mkdir -p "$(dirname "$dest")"
+    if [ -e "$dest" ] || [ -L "$dest" ]; then
+      dest="$dest.$(date -u +%Y%m%dT%H%M%SZ)"
+    fi
+    mv -- "$stray" "$dest"
+    note "stray .git swept from the work tree: $stray -> $dest"
+  done < <(find "$work" -mindepth 2 -name .git -print0 -prune 2>/dev/null)
+  if [ -d "$QUARANTINE_ROOT/$id" ]; then
+    chmod 0700 "$QUARANTINE_ROOT/$id"
+    if [ "$(id -u)" = 0 ]; then chown -R "$SEAT:$SEAT" "$QUARANTINE_ROOT/$id"; fi
+  fi
+  return 0
 }
 
 fresh_repo() {               # fresh_repo <app-id> <work-tree> <why>
   local id="$1" work="$2" why="$3" g="$GIT_ROOT/$1.git"
   python3 "$HARVEST" ensure-repo "$g" "$work" "$GIT_ROOT" >/dev/null \
     || die "$id: could not initialise $g"
-  sweep_stray_gitdirs "$work"
+  sweep_stray_gitdirs "$id" "$work"
   "$GIT" --git-dir="$g" --work-tree="$work" add -A
   "$GIT" --git-dir="$g" --work-tree="$work" \
       -c user.name=apps-builder -c user.email=apps-builder@disjorn.local \
@@ -240,8 +269,16 @@ sanitize_moved_gitdir() {    # sanitize_moved_gitdir <git-dir>
   # house writes. Then every top-level entry that is not on the allowlist
   # goes: hooks/, info/, logs/, worktrees/, commondir, gitdir, index, and
   # anything git grows a name for next year.
-  for entry in "$g"/* "$g"/.[!.]*; do
-    [ -e "$entry" ] || [ -L "$entry" ] || continue
+  #
+  # `find`, not a glob, and the list is taken WHOLE before the first rm: a
+  # glob of `"$g"/*` plus `"$g"/.[!.]*` skips every name beginning with two
+  # dots (`..evil` survived the allowlist — Gable #2608), and deleting out of
+  # a directory the walk is still reading is how entries get skipped.
+  local -a entries=()
+  while IFS= read -r -d '' entry; do
+    entries+=("$entry")
+  done < <(find "$g" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+  for entry in ${entries[@]+"${entries[@]}"}; do
     name="${entry##*/}"
     case " $GITDIR_KEEP " in *" $name "*) continue ;; esac
     rm -rf -- "$entry"
@@ -299,7 +336,7 @@ migrate_app() {              # migrate_app <app-id>
 
   # D6.4 — the honest app. Move, sanitize, THEN fsck (fsck reads config).
   mv -- "$dot" "$g"
-  sweep_stray_gitdirs "$work"
+  sweep_stray_gitdirs "$id" "$work"
   sanitize_moved_gitdir "$g"
   if "$GIT" --git-dir="$g" fsck --no-dangling >/dev/null 2>&1; then
     # The index went with the allowlist; rebuild it from HEAD when there are

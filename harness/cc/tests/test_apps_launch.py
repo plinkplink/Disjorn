@@ -2307,8 +2307,12 @@ def test_a_commondir_cannot_redirect_the_moved_repo(premigration):
     fsm = _subprocess.run(["git", f"--git-dir={g}", "config", "core.fsmonitor"],
                           capture_output=True, text=True)
     assert fsm.returncode != 0 and fsm.stdout.strip() == ""
+    # "the harvest's exact invocation" means BOTH halves of D2 — the flags in
+    # argv and GIT_DIR/GIT_WORK_TREE in the environment (Gable #2608). An add
+    # that carried only the flags was testing less than the harvest does.
+    env = dict(_git_env(premigration["tmp"]), GIT_DIR=str(g), GIT_WORK_TREE=str(work))
     _subprocess.run(["git", f"--git-dir={g}", f"--work-tree={work}", "-c", "core.hooksPath=/dev/null",
-                     "add", "-A"], check=True, env=_git_env(premigration["tmp"]))
+                     "add", "-A"], check=True, env=env)
     assert not (premigration["tmp"] / "MARKER").exists(), "the other repo's fsmonitor ran"
     # the audit named it, out loud, before anything moved
     assert "commondir!" in proc.stdout and str(premigration["tmp"] / "other.git") in proc.stdout
@@ -2341,6 +2345,33 @@ def test_a_nested_git_in_the_work_tree_never_becomes_a_gitlink(premigration):
     assert "160000" not in ls, ls          # no gitlink
     assert "vendor/y.js" in ls
     assert "stray .git swept" in proc.stdout
+    # MOVED, not deleted (Gable #2608): the nested repository is the same kind
+    # of evidence as the top-level one, and this script deletes no git dir.
+    stray = premigration["quar"] / "dddddddddddd" / "gitdir-migration" / "stray" / "vendor" / ".git"
+    assert stray.is_dir(), sorted(_p.name for _p in (premigration["quar"] / "dddddddddddd").rglob("*"))
+    assert (stray / "HEAD").is_file()
+    assert not (nested / ".git").exists()
+
+
+@pytest.mark.skipif(not HAVE_GIT, reason="git is not installed")
+def test_a_dotdot_name_is_audited_and_removed_like_any_other(premigration):
+    """Gable #2608 NOTE: both loops globbed `"$g"/*` plus `"$g"/.[!.]*`, which
+    match no name beginning with TWO dots — `..evil` was neither printed by the
+    audit nor deleted by the allowlist. Git reads no such name, so nothing ran;
+    but "every other top-level entry" has to be true as written, or the next
+    reader trusts a sentence the code does not keep."""
+    evil = premigration["apps"] / "bbbbbbbbbbbb" / ".git"
+    (evil / "..evil").write_text("payload\n", encoding="utf-8")
+    (evil / "..evildir").mkdir()
+    (evil / ".hidden").write_text("payload\n", encoding="utf-8")
+    proc = run_migrate(premigration)
+    assert proc.returncode == 0, proc.stderr
+    g = premigration["git"] / "bbbbbbbbbbbb.git"
+    survivors = sorted(p.name for p in g.iterdir())
+    assert set(survivors) <= {"HEAD", "config", "index", "objects", "refs",
+                              "packed-refs"}, survivors
+    for name in ("..evil", "..evildir", ".hidden"):
+        assert name in proc.stdout, proc.stdout
 
 
 @pytest.mark.skipif(not HAVE_GIT, reason="git is not installed")
