@@ -69,4 +69,4 @@ Server suite green including gate tests (grant round-trip, expired, wrong app, w
 - **Confirmed at**: 2026-09-05 (parent); stage 3 opened at the keyboard 2026-09-09
 
 ## Status
-`building`
+`merged` <!-- main a7348af 2026-09-11 (review-seq 2563 + 2567). First real Live press 2026-09-14 found the server could not sudo (deploy/disjorn.service NoNewPrivileges=true; the live proof had run on a hand-started house — backlog #27, fixed ceedd42); proven live under the real unit the same day, session 12. -->
