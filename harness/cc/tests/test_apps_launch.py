@@ -1929,6 +1929,20 @@ def premigration(tmp_path):
     (evil / ".git" / "objects" / "info").mkdir(parents=True, exist_ok=True)
     (evil / ".git" / "objects" / "info" / "alternates").write_text(
         f"{honest / '.git' / 'objects'}\n", encoding="utf-8")
+    # #2604: a `commondir` file redirects config/hooks/objects to ANOTHER repo
+    # even after config/hooks/alternates are gone; and a nested .git in W
+    # would become a gitlink in a fresh base commit.
+    other = tmp_path / "other.git"
+    _subprocess.run(["git", "init", "-q", "--bare", str(other)], check=True, env=_git_env(tmp_path))
+    marker = tmp_path / "marker.sh"
+    marker.write_text(f"#!/bin/sh\ntouch {tmp_path}/MARKER\n", encoding="utf-8"); marker.chmod(0o755)
+    _subprocess.run(["git", f"--git-dir={other}", "config", "core.fsmonitor", str(marker)],
+                    check=True, env=_git_env(tmp_path))
+    (evil / ".git" / "commondir").write_text(f"{other}\n", encoding="utf-8")
+    nested = evil / "vendor" / "lib"
+    nested.mkdir(parents=True)
+    _subprocess.run(["git", "init", "-q", str(nested)], check=True, env=_git_env(tmp_path))
+    (nested / "x.js").write_text("1\n", encoding="utf-8")
     # A symlink under .git — the #2557 shape.
     linked = _old_style_app(apps, "cccccccccccc", tmp_path)
     (linked / ".git" / "refs" / "heads" / "stolen").symlink_to(
@@ -2273,3 +2287,68 @@ def test_the_op_clock_is_under_the_servers(launcher):
         f"HELPER_TIMEOUT_SEC={server}")
     # And not so far under that a slow rsync is killed for being slow.
     assert launcher.OP_MAX_SEC >= 60
+
+
+@pytest.mark.skipif(not HAVE_GIT, reason="git is not installed")
+def test_a_commondir_cannot_redirect_the_moved_repo(premigration):
+    """Gable #2604 BLOCK: a one-line `commondir` naming another repo made a
+    sanitised git dir read THAT repo's config, run its fsmonitor under the
+    harvest's exact invocation, and pass fsck. Allowlist, not blocklist."""
+    proc = run_migrate(premigration)
+    assert proc.returncode == 0, proc.stderr
+    g = premigration["git"] / "bbbbbbbbbbbb.git"
+    work = premigration["apps"] / "bbbbbbbbbbbb"
+    assert not (g / "commondir").exists()
+    assert sorted(p.name for p in g.iterdir()) == ["HEAD", "config", "index", "objects", "packed-refs", "refs"] \
+        or sorted(p.name for p in g.iterdir()) == ["HEAD", "config", "index", "objects", "refs"]
+    common = _subprocess.run(["git", f"--git-dir={g}", "rev-parse", "--git-common-dir"],
+                             capture_output=True, text=True, check=True).stdout.strip()
+    assert Path(common).resolve() == g.resolve()
+    fsm = _subprocess.run(["git", f"--git-dir={g}", "config", "core.fsmonitor"],
+                          capture_output=True, text=True)
+    assert fsm.returncode != 0 and fsm.stdout.strip() == ""
+    _subprocess.run(["git", f"--git-dir={g}", f"--work-tree={work}", "-c", "core.hooksPath=/dev/null",
+                     "add", "-A"], check=True, env=_git_env(premigration["tmp"]))
+    assert not (premigration["tmp"] / "MARKER").exists(), "the other repo's fsmonitor ran"
+    # the audit named it, out loud, before anything moved
+    assert "commondir!" in proc.stdout and str(premigration["tmp"] / "other.git") in proc.stdout
+
+
+@pytest.mark.skipif(not HAVE_GIT, reason="git is not installed")
+def test_the_index_is_rebuilt_so_the_next_add_diffs_against_head(premigration):
+    proc = run_migrate(premigration)
+    assert proc.returncode == 0, proc.stderr
+    g = premigration["git"] / "aaaaaaaaaaaa.git"
+    work = premigration["apps"] / "aaaaaaaaaaaa"
+    status = _subprocess.run(["git", f"--git-dir={g}", f"--work-tree={work}", "status", "--porcelain"],
+                             capture_output=True, text=True, check=True).stdout
+    assert status == "", status
+
+
+@pytest.mark.skipif(not HAVE_GIT, reason="git is not installed")
+def test_a_nested_git_in_the_work_tree_never_becomes_a_gitlink(premigration):
+    """#2604 NOTE: fresh_repo's add -A on a work tree holding a nested .git
+    would record a gitlink in the base commit. Swept first, named."""
+    # the evil app is moved (real dir), so force the fresh path with a pointer app that has a nested repo
+    pointer = premigration["apps"] / "dddddddddddd"
+    nested = pointer / "vendor"; nested.mkdir()
+    _subprocess.run(["git", "init", "-q", str(nested)], check=True, env=_git_env(premigration["tmp"]))
+    (nested / "y.js").write_text("2\n", encoding="utf-8")
+    proc = run_migrate(premigration)
+    assert proc.returncode == 0, proc.stderr
+    g = premigration["git"] / "dddddddddddd.git"
+    ls = _subprocess.run(["git", f"--git-dir={g}", "ls-files", "-s"], capture_output=True, text=True, check=True).stdout
+    assert "160000" not in ls, ls          # no gitlink
+    assert "vendor/y.js" in ls
+    assert "stray .git swept" in proc.stdout
+
+
+@pytest.mark.skipif(not HAVE_GIT, reason="git is not installed")
+def test_an_old_harvest_without_refuse_mode_is_refused_before_anything_moves(premigration, tmp_path):
+    old = tmp_path / "old_harvest.py"
+    old.write_text("import sys\nif sys.argv[1]=='ensure-repo': sys.exit(0)\n", encoding="utf-8")
+    env = dict(os.environ); env.update(APPS_ROOT=str(premigration["apps"]), GIT_ROOT=str(premigration["git"]),
+        QUARANTINE_ROOT=str(premigration["quar"]), SYSTEMCTL=str(_fake_systemctl_idle(premigration["tmp"])), HARVEST=str(old))
+    proc = _subprocess.run(["bash", str(MIGRATE_SH)], capture_output=True, text=True, env=env)
+    assert proc.returncode != 0 and "no 'refuse' mode" in proc.stderr
+    assert (premigration["apps"] / "aaaaaaaaaaaa" / ".git").is_dir(), "nothing moved"

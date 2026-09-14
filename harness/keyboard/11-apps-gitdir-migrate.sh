@@ -68,6 +68,12 @@ say()  { echo "== $*"; }
 note() { echo "   $*"; }
 die()  { echo "11-apps-gitdir-migrate: FATAL: $*" >&2; exit 1; }
 
+# The installed harvest must be THIS branch's: the old CLI's `ensure-repo` took
+# one argument and would `init` INSIDE the git dir before the commit died
+# (Gable #2604). The `refuse` mode only exists on the new one.
+grep -q 'mode == "refuse"' "$HARVEST" \
+  || die "$HARVEST has no 'refuse' mode — install harness/cc/apps/apps_harvest.py from this branch first"
+
 # No sudo needed for an entirely-scratch run; everything else writes /srv.
 if [ "$(id -u)" != 0 ] \
    && { [ "$APPS_ROOT" = /srv/apps ] || [ "$GIT_ROOT" = /srv/apps-git ] \
@@ -145,6 +151,24 @@ audit_app() {                # audit_app <app-id> <dot-git>
     note "alternates: none"
   fi
 
+  out=""
+  for entry in "$dot"/* "$dot"/.[!.]*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    case " HEAD refs packed-refs objects config hooks description info branches index logs FETCH_HEAD ORIG_HEAD COMMIT_EDITMSG " in
+      *" ${entry##*/} "*) ;;
+      *) out="$out ${entry##*/}" ;;
+    esac
+    case "${entry##*/}" in commondir|gitdir|worktrees) out="$out ${entry##*/}!" ;; esac
+  done
+  if [ -n "$out" ]; then
+    note "TOP-LEVEL ENTRIES OUTSIDE THE ALLOWLIST (! = redirects git elsewhere):$out"
+    for entry in commondir gitdir; do
+      [ -f "$dot/$entry" ] && note "     $entry: $(head -c 200 "$dot/$entry" | tr -d '\0' | tr '\n' ' ')"
+    done
+  else
+    note "top-level entries: nothing beyond what git itself writes"
+  fi
+
   out="$(find "$dot" -type l -printf '%p -> %l\n' 2>/dev/null || true)"
   if [ -n "$out" ]; then
     note "SYMLINKS UNDER .git:"
@@ -175,10 +199,24 @@ quarantine_gitdir() {        # quarantine_gitdir <app-id> <dot-git>
   note "quarantined -> $target"
 }
 
+# A nested `.git` anywhere in W — a real dir, a symlink or a pointer file —
+# would land as a GITLINK in a fresh base commit, or make the next harvest's
+# `add -A` die on an empty nested repo (Gable #2604; the build's own finding
+# (i)). Swept on BOTH paths, moved and fresh, and named in the record.
+sweep_stray_gitdirs() {      # sweep_stray_gitdirs <work-tree>
+  local work="$1" stray
+  while IFS= read -r stray; do
+    [ -n "$stray" ] || continue
+    note "stray .git swept from the work tree: $stray"
+    rm -rf -- "$stray"
+  done < <(find "$work" -mindepth 2 -name .git -print -prune 2>/dev/null)
+}
+
 fresh_repo() {               # fresh_repo <app-id> <work-tree> <why>
   local id="$1" work="$2" why="$3" g="$GIT_ROOT/$1.git"
   python3 "$HARVEST" ensure-repo "$g" "$work" "$GIT_ROOT" >/dev/null \
     || die "$id: could not initialise $g"
+  sweep_stray_gitdirs "$work"
   "$GIT" --git-dir="$g" --work-tree="$work" add -A
   "$GIT" --git-dir="$g" --work-tree="$work" \
       -c user.name=apps-builder -c user.email=apps-builder@disjorn.local \
@@ -187,13 +225,29 @@ fresh_repo() {               # fresh_repo <app-id> <work-tree> <why>
   note "fresh repository at $g (history discarded: $why)"
 }
 
+# What a moved git dir may KEEP (Gable #2604, D6.4 rev 3). Everything else
+# at the top level is deleted BY NAME, and the audit prints it first, because
+# a blocklist (hooks, alternates, config) is a list git gets to extend:
+# `commondir` alone redirects config, hooks and objects to another repo and
+# was outside the old list. ALLOWLIST, not blocklist.
+GITDIR_KEEP="HEAD refs packed-refs objects"
+
 sanitize_moved_gitdir() {    # sanitize_moved_gitdir <git-dir>
-  local g="$1"
+  local g="$1" entry name
   # BEFORE ANY GIT COMMAND TOUCHES IT. The config is what makes a repository
   # dangerous (fsmonitor, clean filters, textconv, sshCommand), so it is not
-  # edited key by key — a blocklist is a list git gets to extend — it is
-  # DELETED and rewritten as the four lines this house writes.
-  rm -f "$g/config"
+  # edited key by key — it is DELETED and rewritten as the four lines this
+  # house writes. Then every top-level entry that is not on the allowlist
+  # goes: hooks/, info/, logs/, worktrees/, commondir, gitdir, index, and
+  # anything git grows a name for next year.
+  for entry in "$g"/* "$g"/.[!.]*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    name="${entry##*/}"
+    case " $GITDIR_KEEP " in *" $name "*) continue ;; esac
+    rm -rf -- "$entry"
+  done
+  # objects/info/ (alternates lives there) goes whole; objects/ stays.
+  rm -rf -- "$g/objects/info"
   cat > "$g/config" <<'CONFIG_EOF'
 [core]
 	repositoryformatversion = 0
@@ -202,8 +256,6 @@ sanitize_moved_gitdir() {    # sanitize_moved_gitdir <git-dir>
 	name = apps-builder
 	email = apps-builder@disjorn.local
 CONFIG_EOF
-  rm -rf "$g/hooks"
-  rm -f "$g/objects/info/alternates"
 }
 
 migrate_app() {              # migrate_app <app-id>
@@ -247,10 +299,16 @@ migrate_app() {              # migrate_app <app-id>
 
   # D6.4 — the honest app. Move, sanitize, THEN fsck (fsck reads config).
   mv -- "$dot" "$g"
+  sweep_stray_gitdirs "$work"
   sanitize_moved_gitdir "$g"
   if "$GIT" --git-dir="$g" fsck --no-dangling >/dev/null 2>&1; then
+    # The index went with the allowlist; rebuild it from HEAD when there are
+    # commits, so the next `add -A` diffs against the tree, not against nothing.
+    if "$GIT" --git-dir="$g" rev-parse -q --verify HEAD >/dev/null 2>&1; then
+      "$GIT" --git-dir="$g" --work-tree="$work" read-tree HEAD
+    fi
     own 0700 "$g"
-    note "moved -> $g (config rewritten, hooks removed, alternates removed, fsck clean)"
+    note "moved -> $g (allowlist: HEAD refs packed-refs objects; config rewritten; everything else removed; fsck clean)"
   else
     note "FSCK FAILED on $g — the object store is not trustworthy; quarantining whole"
     quarantine_gitdir "$id" "$g"
