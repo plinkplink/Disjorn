@@ -748,7 +748,7 @@ export function AppBuildModal({
     <>
     {confirming !== null && (
       <div
-        className="modal-backdrop"
+        className="modal-backdrop app-build-confirm-backdrop"
         onClick={() => setConfirming(null)}
       >
         <div

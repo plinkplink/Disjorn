@@ -125,6 +125,15 @@ function turnFromStages(stages: StageEvent[]): TurnState | null {
       state.no_changes = detail.no_changes === true;
       if (state.no_changes) state.done = true;
     }
+    // A turn that wrote files is over once its preview is published: the
+    // server's own `_running_turn` already ended it at `files_written`, and
+    // `deployed` is the broker's word that the copy landed. Before 2026-09-14
+    // nothing here ever set `done` on a turn that succeeded — only a halt or
+    // `no_changes` did — so after every good turn the modal kept Stop on
+    // screen, kept the clock counting, and sent End into a confirm dialog.
+    // Not `files_written`: the frame must stay frozen until `deployed`
+    // (Round 5), and `done` is what thaws it.
+    if (event.stage === "deployed") state.done = true;
   }
   return state;
 }

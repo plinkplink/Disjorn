@@ -3619,6 +3619,15 @@
 /* The stop confirm (slice (iv)) borrows the delete-channel dialog's frame —
    same shape of question, same weight — and only needs to sit above the
    build modal it was opened from. */
+/* ABOVE the build modal's own backdrop, which is also a .modal-backdrop at
+   40 and a LATER sibling in the DOM — equal z-index, later paints on top, so
+   until 2026-09-14 this dialog opened underneath the modal it was confirming
+   for, and Stop / End session looked like dead buttons. The z-index on the
+   dialog box below cannot fix that: a child's stacking is decided by its
+   backdrop's, not its own. */
+.app-build-confirm-backdrop {
+  z-index: 41;
+}
 .app-build-confirm {
   z-index: 1;
 }
