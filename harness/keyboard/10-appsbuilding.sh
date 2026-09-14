@@ -25,7 +25,13 @@
 # WHAT IT PROVISIONS
 #   user     res-appsbuilding — system account, own subuid/subgid range,
 #            lingering on for rootless podman, in NO privileged group.
-#   dirs     /srv/apps            0750 res-appsbuilding  app repos
+#   dirs     /srv/apps            0750 res-appsbuilding  app WORK TREES
+#            /srv/apps-git        0750 res-appsbuilding  app GIT DIRS —
+#                 <app-id>.git/ 0700 each, and MOUNTED INTO NO CONTAINER,
+#                 EVER (SPECS/2026-09-13-apps-gitdir-outside-the-mount.md D1).
+#                 The turn writes its work tree; the repository that records the
+#                 work is host-only BY LOCATION. A `core.fsmonitor` in a config
+#                 the turn could write was host code execution as this seat.
 #            /srv/apps-www        0755                   preview roots
 #            /srv/apps-turns      0755                   per-turn result dirs
 #            /srv/apps-quarantine 0700                   never mounted anywhere
@@ -238,13 +244,22 @@ if [ "$DRIFT_ONLY" = 0 ]; then
   # the world-readable COPY, and it is a copy for exactly this reason — the
   # stage-3 gate is a house process and reads it without being this user.
   install -d -o "$SEAT" -g "$SEAT" -m 0750 /srv/apps
+  # THE GIT ROOT (2026-09-13 spec, D1). 0750, beside /srv/apps and never
+  # inside it: run-apps.sh mounts /srv/apps/<app-id> at /work and mounts
+  # NOTHING from here, which is what makes the repository something a turn
+  # cannot write. The per-app <app-id>.git/ below it is created 0700 by the
+  # seat's own ensure_repo on the app's first turn — this line only makes the
+  # root the seat writes into. `11-apps-gitdir-migrate.sh` moves the git dirs
+  # of apps that predate the split; it is a ONE-TIME script, run after this
+  # one, with no turn running.
+  install -d -o "$SEAT" -g "$SEAT" -m 0750 /srv/apps-git
   install -d -o "$SEAT" -g "$SEAT" -m 0755 /srv/apps-www
   install -d -o "$SEAT" -g "$SEAT" -m 0755 /srv/apps-turns
   # 0700 and NEVER MOUNTED into any seat: the quarantine holds files a turn
   # tried to publish a credential in, and the brief tells the next turn to read
   # /work first — which would read the injection straight back in (#2293).
   install -d -o "$SEAT" -g "$SEAT" -m 0700 /srv/apps-quarantine
-  say "/srv/apps, /srv/apps-www, /srv/apps-turns, /srv/apps-quarantine ready"
+  say "/srv/apps, /srv/apps-git, /srv/apps-www, /srv/apps-turns, /srv/apps-quarantine ready"
 
   # --- the credential drop point (spec §D) --------------------------------
   # The PARENT is shared by every seat (gable/, claudette/, appsbuilding/),
@@ -546,6 +561,21 @@ if [ "$res_cc" = "$want_cc" ]; then
   echo "  same     resident/apps Containerfile pins both claude-code $want_cc"
 else
   echo "  DIFFERS  resident Containerfile pins $res_cc, apps pins $want_cc"; drift=1
+fi
+
+# THE SPLIT ITSELF, as a fact about the disk rather than about the code: an
+# app whose work tree still holds a `.git` is an app `11-apps-gitdir-migrate.sh`
+# has not reached, and its turns are running against a repository the turn can
+# write. Counted, never listed — an app id is not a secret, but a drift block
+# nobody reads is a drift block that does not work.
+if [ -d /srv/apps ]; then
+  unsplit=$(find /srv/apps -mindepth 2 -maxdepth 2 -name .git 2>/dev/null | wc -l)
+  if [ "$unsplit" = 0 ]; then
+    echo "  same     no app work tree holds a .git (the git dirs are under /srv/apps-git)"
+  else
+    echo "  DIFFERS  $unsplit app work tree(s) still hold a .git — run harness/keyboard/11-apps-gitdir-migrate.sh"
+    drift=1
+  fi
 fi
 
 if [ -f "$CONFIG_DIR/env" ]; then

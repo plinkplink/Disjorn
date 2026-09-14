@@ -68,10 +68,16 @@ nothing it did not already have as itself.
                      the copy).
     revert <app>     swap live and live.prev through a sibling temp name; both
                      must exist. Three renames, no copy.
-    remix <p> <c>    git clone --no-local <p> into /srv/apps/<c>, one empty
+    remix <p> <c>    git clone --bare --no-local of the parent's HOST-ONLY
+                     git dir (/srv/apps-git/<p>.git) into /srv/apps-git/<c>.git,
+                     checked out into the work tree /srv/apps/<c>, one empty
                      commit "remix of <p>" so lineage is in the log, and the
                      parent's preview copied to the child's by the same
                      staged-rename discipline. Refused if <c> exists.
+                     The SOURCE is the git dir, never the work tree: the work
+                     tree is what a builder turn writes, and a repository read
+                     out of it was one `objects/info/alternates` away from
+                     handing over another app's history (2026-09-13 spec, D4).
 
 NOTHING HERE IS POLICY. The session lock, the quota, the token ceiling and the
 seat→bot map all live in the broker (slice ii); who may press Live, who owns an
@@ -163,6 +169,13 @@ SEAT_USER = "res-appsbuilding"
 
 # Roots, all created by harness/keyboard/10-appsbuilding.sh (spec §C).
 APPS_ROOT = "/srv/apps"                                   # <app-id>/ 0750
+# THE HOST-ONLY GIT ROOT (2026-09-13-apps-gitdir-outside-the-mount, D1).
+# `<app-id>.git/` 0700, beside the work tree at APPS_ROOT/<app-id> and never
+# inside it. NOTHING UNDER THIS ROOT IS MOUNTED INTO ANY CONTAINER, EVER — the
+# whole fold is that the party which writes /work is not the party that writes
+# the repository. Pinned equal to apps_harvest.GIT_ROOT by the suite, the same
+# way GIT_USER_NAME is: this program imports nothing seat-side.
+GIT_ROOT = "/srv/apps-git"                                # <app-id>.git/ 0700
 TURNS_ROOT = "/srv/apps-turns"                            # <session>/<turn>/ 0755
 WWW_ROOT = "/srv/apps-www"                                # <app-id>/preview/ 0755
 QUARANTINE_ROOT = "/srv/apps-quarantine"                  # <app-id>/<turn>/ 0700
@@ -634,6 +647,7 @@ def build_run_argv(principal: str, session: str, turn: str, app_id: str,
         f"--setenv=APPS_TURN_MAX_SEC={turn_max}",
         f"--setenv=APPS_PROMPT_MAX_BYTES={_prompt_limit(config)}",
         f"--setenv=APPS_REPO_ROOT={APPS_ROOT}",
+        f"--setenv=APPS_GIT_ROOT={GIT_ROOT}",
         f"--setenv=APPS_TURNS_ROOT={TURNS_ROOT}",
         f"--setenv=APPS_WWW_ROOT={WWW_ROOT}",
         f"--setenv=APPS_QUARANTINE_ROOT={QUARANTINE_ROOT}",
@@ -798,32 +812,43 @@ def _real_dir(path: Path) -> bool:
     return path.is_dir() and not path.is_symlink()
 
 
-def _is_a_real_repo(src: Path) -> bool:
-    """`<src>/.git` is a real DIRECTORY that lives inside `<src>` itself.
+def app_git_dir(git_root, app_id: str) -> Path:
+    """`<git-root>/<app-id>.git` — the one place this program spells the
+    layout. apps_harvest.repo_for spells the same one seat-side."""
+    return Path(git_root) / f"{app_id}.git"
 
-    THE SENTENCE THIS FILE KEEPS RELEARNING (Gable #2546; Claudette #2325,
-    #2329 before it): we keep validating WHERE a thing is instead of WHAT it
-    is. `(src / ".git").exists()` was the whole parent check, and `.git` is
-    allowed to be a FILE — forty bytes reading `gitdir: /srv/apps/<other>/.git`
-    makes any directory a working tree of somebody else's repository. A turn
-    writes /work, so a builder turn could have written those forty bytes and
-    turned "remix this app" into "clone that one". A symlinked `.git` is the
-    same trick with a different syscall.
 
-    So: not a symlink, a directory by lstat rather than by follow, and its
-    realpath lands under the realpath of the app's own directory. A repo the
-    seat owns and points somewhere else is not a repo this remix will read."""
-    dot_git = src / ".git"
-    if dot_git.is_symlink():
-        return False
-    if not dot_git.is_dir():                 # a `gitdir:` pointer file is not
+def _is_a_real_gitdir(git_dir: Path, git_root) -> bool:
+    """`<git-root>/<app-id>.git` is a repository this house made.
+
+    THE SENTENCE THIS FILE KEPT RELEARNING (Gable #2546/#2557; Claudette #2325,
+    #2329 before them): we keep validating WHERE a thing is instead of WHAT it
+    is. Three folds ran down that road — `(src / ".git").exists()`, then "a
+    real directory", then "a real directory whose realpath is inside the app" —
+    and each was a better guess about a name the TURN OWNED. A `.git` pointer
+    file is forty bytes; a symlink is one syscall; `objects/info/alternates`
+    plus a symlinked ref made a clone yield another app's history while every
+    one of those checks passed.
+
+    The name is no longer the turn's. This directory is under a root that is
+    mounted into no container, so what is checked here is not a boundary and is
+    not written down as one — it is the same "is this a repository, or a
+    half-made one an interrupted migration left" question ensure_repo asks
+    seat-side, asked again by root before it starts a unit, and it exists so
+    the refusal costs a stat instead of a transient service.
+
+    Not a symlink, a directory by lstat, resolving inside the git root, holding
+    a HEAD."""
+    if git_dir.is_symlink() or not git_dir.is_dir():
         return False
     try:
-        real_src = os.path.realpath(src)
-        real_git = os.path.realpath(dot_git)
+        real_root = os.path.realpath(git_root)
+        real_git = os.path.realpath(git_dir)
     except OSError:                          # pragma: no cover — lstat'd above
         return False
-    return _under(real_src, real_git) and real_git != real_src
+    if not _under(real_root, real_git) or real_git == real_root:
+        return False
+    return (Path(real_git) / "HEAD").is_file()
 
 
 def _staging(www_root, app_id: str) -> Path:
@@ -960,13 +985,26 @@ def revert_app(www_root, app_id: str, *, stamp: "str | None" = None) -> dict:
     return {"mode": "revert", "app": app_id, "live": str(live)}
 
 
-def _git(args: "list", *, cwd=None, git_bin: str = GIT) -> str:
+def _git(args: "list", *, git_dir=None, work_tree=None, cwd=None,
+         check: bool = True, git_bin: str = GIT) -> str:
     """git with an environment this program built, never one it inherited.
 
-    Same shape as apps_harvest.git: no system or global config (a config file
-    the seat can write is a config file that can name a program), hooks off
-    (`core.hooksPath=/dev/null` — a clone of a repo the seat controls must not
-    run the seat's shell scripts as anybody), C locale, and the author
+    NAME BOTH TREES, IN ARGV AND IN THE ENVIRONMENT. `--git-dir`/`--work-tree`
+    are the statement; GIT_DIR/GIT_WORK_TREE are the belt — measured on git
+    2.47.3, a flagless call with its cwd in a work tree reads a `.git` entry
+    there and follows it, while the same call with those two variables set
+    binds to the git dir it was given and never reads the entry at all. Nothing
+    in an app's work tree decides where its repository is.
+
+    `clone` is the ONE call that names neither, because it is the call that
+    CREATES them and takes both as arguments; the env dict is built fresh here,
+    so it carries no stale GIT_DIR into it.
+
+    The rest is apps_harvest.git's shape: no system or global config (a config
+    file the seat can write is a config file that can name a program), hooks
+    off (`core.hooksPath=/dev/null` — which closed hooks and never closed
+    fsmonitor, clean filters or textconv; what closes those is that the config
+    now lives where the turn cannot write it), C locale, and the author
     identity fixed so the lineage commit is the app builder's."""
     env = {
         "PATH": "/usr/local/bin:/usr/bin:/bin",
@@ -980,9 +1018,23 @@ def _git(args: "list", *, cwd=None, git_bin: str = GIT) -> str:
         "GIT_COMMITTER_NAME": GIT_USER_NAME,
         "GIT_COMMITTER_EMAIL": GIT_USER_EMAIL,
     }
-    proc = subprocess.run([git_bin, "-c", "core.hooksPath=/dev/null", *args],
-                          cwd=cwd, capture_output=True, text=True, env=env)
+    where = []
+    if git_dir is not None:
+        env["GIT_DIR"] = str(git_dir)
+        where.append(f"--git-dir={git_dir}")
+    if work_tree is not None:
+        env["GIT_WORK_TREE"] = str(work_tree)
+        where.append(f"--work-tree={work_tree}")
+    proc = subprocess.run(
+        [git_bin, *where, "-c", "core.hooksPath=/dev/null", *args],
+        cwd=cwd, capture_output=True, text=True, env=env)
     if proc.returncode != 0:
+        if not check:
+            # `check=False` returns what git printed, and a git call that
+            # failed printed nothing on stdout. That emptiness is the answer
+            # the one caller (`_has_commits`) reads — no second argv builder,
+            # which is what the suite's grep pin is protecting.
+            return ""
         # ONE sentence: the last line git said, or nothing if it said nothing.
         said = (proc.stderr or proc.stdout).strip().splitlines()
         fail(f"git {args[0]} failed ({proc.returncode}): "
@@ -990,16 +1042,35 @@ def _git(args: "list", *, cwd=None, git_bin: str = GIT) -> str:
     return proc.stdout
 
 
+def _has_commits(git_dir, git_bin: str) -> bool:
+    """Whether the repository has a HEAD to check out. A freshly cloned EMPTY
+    app has none — `checkout` on an unborn branch exits 128 — and an app whose
+    first turn wrote nothing is a legitimate remix parent."""
+    return bool(_git(["rev-parse", "--verify", "-q", "HEAD"],
+                     git_dir=git_dir, check=False, git_bin=git_bin).strip())
+
+
 def remix_app(apps_root, www_root, parent: str, child: str, *,
-              git_bin: str = GIT, rsync_bin: str = RSYNC,
+              git_root=GIT_ROOT, git_bin: str = GIT, rsync_bin: str = RSYNC,
               stamp: "str | None" = None) -> dict:
     """Clone one app into a new one, lineage in the git log.
 
+    THE SOURCE IS THE PARENT'S HOST-ONLY GIT DIR, not its work tree. The work
+    tree is what the turn writes; reading a repository out of it was the hole
+    (an `objects/info/alternates` plus a symlinked ref made `clone` hand over
+    another app's whole history, and every "is this a real repo" check passed
+    on the way). There is nothing left in the work tree to validate, so nothing
+    here looks at one.
+
     `--no-local --no-hardlinks`: a local clone shares objects by hardlink by
     default, and two apps that are separately writable must not share a byte on
-    disk — `git gc` in one would be reaching into the other's history. And the
-    parent's `.git` must be the parent's OWN directory, not a `gitdir:` pointer
-    file a turn wrote into /work (`_is_a_real_repo` above, Gable #2546).
+    disk — `git gc` in one would be reaching into the other's history.
+
+    `--bare` into the child's git dir, then `core.bare=false`, then a checkout
+    into the child's work tree. NOT `--separate-git-dir`, which writes a `.git`
+    POINTER FILE into the work tree — the exact entry this whole fold forbids.
+    The end state is the one ensure_repo produces: git dir out of the mount,
+    work tree with no `.git` entry of any kind.
 
     The empty commit is the lineage record. Not a note, not a file the next
     turn can rewrite, not a row only the database knows: `git log` in the
@@ -1016,13 +1087,17 @@ def remix_app(apps_root, www_root, parent: str, child: str, *,
     if parent == child:
         die("a remix's parent and child cannot be the same app")
 
-    src = Path(apps_root) / parent
+    src_git = app_git_dir(git_root, parent)
+    dst_git = app_git_dir(git_root, child)
     dst = Path(apps_root) / child
-    if not _real_dir(src) or not _is_a_real_repo(src):
+    if not _is_a_real_gitdir(src_git, git_root):
         die(f"no app repository to remix from: {parent} "
-            f"(its .git must be a real directory of its own)")
+            f"(nothing at {src_git})")
     if dst.exists() or dst.is_symlink():
         die(f"{child} already exists — a remix never writes over an app")
+    if dst_git.exists() or dst_git.is_symlink():
+        die(f"{child} already has a repository at {dst_git} — "
+            f"a remix never writes over one")
 
     # `--no-local`: without it git clones a local path by copying the object
     # store directly, which is how an `objects/info/alternates` in the parent
@@ -1031,15 +1106,22 @@ def remix_app(apps_root, www_root, parent: str, child: str, *,
     # go through the pack protocol, which carries objects and nothing else.
     # `--no-hardlinks` is kept: it is what --no-local implies, said out loud,
     # and it is the one that survives if this ever stops being a local clone.
-    _git(["clone", "--no-local", "--no-hardlinks", "--quiet",
-          str(src), str(dst)], git_bin=git_bin)
-    # 0750, the mode every app repo has: an app's SOURCE is the seat's own and
-    # the served copy is the world-readable one (spec §C).
+    Path(git_root).mkdir(parents=True, exist_ok=True)
+    _git(["clone", "--bare", "--no-local", "--no-hardlinks", "--quiet",
+          str(src_git), str(dst_git)], cwd="/", git_bin=git_bin)
+    os.chmod(dst_git, 0o700)                 # the seat's own; nobody else reads it
+    # 0750, the mode every app work tree has: an app's SOURCE is the seat's own
+    # and the served copy is the world-readable one (spec §C).
+    os.makedirs(dst, exist_ok=True)
     os.chmod(dst, 0o750)
-    _git(["config", "user.name", GIT_USER_NAME], cwd=dst, git_bin=git_bin)
-    _git(["config", "user.email", GIT_USER_EMAIL], cwd=dst, git_bin=git_bin)
+    _git(["config", "core.bare", "false"], git_dir=dst_git, git_bin=git_bin)
+    _git(["config", "user.name", GIT_USER_NAME], git_dir=dst_git, git_bin=git_bin)
+    _git(["config", "user.email", GIT_USER_EMAIL], git_dir=dst_git, git_bin=git_bin)
+    if _has_commits(dst_git, git_bin):
+        _git(["checkout", "-q", "-f"], git_dir=dst_git, work_tree=dst,
+             cwd=str(dst), git_bin=git_bin)
     _git(["commit", "--allow-empty", "-q", "-m", f"remix of {parent}"],
-         cwd=dst, git_bin=git_bin)
+         git_dir=dst_git, work_tree=dst, cwd=str(dst), git_bin=git_bin)
 
     published = False
     parent_preview = Path(www_root) / parent / PREVIEW_NAME
@@ -1057,7 +1139,7 @@ def remix_app(apps_root, www_root, parent: str, child: str, *,
         os.rename(staged, target)
         published = True
     return {"mode": "remix", "parent": parent, "child": child,
-            "repo": str(dst), "preview": published}
+            "repo": str(dst), "git_dir": str(dst_git), "preview": published}
 
 
 # ------------------------------------------------- the pre-flight refusals
@@ -1130,16 +1212,20 @@ def preflight_revert(app_id: str, *, www_root: str = WWW_ROOT) -> None:
         die(f"{app_id} has no previous deploy to revert to")
 
 
-def preflight_remix(parent: str, child: str, *, apps_root: str = APPS_ROOT) -> None:
+def preflight_remix(parent: str, child: str, *, apps_root: str = APPS_ROOT,
+                    git_root: str = GIT_ROOT) -> None:
     if parent == child:
         die("a remix's parent and child cannot be the same app")
-    src = Path(apps_root) / parent
-    if not _real_dir(src) or not _is_a_real_repo(src):
+    if not _is_a_real_gitdir(app_git_dir(git_root, parent), git_root):
         die(f"no app repository to remix from: {parent} "
-            f"(its .git must be a real directory of its own)")
+            f"(nothing at {app_git_dir(git_root, parent)})")
     dst = Path(apps_root) / child
     if dst.exists() or dst.is_symlink():
         die(f"{child} already exists — a remix never writes over an app")
+    dst_git = app_git_dir(git_root, child)
+    if dst_git.exists() or dst_git.is_symlink():
+        die(f"{child} already has a repository at {dst_git} — "
+            f"a remix never writes over one")
 
 
 # --------------------------------------------------- the serving-mode argv
@@ -1191,7 +1277,7 @@ def build_op_argv(mode: str, ids: "list", *, self_path: str = SELF,
 
 def main_op(mode: str, argv: "list", *, dry: bool, seat, self_path: str,
             systemctl_bin: str = SYSTEMCTL, www_root: str = WWW_ROOT,
-            apps_root: str = APPS_ROOT) -> int:
+            apps_root: str = APPS_ROOT, git_root: str = GIT_ROOT) -> int:
     """The privileged half of publish/revert/remix: shapes, pre-flight, argv,
     exec. No file is touched here — root's job is to decide, and the seat's is
     to move."""
@@ -1206,7 +1292,8 @@ def main_op(mode: str, argv: "list", *, dry: bool, seat, self_path: str,
     elif mode == "revert":
         preflight_revert(ids[0], www_root=www_root)
     else:
-        preflight_remix(ids[0], ids[1], apps_root=apps_root)
+        preflight_remix(ids[0], ids[1], apps_root=apps_root,
+                        git_root=git_root)
     if not dry:
         check_wrapper(self_path)
     out = build_op_argv(mode, ids, self_path=self_path, seat=seat)
@@ -1219,7 +1306,7 @@ def main_op(mode: str, argv: "list", *, dry: bool, seat, self_path: str,
 
 
 def main_as_seat(mode: str, argv: "list", *, www_root: str = WWW_ROOT,
-                 apps_root: str = APPS_ROOT) -> int:
+                 apps_root: str = APPS_ROOT, git_root: str = GIT_ROOT) -> int:
     """The unprivileged half, inside the transient unit, as res-appsbuilding.
 
     Reachable by name only from build_op_argv above: the sudoers regexes are
@@ -1243,7 +1330,8 @@ def main_as_seat(mode: str, argv: "list", *, www_root: str = WWW_ROOT,
         elif mode == "revert-as-seat":
             out = revert_app(www_root, ids[0])
         else:
-            out = remix_app(apps_root, www_root, ids[0], ids[1])
+            out = remix_app(apps_root, www_root, ids[0], ids[1],
+                            git_root=git_root)
     except OSError as exc:
         fail(f"{mode}: {exc}")
     print(json.dumps(out))
@@ -1272,14 +1360,16 @@ def main(argv: "list") -> int:
     systemctl_bin = SYSTEMCTL
     if dry and os.environ.get("DISJORN_APPS_LAUNCH_SYSTEMCTL"):
         systemctl_bin = os.environ["DISJORN_APPS_LAUNCH_SYSTEMCTL"]
-    # The two /srv roots the serving modes move things in. Constants on the
-    # real path; a scratch tree under a dry run, so the suite proves the rotate
-    # on a tree it owns instead of on the house's.
-    www_root, apps_root = WWW_ROOT, APPS_ROOT
+    # The three /srv roots the serving modes read and move things in.
+    # Constants on the real path; a scratch tree under a dry run, so the suite
+    # proves the rotate on a tree it owns instead of on the house's.
+    www_root, apps_root, git_root = WWW_ROOT, APPS_ROOT, GIT_ROOT
     if dry and os.environ.get("DISJORN_APPS_LAUNCH_WWW_ROOT"):
         www_root = os.environ["DISJORN_APPS_LAUNCH_WWW_ROOT"]
     if dry and os.environ.get("DISJORN_APPS_LAUNCH_APPS_ROOT"):
         apps_root = os.environ["DISJORN_APPS_LAUNCH_APPS_ROOT"]
+    if dry and os.environ.get("DISJORN_APPS_LAUNCH_GIT_ROOT"):
+        git_root = os.environ["DISJORN_APPS_LAUNCH_GIT_ROOT"]
 
     if len(argv) < 2 or argv[1] not in MODES:
         die("usage: disjorn-apps-launch run <resident> <session> <turn> "
@@ -1291,7 +1381,7 @@ def main(argv: "list") -> int:
     # directories it owns.
     if argv[1].endswith("-as-seat"):
         return main_as_seat(argv[1], argv, www_root=www_root,
-                            apps_root=apps_root)
+                            apps_root=apps_root, git_root=git_root)
 
     seat = None
     if dry and os.environ.get("DISJORN_APPS_LAUNCH_FAKE_SEAT"):
@@ -1305,7 +1395,8 @@ def main(argv: "list") -> int:
         # root it touches is a constant in this file.
         return main_op(argv[1], argv, dry=dry, seat=seat or check_seat(),
                        self_path=self_path, systemctl_bin=systemctl_bin,
-                       www_root=www_root, apps_root=apps_root)
+                       www_root=www_root, apps_root=apps_root,
+                       git_root=git_root)
 
     if argv[1] == "stop":
         # No config, no wrapper, no prompt: a stop names a turn and nothing
