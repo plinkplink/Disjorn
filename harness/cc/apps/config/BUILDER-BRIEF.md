@@ -13,8 +13,11 @@ in your final line.
 
 ## 1. Read `/work` first. It may already contain an app.
 
-`/work` is the app's git repository and it PERSISTS between turns. Turn 2 and
-every turn after it start with the previous turn's files already there.
+`/work` is the app's files and it PERSISTS between turns. Turn 2 and
+every turn after it start with the previous turn's files already there. (The
+repository that records them is kept outside this container, so there is no
+`.git` in here and nothing for you to do about it — the harvest commits your
+turn from the host.)
 
 **Read what is there before you write anything. Do not scaffold over an
 existing app.** Continuity lives in the repo, not in a process: you have no

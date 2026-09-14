@@ -86,6 +86,36 @@ nothing about gitignore, and the file need not be a root dotfile). The dirty
 set used for the SCAN and for QUARANTINE therefore includes ignored files
 (`--ignored=matching`); the set used to decide `no_changes` does not, so the
 "a turn that changed nothing" answer is unchanged.
+
+THE WALL (SPECS/2026-09-13-apps-gitdir-outside-the-mount.md, D7)
+----------------------------------------------------------------
+THE TURN'S WRITABLE SURFACE IS THE WORK TREE AND NOTHING ELSE. The app's
+repository lives at /srv/apps-git/<app-id>.git, which is mounted into no
+container, ever; /srv/apps/<app-id> is the work tree and the only persistent
+rw mount. Git metadata is host-only BY LOCATION, not by a check.
+
+That is the whole fold. Until 2026-09-13 the repository sat at
+/srv/apps/<app-id>/.git — inside the mount — so the turn wrote the metadata
+that every host-side git command then read: a repo-local `core.fsmonitor` in
+`.git/config` was HOST CODE EXECUTION as res-appsbuilding under this module's
+own `git add -A` (and `filter.*.clean`, `core.sshCommand`,
+`uploadpack.packObjectsHook` and `diff.*.textconv` are the same door;
+`core.hooksPath=/dev/null` closes hooks and nothing else). Blocklisting config
+keys was never the shape — the list is git's to extend.
+
+So: every git invocation in this module names BOTH trees explicitly, in argv
+AND in the environment (see `git` below), and no path the turn can write is
+ever consulted to find the repository. A SHAPE CHECK ON A PATH THE TURN CAN
+WRITE IS NOT A BOUNDARY AND IS NEVER WRITTEN DOWN AS ONE (the gate.py #2561
+discipline): three folds in a row — `.exists()`, then "a real directory",
+then "a real directory whose realpath is inside" — were each a better guess
+about a name the adversary owns. The adversary no longer owns the name.
+
+A `.git` entry the turn writes into the work tree is therefore a STRAY, and
+strays are quarantined as a class (`sweep_stray_git` below) rather than
+inspected. Work-tree files that name git machinery (`.gitattributes` filters,
+`.gitmodules`) reference drivers the host-only config never defines, and stay
+inert for that reason and not because anything scanned them.
 """
 
 from __future__ import annotations
@@ -97,10 +127,12 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 # ------------------------------------------------------------------ constants
 
@@ -108,6 +140,17 @@ from pathlib import Path
 # repo's history is written by the same hand, and `git log` should say so.
 GIT_USER_NAME = "apps-builder"
 GIT_USER_EMAIL = "apps-builder@disjorn.local"
+
+# The host-only git root (D1). NOTHING under it is mounted into any container,
+# ever. The runtime value travels from the launcher through run-apps.sh's
+# APPS_GIT_ROOT, exactly like the four roots that came before it; this constant
+# is the default that a hand-run at the keyboard gets, and it is pinned equal to
+# the launcher's GIT_ROOT by tests/test_apps_launch.py — the same discipline
+# GIT_USER_NAME lives under, and for the same reason.
+GIT_ROOT = "/srv/apps-git"
+
+# `<git-root>/<app-id>.git` — the one place a repository is ever named from.
+GIT_DIR_SUFFIX = ".git"
 
 # A credential shorter than this cannot be scanned for without matching half
 # the tree by accident (a 3-character "key" would flag every file that happens
@@ -158,74 +201,203 @@ def _warn(msg: str) -> None:
 
 # ----------------------------------------------------------------------- git
 
-def git(repo: str | os.PathLike, *args: str, check: bool = True,
-        git_bin: str = "git") -> subprocess.CompletedProcess:
-    """Run git in `repo` with a scrubbed environment.
+class Repo(NamedTuple):
+    """THE TWO TREES, ALWAYS TOGETHER AND NEITHER EVER DERIVED FROM THE OTHER.
 
-    -c core.hooksPath=/dev/null: the repo under /work is written BY the turn,
-    so it could contain hooks. A commit is not the place to run code the turn
-    authored. The rest of the env scrub is the same reflex: nothing this
-    process inherited decides who the committer is.
+    `git_dir` is /srv/apps-git/<app-id>.git, host-only and mounted nowhere.
+    `work_tree` is /srv/apps/<app-id>, the turn's /work.
+
+    They travel as one value because the failure this whole fold is about is a
+    git call that names one of them and lets git find the other — and the one
+    git finds by looking is the one the turn wrote."""
+    git_dir: Path
+    work_tree: Path
+
+
+def repo_at(git_dir: str | os.PathLike, work_tree: str | os.PathLike) -> Repo:
+    """The one constructor. A Repo is never half-built."""
+    return Repo(Path(git_dir), Path(work_tree))
+
+
+def repo_for(app_id: str, *, work_tree_root: str | os.PathLike,
+             git_root: str | os.PathLike = GIT_ROOT) -> Repo:
+    """The pair for one app id, from the two roots. The ONLY place the layout
+    `<git-root>/<app-id>.git` beside `<apps-root>/<app-id>` is spelled."""
+    return repo_at(Path(git_root) / f"{app_id}{GIT_DIR_SUFFIX}",
+                   Path(work_tree_root) / app_id)
+
+
+def _git_env(repo: Repo, *, identity: bool) -> dict:
+    """The environment every git call in this module runs under.
+
+    GIT_DIR / GIT_WORK_TREE ARE THE BELT; the flags in argv are the statement.
+    Measured on git 2.47.3: a flagless `git status` with its cwd in the work
+    tree reads a turn-written `.git` (pointer file or symlink) and FOLLOWS it,
+    while the same call with these two variables set binds to the host-only
+    git dir and never reads the entry at all. Both are set, on every call, so
+    a git invocation that is one day written without the flags still cannot be
+    pointed at a repository the turn chose.
+
+    GIT_CONFIG_NOSYSTEM + GIT_CONFIG_GLOBAL=/dev/null: a config file this seat
+    can write is a config file that can name a program to run. The seat owns
+    its own HOME, so /dev/null is the global config and there is no system one.
+    (The launcher's `_git` has set both since stage 3; this being the weaker of
+    the two was a real difference, not a stylistic one.)
+
+    The rest is the old reflex: nothing this process inherited decides who the
+    committer is. `identity=False` for the read-only byte calls, where an
+    author is not a thing that can be committed anyway.
     """
     env = {
         "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
         "HOME": os.environ.get("HOME", "/tmp"),
         "GIT_TERMINAL_PROMPT": "0",
         "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_AUTHOR_NAME": GIT_USER_NAME,
-        "GIT_AUTHOR_EMAIL": GIT_USER_EMAIL,
-        "GIT_COMMITTER_NAME": GIT_USER_NAME,
-        "GIT_COMMITTER_EMAIL": GIT_USER_EMAIL,
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_DIR": str(repo.git_dir),
+        "GIT_WORK_TREE": str(repo.work_tree),
         "LC_ALL": "C",
     }
+    if identity:
+        env.update({
+            "GIT_AUTHOR_NAME": GIT_USER_NAME,
+            "GIT_AUTHOR_EMAIL": GIT_USER_EMAIL,
+            "GIT_COMMITTER_NAME": GIT_USER_NAME,
+            "GIT_COMMITTER_EMAIL": GIT_USER_EMAIL,
+        })
+    return env
+
+
+def _git_argv(repo: Repo, args, git_bin: str) -> list:
+    """`git --git-dir=<G> --work-tree=<W> -c core.hooksPath=/dev/null <args>`.
+
+    BOTH TREES ARE NAMED, ALWAYS. `-C <repo>` used to be the whole statement,
+    which meant git discovered the git dir from the work tree — from a path the
+    turn writes. Nothing here looks at `<W>/.git` for any purpose.
+
+    `core.hooksPath=/dev/null` stays, unchanged and unpromoted: it closed hooks
+    and it never closed anything else (fsmonitor, clean filters, textconv,
+    sshCommand). What closes those is that the config file now lives where the
+    turn cannot write it."""
+    return [git_bin, f"--git-dir={repo.git_dir}",
+            f"--work-tree={repo.work_tree}",
+            "-c", "core.hooksPath=/dev/null", *args]
+
+
+def git(repo: Repo, *args: str, check: bool = True,
+        git_bin: str = "git") -> subprocess.CompletedProcess:
+    """Run git against the split repo, with a scrubbed environment.
+
+    cwd is the WORK TREE, because a relative pathspec (`clean`, `checkout -- .`)
+    is resolved against the cwd and the old `-C <repo>` put it there. It is not
+    how the repository is found — the flags and the env decide that, and the
+    probe above measured that they win over anything at the cwd."""
     return subprocess.run(
-        [git_bin, "-c", "core.hooksPath=/dev/null", "-C", str(repo), *args],
-        check=check, capture_output=True, text=True, env=env,
+        _git_argv(repo, args, git_bin),
+        check=check, capture_output=True, text=True,
+        cwd=str(repo.work_tree), env=_git_env(repo, identity=True),
     )
 
 
-def git_bytes(repo: str | os.PathLike, *args: str,
-              git_bin: str = "git") -> bytes:
+def git_bytes(repo: Repo, *args: str, git_bin: str = "git") -> bytes:
     """git output as raw BYTES. The secret scan must not go through a decoder:
     a diff of a binary file is not valid UTF-8, and a `errors="replace"` decode
     would mangle exactly the bytes we are looking for."""
-    env = {
-        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-        "HOME": os.environ.get("HOME", "/tmp"),
-        "GIT_TERMINAL_PROMPT": "0",
-        "GIT_CONFIG_NOSYSTEM": "1",
-        "LC_ALL": "C",
-    }
     proc = subprocess.run(
-        [git_bin, "-c", "core.hooksPath=/dev/null", "-C", str(repo), *args],
-        capture_output=True, env=env,
+        _git_argv(repo, args, git_bin),
+        capture_output=True, cwd=str(repo.work_tree),
+        env=_git_env(repo, identity=False),
     )
     return proc.stdout
 
 
-def ensure_repo(repo: str | os.PathLike, git_bin: str = "git") -> bool:
-    """`git init` the app repo if it is not one yet. Returns True if it created.
+class GitDirIncomplete(RuntimeError):
+    """`<git-root>/<app-id>.git` exists and is not a repository this house
+    made. An INCIDENT, never an input — see `gitdir_state`."""
+
+
+def _under(parent: str, child: str) -> bool:
+    """`child` is `parent` or lives beneath it. Both must already be real
+    paths; this compares strings and follows nothing."""
+    return child == parent or child.startswith(parent.rstrip("/") + "/")
+
+
+def gitdir_state(git_dir: str | os.PathLike,
+                 git_root: str | os.PathLike = GIT_ROOT) -> str:
+    """`"absent"` or `"repo"`. EVERY OTHER SHAPE RAISES.
+
+    G IS WRITTEN BY HOST CODE ONLY. It is not under any mount, so a turn
+    cannot have made it — which means G existing as a symlink, as a file, as a
+    directory whose realpath is outside the git root, or as a directory with no
+    HEAD is an interrupted init or an interrupted migration. That is an
+    incident and the keyboard decides what it was; it is not a signal to
+    re-init, because re-initialising over a directory that might hold objects
+    is the branch that loses an app's history.
+
+    The refusal is by state, not by shape-of-a-name: there is no adversary on
+    this path, and the check exists to stop US from writing over OUR own
+    half-made tree."""
+    git_dir = Path(git_dir)
+    try:
+        st = os.lstat(git_dir)
+    except FileNotFoundError:
+        return "absent"
+    except OSError as exc:
+        raise GitDirIncomplete(f"gitdir_incomplete: {git_dir} ({exc})")
+    if stat.S_ISLNK(st.st_mode):
+        raise GitDirIncomplete(f"gitdir_incomplete: {git_dir} is a symlink")
+    if not stat.S_ISDIR(st.st_mode):
+        raise GitDirIncomplete(f"gitdir_incomplete: {git_dir} is not a directory")
+    real = os.path.realpath(git_dir)
+    if not _under(os.path.realpath(git_root), real):
+        raise GitDirIncomplete(
+            f"gitdir_incomplete: {git_dir} resolves to {real}, outside {git_root}")
+    if not (Path(real) / "HEAD").is_file():
+        raise GitDirIncomplete(f"gitdir_incomplete: {git_dir} has no HEAD")
+    return "repo"
+
+
+def ensure_repo(repo: Repo, git_root: str | os.PathLike = GIT_ROOT,
+                git_bin: str = "git") -> bool:
+    """Create the SPLIT repo if there is not one yet. True if it created.
 
     Called from run-apps.sh BEFORE the container starts, as res-appsbuilding —
     never as root and never by the broker, so §E's "the broker never writes
     under /srv/apps" is true from the first turn (spec §C, Gable #2295).
+
+    "Already a repo?" is a fact about the HOST-ONLY tree (`<G>/HEAD` exists),
+    never about anything in the work tree: `(work_tree / ".git").exists()` was
+    the old question and the turn owned the answer.
+
+    END STATE, whichever branch ran: `G` holds HEAD, `core.bare=false`,
+    `core.worktree` UNSET, and there is no `.git` entry of any kind in `W`.
+    Measured (git 2.47.3): `git --git-dir=G --work-tree=W init` writes nothing
+    into `W` but DOES write `core.worktree=W` into `G/config`, so the unset is
+    part of the init and not a tidy-up. The work tree is argv and environment,
+    every call, and a config key that also names it is a second place for the
+    answer to live. `--separate-git-dir` is not used and must not be: it writes
+    a `.git` POINTER FILE into `W`, which is the exact entry this fold forbids.
     """
-    repo = Path(repo)
-    repo.mkdir(parents=True, exist_ok=True)
-    if (repo / ".git").exists():
+    repo.work_tree.mkdir(parents=True, exist_ok=True)
+    if gitdir_state(repo.git_dir, git_root) == "repo":
         return False
+    repo.git_dir.parent.mkdir(parents=True, exist_ok=True)
     git(repo, "init", "-q", "-b", "main", git_bin=git_bin)
+    # `config --unset` exits 5 on a key that is not there; the end state is
+    # what matters and the suite pins it.
+    git(repo, "config", "--unset", "core.worktree", check=False, git_bin=git_bin)
     git(repo, "config", "user.name", GIT_USER_NAME, git_bin=git_bin)
     git(repo, "config", "user.email", GIT_USER_EMAIL, git_bin=git_bin)
+    os.chmod(repo.git_dir, 0o700)
     return True
 
 
-def has_commits(repo: str | os.PathLike, git_bin: str = "git") -> bool:
+def has_commits(repo: Repo, git_bin: str = "git") -> bool:
     return git(repo, "rev-parse", "--verify", "-q", "HEAD",
                check=False, git_bin=git_bin).returncode == 0
 
 
-def porcelain(repo: str | os.PathLike, *, ignored: bool = False,
+def porcelain(repo: Repo, *, ignored: bool = False,
               git_bin: str = "git") -> list[tuple[str, str]]:
     """`git status --porcelain=v1 -z -uall` as [(xy, path)].
 
@@ -258,7 +430,7 @@ def porcelain(repo: str | os.PathLike, *, ignored: bool = False,
     return entries
 
 
-def dirty_paths(repo: str | os.PathLike, *, ignored: bool = False,
+def dirty_paths(repo: Repo, *, ignored: bool = False,
                 git_bin: str = "git") -> list[str]:
     """Repo-relative FILE paths that exist on disk and are not what HEAD says.
 
@@ -271,33 +443,38 @@ def dirty_paths(repo: str | os.PathLike, *, ignored: bool = False,
     supposed to be. So every directory entry is walked and its files listed.
 
     The list is what the secret scan reads and what quarantine moves.
+
+    Nothing is pruned from the walk. `.git` used to be skipped here, on the
+    reasoning that it was the repository; the repository is elsewhere now and
+    a `.git` under the work tree is a stray — swept into quarantine before
+    this function is ever called, and if one somehow survived the sweep,
+    SCANNING it is the safe direction.
     """
-    repo = Path(repo)
+    work = repo.work_tree
     paths: list[str] = []
     for xy, path in porcelain(repo, ignored=ignored, git_bin=git_bin):
         if not (xy == "!!" or xy.strip()):
             continue
         rel = path.rstrip("/")
-        full = repo / rel
+        full = work / rel
         if full.is_symlink() or full.is_file():
             paths.append(rel)
         elif full.is_dir():
             for dirpath, dirnames, filenames in os.walk(full):
-                dirnames[:] = [d for d in dirnames if d != ".git"]
                 for name in filenames:
                     paths.append(os.path.relpath(
-                        os.path.join(dirpath, name), repo))
+                        os.path.join(dirpath, name), work))
     return sorted(set(paths))
 
 
-def is_clean(repo: str | os.PathLike, git_bin: str = "git") -> bool:
+def is_clean(repo: Repo, git_bin: str = "git") -> bool:
     """The `no_changes` question, and deliberately WITHOUT ignored files: a
     turn that wrote only files its own .gitignore hides has still changed
     nothing this house will ever publish. (The SCAN uses the wider set.)"""
     return not porcelain(repo, ignored=False, git_bin=git_bin)
 
 
-def commit_all(repo: str | os.PathLike, message: str,
+def commit_all(repo: Repo, message: str,
                git_bin: str = "git") -> str | None:
     """`git add -A && git commit`. Returns the sha, or None if there was
     nothing to commit (git exits 1 on an empty commit, which is not an error
@@ -315,7 +492,7 @@ def commit_all(repo: str | os.PathLike, message: str,
     return git(repo, "rev-parse", "HEAD", git_bin=git_bin).stdout.strip()
 
 
-def commit_files(repo: str | os.PathLike, sha: str,
+def commit_files(repo: Repo, sha: str,
                  git_bin: str = "git") -> list[str]:
     """The paths a commit touched — `git show --name-only`, which is what §E
     names as the source of `detail.files`."""
@@ -377,7 +554,7 @@ def read_key(key_file: str | os.PathLike, var: str = "ANTHROPIC_API_KEY") -> str
     return value
 
 
-def scan_for_secret(repo: str | os.PathLike,
+def scan_for_secret(repo: Repo,
                     patterns: list[tuple[str, bytes]],
                     *, paths: list[str] | None = None,
                     git_bin: str = "git") -> dict | None:
@@ -408,7 +585,7 @@ def scan_for_secret(repo: str | os.PathLike,
     if paths is None:
         paths = dirty_paths(repo, ignored=True, git_bin=git_bin)
     for rel in paths:
-        full = Path(repo) / rel
+        full = repo.work_tree / rel
         try:
             if full.is_symlink():
                 found = hit(os.readlink(full).encode(), f"{rel} (symlink target)")
@@ -424,21 +601,22 @@ def scan_for_secret(repo: str | os.PathLike,
     return None
 
 
-def quarantine(repo: str | os.PathLike, paths: list[str],
+def quarantine(work_tree: str | os.PathLike, paths: list[str],
                dest: str | os.PathLike) -> list[str]:
-    """Move every named path OUT of the repo into `dest`, relative paths kept.
+    """Move every named path OUT of the work tree into `dest`, paths kept.
 
     The quarantine root is 0700 and is never mounted into any seat: the brief
     tells the next turn to read /work first, so leaving a poisoned file in
     place would feed the injection straight back in (Claudette #2293).
-    Returns the paths actually moved.
+    Returns the paths actually moved. It moves NAMES IT WAS GIVEN and
+    follows nothing: a symlink is renamed, never resolved.
     """
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
     os.chmod(dest, 0o700)
     moved = []
     for rel in paths:
-        src = Path(repo) / rel
+        src = Path(work_tree) / rel
         if not (src.exists() or src.is_symlink()):
             continue
         target = dest / rel
@@ -448,7 +626,75 @@ def quarantine(repo: str | os.PathLike, paths: list[str],
     return moved
 
 
-def reset_tree(repo: str | os.PathLike, git_bin: str = "git") -> None:
+# ------------------------------------------------------------ stray .git
+
+# Where a swept `.git` goes, under the turn's own quarantine directory. A
+# subdirectory of its own because a secret hit quarantines dirty PATHS into the
+# same root and the two are different findings.
+STRAY_GIT_DEST = "stray-git"
+STRAY_GIT_NAME = ".git"
+
+
+def find_stray_git(work_tree: str | os.PathLike) -> list[str]:
+    """Every entry named `.git` under the work tree, as relative paths.
+
+    THE MEASUREMENT THIS EXISTS FOR (git 2.47.3, 2026-09-13). In a split work
+    tree, a `.git` entry — real directory, symlink to a directory, or a
+    `gitdir:` pointer file, at the top level or nested — is listed by NONE of
+    `status --porcelain -uall --ignored=matching`, `add -A`, or `ls-files`, and
+    `clean` never removes one. A file beside it is listed normally. So a turn
+    that writes `.git/payload` writes the one place in the tree that the secret
+    scan, the commit, the reset and the preview all walk straight past.
+
+    Invisible is not harmless: it is a payload that survives every turn.
+    (It is also, with a `gitdir:` pointer, the one shape `add -A` reacts to at
+    all — it records the enclosing directory as a GITLINK, so a nested pointer
+    file puts a commit of somebody else's repository into this app's history.)
+
+    LSTAT, NEVER FOLLOW. A symlinked `.git` is collected by NAME and the walk
+    does not descend through it; a real `.git` directory is collected whole and
+    not walked into either — it is moved as one thing, and enumerating a tree
+    the turn wrote in order to move it piecewise is work with no reader."""
+    work_tree = Path(work_tree)
+    found: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(work_tree, followlinks=False):
+        for name in list(dirnames):
+            if name == STRAY_GIT_NAME:
+                dirnames.remove(name)          # collected whole, never entered
+                found.append(os.path.relpath(
+                    os.path.join(dirpath, name), work_tree))
+        for name in filenames:                 # a pointer file, or a symlink
+            if name == STRAY_GIT_NAME:
+                found.append(os.path.relpath(
+                    os.path.join(dirpath, name), work_tree))
+    return sorted(found)
+
+
+def sweep_stray_git(work_tree: str | os.PathLike,
+                    quarantine_dir: str | os.PathLike) -> list[str]:
+    """Move every stray `.git` out of the work tree. Returns what moved.
+
+    A CLASS, NOT A CASE. Nothing here reads the entry to decide whether this
+    particular one was dangerous — that is the shape-check reflex this spec
+    exists to end. The turn's repository is not in this tree, so no `.git`
+    here has a legitimate author, and each one is moved to the turn's
+    quarantine where a human can read it at leisure.
+
+    The turn is not halted for it: a vendored dependency that dragged a `.git`
+    in is a builder mistake, not an attack, and the two are indistinguishable
+    from here. The record names the paths (`stray_git`), which is what makes
+    it reviewable."""
+    paths = find_stray_git(work_tree)
+    if not paths:
+        return []
+    moved = quarantine(work_tree, paths, Path(quarantine_dir) / STRAY_GIT_DEST)
+    if moved:
+        _warn(f"{len(moved)} stray .git entr(ies) moved out of the work tree: "
+              + ", ".join(moved))
+    return moved
+
+
+def reset_tree(repo: Repo, git_bin: str = "git") -> None:
     """Back to HEAD, exactly. `checkout -- .` needs a HEAD to check out; a
     first turn that tripped the scan has none, and `clean -fd` alone is the
     whole reset in that case."""
@@ -464,7 +710,7 @@ def reset_tree(repo: str | os.PathLike, git_bin: str = "git") -> None:
 
 # ------------------------------------------------------------------- preview
 
-def preview_argv(repo: str | os.PathLike, dest: str | os.PathLike,
+def preview_argv(work_tree: str | os.PathLike, dest: str | os.PathLike,
                  rsync_bin: str = "rsync") -> list[str]:
     """The exact rsync argv, factored out so a test can assert it without
     needing rsync installed. `dest` is the FRESH sibling, never the live root.
@@ -481,8 +727,11 @@ def preview_argv(repo: str | os.PathLike, dest: str | os.PathLike,
                       it transfers — and because the destination is fresh,
                       that is every path. No chmod walk afterwards, so no
                       `os.chmod` on a name that might not be the thing.
-    `--exclude .git`  unanchored, so it drops the repo's history AND any nested
-                      .git a vendored copy dragged in.
+    `--exclude .git`  unanchored. The repository itself is no longer in this
+                      tree at all, and the stray sweep has already moved every
+                      `.git` entry out — this stays because a published tree
+                      must never carry one whatever else changes, and because a
+                      preview is the one artefact a stranger can fetch.
     `--exclude /.*`   anchored to the transfer root by the leading slash, so it
                       drops `.env`, `.gitignore`, `.claude` and friends at the
                       repo root — `.env` is the file a model writes a key into
@@ -495,7 +744,7 @@ def preview_argv(repo: str | os.PathLike, dest: str | os.PathLike,
     """
     return [rsync_bin, "-a", "--no-links", "--no-D", "--chmod=D0755,F0644",
             "--exclude", ".git", "--exclude", "/.*",
-            f"{str(repo).rstrip('/')}/", f"{str(dest).rstrip('/')}/"]
+            f"{str(work_tree).rstrip('/')}/", f"{str(dest).rstrip('/')}/"]
 
 
 def _remove(path: Path) -> None:
@@ -542,7 +791,7 @@ def preview_old(preview_dir: str | os.PathLike, turn: int) -> Path:
     return staging_root(preview_dir) / f"{preview_dir.name}.old.{int(turn)}"
 
 
-def copy_preview(repo: str | os.PathLike, preview_dir: str | os.PathLike,
+def copy_preview(work_tree: str | os.PathLike, preview_dir: str | os.PathLike,
                  turn: int, rsync_bin: str = "rsync") -> None:
     """Publish the committed tree to the preview root BY RENAME.
 
@@ -580,7 +829,7 @@ def copy_preview(repo: str | os.PathLike, preview_dir: str | os.PathLike,
     os.mkdir(sibling, 0o755)
     os.chmod(sibling, 0o755)             # our own fresh directory, umask-proof
 
-    argv = preview_argv(repo, sibling, rsync_bin=rsync_bin)
+    argv = preview_argv(work_tree, sibling, rsync_bin=rsync_bin)
     proc = subprocess.run(argv, capture_output=True, text=True)
     if proc.returncode != 0:
         shutil.rmtree(sibling, ignore_errors=True)
@@ -614,7 +863,8 @@ def copy_preview(repo: str | os.PathLike, preview_dir: str | os.PathLike,
 
 # ------------------------------------------------------------------- watcher
 
-def watch_for_scaffolded(repo: str | os.PathLike, marker_path: str | os.PathLike,
+def watch_for_scaffolded(work_tree: str | os.PathLike,
+                         marker_path: str | os.PathLike,
                          started_at: float, *, deadline: float | None = None,
                          interval: float = 0.5,
                          _clock=time.time) -> str | None:
@@ -624,20 +874,19 @@ def watch_for_scaffolded(repo: str | os.PathLike, marker_path: str | os.PathLike
     plink and must never watch (or own) anything under /srv/apps (Gable #2295,
     Claudette #2299). The broker reads the marker; it does not hold the watch.
 
-    "First change" is §A's definition and not the obvious one: the repo is
-    initialised BEFORE the container starts and turn 2 begins with a full tree,
-    so "a path exists" would fire at t=0 every turn (Claudette #2284). What
-    counts is a path OUTSIDE `.git/` whose mtime or ctime is at or after
-    `started_at`.
+    "First change" is §A's definition and not the obvious one: turn 2 begins
+    with a full tree, so "a path exists" would fire at t=0 every turn
+    (Claudette #2284). What counts is a path whose mtime or ctime is at or
+    after `started_at`.
 
     Returns the ISO timestamp written, or None if the deadline passed first.
     A poll, not inotify: 0.5s is invisible next to a model turn, and it needs
     no package in the image and no fd budget on a tree the turn is rewriting.
     """
-    repo = Path(repo)
+    work_tree = Path(work_tree)
     marker_path = Path(marker_path)
     while True:
-        if _changed_since(repo, started_at):
+        if _changed_since(work_tree, started_at):
             stamp = _now_iso()
             marker_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = marker_path.with_name(marker_path.name + ".tmp")
@@ -650,16 +899,21 @@ def watch_for_scaffolded(repo: str | os.PathLike, marker_path: str | os.PathLike
         time.sleep(interval)
 
 
-def _changed_since(repo: Path, started_at: float) -> bool:
-    """Any ENTRY under the repo, outside `.git/`, created or modified at or
-    after `started_at`. The repo root's own mtime does NOT count: `git init`
-    creates `.git/` in it moments before the watch starts and would fire the
-    marker at t=0 on turn 1 (measured at the keyboard's proving turn). A file
-    created directly in the root registers through its own timestamps, so
-    nothing is lost by ignoring the directory's."""
-    root = Path(repo)
+def _changed_since(work_tree: Path, started_at: float) -> bool:
+    """Any ENTRY under the work tree created or modified at or after
+    `started_at`. The root's own mtime does NOT count: a directory's mtime
+    moves when anything is created in it, and a file created directly in the
+    root registers through its own timestamps anyway, so nothing is lost.
+
+    `.git` USED TO BE SKIPPED HERE and no longer is. The reason for the skip
+    was `git init` touching `<work-tree>/.git` moments before the watch
+    started, which fired the marker at t=0 on turn 1 (measured at the
+    keyboard's proving turn). The init writes nothing into the work tree now —
+    the git dir is outside it — so the reason is gone, and what is left is that
+    a turn whose only write is `.git/x` has still written, and the room should
+    say so."""
+    root = Path(work_tree)
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d != ".git"]
         entries = [os.path.join(dirpath, d) for d in dirnames]
         entries += [os.path.join(dirpath, f) for f in filenames]
         for name in entries:
@@ -854,7 +1108,76 @@ def runner_report(text: str | None,
 
 # ------------------------------------------------------------------- harvest
 
-def harvest(repo: str | os.PathLike, exit_code: int,
+def _skeleton(exit_code: int, *, session: int, turn: int, app_id: str,
+              started_at: str, ended_at: str | None, model: str,
+              spool_stdout: str, spool_stderr: str) -> dict:
+    """Every key result.json ever has, with its "nothing happened" value.
+
+    ONE builder, because there are two writers: the harvest proper, and the
+    pre-flight refusal (`refuse`) for a turn that never started. A record with
+    a key missing and a record with the key set to null are two different
+    answers to a broker reading with .get(), and a second hand-rolled dict is
+    how they drift (Claudette #2336).
+    """
+    return {
+        "session": int(session),
+        "turn": int(turn),
+        "app_id": app_id,
+        "exit": int(exit_code),
+        "halted": None,
+        "no_changes": False,
+        "files": [],
+        "commit": None,
+        "quarantine": None,
+        # Every `.git` entry the turn left in the work tree, moved out before
+        # anything read the tree (D5). Always present, empty on the normal
+        # turn: "no strays" and "this build predates the sweep" are two
+        # different answers.
+        "stray_git": [],
+        "error": None,
+        "started_at": started_at,
+        "ended_at": ended_at or _now_iso(),
+        "model": model,
+        "runner": RUNNER,
+        "spool": {"stdout": spool_stdout, "stderr": spool_stderr},
+        # Set again inside _branches; present HERE so an error record has the
+        # same shape as a success record (Claudette #2336).
+        "spool_redacted": False,
+        "usage": None,
+        # The runner's last word (slice (ii), §C1). Always present, null when
+        # the runner said nothing — the broker reads these with .get() for the
+        # records written before this key existed, and reads a real answer
+        # from every record written after it.
+        "summary": None,
+        "flag": None,
+    }
+
+
+def refuse(result_dir: str | os.PathLike, reason: str, *, session: int,
+           turn: int, app_id: str, started_at: str, model: str = "",
+           spool_stdout: str = "", spool_stderr: str = "",
+           exit_code: int = 1) -> dict:
+    """The record for a turn that was REFUSED BEFORE IT STARTED.
+
+    The one caller is run-apps.sh, when `ensure-repo` raises — today only
+    `GitDirIncomplete`, a half-made host-only git dir that the keyboard has to
+    look at. No container ran, so there is nothing to commit, nothing to scan
+    and nothing to publish; what the house needs is the same record every other
+    ended turn leaves, saying `halted = "error"` and why.
+
+    A turn that ends without result.json is §E's synthesized halt on the
+    broker side, and it says "the unit died" — which is true and useless. This
+    says which directory to go and look at."""
+    payload = _skeleton(exit_code, session=session, turn=turn, app_id=app_id,
+                        started_at=started_at, ended_at=None, model=model,
+                        spool_stdout=spool_stdout, spool_stderr=spool_stderr)
+    payload["halted"] = "error"
+    payload["error"] = reason
+    _warn(f"REFUSED before the container: {reason}")
+    return _finish(result_dir, payload)
+
+
+def harvest(repo: Repo, exit_code: int,
             result_dir: str | os.PathLike, key_file: str | os.PathLike | None,
             preview_dir: str | os.PathLike, turn: int, *,
             session: int, app_id: str, started_at: str, ended_at: str | None = None,
@@ -872,35 +1195,10 @@ def harvest(repo: str | os.PathLike, exit_code: int,
     rename). The only thing that can still raise is writing result.json
     itself, and _cli_harvest makes that loud.
     """
-    ended_at = ended_at or _now_iso()
-    payload = {
-        "session": int(session),
-        "turn": int(turn),
-        "app_id": app_id,
-        "exit": int(exit_code),
-        "halted": None,
-        "no_changes": False,
-        "files": [],
-        "commit": None,
-        "quarantine": None,
-        "error": None,
-        "started_at": started_at,
-        "ended_at": ended_at,
-        "model": model,
-        "runner": RUNNER,
-        "spool": {"stdout": spool_stdout, "stderr": spool_stderr},
-        # Set again inside _branches; present HERE so an error record has the
-        # same shape as a success record (Claudette #2336).
-        "spool_redacted": False,
-        "usage": None,
-        # The runner's last word (slice (ii), §C1). Always present, null when
-        # the runner said nothing — the broker reads these with .get() for the
-        # records written before this key existed, and reads a real answer
-        # from every record written after it.
-        "summary": None,
-        "flag": None,
-    }
-
+    payload = _skeleton(
+        exit_code, session=session, turn=turn, app_id=app_id,
+        started_at=started_at, ended_at=ended_at, model=model,
+        spool_stdout=spool_stdout, spool_stderr=spool_stderr)
     halted_reason = None
     if exit_code != 0:
         if timed_out or exit_code in TIMEOUT_EXIT_CODES:
@@ -949,6 +1247,15 @@ def _branches(repo, payload, halted_reason, patterns, result_dir, key_file,
     payload["usage"], report_text = parse_result_claude_code(spool_stdout)
     payload["summary"], payload["flag"] = runner_report(report_text, patterns)
 
+    # BEFORE THE SCAN, and before anything else reads the tree (D5). A `.git`
+    # entry the turn wrote is invisible to every porcelain this module drives —
+    # status, add, ls-files, clean all walk past it — so it is the one place a
+    # payload could sit unscanned across turns. The sweep moves the entry out
+    # by lstat; what is left behind is an ordinary tree that the scan below
+    # sees whole. This never halts the turn: the paths are in the record.
+    quar = Path(quarantine_dir) if quarantine_dir else Path(result_dir) / "quarantine"
+    payload["stray_git"] = sweep_stray_git(repo.work_tree, quar)
+
     # The scan set is WIDER than "is the tracked tree dirty": --ignored=matching
     # includes files a self-written .gitignore would hide. An ignored-only
     # turn is `no_changes` to git and to the bar, but it is still scanned, and
@@ -960,11 +1267,11 @@ def _branches(repo, payload, halted_reason, patterns, result_dir, key_file,
     if found:
         # The headline is decided HERE, on the hit; a quarantine or reset
         # that then fails adds an `error` and does not downgrade it.
-        dest = Path(quarantine_dir) if quarantine_dir else Path(result_dir) / "quarantine"
+        dest = quar
         payload["halted"] = "secret"
         payload["quarantine"] = str(dest)
         payload["files"] = []
-        moved = quarantine(repo, scan_paths, dest)
+        moved = quarantine(repo.work_tree, scan_paths, dest)
         reset_tree(repo, git_bin=git_bin)
         _warn(f"SECRET in the turn's output ({found['encoding']} in "
               f"{found['where']}) — {len(moved)} path(s) quarantined at {dest}, "
@@ -996,7 +1303,7 @@ def _branches(repo, payload, halted_reason, patterns, result_dir, key_file,
     sha = commit_all(repo, f"turn {int(turn)}", git_bin=git_bin)
     payload["commit"] = sha
     payload["files"] = commit_files(repo, sha, git_bin=git_bin) if sha else []
-    copy_preview(repo, preview_dir, int(turn), rsync_bin=rsync_bin)
+    copy_preview(repo.work_tree, preview_dir, int(turn), rsync_bin=rsync_bin)
     return _finish(result_dir, payload)
 
 
@@ -1018,14 +1325,44 @@ def _cli_watch(argv: list[str]) -> int:
 
 
 def _cli_ensure_repo(argv: list[str]) -> int:
-    created = ensure_repo(argv[0])
+    """`ensure-repo <git-dir> <work-tree> [git-root]` — both trees, named.
+
+    The order is (metadata, content), the same order every git argv in this
+    module is written in. A GitDirIncomplete reaches the wrapper as exit 2 with
+    the reason on stderr; the wrapper turns that into the turn's record.
+    """
+    git_root = argv[2] if len(argv) > 2 else GIT_ROOT
+    try:
+        created = ensure_repo(repo_at(argv[0], argv[1]), git_root)
+    except GitDirIncomplete as exc:
+        _warn(str(exc))
+        return 2
     print("created" if created else "present")
+    return 0
+
+
+def _cli_refuse(argv: list[str]) -> int:
+    """`refuse <spec.json> <reason>` — the record for a turn that never ran.
+
+    It takes the SAME spec file the harvest takes, because the fields are the
+    same fields and a second argument list is a second thing to keep in step.
+    """
+    spec = json.loads(Path(argv[0]).read_text(encoding="utf-8"))
+    payload = refuse(
+        spec["result_dir"], argv[1],
+        session=int(spec["session"]), turn=int(spec["turn"]),
+        app_id=spec["app_id"], started_at=spec["started_at"],
+        model=spec.get("model", ""),
+        spool_stdout=spec.get("spool_stdout", ""),
+        spool_stderr=spec.get("spool_stderr", ""),
+        exit_code=int(spec.get("exit_code", 1)) or 1)
+    print(json.dumps(payload, sort_keys=True))
     return 0
 
 
 def _cli_harvest(argv: list[str]) -> int:
     """`harvest <json-file>` — every argument in one JSON object, because there
-    are thirteen of them and a positional bash call with thirteen slots is a
+    are fifteen of them and a positional bash call with fifteen slots is a
     defect waiting for its first reorder."""
     spec = json.loads(Path(argv[0]).read_text(encoding="utf-8"))
     try:
@@ -1046,7 +1383,8 @@ def _cli_harvest(argv: list[str]) -> int:
 
 def _harvest_from_spec(spec: dict) -> dict:
     return harvest(
-        spec["repo"], int(spec["exit_code"]), spec["result_dir"],
+        repo_at(spec["git_dir"], spec["repo"]),
+        int(spec["exit_code"]), spec["result_dir"],
         spec.get("key_file"), spec["preview_dir"], int(spec["turn"]),
         session=int(spec["session"]), app_id=spec["app_id"],
         started_at=spec["started_at"], ended_at=spec.get("ended_at"),
@@ -1061,10 +1399,12 @@ def _harvest_from_spec(spec: dict) -> dict:
 def main(argv: list[str]) -> int:
     if len(argv) < 2:
         sys.stderr.write(
-            "usage: apps_harvest.py watch <repo> <marker> <started-at-epoch> "
-            "[deadline-epoch]\n"
-            "       apps_harvest.py ensure-repo <repo>\n"
-            "       apps_harvest.py harvest <spec.json>\n")
+            "usage: apps_harvest.py watch <work-tree> <marker> "
+            "<started-at-epoch> [deadline-epoch]\n"
+            "       apps_harvest.py ensure-repo <git-dir> <work-tree> "
+            "[git-root]\n"
+            "       apps_harvest.py harvest <spec.json>\n"
+            "       apps_harvest.py refuse <spec.json> <reason>\n")
         return 64
     mode, rest = argv[1], argv[2:]
     if mode == "watch":
@@ -1073,6 +1413,8 @@ def main(argv: list[str]) -> int:
         return _cli_ensure_repo(rest)
     if mode == "harvest":
         return _cli_harvest(rest)
+    if mode == "refuse":
+        return _cli_refuse(rest)
     sys.stderr.write(f"apps_harvest.py: unknown mode {mode!r}\n")
     return 64
 

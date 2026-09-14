@@ -12,12 +12,13 @@
 # only reader of /etc/disjorn-apps/launch.toml. This script reads no config.
 #
 # WHAT IT DOES, in order (spec §C/§E):
-#   1. make the result directory and the app repo; `git init` the repo if this
-#      is its first turn (as res-appsbuilding — the broker runs as plink and
-#      must never write under /srv/apps, Gable #2295);
+#   1. make the result directory, the app WORK TREE and the app's host-only
+#      GIT DIR; `git init` the split repo if this is its first turn (as
+#      res-appsbuilding — the broker runs as plink and must never write under
+#      /srv/apps, Gable #2295);
 #   2. start the in-unit WATCHER, which writes the `scaffolded` marker into the
-#      result directory on the first change under /work outside .git/ after
-#      now. The broker READS that marker; it never holds a watch of its own;
+#      result directory on the first change under /work after now. The broker
+#      READS that marker; it never holds a watch of its own;
 #   3. `podman run` the seat: /work rw, the image's own /shelf ro, /config ro
 #      nothing from the credential dir mounted, a tmpfs HOME, the prompt on stdin, the runner's
 #      stream spooled to 0600 files;
@@ -30,6 +31,22 @@
 # THE SEAT HOLDS NO HOUSE CREDENTIAL (spec §A). There is no broker socket, no
 # gatehouse, no house memory, no spine, no platform clone in any mount below.
 # Its only inbound is the prompt on stdin; its only outbound is /work.
+#
+# THE WALL (SPECS/2026-09-13-apps-gitdir-outside-the-mount.md, D7)
+# ----------------------------------------------------------------
+# THE TURN'S WRITABLE SURFACE IS THE WORK TREE AND NOTHING ELSE. /work is
+# $REPO_ROOT/<app-id> and it is the only persistent rw mount below. The app's
+# REPOSITORY lives at $GIT_ROOT/<app-id>.git, which is mounted into no
+# container, ever — not ro, not under another name, not "just for this one
+# thing". Git metadata is host-only BY LOCATION.
+#
+# Until 2026-09-13 the repository was at /work/.git, so the turn wrote the
+# config that the host's own `git add -A` then read, and `core.fsmonitor` in
+# it was host code execution as res-appsbuilding (Gable #2546/#2557).
+# A SHAPE CHECK ON A PATH THE TURN CAN WRITE IS NOT A BOUNDARY AND IS NEVER
+# WRITTEN DOWN AS ONE (the gate.py #2561 discipline). If a future flag here
+# ever mounts anything under $GIT_ROOT, this file's own test suite fails —
+# and that test is the statement, not this paragraph.
 set -euo pipefail
 
 _tag="$(basename "$0" .sh)"
@@ -55,6 +72,8 @@ PONYTAIL_MODE="${APPS_PONYTAIL_MODE:-full}"
 RUNNER_COMMAND="${APPS_RUNNER_COMMAND:-[\"claude\",\"-p\",\"--output-format\",\"stream-json\",\"--verbose\"]}"
 TURN_MAX_SEC="${APPS_TURN_MAX_SEC:-1800}"
 REPO_ROOT="${APPS_REPO_ROOT:-/srv/apps}"
+# The host-only git root (D1). NEVER MOUNTED, by this script or any other.
+GIT_ROOT="${APPS_GIT_ROOT:-/srv/apps-git}"
 TURNS_ROOT="${APPS_TURNS_ROOT:-/srv/apps-turns}"
 WWW_ROOT="${APPS_WWW_ROOT:-/srv/apps-www}"
 QUARANTINE_ROOT="${APPS_QUARANTINE_ROOT:-/srv/apps-quarantine}"
@@ -63,7 +82,9 @@ HARVEST="${APPS_HARVEST:-/usr/local/lib/disjorn/apps_harvest.py}"
 NETWORK="${APPS_NETWORK:-pasta}"
 PODMAN="${APPS_PODMAN:-podman}"
 
-REPO="$REPO_ROOT/$APP_ID"
+# The two trees, always named together and neither derived from the other.
+REPO="$REPO_ROOT/$APP_ID"                 # the WORK TREE; this is /work
+GIT_DIR_PATH="$GIT_ROOT/$APP_ID.git"      # the REPOSITORY; mounted nowhere
 RESULT_DIR="$TURNS_ROOT/$SESSION/$TURN"
 PREVIEW_DIR="$WWW_ROOT/$APP_ID/preview"
 QUARANTINE_DIR="$QUARANTINE_ROOT/$APP_ID/$TURN"
@@ -107,14 +128,90 @@ PROMPT_MAX_BYTES="${APPS_PROMPT_MAX_BYTES:-65536}"
 [ -s "$PROMPT" ] || _die "empty prompt on stdin"
 STARTED_AT_EPOCH="$(date +%s)"
 STARTED_AT="$(date -u -Is)"
+# Named here rather than at step 3: the harvest's argument file carries both
+# paths and is written on the REFUSAL path too, before there is anything to
+# spool. Truncating and chmod'ing them is still step 3's job.
+STDOUT_LOG="$RESULT_DIR/stdout.log"
+STDERR_LOG="$RESULT_DIR/stderr.log"
 
-# ── 1. the app repo ──────────────────────────────────────────────────────────
-# 0750: res-appsbuilding's own, and nothing else on the box reads an app's
-# source. The PREVIEW root is the world-readable copy, and it is a copy for
-# exactly this reason.
+# ── the harvest's argument file ──────────────────────────────────────────────
+# Fifteen arguments in one JSON file rather than fifteen positional slots: a
+# positional call with fifteen slots is a defect waiting for its first reorder.
+# The file lives in the result directory (0600 — it names the credential FILE,
+# though never its value) and is removed on the way out.
+#
+# ONE WRITER, TWO READERS: `harvest` (the turn ran and ended) and `refuse` (the
+# turn never started, because ensure-repo found a half-made git dir). The fields
+# are the same fields, so they are written in one place; two argument builders
+# for one record is how the two records drift.
+#
+#     _write_harvest_spec <exit-code> <timed-out>
+#
+# Every value crosses into python as ENVIRONMENT, never interpolated into the
+# heredoc's source: a path with a quote in it would otherwise be a code
+# injection into this script's own helper, and "the charsets make that
+# impossible" is an argument, not a mechanism.
+_spec="$RESULT_DIR/.harvest-input.json"
+_write_harvest_spec() {
+  ( umask 0077
+    H_REPO="$REPO" H_GITDIR="$GIT_DIR_PATH" H_RC="$1" H_RESULT="$RESULT_DIR" \
+    H_KEY="$ENV_FILE" H_PREVIEW="$PREVIEW_DIR" H_TURN="$TURN" \
+    H_SESSION="$SESSION" H_APP="$APP_ID" H_STARTED="$STARTED_AT" \
+    H_MODEL="$MODEL" H_QUAR="$QUARANTINE_DIR" H_OUT="$STDOUT_LOG" \
+    H_ERR="$STDERR_LOG" H_TIMEDOUT="$2" \
+    python3 - "$_spec" <<'HARVEST_SPEC_EOF'
+import json, os, sys
+e = os.environ
+json.dump({
+    "repo": e["H_REPO"],
+    "git_dir": e["H_GITDIR"],
+    "exit_code": int(e["H_RC"]),
+    "result_dir": e["H_RESULT"],
+    "key_file": e["H_KEY"],
+    "preview_dir": e["H_PREVIEW"],
+    "turn": int(e["H_TURN"]),
+    "session": int(e["H_SESSION"]),
+    "app_id": e["H_APP"],
+    "started_at": e["H_STARTED"],
+    "model": e["H_MODEL"],
+    "quarantine_dir": e["H_QUAR"],
+    "spool_stdout": e["H_OUT"],
+    "spool_stderr": e["H_ERR"],
+    "timed_out": e["H_TIMEDOUT"] == "1",
+}, open(sys.argv[1], "w"))
+HARVEST_SPEC_EOF
+  )
+}
+
+# ── 1. the app's two trees ───────────────────────────────────────────────────
+# 0750 on the work tree: res-appsbuilding's own, and nothing else on the box
+# reads an app's source. The PREVIEW root is the world-readable copy, and it is
+# a copy for exactly this reason.
+#
+# The GIT DIR is created by ensure-repo, under $GIT_ROOT, 0700 — outside every
+# mount below. This script does NOT mkdir it by name first: "already a repo" is
+# ensure-repo's question and it answers it on $GIT_DIR_PATH/HEAD, which is a
+# fact about the host-only tree.
 mkdir -p "$REPO"
 chmod 0750 "$REPO"
-python3 "$HARVEST" ensure-repo "$REPO" >/dev/null || _die "cannot init $REPO"
+# A REFUSAL HERE ENDS THE TURN WITH A RECORD, not with silence. ensure-repo
+# exits 2 when $GIT_DIR_PATH exists and is not a repository this house made —
+# an interrupted init or an interrupted migration, which is an incident for the
+# keyboard and never a reason to re-init over a directory that may hold the
+# app's history. No container starts, nothing under either tree is written or
+# deleted, and the broker reads the reason out of result.json instead of
+# synthesizing "the unit died" (§E).
+if ! _ensure_err="$(python3 "$HARVEST" ensure-repo \
+        "$GIT_DIR_PATH" "$REPO" "$GIT_ROOT" 2>&1 >/dev/null)"; then
+  _reason="$(printf '%s' "$_ensure_err" | tail -n1)"
+  _reason="${_reason#apps-harvest: }"
+  [ -n "$_reason" ] || _reason="ensure-repo failed and said nothing"
+  _write_harvest_spec 1 0
+  python3 "$HARVEST" refuse "$_spec" "$_reason" >/dev/null \
+    || _say "could not even write the refusal record — the broker must synthesize"
+  rm -f "$_spec"
+  _die "$_reason"
+fi
 
 # ── 2. the in-unit watcher ───────────────────────────────────────────────────
 # `scaffolded` is derived HOST-SIDE from the filesystem, never from runner
@@ -127,8 +224,6 @@ python3 "$HARVEST" watch "$REPO" "$RESULT_DIR/scaffolded" \
 _watcher_pid=$!
 
 # ── 3. the container ─────────────────────────────────────────────────────────
-STDOUT_LOG="$RESULT_DIR/stdout.log"
-STDERR_LOG="$RESULT_DIR/stderr.log"
 : > "$STDOUT_LOG"; chmod 0600 "$STDOUT_LOG"
 : > "$STDERR_LOG"; chmod 0600 "$STDERR_LOG"
 
@@ -280,41 +375,7 @@ fi
 _say "runner exit $_podman_rc (timed_out=$_timed_out)"
 
 # ── 4. the harvest ───────────────────────────────────────────────────────────
-# Thirteen arguments in one JSON file rather than thirteen positional slots: a
-# positional call with thirteen slots is a defect waiting for its first
-# reorder. The file lives in the result directory (0600 — it names the
-# credential FILE, though never its value) and is removed on the way out.
-_spec="$RESULT_DIR/.harvest-input.json"
-umask 0077
-# Every value crosses into python as ENVIRONMENT, never interpolated into the
-# heredoc's source: a path with a quote in it would otherwise be a code
-# injection into this script's own helper, and "the charsets make that
-# impossible" is an argument, not a mechanism.
-H_REPO="$REPO" H_RC="$_podman_rc" H_RESULT="$RESULT_DIR" H_KEY="$ENV_FILE" \
-H_PREVIEW="$PREVIEW_DIR" H_TURN="$TURN" H_SESSION="$SESSION" H_APP="$APP_ID" \
-H_STARTED="$STARTED_AT" H_MODEL="$MODEL" H_QUAR="$QUARANTINE_DIR" \
-H_OUT="$STDOUT_LOG" H_ERR="$STDERR_LOG" H_TIMEDOUT="$_timed_out" \
-python3 - "$_spec" <<'PYEOF'
-import json, os, sys
-e = os.environ
-json.dump({
-    "repo": e["H_REPO"],
-    "exit_code": int(e["H_RC"]),
-    "result_dir": e["H_RESULT"],
-    "key_file": e["H_KEY"],
-    "preview_dir": e["H_PREVIEW"],
-    "turn": int(e["H_TURN"]),
-    "session": int(e["H_SESSION"]),
-    "app_id": e["H_APP"],
-    "started_at": e["H_STARTED"],
-    "model": e["H_MODEL"],
-    "quarantine_dir": e["H_QUAR"],
-    "spool_stdout": e["H_OUT"],
-    "spool_stderr": e["H_ERR"],
-    "timed_out": e["H_TIMEDOUT"] == "1",
-}, open(sys.argv[1], "w"))
-PYEOF
-umask 0022
+_write_harvest_spec "$_podman_rc" "$_timed_out"
 
 if python3 "$HARVEST" harvest "$_spec"; then
   rm -f "$_spec"
