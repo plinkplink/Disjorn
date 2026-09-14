@@ -2088,6 +2088,35 @@ def test_the_migration_refuses_while_a_turn_is_running(premigration, tmp_path):
 
 
 @pytest.mark.skipif(not HAVE_GIT, reason="git is not installed")
+def test_the_serving_gate_is_not_a_turn_and_does_not_block_the_migration(premigration, tmp_path):
+    """Found at the deploy, 2026-09-14. `disjorn-apps-gate.service` matches the
+    refusal's glob and is active every minute of every day — it is the process
+    behind the public origin, it reads /srv/apps-www and it holds no repository
+    open. Counted as a turn, this script refuses forever on the real box while
+    printing "migrate when the seat is idle" about a unit that is never idle by
+    design. A turn unit beside it still refuses: the exclusion is one name, not
+    a relaxation."""
+    gate = tmp_path / "systemctl-gate"
+    gate.write_text("#!/bin/sh\necho 'disjorn-apps-gate.service loaded active "
+                    "running Disjorn apps serving gate'\n", encoding="utf-8")
+    gate.chmod(0o755)
+    proc = run_migrate(premigration, systemctl=gate)
+    assert proc.returncode == 0, proc.stderr
+    assert (premigration["git"] / "aaaaaaaaaaaa.git").is_dir()
+
+    both = tmp_path / "systemctl-gate-and-turn"
+    both.write_text("#!/bin/sh\necho 'disjorn-apps-gate.service loaded active "
+                    "running Disjorn apps serving gate'\n"
+                    "echo 'disjorn-apps-12-3.service loaded active running x'\n",
+                    encoding="utf-8")
+    both.chmod(0o755)
+    proc = run_migrate(premigration, systemctl=both)
+    assert proc.returncode == 1 and "ACTIVE" in proc.stderr
+    assert "disjorn-apps-12-3" in proc.stderr
+    assert "disjorn-apps-gate" not in proc.stderr
+
+
+@pytest.mark.skipif(not HAVE_GIT, reason="git is not installed")
 def test_the_migration_audit_only_moves_nothing(premigration):
     proc = run_migrate(premigration, "--audit")
     assert proc.returncode == 0

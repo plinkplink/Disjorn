@@ -57,6 +57,15 @@ REPO_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 HARVEST="${HARVEST:-/usr/local/lib/disjorn/apps_harvest.py}"
 [ -f "$HARVEST" ] || HARVEST="$REPO_DIR/harness/cc/apps/apps_harvest.py"
 UNIT_GLOB='disjorn-apps-*.service'
+# The SERVING GATE matches that glob and is active every minute of every day:
+# it is the second ASGI process behind the public origin, it reads
+# /srv/apps-www and it holds no repository open. Left in the refusal below it
+# would make this script permanently unrunnable on the real box while printing
+# "migrate when the seat is idle" about a unit that is never idle by design.
+# Found at the deploy, 2026-09-14. TURN and OP units are the ones that matter:
+# `disjorn-apps-<session>-<turn>` and `disjorn-apps-<mode>-<ids>`, both
+# transient, both holding a git dir open for the length of their work.
+UNIT_NEVER_A_TURN='disjorn-apps-gate.service'
 
 # The four keys this house's own repositories carry, plus the two identity
 # tables. ANYTHING ELSE in a config is printed verbatim by the audit, because
@@ -94,7 +103,8 @@ own() {                      # own <mode> <path>
 # A turn's harvest holds the repository open for the length of a commit and an
 # rsync. Moving it mid-turn costs that turn its record.
 active="$("$SYSTEMCTL" list-units --no-legend --no-pager --plain --state=active \
-          "$UNIT_GLOB" 2>/dev/null | awk '{print $1}' | grep . || true)"
+          "$UNIT_GLOB" 2>/dev/null | awk '{print $1}' \
+          | grep -vxF "$UNIT_NEVER_A_TURN" | grep . || true)"
 if [ -n "$active" ]; then
   die "apps units are ACTIVE — migrate when the seat is idle:
 $active"
