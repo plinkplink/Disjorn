@@ -3,6 +3,7 @@
    Errors surface as ApiError with the server's `detail` string. */
 
 import type {
+  AdminUserRow,
   App,
   AppCardData,
   AppRoot,
@@ -164,6 +165,26 @@ export function changePassword(
 ): Promise<{ ok: boolean }> {
   return request<{ ok: boolean }>("POST", "/auth/password", {
     current_password: currentPassword,
+    new_password: newPassword,
+  });
+}
+
+/** ADMIN: every human account, for the reset picker in Settings. */
+export function listUsers(): Promise<AdminUserRow[]> {
+  return request<AdminUserRow[]>("GET", "/auth/users");
+}
+
+/**
+ * ADMIN: set another account's password. The server marks the account as
+ * owing a rotation and ends all of its sessions, so what the admin knows is
+ * good for exactly one login. There is no self-service "forgot password"
+ * route on purpose: the house has no email, so an admin is the identity check.
+ */
+export function adminResetPassword(
+  userId: number,
+  newPassword: string,
+): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>("POST", `/auth/users/${userId}/password`, {
     new_password: newPassword,
   });
 }

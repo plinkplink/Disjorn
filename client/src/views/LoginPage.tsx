@@ -9,6 +9,7 @@ export function LoginPage() {
   const loggingIn = useSession((s) => s.loggingIn);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [showHelp, setShowHelp] = useState(false);
 
   const onSubmit = (event: FormEvent) => {
     event.preventDefault();
@@ -45,6 +46,22 @@ export function LoginPage() {
         <button className="btn btn-primary" type="submit" disabled={loggingIn}>
           {loggingIn ? "Logging in…" : "Log in"}
         </button>
+        <button
+          type="button"
+          className="link-btn login-help-toggle"
+          aria-expanded={showHelp}
+          aria-controls="login-help"
+          onClick={() => setShowHelp((v) => !v)}
+        >
+          Forgot your password?
+        </button>
+        {showHelp && (
+          <p className="field-hint" id="login-help">
+            Disjorn does not send email, so there is no reset link. Ask an
+            admin to reset your password. They will hand you a temporary one,
+            and the next time you log in you will be asked to choose your own.
+          </p>
+        )}
       </form>
     </div>
   );

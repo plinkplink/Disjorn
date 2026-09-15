@@ -63,6 +63,22 @@
   border-color: var(--accent);
 }
 
+/* <select> gets the same skin as <input> — the reset-password account picker
+   is the first one in a .field. */
+.field select {
+  background: var(--bg-0);
+  color: inherit;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-m);
+  padding: var(--space-2) var(--space-3);
+  outline: none;
+  font: inherit;
+}
+
+.field select:focus {
+  border-color: var(--accent);
+}
+
 .btn {
   border: none;
   border-radius: var(--radius-m);
@@ -106,6 +122,24 @@
   margin: 0;
   color: var(--danger);
   font-size: var(--text-sm);
+}
+
+/* A button that reads as a link — the login page's "Forgot your password?"
+   disclosure. A button, not an <a>, because it toggles text, not a route. */
+.link-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.login-help-toggle {
+  align-self: flex-start;
 }
 
 /* Quiet guidance under a field — the password rule, and what changing it
@@ -2404,6 +2438,18 @@
 .settings-logout:hover {
   background: var(--danger);
   color: var(--text-on-accent);
+}
+
+.settings-reset-btn {
+  align-self: flex-start;
+}
+
+.settings-reset-done code {
+  user-select: all;
+  padding: 0 var(--space-1);
+  background: var(--bg-0);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-s);
 }
 
 /* ================= per-channel membership (private channels) ================= */

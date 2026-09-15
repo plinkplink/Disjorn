@@ -1,6 +1,7 @@
-/* Settings (WP11) — hash #/settings. Three sections:
+/* Settings (WP11) — hash #/settings. Sections:
      Profile        display-name edit + avatar upload with local preview
      Notifications  per-device Web Push enable/disable + notify_all_main pref
+     Reset password admin only: hand another account a temporary password
      Account        username + log out
    Push permission is requested HERE and only here (spec §10). */
 
@@ -8,7 +9,10 @@ import { useEffect, useRef, useState } from "react";
 
 import {
   ApiError,
+  PASSWORD_MIN_LENGTH,
+  adminResetPassword,
   getNotifyPrefs,
+  listUsers,
   putNotifyPrefs,
   updateMe,
   uploadAvatar,
@@ -16,6 +20,7 @@ import {
 import { isIos, isStandalone, useInstall } from "../install";
 import { usePush } from "../push";
 import { useSession } from "../stores/session";
+import type { AdminUserRow } from "../types";
 import { socket } from "../ws";
 
 /* ---------------------------------------------------------------- profile */
@@ -309,6 +314,170 @@ function InstallSection() {
   );
 }
 
+/* ------------------------------------------------------- reset password */
+
+/** A handover password nobody has to invent: 16 url-safe chars from the CSPRNG. */
+function randomHandover(): string {
+  const alphabet =
+    "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789";
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => alphabet[b % alphabet.length]).join("");
+}
+
+/**
+ * The admin half of "I forgot my password". The server route is narrow on
+ * purpose (see admin_reset_password in routers/auth.py): it sets a password
+ * the account must replace on first login and ends every session it had.
+ * This form is the only client surface for it, and it renders for admins only.
+ */
+function ResetPasswordSection() {
+  const me = useSession((s) => s.user);
+  const [users, setUsers] = useState<AdminUserRow[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [targetId, setTargetId] = useState<number | null>(null);
+  const [handover, setHandover] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState<{ username: string; password: string } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    listUsers()
+      .then((rows) => {
+        if (!cancelled) setUsers(rows);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setLoadError(err instanceof ApiError ? err.detail : "Could not load accounts");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (me === null || !me.is_admin) return null;
+
+  // You reset your own password on the change-password screen; the server
+  // answers 400 to a self-reset, so the option is not offered at all.
+  const others = (users ?? []).filter((u) => u.id !== me.id);
+  const target = others.find((u) => u.id === targetId) ?? null;
+  const tooShort = handover.length > 0 && handover.length < PASSWORD_MIN_LENGTH;
+  const ready = target !== null && handover.length >= PASSWORD_MIN_LENGTH && !busy;
+
+  const submit = async () => {
+    if (!ready || target === null) return;
+    setBusy(true);
+    setError(null);
+    setDone(null);
+    try {
+      await adminResetPassword(target.id, handover);
+      setDone({ username: target.username, password: handover });
+      setUsers((rows) =>
+        rows === null
+          ? rows
+          : rows.map((u) => (u.id === target.id ? { ...u, must_change_password: true } : u)),
+      );
+      setHandover("");
+      setTargetId(null);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.detail : "Reset failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="settings-section">
+      <h2>Reset a password</h2>
+      <p className="settings-note">
+        For someone who is locked out. They log in once with the password you
+        give them, then must choose their own before anything else works. All
+        of their devices are signed out.
+      </p>
+
+      {loadError !== null && <p className="form-error">{loadError}</p>}
+
+      <div className="field">
+        <label htmlFor="reset-user">Account</label>
+        <select
+          id="reset-user"
+          value={targetId ?? ""}
+          disabled={users === null || busy}
+          onChange={(e) => {
+            setTargetId(e.target.value === "" ? null : Number(e.target.value));
+            setDone(null);
+            setError(null);
+          }}
+        >
+          <option value="">
+            {users === null ? "Loading…" : "Choose an account…"}
+          </option>
+          {others.map((u) => (
+            <option key={u.id} value={u.id}>
+              {u.display_name} ({u.username})
+              {u.must_change_password ? " — reset pending" : ""}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <div className="field">
+        <label htmlFor="reset-password">Temporary password</label>
+        <div className="settings-inline">
+          <input
+            id="reset-password"
+            type="text"
+            value={handover}
+            onChange={(e) => setHandover(e.target.value)}
+            autoComplete="off"
+            spellCheck={false}
+            disabled={busy}
+            aria-describedby="reset-password-hint"
+          />
+          <button
+            type="button"
+            className="btn"
+            disabled={busy}
+            onClick={() => setHandover(randomHandover())}
+          >
+            Generate
+          </button>
+        </div>
+        <p className="field-hint" id="reset-password-hint">
+          At least {PASSWORD_MIN_LENGTH} characters. Shown in the clear so you
+          can pass it on; it stops working the moment they replace it.
+        </p>
+      </div>
+
+      {tooShort && (
+        <p className="form-error">
+          That is {handover.length} character{handover.length === 1 ? "" : "s"} — it
+          needs {PASSWORD_MIN_LENGTH}.
+        </p>
+      )}
+      {error !== null && <p className="form-error">{error}</p>}
+
+      <button
+        type="button"
+        className="btn btn-danger settings-reset-btn"
+        disabled={!ready}
+        onClick={() => void submit()}
+      >
+        {busy ? "Resetting…" : target === null ? "Reset password" : `Reset ${target.username}'s password`}
+      </button>
+
+      {done !== null && (
+        <p className="settings-note settings-reset-done" role="status">
+          Done. Tell <strong>{done.username}</strong> to log in with{" "}
+          <code>{done.password}</code> and pick a new password when asked.
+        </p>
+      )}
+    </section>
+  );
+}
+
 /* ------------------------------------------------------------------ view */
 
 export function SettingsView({ onClose }: { onClose: () => void }) {
@@ -327,6 +496,7 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
         <ProfileSection />
         <NotificationsSection />
         <InstallSection />
+        <ResetPasswordSection />
         <section className="settings-section">
           <h2>Account</h2>
           {user !== null && (
