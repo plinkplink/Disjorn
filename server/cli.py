@@ -3,6 +3,7 @@
 
 Usage:
     .venv/bin/python cli.py create-user <username> [--display-name NAME] [--admin] [--password-stdin]
+    .venv/bin/python cli.py reset-password <username> [--password-stdin]
     .venv/bin/python cli.py create-bot <name> [--chibi-pack PACK]
     .venv/bin/python cli.py gen-vapid
 
@@ -12,6 +13,8 @@ needed. `create-user` prompts for a password via getpass unless
 password you type is a handover, not the account's password: the new user is
 created with `must_change_password` set, so it is good for logging in and
 calling POST /auth/password and nothing else (see routers/auth.py).
+`reset-password` is the keyboard's copy of POST /auth/users/{id}/password:
+same handover semantics, plus it ends every session the account had.
 `create-bot` prints the raw API key exactly once; only its SHA-256 hash is
 stored; `--chibi-pack` sets `bots.chibi_pack` at creation (a bare pack name
 under DATA_DIR/assets/chibi_packs/ or an absolute path to a pack directory —
@@ -72,6 +75,38 @@ async def cmd_create_user(args: argparse.Namespace) -> None:
         _fail(f"user '{args.username}' already exists")
     admin_note = " [admin]" if args.admin else ""
     print(f"Created user '{args.username}' (id={cur.lastrowid}){admin_note}")
+    print(
+        "This password is a handover only: the account can log in with it, but every "
+        "route except GET /me and POST /auth/password answers 403 until the user sets "
+        "their own via POST /auth/password."
+    )
+
+
+async def cmd_reset_password(args: argparse.Namespace) -> None:
+    """Lockout recovery from the keyboard. Mirrors admin_reset_password in
+    routers/auth.py exactly: new argon2 hash, rotation owed, all sessions gone."""
+    password = _read_password(args)
+    await db.connect()
+    await db.run_migrations()
+    row = await db.fetch_one(
+        "SELECT id FROM users WHERE username = ?", (args.username,)
+    )
+    if row is None:
+        _fail(f"no user '{args.username}'")
+    new_hash = hash_password(password)
+    async with db.transaction():
+        await db.execute(
+            "UPDATE users SET password_hash = ?, must_change_password = 1 WHERE id = ?",
+            (new_hash, row["id"]),
+            commit=False,
+        )
+        cur = await db.execute(
+            "DELETE FROM sessions WHERE user_id = ?", (row["id"],), commit=False
+        )
+    print(
+        f"Reset password for '{args.username}' (id={row['id']}); "
+        f"ended {cur.rowcount} session(s)."
+    )
     print(
         "This password is a handover only: the account can log in with it, but every "
         "route except GET /me and POST /auth/password answers 403 until the user sets "
@@ -159,6 +194,16 @@ def main(argv: list[str] | None = None) -> None:
         help="read the password from the first line of stdin instead of prompting",
     )
 
+    p_reset = sub.add_parser(
+        "reset-password", help="set a handover password on an existing account"
+    )
+    p_reset.add_argument("username")
+    p_reset.add_argument(
+        "--password-stdin",
+        action="store_true",
+        help="read the password from the first line of stdin instead of prompting",
+    )
+
     p_bot = sub.add_parser("create-bot", help="create a bot (prints API key once)")
     p_bot.add_argument("name")
     p_bot.add_argument(
@@ -177,6 +222,8 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.command == "create-user":
         asyncio.run(_run_db_command(cmd_create_user(args)))
+    elif args.command == "reset-password":
+        asyncio.run(_run_db_command(cmd_reset_password(args)))
     elif args.command == "create-bot":
         asyncio.run(_run_db_command(cmd_create_bot(args)))
     elif args.command == "gen-vapid":

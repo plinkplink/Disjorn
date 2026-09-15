@@ -34,6 +34,15 @@ export interface User {
   created_at: string;
 }
 
+/** GET /auth/users (admin only): enough to pick an account to reset. */
+export interface AdminUserRow {
+  id: number;
+  username: string;
+  display_name: string;
+  is_admin: boolean;
+  must_change_password: boolean;
+}
+
 export interface MessageAuthor {
   type: MemberType;
   id: number;

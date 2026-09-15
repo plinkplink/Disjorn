@@ -411,6 +411,40 @@ async def change_password(
     return {"ok": True}
 
 
+class AdminUserRow(BaseModel):
+    """What an admin needs in order to pick an account to reset: identity plus
+    whether it already owes a rotation. No hash, no sessions, nothing else."""
+
+    id: int
+    username: str
+    display_name: str
+    is_admin: bool
+    must_change_password: bool
+
+
+@router.get("/auth/users")
+async def admin_list_users(
+    admin: Annotated[User, Depends(get_admin_user)],
+) -> list[AdminUserRow]:
+    """ADMIN: every human account, in id order. Exists so the Settings reset
+    form can name a user without the admin having to know their numeric id.
+    Bots live in their own table and are not accounts anyone logs in to."""
+    rows = await db.fetch_all(
+        "SELECT id, username, display_name, is_admin, must_change_password "
+        "FROM users ORDER BY id"
+    )
+    return [
+        AdminUserRow(
+            id=r["id"],
+            username=r["username"],
+            display_name=r["display_name"],
+            is_admin=bool(r["is_admin"]),
+            must_change_password=bool(r["must_change_password"]),
+        )
+        for r in rows
+    ]
+
+
 class AdminPasswordReset(BaseModel):
     new_password: str = Field(min_length=PASSWORD_MIN_LENGTH)
 
