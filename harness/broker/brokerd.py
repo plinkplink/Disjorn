@@ -1799,7 +1799,8 @@ class Broker:
         name = self.uid_map.get(uid)
         if name != SERVER_PEER_IDENTITY or pid is None:
             return name
-        if self.server_unit in self._read_peer_cgroup(pid):
+        if any(line.rstrip().endswith("/" + self.server_unit)
+               for line in self._read_peer_cgroup(pid).splitlines()):
             return SERVER_IDENTITY
         return name
 
