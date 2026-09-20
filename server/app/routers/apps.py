@@ -1542,7 +1542,7 @@ async def publish_stage(
 
     await _publish_stage_frame(session, body.stage, detail, created_at)
 
-    if body.stage == "files_written" or halted is not None:
+    if (body.stage == "files_written" or halted is not None) and session.get("mode", "app") == "app":
         try:
             await deliver_message(
                 session["channel_id"], "bot", await _system_bot_id(),

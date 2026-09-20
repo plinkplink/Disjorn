@@ -524,6 +524,7 @@ async def list_backlog(
 
 BUILD_NOT_A_PERSON = "Only a person can start a build."
 
+BUILD_NOT_IN_APP_ROOM = "This room builds its app; /build is for the platform. Type it in another channel."
 BUILD_USAGE = (
     "Usage: `/build <what to change>` — e.g. "
     "`/build fix the typo on the login page`."
@@ -539,6 +540,8 @@ async def _build(ctx: Ctx) -> str:
         return BUILD_NOT_A_PERSON
     if not ctx.args.strip():
         return BUILD_USAGE
+    if ctx.channel_type == "app_build":
+        return BUILD_NOT_IN_APP_ROOM
 
     from . import apps
 

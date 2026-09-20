@@ -1785,6 +1785,23 @@ async def test_migration_015_adds_mode_and_repo_slug(app):
     assert "mode IN ('app', 'repo')" in ddl["sql"]
 
 
+async def test_a_repo_session_posts_no_turn_line_in_the_origin_channel(
+    client, app, settings_env, seat_toml
+):
+    from app.routers import apps as apps_router
+
+    session = await build_fixture(client, settings_env, seat_toml)
+    await make_bot("BuildGable", "buildgable-key")
+    settings_env(PLATFORM_BUILD_BOT="BuildGable")
+    feed = await db.fetch_one("SELECT id FROM channels WHERE type = 'main_feed'")
+    repo = await apps_router.create_repo_session(session["app"]["owner_user_id"], feed["id"])
+    before = await channel_lines(feed["id"])
+    await post_stage(client, repo["id"], "files_written", {"turn": 1, "summary": "x"})
+    await post_stage(client, repo["id"], "scoped", {"turn": 1, "halted": "error", "reason": "y"})
+    assert await channel_lines(feed["id"]) == before
+    assert len(await channel_lines(session["channel_id"])) == 1
+
+
 async def test_a_repo_session_reads_back_as_repo_in_both_views(
     client, app, settings_env, seat_toml
 ):

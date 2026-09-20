@@ -716,6 +716,24 @@ async def test_build_opens_a_repo_session_on_the_origin_channel(client, monkeypa
     )
 
 
+async def test_build_inside_an_app_room_is_refused_before_the_broker(client, monkeypatch):
+    calls = record_broker(monkeypatch, ok_response())
+    await make_user("alice")
+    await make_bot(BUILD_BOT_NAME, BUILD_BOT_KEY)
+    await login(client, "alice")
+    row = await db.fetch_one(
+        "INSERT INTO channels (type, name, visibility) VALUES ('app_build', 'room', 'private') RETURNING id"
+    )
+    await db.execute(
+        "INSERT INTO channel_members (channel_id, member_type, member_id) "
+        "SELECT ?, 'user', id FROM users WHERE username = 'alice'", (row["id"],)
+    )
+    await post(client, row["id"], "/build change the platform")
+    lines = await channel_messages(client, row["id"])
+    assert any("is for the platform" in m["content"] for m in lines)
+    assert calls == [] and await sessions() == []
+
+
 async def test_build_refused_by_the_broker_ends_the_session(client, monkeypatch):
     refusal = slash.broker_client.BrokerError(
         "build-refused", "plink is the only human who may start a build."

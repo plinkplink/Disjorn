@@ -572,6 +572,9 @@ export const useApps = create<AppsState>()((set, get) => {
             }),
           },
         });
+        if (session.mode === "repo" && session.repo_slug === null) {
+          adoptSession(frame.session_id);
+        }
       } else {
         adoptSession(frame.session_id);
       }
