@@ -321,6 +321,30 @@ def test_a_retro_spec_with_a_paid_review_clears_the_keyboard_card(repo, gatehous
     assert [c for c in cards if c["kind"] == "keyboard"] == []
 
 
+def test_a_sha_cited_in_passing_clears_nothing(repo, gatehouse):
+    reviewed, bystander = "b" * 40, "d" * 40
+    drift = {"paths": {"mirror": str(repo)}, "citations": [
+        {"holds": True, "kind": "override-seq", "seq": 1500, "self_cited": False,
+         "author": "plink", "push": {"new": sha, "old": "c" * 40}}
+        for sha in (reviewed, bystander)]}
+    text = RETRO.format(sha=reviewed[:7]).replace(
+        "## Request", f"Built after the sweep at `{bystander[:7]}` landed.\n\n## Request")
+    (repo / "SPECS" / "2026-09-14-retro-b.md").write_text(text)
+    cards = by_slug(derive(repo, gatehouse, drift=drift))
+    assert "keyboard-" + "b" * 12 not in cards
+    assert "review-pending" in cards["keyboard-" + "d" * 12]["flags"]
+
+
+def test_a_draft_spec_with_a_review_record_clears_nothing(repo, gatehouse):
+    sha = "b" * 40
+    drift = {"paths": {"mirror": str(repo)}, "citations": [
+        {"holds": True, "kind": "override-seq", "seq": 1500, "self_cited": False,
+         "author": "plink", "push": {"new": sha, "old": "c" * 40}}]}
+    (repo / "SPECS" / "2026-09-14-retro-b.md").write_text(
+        RETRO.format(sha=sha[:7]).replace("`merged`", "`draft`"))
+    assert "review-pending" in by_slug(derive(repo, gatehouse, drift=drift))["keyboard-" + "b" * 12]["flags"]
+
+
 def test_a_spec_naming_the_sha_without_a_review_record_clears_nothing(repo, gatehouse):
     sha = "b" * 40
     drift = {"paths": {"mirror": str(repo)}, "citations": [

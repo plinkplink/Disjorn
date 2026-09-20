@@ -624,16 +624,18 @@ def _lane_owner(hits: list, lane_owners: dict) -> Optional[str]:
     return None
 
 
-REVIEW_RECORD_HEADING = re.compile(r"^##\s+Review record\b", re.MULTILINE)
-_HEX_TOKEN = re.compile(r"\b[0-9a-f]{7,40}\b")
+_HEX_TOKEN = re.compile(r"\b(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b")
+_MERGED_AS = re.compile(r"^.*\bmerged\b.*$", re.IGNORECASE | re.MULTILINE)
 
 
 def _reviewed_shas(spec_text: str) -> set[str]:
-    """Sha prefixes a spec names, if it carries a Review record: a retro spec
-    plus a paid review is how a keyboard card leaves Review."""
-    if not REVIEW_RECORD_HEADING.search(spec_text):
+    """Sha prefixes a merged spec names in its Review record or on a merged
+    line; shas cited in passing clear nothing."""
+    record = _section(spec_text, "Review record")
+    if not record or _status_word(brokerd().parse_spec_status(spec_text) or "") not in MERGED_WORDS:
         return set()
-    return {t.lower() for t in _HEX_TOKEN.findall(spec_text)}
+    scope = "\n".join(record) + "\n" + "\n".join(_MERGED_AS.findall(spec_text))
+    return {t.lower() for t in _HEX_TOKEN.findall(scope)}
 
 
 def _is_reviewed(sha: str, reviewed: set[str]) -> bool:
