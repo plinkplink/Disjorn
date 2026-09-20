@@ -176,6 +176,25 @@ def test_find_trailer_reads_both_kinds(hook):
     assert hook.find_trailer("s\n\nReview-Seq:  1428  ") == "review-seq:1428"
 
 
+def test_find_trailer_reads_a_merge_seq_with_its_channel(hook):
+    assert hook.find_trailer("subject\n\nmerge-seq: 4:2704\n") == "merge-seq:4:2704"
+    assert hook.find_trailer("s\n\nMerge-Seq:  4:2704  ") == "merge-seq:4:2704"
+
+
+def test_a_merge_seq_without_a_channel_is_not_a_trailer(hook):
+    # Seqs are per channel, so a bare seq names no message. It must not pass
+    # the gate as one.
+    assert hook.find_trailer("subject\n\nmerge-seq: 2704\n") is None
+    assert hook.find_trailer("subject\n\nmerge-seq: 4:\n") is None
+    assert hook.find_trailer("subject\n\nmerge-seq: :2704\n") is None
+
+
+def test_a_merge_commit_records_the_review_that_follows_it(hook):
+    # Last trailer wins, and a Tier 2 merge writes review-seq after merge-seq.
+    assert hook.find_trailer("merge: x\n\nmerge-seq: 4:2704\nreview-seq: 2710") \
+        == "review-seq:2710"
+
+
 def test_find_trailer_is_a_presence_check_not_a_validator(hook):
     # The hook does NOT know whether 1 is a real seq. That is the digest's job,
     # and the whole reason the digest exists — see G2.
@@ -228,6 +247,7 @@ def test_guarded_push_without_a_trailer_is_refused(lane):
     assert lane.main_sha() == before, "the ref must not have moved"
     assert "REFUSED" in proc.stderr
     assert "review-seq" in proc.stderr and "override-merge" in proc.stderr
+    assert "merge-seq" in proc.stderr
     assert lane.push_lines()[-1].endswith("NONE refused")
 
 
@@ -245,6 +265,24 @@ def test_override_seq_trailer_lets_it_through(lane):
     assert lane.push().returncode == 0
     assert lane.main_sha() == sha
     assert lane.push_lines()[-1].endswith("override-seq:1440 passed")
+
+
+def test_merge_seq_trailer_lets_it_through(lane):
+    lane.write("harness/broker/thing.py", "x = 1\n")
+    sha = lane.commit("merge: a slug (/merge by plink, tier 1)\n\nmerge-seq: 4:2704")
+    assert lane.push().returncode == 0
+    assert lane.main_sha() == sha
+    assert lane.push_lines()[-1].endswith("merge-seq:4:2704 passed")
+
+
+def test_a_channelless_merge_seq_does_not_open_the_gate(lane):
+    before = lane.main_sha()
+    lane.write("harness/broker/thing.py", "x = 1\n")
+    lane.commit("merge: a slug\n\nmerge-seq: 2704")
+    proc = lane.push(check=False)
+    assert proc.returncode != 0
+    assert lane.main_sha() == before
+    assert lane.push_lines()[-1].endswith("NONE refused")
 
 
 def test_non_main_branch_passes_untouched_and_is_not_logged(lane):
