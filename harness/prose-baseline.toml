@@ -69,7 +69,7 @@
 "harness/keyboard/wake.py" = 1390
 "harness/metrics/metrics.py" = 31154
 "harness/metrics/tests/test_gate_drift.py" = 13896
-"harness/planroom/planroom.py" = 13884
+"harness/planroom/planroom.py" = 13454
 "harness/residency/adapter.py" = 7679
 "harness/residency/config.py" = 9474
 "harness/residency/detector.py" = 4613
