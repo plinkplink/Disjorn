@@ -31,7 +31,7 @@ ALL_VERBS = [
     "classify-diff", "read-prod-logs", "read-own-log", "read-metrics",
     "file-proposal", "query-own-audit",
     "board-list", "board-card", "board-search", "board-flag", "board-comment",
-    "summon-hop", "apps-build",
+    "summon-hop", "apps-build", "build",
 ]
 
 RECORD_STUB = textwrap.dedent("""\
@@ -325,7 +325,12 @@ class BrokerHarness:
                  spec_repo: Path | None = None,
                  gatehouse: Path | None = None,
                  planroom_calls: list | None = None,
-                 planroom_state: dict | None = None) -> None:
+                 planroom_state: dict | None = None,
+                 channel_posts: list | None = None,
+                 message_db: Path | None = None) -> None:
+        # Every post the broker made to a NAMED channel (the `/build` banner).
+        self.channel_posts = channel_posts if channel_posts is not None else []
+        self.message_db = message_db
         self.spec_repo = spec_repo
         self.gatehouse = gatehouse
         # Every /planroom call the broker made, and the fake board it talked to.
@@ -366,6 +371,39 @@ class BrokerHarness:
         self.broker.start_build["command"] = [
             PY, str(self.stub_dir / "flood.py"), str(self.build_record),
             str(megabytes)]
+
+    # -- the server principal (`/build`) ----------------------------------
+    def become_server(self, unit: str = "disjorn-test.service") -> None:
+        """Make this process's uid resolve to `server`: map it to the identity
+        the unit check sits behind, and answer the cgroup probe with `unit`."""
+        self.broker.uid_map[os.getuid()] = "plink"
+        self.broker.server_unit = unit
+        self.broker._read_peer_cgroup = lambda pid: f"0::/system.slice/{unit}\n"
+
+    def add_message(self, channel_id: int, seq: int, content: str, *,
+                    author: str = "plink", author_type: str = "user",
+                    flags: str = "{}", deleted: str | None = None) -> None:
+        """One row in the scratch server DB the build verb reads."""
+        import sqlite3
+        assert self.message_db is not None
+        db = sqlite3.connect(self.message_db)
+        with db:
+            db.execute("insert or ignore into users (id, username) values (?, ?)",
+                       (abs(hash(author)) % 100000 + 1, author))
+            uid_row = db.execute("select id from users where username = ?",
+                                 (author,)).fetchone()
+            db.execute("insert into messages (channel_id, seq, author_type, "
+                       "author_id, content, privacy_flags, deleted_at) "
+                       "values (?, ?, ?, ?, ?, ?, ?)",
+                       (channel_id, seq, author_type,
+                        uid_row[0] if author_type == "user" else 5,
+                        content, flags, deleted))
+        db.close()
+
+    def build_ledger_lines(self) -> list[dict]:
+        return [json.loads(ln) for ln
+                in Path(self.broker.build_ledger).read_text().splitlines()
+                if ln.strip()]
 
     # -- client side ------------------------------------------------------
     def _connect(self) -> socket.socket:
@@ -571,6 +609,22 @@ def harness(tmp_path: Path):
     sock = tmp_path / "b.sock"
     verbs_path = tmp_path / "verbs.toml"
 
+    # The server DB the `build` verb reads its message out of: just the two
+    # tables it joins, so no server import is needed to exercise the wire.
+    message_db = tmp_path / "disjorn.db"
+    import sqlite3 as _sq
+    _db = _sq.connect(message_db)
+    with _db:
+        _db.execute("create table users (id integer primary key, "
+                    "username text not null unique)")
+        _db.execute("create table messages (id integer primary key autoincrement, "
+                    "channel_id integer not null, seq integer not null, "
+                    "author_type text not null, author_id integer not null, "
+                    "content text not null, privacy_flags text not null "
+                    "default '{}', deleted_at text)")
+    _db.close()
+    build_ledger = tmp_path / "build-ledger.jsonl"
+
     broker_toml = tmp_path / "broker.toml"
     broker_toml.write_text(textwrap.dedent(f"""\
         [broker]
@@ -628,11 +682,20 @@ def harness(tmp_path: Path):
         # local-stamp record naming the sha, because that commit never meets
         # the pre-receive hook and can never have a push-log line.
         canonical_repo = "{gatehouse}"
+        message_db = "{message_db}"
 
         [disjorn]
         url = "http://127.0.0.1:1"
         api_key_path = "{tmp_path / 'no-key'}"
         custodian_channel_id = 3
+
+        [server]
+        unit = "disjorn-test.service"
+
+        [build]
+        humans = ["plink"]
+        seat = "test"
+        ledger = "{build_ledger}"
     """))
 
     proposals: list = []
@@ -656,6 +719,8 @@ def harness(tmp_path: Path):
                                "payload": payload, "cfg": dict(disjorn_cfg)})
         if planroom_state.get("http_error"):
             raise VerbError("exec-failure", planroom_state["http_error"])
+        if path.endswith("/stage"):
+            return {"ok": True}
         cards = planroom_state["cards"]
         by_slug = {c["slug"]: c for c in cards}
         face = planroom_state["face"]
@@ -680,16 +745,25 @@ def harness(tmp_path: Path):
                     "comments": planroom_state["comments"].get(slug, [])}
         raise VerbError("exec-failure", f"unstubbed plan room path {path}")
 
+    channel_posts: list = []
+
+    def stub_channel_transport(disjorn_cfg: dict, channel_id: int,
+                               body: str) -> dict:
+        channel_posts.append({"channel_id": channel_id, "body": body})
+        return {"seq": 1, "message_id": 1}
+
     config = load_config(str(broker_toml))
     broker = Broker(config, str(verbs_path), transport=stub_transport,
-                    planroom_api=stub_planroom)
+                    planroom_api=stub_planroom,
+                    channel_transport=stub_channel_transport)
     h = BrokerHarness(broker, verbs_path, record_file, proposals,
                       specs_dir=specs_dir, build_record=build_record,
                       build_log_dir=build_logs, stub_dir=stub_dir,
                       unit_state_file=unit_state_file, stop_record=stop_record,
                       spec_repo=spec_repo, gatehouse=gatehouse,
                       planroom_calls=planroom_calls,
-                      planroom_state=planroom_state)
+                      planroom_state=planroom_state,
+                      channel_posts=channel_posts, message_db=message_db)
     h.set_verbs()  # everything explicitly OFF to start
 
     t = threading.Thread(target=broker.serve_forever, daemon=True)

@@ -1,0 +1,307 @@
+"""The `build` verb: a human's `/build` message, read by the broker itself."""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from brokerd import Broker, ConfigError  # noqa: E402
+from broker_testlib import harness  # noqa: E402,F401
+
+CHANNEL = 7
+SESSION = 12
+SEQ = 100
+TEXT = "/build fix the login typo on the settings page"
+SLUG_STEM = "fix-the-login-typo-on"
+
+
+def arm(h, *, content: str = TEXT, author: str = "plink",
+        author_type: str = "user", flags: str = "{}", seq: int = SEQ,
+        message: bool = True):
+    """A `server` caller, the verb switched on, and the message in the DB."""
+    h.become_server()
+    h.set_verbs("server", build=True)
+    if message:
+        h.add_message(CHANNEL, seq, content, author=author,
+                      author_type=author_type, flags=flags)
+    return h.use_fake_build()
+
+
+def call(h, *, seq: int = SEQ, channel: int = CHANNEL, session: int = SESSION):
+    return h.call("build", {"seq": seq, "channel_id": channel,
+                            "session_id": session})
+
+
+def git(repo: Path, *args: str) -> None:
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    subprocess.run(["git", "-C", str(repo), *args], check=True, env=env,
+                   capture_output=True)
+
+
+def make_gatehouse(h, *branches: str) -> Path:
+    """A real repo at [gate].canonical_repo, with `main` and the given branches."""
+    repo = h.gatehouse
+    repo.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "-C", str(repo), "init", "-q", "-b", "main"],
+                   check=True, capture_output=True)
+    (repo / "a.txt").write_text("one\n")
+    git(repo, "add", "a.txt")
+    git(repo, "commit", "-q", "-m", "init")
+    for branch in branches:
+        git(repo, "checkout", "-q", "-b", branch)
+        (repo / "a.txt").write_text("one\ntwo\n")
+        git(repo, "commit", "-q", "-am", branch)
+        git(repo, "checkout", "-q", "main")
+    return repo
+
+
+def stages(h) -> list[tuple[str, dict]]:
+    return [(c["payload"]["stage"], c["payload"]["detail"])
+            for c in h.planroom_calls if c["path"].endswith("/stage")]
+
+
+# ── identity ─────────────────────────────────────────────────────────────
+
+def test_the_server_principal_is_the_cgroup_and_not_the_uid(harness):
+    """Same uid as plink at the keyboard; only the peer's cgroup separates them."""
+    uid = os.getuid()
+    harness.broker.uid_map[uid] = "plink"
+    harness.broker.server_unit = "no-such-unit.service"
+    assert harness.broker._caller_identity(uid, os.getpid()) == "plink"
+    fragment = Path(f"/proc/{os.getpid()}/cgroup").read_text().strip().rsplit(
+        "/", 1)[-1]
+    if not fragment:
+        pytest.skip("this process is in the root cgroup")
+    harness.broker.server_unit = fragment
+    assert harness.broker._caller_identity(uid, os.getpid()) == "server"
+
+
+def test_a_resident_uid_is_never_the_server(harness):
+    assert harness.broker._caller_identity(os.getuid(), os.getpid()) == "res-test"
+
+
+# ── the ten steps, refusal by refusal ────────────────────────────────────
+
+def test_a_bot_authored_message_is_refused(harness):
+    arm(harness, author="gable", author_type="bot")
+    resp = call(harness)
+    assert resp["error"]["code"] == "build-refused"
+    assert "only a person" in resp["error"]["message"]
+
+
+def test_a_privacy_flagged_message_is_refused(harness):
+    arm(harness, flags='{"off_the_record": true}')
+    resp = call(harness)
+    assert resp["error"]["code"] == "build-refused"
+    assert "private" in resp["error"]["message"]
+
+
+def test_an_author_not_on_the_human_list_is_refused(harness):
+    arm(harness, author="stranger")
+    resp = call(harness)
+    assert resp["error"]["code"] == "build-refused"
+    assert "human list" in resp["error"]["message"]
+
+
+def test_an_unknown_seq_is_refused(harness):
+    arm(harness, message=False)
+    resp = call(harness, seq=999)
+    assert resp["error"]["code"] == "build-refused"
+    assert "no message 999" in resp["error"]["message"]
+
+
+def test_a_message_with_no_request_in_it_is_refused(harness):
+    arm(harness, content="/build")
+    resp = call(harness)
+    assert resp["error"]["code"] == "build-refused"
+    assert "something to build" in resp["error"]["message"]
+
+
+def test_over_long_text_is_refused(harness):
+    arm(harness, content="/build " + "x" * 4001)
+    assert call(harness)["error"]["code"] == "build-refused"
+
+
+@pytest.mark.parametrize("args", [
+    {"seq": SEQ, "channel_id": CHANNEL},
+    {"seq": SEQ, "channel_id": CHANNEL, "session_id": SESSION, "tier": 0},
+    {"seq": 0, "channel_id": CHANNEL, "session_id": SESSION},
+])
+def test_the_arg_schema_is_exactly_three_positive_ints(harness, args):
+    arm(harness)
+    assert harness.call("build", args)["error"]["code"] == "bad-args"
+
+
+def test_every_denial_is_audited(harness):
+    arm(harness, author="stranger")
+    call(harness)
+    entry = harness.audit_lines()[-1]
+    assert entry["verb"] == "build" and entry["allowed"] is False
+    assert entry["result_summary"].startswith("denied: ")
+    assert entry["resident"] == "server"
+
+
+def test_a_refused_build_never_spawns(harness):
+    spawn = arm(harness, author="stranger")
+    call(harness)
+    assert spawn.calls == []
+
+
+# ── the success path ─────────────────────────────────────────────────────
+
+def test_a_chat_build_launches_through_the_start_build_path(harness):
+    spawn = arm(harness)
+    resp = call(harness)
+    assert resp["ok"] is True
+    result = resp["result"]
+    assert result["started"] is True
+    assert result["session_id"] == SESSION
+    assert result["slug"].endswith(SLUG_STEM)
+    assert result["branch"] == f"loop/{result['slug']}"
+    assert result["pid"] == spawn.procs[0].pid
+    # Same argv shape as a spec build: the SEAT, the slug, the model pin.
+    argv = spawn.calls[0]
+    assert argv[3:5] == ["test", result["slug"]]
+    assert argv[-2:] == ["--model", "claude-opus-4-8"]
+    harness.broker.join_builds()
+
+
+def test_the_prompt_on_stdin_names_the_branch_and_has_no_spec(harness):
+    spawn = arm(harness)
+    resp = call(harness)
+    harness.broker.join_builds()
+    prompt = spawn.procs[0].stdin_written.decode()
+    assert resp["result"]["branch"] in prompt
+    assert "NO SPEC FILE" in prompt
+    assert "fix the login typo" in prompt
+
+
+def test_the_slug_takes_five_words_and_today(harness):
+    arm(harness)
+    import datetime as dt
+    today = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
+    assert call(harness)["result"]["slug"] == f"{today}-{SLUG_STEM}"
+    harness.broker.join_builds()
+
+
+def test_a_slug_already_in_the_gatehouse_gets_a_suffix(harness):
+    import datetime as dt
+    today = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
+    make_gatehouse(harness, f"loop/{today}-{SLUG_STEM}")
+    arm(harness)
+    assert call(harness)["result"]["slug"] == f"{today}-{SLUG_STEM}-2"
+    harness.broker.join_builds()
+
+
+def test_the_ledger_records_who_asked_for_what(harness):
+    arm(harness)
+    result = call(harness)["result"]
+    harness.broker.join_builds()
+    line = harness.build_ledger_lines()[-1]
+    assert line["seq"] == SEQ and line["channel_id"] == CHANNEL
+    assert line["author"] == "plink" and line["session_id"] == SESSION
+    assert line["slug"] == result["slug"]
+    assert len(line["text_sha256"]) == 64
+    assert line["ts"]
+
+
+def test_the_stages_go_to_the_session_and_the_banner_to_the_channel(harness):
+    make_gatehouse(harness)
+    arm(harness)
+    result = call(harness)["result"]
+    harness.broker.join_builds()
+    posted = stages(harness)
+    assert posted[0][0] == "scoped" and posted[0][1]["turn"] == 1
+    assert posted[0][1]["model"] == "claude-opus-4-8"
+    assert [p[0] for p in posted[1:]] == ["files_written", "deployed"]
+    assert posted[2][1]["branch"] == result["branch"]
+    assert posted[2][1]["sha"]
+    assert {c["path"] for c in harness.planroom_calls} == {
+        f"/apps/sessions/{SESSION}/stage"}
+
+    assert len(harness.channel_posts) == 1
+    post = harness.channel_posts[0]
+    assert post["channel_id"] == CHANNEL
+    lines = post["body"].splitlines()
+    assert len(lines) == 4
+    assert lines[0].startswith("tests: ") and "self-reported" in lines[0]
+    assert lines[1] == "tier: pending gates (slice 2)"
+    assert lines[2] == "diffstat: no commits"
+    assert lines[3] == f"next: /merge {result['slug']} (slice 2); until then, keyboard merge"
+
+
+def test_a_seq_started_build_posts_nothing_in_custodian(harness):
+    arm(harness)
+    call(harness)
+    harness.broker.join_builds()
+    assert harness.proposals == []
+
+
+def test_the_diffstat_is_read_out_of_the_gatehouse(harness):
+    make_gatehouse(harness, "loop/landed")
+    assert "1 file changed" in harness.broker._gatehouse_diffstat("loop/landed")
+    assert harness.broker._gatehouse_diffstat("loop/never") == "no commits"
+
+
+def test_a_failed_build_halts_the_session(harness):
+    from broker_testlib import FakeBuildProc, build_out
+    arm(harness)
+    harness.use_fake_build(
+        lambda: FakeBuildProc(out=build_out(publish=""), rc=1, err=b"boom"))
+    call(harness)
+    harness.broker.join_builds()
+    halted = [d for s, d in stages(harness) if d.get("halted")]
+    assert halted and halted[0]["turn"] == 1 and halted[0]["reason"]
+    assert len(harness.channel_posts) == 1
+
+
+def test_a_chat_build_spends_the_seats_daily_budget(harness):
+    arm(harness)
+    harness.add_message(CHANNEL, SEQ + 1, "/build second thing")
+    harness.add_message(CHANNEL, SEQ + 2, "/build third thing")
+    assert call(harness)["ok"] is True
+    assert call(harness, seq=SEQ + 1)["ok"] is True
+    resp = call(harness, seq=SEQ + 2)
+    assert resp["error"]["code"] == "over-budget"
+    harness.broker.join_builds()
+
+
+# ── boot validation ──────────────────────────────────────────────────────
+
+def fresh(harness, **build_cfg) -> Broker:
+    config = {**harness.broker.config,
+              "build": {**harness.broker.config["build"], **build_cfg}}
+    return Broker(config, str(harness.verbs_path), transport=lambda cfg, b: {})
+
+
+@pytest.mark.parametrize("cfg,fragment", [
+    ({"humans": ["plink", "res-gable"]}, "resident seat"),
+    ({"humans": "plink"}, "build.humans"),
+    ({"seat": "res-test"}, "WITHOUT"),
+    ({"seat": "nobody"}, "not a resident"),
+    ({"ledger": ""}, "build.ledger"),
+])
+def test_a_bad_build_block_refuses_to_start(harness, cfg, fragment):
+    with pytest.raises(ConfigError) as ei:
+        fresh(harness, **cfg)
+    assert fragment in str(ei.value)
+
+
+def test_an_empty_human_list_boots_and_refuses_everything(harness):
+    broker = fresh(harness, humans=[])
+    assert broker.build_humans == frozenset()
+
+
+def test_an_empty_server_unit_refuses_to_start(harness):
+    config = {**harness.broker.config, "server": {"unit": "  "}}
+    with pytest.raises(ConfigError) as ei:
+        Broker(config, str(harness.verbs_path), transport=lambda cfg, b: {})
+    assert "[server].unit" in str(ei.value)

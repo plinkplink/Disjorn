@@ -20,6 +20,13 @@ privileged broker. Deliberately dead simple.
   caller** (`wake`, 2026-08-25): a human at the keyboard, from their own uid,
   who may call that verb and nothing else — and whom no seat may impersonate,
   because the uid is the kernel's word, not the caller's.
+- One identity is resolved by **uid plus cgroup**: the **server** (`build`).
+  The Disjorn server runs under plink's uid, so SO_PEERCRED alone cannot
+  separate it from the human at the keyboard. A caller becomes `server` only
+  when its uid maps to `plink` in `[uids]` AND `/proc/<peer pid>/cgroup` names
+  `[server].unit` (default `disjorn.service`); otherwise it is whatever
+  `[uids]` says. Both halves are the kernel's word about the connection, not
+  the request body's.
 
 ## Request
 
@@ -56,6 +63,7 @@ Failure:
 | `bad-args`       | args failed the verb's schema (also: malformed request JSON)   |
 | `exec-failure`   | verb was authorized but its execution failed (exit/timeout/IO) |
 | `apps-refused`   | an `apps-build` check refused the handoff; the message is the flat sentence |
+| `build-refused`  | a `build` check refused the request; the message is the plain reason |
 | `internal`       | broker-side problem (bad config, unexpected exception)         |
 
 Every request — success, failure, or denial — appends exactly one line to the
@@ -63,15 +71,17 @@ audit log: `{ts, resident, verb, args, allowed, result_summary}`. Denials have
 `allowed: false`. Unknown uids are recorded as `"uid:<n>"`.
 
 A verb may add extra FACT fields to its own line; they can never overwrite the
-six core keys. Today there is exactly one: `start-build` success lines carry
+six core keys. `start-build` and `build` success lines carry
 `"build_started": true`, which is how the build budget distinguishes "a build
-ran" from "the call was authorized but nothing ever launched" (BL-D3).
+ran" from "the call was authorized but nothing ever launched" (BL-D3); a
+`build` line adds `"build_seat"`, because its own `resident` is `server` and
+the budget belongs to the seat the build ran as.
 
 ## Verb table
 
 All verbs are per-caller toggleable in `verbs.toml` and default OFF.
-`restart-self` does not exist and never will (plink's ruling #3). `wake` is in
-the table but in no seat's section — see its entry below.
+`restart-self` does not exist and never will (plink's ruling #3). `wake` and
+`build` are in the table but in no seat's section — see their entries below.
 
 ### `restart-disjorn`
 - args: none.
@@ -349,6 +359,48 @@ the table but in no seat's section — see its entry below.
   human runs `classify-diff` on the branch), or **failed** (why, loud).
   Intermediate checkpoints are the build session's own choice to mark, from
   inside the session — the broker owns only the started/done/failed transitions.
+
+### `build`
+
+SPECS/2026-09-20-build-lane-v2-stage1-2b.md. The SECOND entrance to the same
+build `start-build` runs. `start-build` takes a confirmed spec file from a
+resident's hands; `build` takes the seq of a human's own `/build` message and
+reads that message itself. **The caller is the server, and nothing the caller
+says about the message is trusted** — author, text and privacy all come out of
+the message DB.
+
+- args: `{"seq": int, "channel_id": int, "session_id": int}`, all three
+  required, all positive, and nothing else. There is no author field and no
+  text field, by design.
+- result: `{"started": true, "slug": str, "branch": str, "session_id": int,
+  "pid": int}`. It returns AT SPAWN, like `start-build`.
+- Checks, in order, each refusing with `build-refused`, a plain reason, and an
+  audit line whose summary starts `denied: `:
+  1. the message exists at `(channel_id, seq)` and is not deleted, and its
+     `author_type` is `user`;
+  2. its `privacy_flags` do not hide it from bots (the rule in
+     `server/app/privacy.py`, restated in `brokerd.hidden_from_bots`);
+  3. its author is on `[build].humans`;
+  4. its text — the content with a leading `/build` word stripped — is 1..4000
+     characters.
+- The slug is `YYYY-MM-DD-<up to five words of the text, kebab>`, suffixed
+  `-2`, `-3`, … until `loop/<slug>` is free in the gatehouse. Branch
+  `loop/<slug>`.
+- Every accepted request appends one line to `[build].ledger`: ts, seq,
+  channel_id, author, text_sha256, slug, session_id.
+- The launch is `start-build`'s, verbatim: same slug claim, same daily build
+  budget (spent by `res-<[build].seat>`, not by the caller), same
+  `run-build.sh` argv, same sidecar, same restart re-adoption, same reaper.
+  The prompt on stdin is the message text, wrapped the way a spec is, saying
+  there is no spec file. No spec Status stamping — there is no spec.
+- What the room sees is the APPS BUILD MODAL, not #custodian: stage events go
+  to `session_id` (`scoped` at spawn, then `files_written` + `deployed`, or
+  `files_written {no_changes}`, or `scoped {halted: "error"}`), and ONE
+  four-line banner goes to the ORIGIN channel — `tests`, `tier`, `diffstat`,
+  `next`. A seq-started build posts no #custodian outcome line at all.
+- With `[build]` absent the verb answers "chat builds are not configured on
+  this broker". Every key in `[build]` is validated at boot and a bad one is a
+  refusal to start; `humans = []` is legal and refuses every request.
 
 ### `classify-diff`
 - args: `{"repo": str, "range": str, "gates": object}`
