@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -76,16 +77,70 @@ def test_the_server_principal_is_the_cgroup_and_not_the_uid(harness):
     harness.broker.uid_map[uid] = "plink"
     harness.broker.server_unit = "no-such-unit.service"
     assert harness.broker._caller_identity(uid, os.getpid()) == "plink"
-    fragment = Path(f"/proc/{os.getpid()}/cgroup").read_text().strip().rsplit(
-        "/", 1)[-1]
-    if not fragment:
+    path = Path(f"/proc/{os.getpid()}/cgroup").read_text().strip().rpartition(":")[2]
+    if path in ("", "/"):
         pytest.skip("this process is in the root cgroup")
-    harness.broker.server_unit = fragment
+    harness.broker.server_unit = path
     assert harness.broker._caller_identity(uid, os.getpid()) == "server"
 
 
 def test_a_resident_uid_is_never_the_server(harness):
+    harness.broker.server_unit = "disjorn-test.service"
+    harness.broker._read_peer_cgroup = lambda pid: "0::/system.slice/disjorn-test.service\n"
     assert harness.broker._caller_identity(os.getuid(), os.getpid()) == "res-test"
+
+
+def test_the_unit_must_sit_under_system_slice(harness):
+    harness.become_server()
+    harness.broker._read_peer_cgroup = lambda pid: "0::/user.slice/disjorn-test.service\n"
+    assert harness.broker._caller_identity(os.getuid(), os.getpid()) == "plink"
+    harness.broker._read_peer_cgroup = lambda pid: "0::/system.slice/x-disjorn-test.service\n"
+    assert harness.broker._caller_identity(os.getuid(), os.getpid()) == "plink"
+
+
+@pytest.mark.parametrize("text", [
+    "/build ../../etc/passwd", "/build -rf / --force", "/build \"quoted\" 'words' here",
+    "/build fix/the/thing with spaces", "/build ünïcödé wörds ünd mehr",
+    "/build " + "!?*&^%$#@" * 400,
+])
+def test_free_text_only_ever_yields_a_safe_slug_or_a_refusal(harness, text):
+    arm(harness, content=text)
+    resp = harness.call("build", {"seq": SEQ, "channel_id": CHANNEL, "session_id": SESSION})
+    if resp["ok"]:
+        stem = resp["result"]["slug"][11:]
+        assert re.fullmatch(r"[0-9a-z][0-9a-z-]*", stem), resp["result"]["slug"]
+        assert ".." not in resp["result"]["branch"] and "/" not in stem
+    else:
+        assert resp["error"]["code"] == "build-refused"
+
+
+def test_text_with_no_usable_word_is_refused_not_minted(harness):
+    arm(harness, content="/build !!! ??? ...")
+    resp = call(harness)
+    assert resp["error"]["code"] == "build-refused"
+    assert "at least one word" in resp["error"]["message"]
+
+
+def test_the_privacy_vocabulary_matches_the_servers(harness):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "server_privacy", Path(__file__).resolve().parents[3] / "server" / "app" / "privacy.py")
+    privacy = importlib.util.module_from_spec(spec); spec.loader.exec_module(privacy)
+    import brokerd
+    assert tuple(brokerd.BOT_HIDDEN_FLAGS) == tuple(privacy.BOT_HIDDEN_FLAGS)
+    for flag in privacy.BOT_HIDDEN_FLAGS:
+        assert brokerd.hidden_from_bots({flag: True}) == privacy.hidden_from_bots({flag: True}) is True
+    assert brokerd.hidden_from_bots({"other": True}) == privacy.hidden_from_bots({"other": True}) is False
+
+
+def test_a_deleted_message_is_refused(harness):
+    harness.become_server()
+    harness.set_verbs("server", build=True)
+    harness.add_message(CHANNEL, SEQ, TEXT, deleted="2026-01-01T00:00:00Z")
+    harness.use_fake_build()
+    resp = call(harness)
+    assert resp["error"]["code"] == "build-refused"
+    assert "deleted" in resp["error"]["message"]
 
 
 # ── the ten steps, refusal by refusal ────────────────────────────────────

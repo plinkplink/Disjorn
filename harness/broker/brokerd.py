@@ -868,8 +868,8 @@ def strip_build_command(content: str) -> str:
 def slug_from_build_text(text: str, today: str) -> str:
     """`YYYY-MM-DD-<up to five words>`, kebab, ASCII, bounded."""
     stem = "-".join(_SLUG_WORD_RE.findall(text.lower())[:BUILD_SLUG_WORDS])
-    stem = stem[:MAX_BUILD_SLUG_STEM].strip("-") or BUILD_VERB
-    return f"{today}-{stem}"
+    stem = stem[:MAX_BUILD_SLUG_STEM].strip("-")
+    return f"{today}-{stem}" if stem else ""
 
 
 def build_chat_prompt(text: str, *, slug: str, branch: str) -> str:
@@ -1799,7 +1799,9 @@ class Broker:
         name = self.uid_map.get(uid)
         if name != SERVER_PEER_IDENTITY or pid is None:
             return name
-        if any(line.rstrip().endswith("/" + self.server_unit)
+        unit = self.server_unit
+        want = unit if "/" in unit else f"/system.slice/{unit}"
+        if any(line.rstrip().rpartition(":")[2] == want
                for line in self._read_peer_cgroup(pid).splitlines()):
             return SERVER_IDENTITY
         return name
@@ -3044,7 +3046,12 @@ class Broker:
                             f"{MAX_BUILD_TEXT_CHARS} characters")
 
         today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
-        slug = self._unique_build_slug(slug_from_build_text(text, today))
+        slug = slug_from_build_text(text, today)
+        if not slug:
+            raise VerbError(BUILD_REFUSED,
+                            "a build request needs at least one word a branch "
+                            "name can carry")
+        slug = self._unique_build_slug(slug)
         branch = f"loop/{slug}"
         self._build_ledger_line({
             "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),
