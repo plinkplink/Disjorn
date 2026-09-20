@@ -405,6 +405,7 @@ class HarnessView(BaseModel):
     session_id: int
     app_id: str
     owner_user_id: int
+    owner_username: Optional[str] = None
     builder_bot_id: int
     channel_id: int
     stage: Optional[AppStage] = None
@@ -1408,10 +1409,13 @@ async def harness_view(session_id: int, actor: CurrentActor) -> HarnessView:
     """
     _require_stage_publisher(actor)
     session = await _publisher_session(session_id)
+    owner = await db.fetch_one(
+        "SELECT username FROM users WHERE id = ?", (session["user_id"],))
     return HarnessView(
         session_id=session["id"],
         app_id=session["app_id"],
         owner_user_id=session["user_id"],
+        owner_username=(owner or {}).get("username"),
         builder_bot_id=session["builder_bot_id"],
         channel_id=session["channel_id"],
         stage=session["stage"],

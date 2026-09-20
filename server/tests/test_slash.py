@@ -749,3 +749,131 @@ async def test_build_without_a_build_bot_starts_nothing(client, monkeypatch):
     assert await sessions() == []
     replies = [m["content"] for m in await channel_messages(client, ch)]
     assert replies[-1].startswith("No build bot")
+
+
+# ---------------------------------------------------------------------------
+# /merge — the human step the tiers wait for
+# ---------------------------------------------------------------------------
+
+MERGE_SHA = "9f1c0aa7b3d24e6f8a10bc55d3e7f9012345abcd"
+
+
+def merged_response(tier: int = 1) -> dict:
+    return {"ok": True, "verb": "merge",
+            "result": {"merged": True, "slug": SLUG, "sha": MERGE_SHA,
+                       "tier": tier}}
+
+
+async def test_merge_from_a_bot_is_refused_without_reaching_the_broker(
+    client, monkeypatch, caplog
+):
+    calls = record_broker(monkeypatch, merged_response())
+    bot_id = await make_bot("claw")
+    ch = await main_feed_id()
+    await db.execute(
+        "INSERT INTO channel_members (channel_id, member_type, member_id) "
+        "VALUES (?, 'bot', ?)",
+        (ch, bot_id),
+    )
+
+    with caplog.at_level("WARNING"):
+        r = await client.post(
+            f"/channels/{ch}/messages",
+            json={"content": f"/merge {SLUG}"},
+            headers={"X-Api-Key": BOT_KEY},
+        )
+    assert r.status_code == 200
+
+    assert calls == []
+    posted = await db.fetch_all(
+        "SELECT content FROM messages WHERE channel_id = ? ORDER BY seq", (ch,)
+    )
+    assert posted[-1]["content"] == "Only a person can merge a branch."
+    assert any("/merge refused" in rec.getMessage() for rec in caplog.records)
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("2026-09-20-x", ("2026-09-20-x", None)),
+    ("  2026-09-20-x  ", ("2026-09-20-x", None)),
+    ("2026-09-20-x pass 2704", ("2026-09-20-x", 2704)),
+    ("2026-09-20-x PASS 2704", ("2026-09-20-x", 2704)),
+    ("", None),
+    ("2026-09-20-x pass", None),
+    ("2026-09-20-x pass abc", None),
+    ("2026-09-20-x pass 0", None),
+    ("2026-09-20-x pass 2704 please", None),
+    ("2026-09-20-x 2704", None),
+])
+def test_merge_args_parse(raw, expected):
+    assert slash.parse_merge_args(raw.strip()) == expected
+
+
+@pytest.mark.parametrize("args", ["", "2026-09-20-x pass", "a b c d"])
+async def test_merge_with_unparseable_args_answers_usage(
+    client, monkeypatch, args
+):
+    calls = record_broker(monkeypatch, merged_response())
+    await make_user("alice")
+    await login(client, "alice")
+    ch = await main_feed_id()
+
+    await post(client, ch, f"/merge {args}".rstrip())
+    assert calls == []
+    replies = [m["content"] for m in await channel_messages(client, ch)]
+    assert replies[-1].startswith("Usage: `/merge ")
+
+
+async def test_merge_hands_the_broker_the_seq_and_the_slug(client, monkeypatch):
+    calls = record_broker(monkeypatch, merged_response(tier=1))
+    await make_user("alice")
+    await login(client, "alice")
+    ch = await main_feed_id()
+
+    posted = await post(client, ch, f"/merge {SLUG}")
+
+    assert len(calls) == 1
+    assert calls[0]["verb"] == "merge"
+    assert calls[0]["args"] == {
+        "seq": posted["seq"],
+        "channel_id": ch,
+        "slug": SLUG,
+        "pass_seq": None,
+    }
+    replies = [m["content"] for m in await channel_messages(client, ch)]
+    assert replies[-1] == (
+        f"Merged `{SLUG}` as {MERGE_SHA} (tier 1). Deploy stays at the keyboard."
+    )
+
+
+async def test_merge_passes_a_review_seq_through(client, monkeypatch):
+    calls = record_broker(monkeypatch, merged_response(tier=2))
+    await make_user("alice")
+    await login(client, "alice")
+    ch = await main_feed_id()
+
+    await post(client, ch, f"/merge {SLUG} pass 2704")
+
+    assert calls[0]["args"]["pass_seq"] == 2704
+    replies = [m["content"] for m in await channel_messages(client, ch)]
+    assert replies[-1].endswith("(tier 2). Deploy stays at the keyboard.")
+
+
+async def test_a_refused_merge_replies_with_the_brokers_own_words(
+    client, monkeypatch
+):
+    refusal = slash.broker_client.BrokerError(
+        "merge-refused",
+        f"loop/{SLUG} is Tier 2: it needs a reviewer's PASS in #custodian.",
+    )
+    calls = record_broker(monkeypatch, error=refusal)
+    await make_user("alice")
+    await login(client, "alice")
+    ch = await main_feed_id()
+
+    await post(client, ch, f"/merge {SLUG}")
+
+    assert len(calls) == 1
+    replies = [m["content"] for m in await channel_messages(client, ch)]
+    assert replies[-1] == (
+        f"loop/{SLUG} is Tier 2: it needs a reviewer's PASS in #custodian."
+    )
