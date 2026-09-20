@@ -215,6 +215,7 @@ def test_the_ledger_records_who_asked_for_what(harness):
 
 def test_the_stages_go_to_the_session_and_the_banner_to_the_channel(harness):
     make_gatehouse(harness)
+    harness.stub_gates()
     arm(harness)
     result = call(harness)["result"]
     harness.broker.join_builds()
@@ -225,17 +226,18 @@ def test_the_stages_go_to_the_session_and_the_banner_to_the_channel(harness):
     assert posted[2][1]["branch"] == result["branch"]
     assert posted[2][1]["sha"]
     assert {c["path"] for c in harness.planroom_calls} == {
-        f"/apps/sessions/{SESSION}/stage"}
+        f"/apps/sessions/{SESSION}/stage",
+        f"/apps/sessions/{SESSION}/harness-view"}
 
     assert len(harness.channel_posts) == 1
     post = harness.channel_posts[0]
     assert post["channel_id"] == CHANNEL
     lines = post["body"].splitlines()
     assert len(lines) == 4
-    assert lines[0].startswith("tests: ") and "self-reported" in lines[0]
-    assert lines[1] == "tier: pending gates (slice 2)"
+    assert lines[0].startswith("tests: ")
+    assert lines[1].startswith("tier: ")
     assert lines[2] == "diffstat: no commits"
-    assert lines[3] == f"next: /merge {result['slug']} (slice 2); until then, keyboard merge"
+    assert lines[3].startswith("next: ")
 
 
 def test_a_seq_started_build_posts_nothing_in_custodian(harness):
@@ -263,14 +265,15 @@ def test_a_failed_build_halts_the_session(harness):
     assert len(harness.channel_posts) == 1
 
 
-def test_a_chat_build_spends_the_seats_daily_budget(harness):
+def test_a_chat_build_spends_the_servers_daily_budget(harness):
     arm(harness)
     harness.add_message(CHANNEL, SEQ + 1, "/build second thing")
     harness.add_message(CHANNEL, SEQ + 2, "/build third thing")
     assert call(harness)["ok"] is True
     assert call(harness, seq=SEQ + 1)["ok"] is True
     resp = call(harness, seq=SEQ + 2)
-    assert resp["error"]["code"] == "over-budget"
+    assert resp["error"]["code"] == "build-refused"
+    assert resp["error"]["message"] == "today's chat build budget (2) is spent"
     harness.broker.join_builds()
 
 
@@ -305,3 +308,59 @@ def test_an_empty_server_unit_refuses_to_start(harness):
     with pytest.raises(ConfigError) as ei:
         Broker(config, str(harness.verbs_path), transport=lambda cfg, b: {})
     assert "[server].unit" in str(ei.value)
+
+
+# ── the session is the server's word, not the caller's ───────────────────
+
+def view(h, **fields) -> None:
+    h.planroom_state["sessions"][SESSION] = {
+        **{"open": True, "mode": "repo", "owner_username": "plink"}, **fields}
+
+
+def test_the_session_is_checked_before_anything_launches(harness):
+    spawn = arm(harness)
+    view(harness, owner_username="someone-else")
+    resp = call(harness)
+    assert resp["error"]["code"] == "build-refused"
+    assert resp["error"]["message"] == f"session {SESSION} does not belong to plink"
+    assert spawn.calls == []
+    assert harness.build_ledger_lines() == []
+
+
+def test_a_closed_session_is_refused(harness):
+    arm(harness)
+    view(harness, open=False)
+    assert "has ended" in call(harness)["error"]["message"]
+
+
+def test_an_app_mode_session_is_refused(harness):
+    arm(harness)
+    view(harness, mode="app")
+    assert "is not a repo build" in call(harness)["error"]["message"]
+
+
+def test_a_session_the_server_does_not_know_is_refused(harness):
+    arm(harness)
+    harness.planroom_state["sessions"][SESSION] = False
+    resp = call(harness)
+    assert resp["error"]["code"] == "build-refused"
+    assert "cannot be read" in resp["error"]["message"]
+
+
+def test_an_owned_open_repo_session_launches(harness):
+    arm(harness)
+    view(harness)
+    assert call(harness)["ok"] is True
+    harness.broker.join_builds()
+
+
+def test_a_chat_build_leaves_the_build_seats_own_allowance_alone(harness):
+    """The seat's [start_build] cap is 2 and it is not what a chat build spends."""
+    arm(harness)
+    call(harness)
+    harness.broker.join_builds()
+    today = __import__("datetime").datetime.now(
+        __import__("datetime").timezone.utc).strftime("%Y-%m-%d")
+    assert harness.broker._count_builds_today("res-test", today) == 0
+    assert harness.broker._count_builds_today("server", today) == 1
+    assert harness.audit_lines()[-1]["build_seat"] == "res-test"

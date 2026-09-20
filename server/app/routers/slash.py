@@ -22,13 +22,10 @@ to post; returning None posts nothing.
     /backlog built <id>             -> status 'built'
     /backlog spec'd <id> <slug>     -> status "spec'd" + spec_ref = <slug>
 
-The four triage verbs are RESERVED FIRST WORDS. `/backlog reject the login
-flow` files nothing and says so, rather than guessing which of the two things
-you meant. The alternative — treat it as a subcommand only when the rest
-happens to parse as an id — turns `/backlog reject 5 please` into a filed item
-reading "reject 5 please" while the person who typed it believes #5 is
-rejected. A refusal you can read beats a silent wrong turn; that is the same
-reason `duplicate` exists at all.
+The four triage verbs are RESERVED FIRST WORDS: `/backlog reject the login flow`
+files nothing and says so, because a subcommand recognised only when the rest
+happens to parse as an id files "reject 5 please" as an item while the person
+who typed it believes #5 is rejected.
 
 The verbs are authenticated-HUMAN-only and bots are refused server-side, in
 services/backlog.py rather than here — one write path, one gate, reached both
@@ -566,3 +563,54 @@ async def _build(ctx: Ctx) -> str:
     slug = (response.get("result") or {}).get("slug")
     await apps.mark_repo_queued(session, slug)
     return f"Build started on `loop/{slug}` (session {session['id']})."
+
+
+MERGE_NOT_A_PERSON = "Only a person can merge a branch."
+
+MERGE_USAGE = (
+    "Usage: `/merge <slug> [pass <seq>]` — e.g. "
+    "`/merge 2026-09-20-fix-the-login-typo pass 2704`."
+)
+
+
+def parse_merge_args(raw: str) -> Optional[tuple[str, Optional[int]]]:
+    """`<slug>`, or `<slug> pass <seq>`. Anything else is None, which is usage."""
+    parts = raw.split()
+    if len(parts) == 1:
+        return parts[0], None
+    if (len(parts) == 3 and parts[1].lower() == "pass"
+            and parts[2].isdigit() and int(parts[2]) > 0):
+        return parts[0], int(parts[2])
+    return None
+
+
+@command("merge")
+async def _merge(ctx: Ctx) -> str:
+    if ctx.actor.type != "user" or ctx.actor.user is None:
+        logger.warning(
+            "/merge refused: %s %s is not a person", ctx.actor.type, ctx.actor.id
+        )
+        return MERGE_NOT_A_PERSON
+    parsed = parse_merge_args(ctx.args.strip())
+    if parsed is None:
+        return MERGE_USAGE
+    slug, pass_seq = parsed
+
+    try:
+        response = await broker_client.call_broker(
+            "merge",
+            {
+                "seq": ctx.message_seq,
+                "channel_id": ctx.channel_id,
+                "slug": slug,
+                "pass_seq": pass_seq,
+            },
+        )
+    except broker_client.BrokerError as exc:
+        return exc.message
+
+    result = response.get("result") or {}
+    return (
+        f"Merged `{result.get('slug')}` as {result.get('sha')} "
+        f"(tier {result.get('tier')}). Deploy stays at the keyboard."
+    )

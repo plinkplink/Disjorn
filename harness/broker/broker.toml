@@ -512,12 +512,29 @@ unit = "disjorn.service"
 # everything, which is how you disarm `/build` without editing verbs.toml.
 humans = ["plink"]
 # The resident the build RUNS as, without the `res-` prefix. It must be a
-# resident of this house ([uids] / [residents]); it spends that seat's daily
-# build budget, the same one [start_build] caps.
+# resident of this house ([uids] / [residents]).
 seat = "gable"
+# Chat builds per UTC day, spent under the `server` principal. A chat build does
+# NOT touch the build seat's [start_build] allowance: one entrance may not eat
+# the other's day.
+daily_build_cap = 4
 # One JSON line per accepted `/build`: ts, seq, channel_id, author,
-# text_sha256, slug, session_id. Keep it somewhere no resident can write.
+# text_sha256, slug, session_id. `/merge` appends here too, with kind = "merge"
+# (ts, seq, channel_id, author, slug, tier, sha, pass_seq), and the Tier 0
+# auto-merge budget is counted from those lines. Keep it somewhere no resident
+# can write.
 ledger = "/var/lib/disjorn-broker/build-ledger.jsonl"
+# THE GATES, AND WHOSE HANDS THEY RUN IN. The broker launches the suite itself
+# through the same sudo helper a build uses (`disjorn-build-launch gate`), reads
+# the verdict off the launcher's stdout, and merges nothing without a green run
+# it started. A caller-supplied gate result has no slot to arrive in.
+gate_timeout_sec = 900
+# The full stdout+stderr of each gate run, 0600. Never a resident-writable dir.
+gate_log_dir = "/var/lib/disjorn-broker/gate-logs"
+# Where `/merge` clones, merges and pushes from. A throwaway tree per merge, so
+# a half-done merge is a directory nobody reads rather than a gatehouse nobody
+# can build from.
+merge_work_dir = "/var/lib/disjorn-broker/merge-work"
 
 [disjorn]
 # file-proposal posts to #custodian AS THE BROKER'S OWN bot identity — the

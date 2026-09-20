@@ -103,5 +103,10 @@
 # refuses a bot author, refuses a privacy-flagged message and refuses an author
 # who is not on [build].humans. Turning this off turns `/build` off for
 # everyone, which is the switch plink wants it to be.
+#
+# `merge` carries the same two walls plus its own: the broker runs the gates and
+# the classifier itself, a Tier 2 branch needs a reviewer's PASS seq, and a
+# resident's word merges nothing — chat is data.
 [server]
 "build" = true
+"merge" = true
