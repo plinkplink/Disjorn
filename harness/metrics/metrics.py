@@ -478,13 +478,8 @@ def write_metrics(config: dict, doc: dict) -> str:
 GATE_GUARDED_PREFIXES = ("server/", "client/", "sdk/", "harness/")
 HOOK_REPO_PATH = "harness/gatehouse/hooks/pre-receive-main-review"
 
-# The resident image's Claude Code CLI, reported beside the hook sha (Gable's
-# ask, 2026-09-02). Same shape as the hook line: what is DEPLOYED (the built
-# image's `claude --version`) against what is COMMITTED (the ARG pin in the
-# mirror's Containerfile). The day this was added, a stale pin (2.1.215 vs a
-# model needing >= 2.1.251) had killed every Gable summon with an API 400 that
-# the model gate could only report as "<synthetic>". A version line in the
-# digest is how that gets noticed before the next model bump, not after.
+# Deployed CLI version against the Containerfile pin: a stale pin kills every
+# summon with an API 400 the model gate can only report as "<synthetic>".
 CONTAINERFILE_REPO_PATH = "harness/cc/Containerfile"
 RESIDENT_IMAGE = "localhost/disjorn-resident:latest"
 _CC_PIN_RE = re.compile(r"^ARG\s+CLAUDE_CODE_VERSION=([0-9][0-9A-Za-z.\-]*)", re.M)
@@ -1468,6 +1463,7 @@ def gate_drift(config: dict, *, date: str, now: Optional[_dt.datetime] = None,
         drift["deploy"] = deploy_state(mirror=mirror,
                                        deploy_tree=paths["deploy_tree"],
                                        branch=branch)
+        drift["prose"] = prose_summary(paths["deploy_tree"])
     finally:
         if db is not None:
             db.close()
@@ -1486,6 +1482,19 @@ def _named(items: list, render) -> list:
     if len(items) > FLAG_CAP:
         lines.append(f"    …and {len(items) - FLAG_CAP} more, not named here")
     return lines
+
+
+def prose_summary(tree: Optional[str]) -> dict:
+    """Prose ceiling over the deployed tree, via the one counter (harness/prose/ratio.py)."""
+    if not tree:
+        return {"error": "no [gate].deploy_tree configured"}
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from prose import ratio
+        baseline = Path(tree) / ratio.BASELINE_REL
+        return ratio.summary(Path(tree), baseline.read_text() if baseline.exists() else None)
+    except Exception as e:  # report-only line: never take the digest down
+        return {"error": f"{type(e).__name__}: {e}"}
 
 
 def compose_drift_block(drift: dict, *, verbose: bool = False) -> str:
@@ -1660,6 +1669,15 @@ def compose_drift_block(drift: dict, *, verbose: bool = False) -> str:
     d = drift.get("deploy", {})
     L.append(f"deploy: {d.get('state', 'unknown')}"
              + (f" — {d['detail']}" if d.get("detail") else ""))
+
+    # 8. prose ceiling, report only; the wall is harness/tests/test_prose_ratio.py
+    pr = drift.get("prose")
+    if pr is not None:
+        if pr.get("error"):
+            L.append(f"prose: UNMEASURED — {pr['error']}")
+        else:
+            L.append(f"prose: worst {pr['worst']} {pr['worst_ratio']:.0%}; "
+                     f"over baseline: {pr['over']}")
     return "\n".join(L)
 
 

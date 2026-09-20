@@ -150,6 +150,21 @@ Arming it is four plink-owned edits, none of which a resident can reach:
 Stopping any one of the four stops the lane. Nothing self-wakes: there is no
 cron, no chat surface, and no verb a resident can press to reach this.
 
+## Code prose ceiling (binds the keyboard too)
+
+- A comment or docstring states a constraint the code cannot show, in one sentence. What the code does is not a comment.
+- No provenance in code: no seq citations, dates, names, "ruled by", "used to", "the day this was added", or incident narration. Git holds who and when; SPECS/ and DEFERRED.md hold why at length. A comment may point at a spec slug or DEFERRED heading in five words or fewer.
+- Exception, stated as a constraint: a lesson that was expensive and is likely to be repeated keeps one line saying what must not be done and what breaks if it is. Never the story of how it was learned.
+- Prose allowance per `.py`/`.sh` file: the larger of 25% of bytes and 1 KB. A new file stays within it. An existing file's prose bytes may not rise above its line in `harness/prose-baseline.toml`, and a build that touches a file over the allowance must lower it or say in the banner why it could not. The wall is `harness/tests/test_prose_ratio.py`; it runs in every build-seat suite and at keyboard merge.
+
+Before a merge to main:
+
+```
+server/.venv/bin/python -m pytest harness/tests -q      # the wall
+python3 harness/prose/ratio.py report                   # worst files
+python3 harness/prose/ratio.py baseline                 # what a rewritten baseline would say
+```
+
 ## After the session
 
 - Flip individual switches with `sudoedit /etc/disjorn-broker/verbs.toml` —

@@ -47,10 +47,13 @@ you are working under. You do not know the house's rules and you do not need to
    arranged.
 
 5. **Comments state constraints the code cannot show — nothing else.**
-   Never restate the line below a comment. Do not copy an existing verbose
-   comment style; for comments, this rule outranks matching the
-   surrounding code. Same bar for any .md you touch: add facts, not
-   narrative.
+   - A comment or docstring states a constraint the code cannot show, in one sentence. What the code does is not a comment.
+   - No provenance in code: no seq citations, dates, names, "ruled by", "used to", "the day this was added", or incident narration. Git holds who and when; SPECS/ and DEFERRED.md hold why at length. A comment may point at a spec slug or DEFERRED heading in five words or fewer.
+   - Exception, stated as a constraint: a lesson that was expensive and is likely to be repeated keeps one line saying what must not be done and what breaks if it is. Never the story of how it was learned.
+   - Prose allowance per `.py`/`.sh` file: the larger of 25% of bytes and 1 KB. A new file stays within it. An existing file's prose bytes may not rise above its line in `harness/prose-baseline.toml`, and a build that touches a file over the allowance must lower it or say in the banner why it could not. The wall is `harness/tests/test_prose_ratio.py`; it runs in every build-seat suite and at keyboard merge.
+   - Do not copy an existing verbose comment style; for comments, this
+     rule outranks matching the surrounding code. Same bar for any .md you
+     touch: add facts, not narrative.
 
 6. **End with one JSON object on stdout**, as the last thing you print:
 
