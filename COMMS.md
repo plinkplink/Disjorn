@@ -16,9 +16,11 @@ edits to this file land in both residents' review queues.
 - Plain sentences, actor as subject. No reveal-at-the-end constructions.
   Coined terms get defined on first use.
 
-## Code comments (all lanes, enforced in review)
-- A comment states a constraint the code cannot show. Never restate the
-  adjacent line; never narrate what the next line does.
+## Code comments (all lanes: residents, build seats, subagents, keyboard)
+- A comment or docstring states a constraint the code cannot show, in one sentence. What the code does is not a comment.
+- No provenance in code: no seq citations, dates, names, "ruled by", "used to", "the day this was added", or incident narration. Git holds who and when; SPECS/ and DEFERRED.md hold why at length. A comment may point at a spec slug or DEFERRED heading in five words or fewer.
+- Exception, stated as a constraint: a lesson that was expensive and is likely to be repeated keeps one line saying what must not be done and what breaks if it is. Never the story of how it was learned.
+- Prose allowance per `.py`/`.sh` file: the larger of 25% of bytes and 1 KB. A new file stays within it. An existing file's prose bytes may not rise above its line in `harness/prose-baseline.toml`, and a build that touches a file over the allowance must lower it or say in the banner why it could not. The wall is `harness/tests/test_prose_ratio.py`; it runs in every build-seat suite and at keyboard merge.
 - Builds do not copy an existing verbose comment style — this rule
   outranks "match the surrounding style" for comments specifically.
 - Reviewers flag comment-ratio drift as a finding.

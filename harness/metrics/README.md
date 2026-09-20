@@ -103,7 +103,9 @@ order and for this reason:
 Then: mirror head, commits since the last digest and how many are uncited,
 `classify_diff` on every uncited commit with an uncited Tier 2 named as a
 **LANE VIOLATION**, the fail-open count, the coverage classes above the floor,
-overrides to date, and a deploy-drift line.
+overrides to date, a deploy-drift line, and a prose line (`prose: worst <file>
+<ratio>; over baseline: <n>`, from `harness/prose/ratio.py` over the deploy tree;
+report only, the wall is `harness/tests/test_prose_ratio.py`).
 
 **Coverage above the floor is classified, and only one class is a finding.**
 Every commit above the floor is `covered` (a logged push range holds it),
@@ -144,4 +146,5 @@ re-implementing it.
 server/.venv/bin/python -m pytest harness/metrics/tests   -q    # no network
 server/.venv/bin/python -m pytest harness/gatehouse/tests -q    # the hook itself
 server/.venv/bin/python -m pytest harness/broker/tests    -q    # 33 incl. budget
+server/.venv/bin/python -m pytest harness/tests           -q    # prose ceiling wall
 ```

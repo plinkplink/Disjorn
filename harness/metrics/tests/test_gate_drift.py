@@ -1025,6 +1025,21 @@ def test_deploy_state_in_sync(lane):
     assert d["dirty"] is False
 
 
+def test_prose_line_reports_worst_file_and_over_count(lane):
+    lane.commit("harness/big.py", "# " + "x" * 3000 + "\ny = 1\n", "harness: prose-heavy")
+    lane.commit("harness/small.py", "y = 1\n", "harness: lean")
+    lane.deploy()
+    d = lane.drift()
+    assert d["prose"]["worst"] == "harness/big.py" and d["prose"]["over"] == 1
+    line = [l for l in lane.block().splitlines() if l.startswith("prose:")][0]
+    assert line == "prose: worst harness/big.py 100%; over baseline: 1"
+
+
+def test_prose_line_says_unmeasured_when_the_tree_is_gone(lane):
+    d = M.compose_drift_block({**lane.drift(), "prose": M.prose_summary("/nope/prod")})
+    assert "prose: UNMEASURED" in d
+
+
 def test_deploy_state_behind_is_drift(lane):
     lane.deploy()
     lane.commit("harness/new.py", "x\n", "harness: unpublished to prod")
