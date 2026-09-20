@@ -10,8 +10,8 @@ hook is the other half of that symmetry.
 
 WHAT IT DOES, AND NOTHING MORE. It refuses a `main` ref update whose commit
 range touches `server/`, `client/`, `sdk/` or `harness/` unless the pushed
-head's commit message carries a `review-seq: <n>` or `override-seq: <n>`
-trailer.
+head's commit message carries a `review-seq: <n>`, `override-seq: <n>` or
+`merge-seq: <channel_id>:<seq>` trailer.
 
 IT IS DELIBERATELY DUMB — paths plus a trailer, a presence check on text. It
 does NOT check that the seq exists, that it lives in #custodian, or that the
@@ -92,8 +92,11 @@ GUARDED_PREFIXES = ("server/", "client/", "sdk/", "harness/")
 # bottom of a message). Deliberately not `git interpret-trailers`: the hook must
 # behave identically to the digest's reader, and one regex in two files is
 # easier to keep honest than one parser and one regex.
+# `merge-seq` names a channel as well as a seq: seqs are per channel, and the
+# chat message that authorises a merge may be typed in any channel.
 TRAILER_RE = re.compile(
-    r"^\s*(review-seq|override-seq)\s*:\s*(\d+)\s*$", re.IGNORECASE)
+    r"^\s*(review-seq|override-seq)\s*:\s*(\d+)\s*$"
+    r"|^\s*(merge-seq)\s*:\s*(\d+):(\d+)\s*$", re.IGNORECASE)
 
 LOG_NAME = "disjorn-push-log"
 NO_TRAILER = "NONE"
@@ -126,7 +129,8 @@ def is_zero(sha: str) -> bool:
 
 
 def find_trailer(message: str) -> Optional[str]:
-    """`review-seq:<n>` / `override-seq:<n>` from a commit message, or None.
+    """`review-seq:<n>`, `override-seq:<n>` or `merge-seq:<channel>:<seq>` from
+    a commit message, or None.
 
     Returns the NORMALISED form (lowercase kind, no spaces) because that string
     goes straight into the log and the digest parses it back."""
@@ -134,7 +138,8 @@ def find_trailer(message: str) -> Optional[str]:
     for line in message.splitlines():
         m = TRAILER_RE.match(line)
         if m:
-            found = f"{m.group(1).lower()}:{m.group(2)}"
+            kind, *rest = [g for g in m.groups() if g is not None]
+            found = ":".join([kind.lower(), *rest])
     return found
 
 
@@ -232,7 +237,7 @@ def decide(git_dir: str, old: str, new: str) -> dict:
                 "why": f"trailer present: {trailer}"}
     return {"outcome": REFUSED, "trailer": None, "hits": hits,
             "why": "gated lane touched and the head commit carries no "
-                   "review-seq / override-seq trailer"}
+                   "review-seq / override-seq / merge-seq trailer"}
 
 
 # --------------------------------------------------------------------------
@@ -342,7 +347,8 @@ def run_hook(stdin_text: str, git_dir: str, log_path: str,
             say(f"  this push touches a gated lane: "
                 f"{', '.join(d['hits'][:8])}"
                 + (f" (+{len(d['hits']) - 8} more)" if len(d["hits"]) > 8 else ""))
-            say("  the head commit carries no review-seq / override-seq trailer.")
+            say("  the head commit carries no review-seq / override-seq /")
+            say("  merge-seq trailer.")
             say("  Either get a review and cite it:")
             say("      review-seq: <#custodian seq of the review>")
             say("  or take the override, which is an ordinary legible act and")
@@ -350,6 +356,9 @@ def run_hook(stdin_text: str, git_dir: str, log_path: str,
             say("      keyboard: override-merge <slug> — <reason>")
             say("  and cite that seq:")
             say("      override-seq: <that seq>")
+            say("  A merge the broker makes from chat carries the seq of the")
+            say("  human message that asked for it, with its channel:")
+            say("      merge-seq: <channel_id>:<that seq>")
             say("  Review is still owed within a day. Overrides are counted")
             say("  forever, in every daily digest. The count is the control.")
             say("  Amend the tip commit with the trailer and push again.")
