@@ -64,7 +64,7 @@ from fastapi import APIRouter, Depends, Query
 
 from .. import db, privacy
 from ..models import BacklogItem
-from ..services import backlog as backlog_service
+from ..services import backlog as backlog_service, broker_client
 from .auth import Actor, get_actor
 from .messages import deliver_message
 
@@ -128,10 +128,12 @@ class Ctx:
         flags: Optional[dict[str, Any]] = None,
         channel_type: Optional[str] = None,
         channel_visibility: str = "public",
+        message_seq: int = 0,
     ) -> None:
         self.channel_id = channel_id
         self.args = args
         self.actor = actor
+        self.message_seq = message_seq
         # Effective privacy flags of the message that carried this command
         # (caller-supplied + server NL detection, already merged by the create
         # path). Handlers that persist command text to bot-readable surfaces
@@ -254,6 +256,8 @@ async def dispatch(
     content: str,
     actor: Actor,
     flags: Optional[dict[str, Any]] = None,
+    *,
+    message_seq: int,
 ) -> None:
     """Handle a posted message if its content is a registered slash command.
 
@@ -292,7 +296,7 @@ async def dispatch(
     channel_type = channel["type"] if channel is not None else None
     visibility = channel["visibility"] if channel is not None else "private"
     reply = await handler(
-        Ctx(channel_id, args, actor, flags, channel_type, visibility)
+        Ctx(channel_id, args, actor, flags, channel_type, visibility, message_seq)
     )
     if reply:
         await _post_system_reply(channel_id, reply)
@@ -519,3 +523,46 @@ async def list_backlog(
     text. No read-side filtering is needed.
     """
     return [BacklogItem(**it) for it in await _items_page(from_id, limit)]
+
+
+BUILD_NOT_A_PERSON = "Only a person can start a build."
+
+BUILD_USAGE = (
+    "Usage: `/build <what to change>` — e.g. "
+    "`/build fix the typo on the login page`."
+)
+
+
+@command("build")
+async def _build(ctx: Ctx) -> str:
+    if ctx.actor.type != "user" or ctx.actor.user is None:
+        logger.warning(
+            "/build refused: %s %s is not a person", ctx.actor.type, ctx.actor.id
+        )
+        return BUILD_NOT_A_PERSON
+    if not ctx.args.strip():
+        return BUILD_USAGE
+
+    from . import apps
+
+    try:
+        session = await apps.create_repo_session(ctx.actor.user.id, ctx.channel_id)
+    except apps.RepoSessionError as exc:
+        return str(exc)
+
+    try:
+        response = await broker_client.call_broker(
+            "build",
+            {
+                "seq": ctx.message_seq,
+                "channel_id": ctx.channel_id,
+                "session_id": session["id"],
+            },
+        )
+    except broker_client.BrokerError as exc:
+        await apps.end_repo_session(session["id"])
+        return exc.message
+
+    slug = (response.get("result") or {}).get("slug")
+    await apps.mark_repo_queued(session, slug)
+    return f"Build started on `loop/{slug}` (session {session['id']})."
