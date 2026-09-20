@@ -367,6 +367,13 @@ export interface TurnState {
   done: boolean;
 }
 
+/**
+ * What a session is building. `repo` is the platform itself, on a `loop/*`
+ * branch in the gatehouse; there is no app to serve, so no gate verb applies
+ * (SPECS/2026-09-20-build-lane-v2-stage1-2b.md).
+ */
+export type AppSessionMode = "app" | "repo";
+
 /** SessionOut — everything the build modal renders, in one payload. */
 export interface AppSession {
   id: number;
@@ -379,6 +386,10 @@ export interface AppSession {
   stage: AppStage | null;
   stages: StageEvent[];
   quota: Quota;
+  mode: AppSessionMode;
+  /** The branch is `loop/<repo_slug>`. Null in app mode, and in repo mode
+      until the broker has answered with a slug. */
+  repo_slug: string | null;
   /** Client-side, derived from `stages` — not a field the server sends. Null
       until the first event carrying a turn arrives. */
   lastTurn?: TurnState | null;

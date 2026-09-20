@@ -24,6 +24,7 @@ const COMMANDS: Section[] = [
   {
     title: "Chat commands",
     items: [
+      { label: "Build a platform change from chat", cmd: "/build <what to change>" },
       { label: "List the backlog", cmd: "/backlog" },
       { label: "File a backlog item", cmd: "/backlog <your request>" },
       { label: "Reject a backlog item", cmd: "/backlog reject <id>" },

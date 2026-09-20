@@ -41,6 +41,7 @@ import { useChannels } from "../stores/channels";
 import { useMembers } from "../stores/members";
 import { useMessages } from "../stores/messages";
 import type {
+  AppStage,
   AppVisibility,
   Attachment,
   HaltReason,
@@ -102,6 +103,19 @@ function countFiles(files: string[]): number {
   const more = last === undefined ? null : /^\+(\d+) more$/.exec(last);
   return more === null ? files.length : files.length - 1 + Number(more[1]);
 }
+
+/* Repo mode's bar. The stage words are the app vocabulary and cannot change —
+   the server's CHECK constraint owns them — so the platform build relabels
+   them where it reads them. `live` is dropped: a harvest lands on the branch
+   and stops, and nothing in repo mode ever posts it. */
+const REPO_STAGES: readonly AppStage[] = APP_STAGES.filter((s) => s !== "live");
+
+const REPO_STAGE_LABELS: Partial<Record<AppStage, string>> = {
+  scoped: "Queued",
+  scaffolded: "Working",
+  files_written: "Committed",
+  deployed: "On the branch",
+};
 
 /** Said wherever a URL would have gone on a house with no serving gate. One
     sentence, and it names the house rather than the app: nothing is wrong
@@ -310,6 +324,9 @@ export function AppBuildModal({
   const [revertArmed, setRevertArmed] = useState(false);
 
   const originBase = useApps((s) => s.originBase);
+  /** A platform build. There is no served app behind it, so every gate path
+      below — the mint, the card, the frame, the four verbs — is skipped. */
+  const repoMode = session?.mode === "repo";
   const appId = session?.app.id ?? null;
   const card = useApps((s) => (appId === null ? undefined : s.cards[appId]));
 
@@ -461,7 +478,7 @@ export function AppBuildModal({
      cheap and the alternative — reusing a grant we cached — is a client
      holding a credential it has no reason to hold. */
   useEffect(() => {
-    if (appId === null) return;
+    if (appId === null || repoMode) return;
     if (originBase === "") {
       setPreviewUrl(null);
       setPreviewNote(NO_GATE);
@@ -494,14 +511,14 @@ export function AppBuildModal({
     return () => {
       cancelled = true;
     };
-  }, [appId, originBase, deployedCount]);
+  }, [appId, originBase, deployedCount, repoMode]);
 
   /* The card is where `has_previous_live` lives — Revert is shown only when
      there is a previous live to go back to, and only the server knows. */
   useEffect(() => {
-    if (appId === null) return;
+    if (appId === null || repoMode) return;
     void useApps.getState().loadCard(appId);
-  }, [appId]);
+  }, [appId, repoMode]);
 
   const commitRename = () => {
     setRenaming(false);
@@ -719,7 +736,21 @@ export function AppBuildModal({
   }
 
   const { app, builder } = session;
-  const reached = session.stage === null ? -1 : APP_STAGES.indexOf(session.stage);
+  const barStages = repoMode ? REPO_STAGES : APP_STAGES;
+  const reached = session.stage === null ? -1 : barStages.indexOf(session.stage);
+  const title = repoMode
+    ? session.repo_slug === null
+      ? "Building the platform"
+      : `Building the platform — loop/${session.repo_slug}`
+    : `Building ${app.name}`;
+
+  /* Where the harvest landed. Only the `deployed` event carries the sha, so
+     the newest one is read rather than the folded turn. */
+  const landed = repoMode
+    ? session.stages.filter((e) => e.stage === "deployed").slice(-1)[0]?.detail
+    : undefined;
+  const branch = typeof landed?.branch === "string" ? landed.branch : null;
+  const sha = typeof landed?.sha === "string" ? landed.sha : null;
 
   /* The turn, and what it makes the bar say. `lastTurn` is derived in the
      store from the whole event list, so a new turn's `scoped` clears a halt
@@ -782,13 +813,16 @@ export function AppBuildModal({
         className="app-build-modal"
         role="dialog"
         aria-modal="true"
-        aria-label={`Building ${app.name}`}
+        aria-label={title}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="member-modal-head app-build-head">
           <BotAvatar src={builder.avatar_url} name={builder.name} size={32} />
           <span className="app-build-builder">{builder.name}</span>
-          {renaming ? (
+          {repoMode ? (
+            /* The platform is not an app row anyone may rename. */
+            <span className="app-build-title">{title}</span>
+          ) : renaming ? (
             <input
               className="app-name-input"
               autoFocus
@@ -813,7 +847,9 @@ export function AppBuildModal({
               {app.name}
             </button>
           )}
-          <QuotaMeter quota={quota} />
+          {/* The meter counts app builds; a platform build spends none of
+              them, and the broker's own budget is its cap. */}
+          {!repoMode && <QuotaMeter quota={quota} />}
           <button
             className="btn app-build-toggle"
             aria-pressed={showPreview}
@@ -821,7 +857,7 @@ export function AppBuildModal({
           >
             {showPreview ? "Chat" : "Progress"}
           </button>
-          {turnRunning && !ended && (
+          {turnRunning && !ended && !repoMode && (
             <button
               className="btn btn-danger"
               disabled={stopping}
@@ -833,7 +869,7 @@ export function AppBuildModal({
           <button
             className="btn"
             disabled={ended || ending}
-            onClick={() => (turnRunning ? setConfirming("end") : endNow())}
+            onClick={() => (turnRunning && !repoMode ? setConfirming("end") : endNow())}
           >
             {ending ? "Ending…" : ended ? "Ended" : "End session"}
           </button>
@@ -851,11 +887,15 @@ export function AppBuildModal({
 
         <div className={`app-build-body${showPreview ? " show-preview" : ""}`}>
           <div className="app-build-chat">
-            <div className="app-intro-card">
-              <strong>Say what you want to build.</strong> {builder.name} will
-              ask what it needs, then build it. Talk for as long as you like
-              first — nothing starts until it has enough.
-            </div>
+            {/* A repo build is already running when this opens, and this room
+                is the channel it was asked for in, not a build room. */}
+            {!repoMode && (
+              <div className="app-intro-card">
+                <strong>Say what you want to build.</strong> {builder.name}{" "}
+                will ask what it needs, then build it. Talk for as long as you
+                like first — nothing starts until it has enough.
+              </div>
+            )}
             <MessageList
               channelId={session.channel_id}
               onReply={(m) => {
@@ -905,7 +945,7 @@ export function AppBuildModal({
 
           <div className="app-build-preview">
             <ol className="stage-bar">
-              {APP_STAGES.map((stage, i) => (
+              {barStages.map((stage, i) => (
                 <li
                   key={stage}
                   className={`stage-step${
@@ -915,6 +955,7 @@ export function AppBuildModal({
                   <span className="stage-dot" aria-hidden />
                   <span className="stage-label">
                     {(i === reached ? currentLabel : null) ??
+                      (repoMode ? REPO_STAGE_LABELS[stage] : null) ??
                       APP_STAGE_LABELS[stage]}
                   </span>
                 </li>
@@ -947,6 +988,23 @@ export function AppBuildModal({
                 </ul>
               </div>
             )}
+            {repoMode ? (
+              /* No frame and no gate verb: the branch IS the outcome, and
+                 until `deployed` lands there is nothing yet to name. */
+              branch === null && sha === null ? null : (
+                <div className="app-build-landed">
+                  <div className="app-build-landed-row">
+                    <span className="app-elapsed-label">Branch</span>
+                    <code>{branch ?? "—"}</code>
+                  </div>
+                  <div className="app-build-landed-row">
+                    <span className="app-elapsed-label">Commit</span>
+                    <code>{sha ?? "—"}</code>
+                  </div>
+                </div>
+              )
+            ) : (
+              <>
             <div className={`app-preview-frozen${frozen ? " frozen" : ""}`}>
               {(frozen || previewUrl === null) && (
                 <div className="app-preview-banner">
@@ -1095,6 +1153,8 @@ export function AppBuildModal({
                   </button>
                 ))}
             </div>
+              </>
+            )}
           </div>
         </div>
       </div>

@@ -553,6 +553,12 @@ export function AppShell() {
     useApps.getState().clearBuildModalRequest();
   }, [pendingSessionId]);
 
+  /* The store decides whether a repo build may take the screen, and this is
+     the only thing that tells it a modal is already up. */
+  useEffect(() => {
+    useApps.getState().setOpenBuildSession(buildSessionId);
+  }, [buildSessionId]);
+
   // Default to #main once channels arrive (unless a deep link chose one).
   useEffect(() => {
     if (!loaded) return;

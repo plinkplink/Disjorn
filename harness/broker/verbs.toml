@@ -92,3 +92,16 @@
 # seat may call must also be a verb no seat can see.
 [plink]
 "wake" = false
+
+# THE SERVER (SPECS/2026-09-20-build-lane-v2-stage1-2b.md). Not a seat and not a
+# human: the Disjorn server itself, authenticated at the socket by plink's uid
+# PLUS the peer cgroup naming [server].unit in broker.toml. It carries the one
+# verb behind the `/build` slash command.
+#
+# This section ships ON, and that is not an exception to the rule above: `build`
+# is not a power any resident gains. The broker re-reads the message itself,
+# refuses a bot author, refuses a privacy-flagged message and refuses an author
+# who is not on [build].humans. Turning this off turns `/build` off for
+# everyone, which is the switch plink wants it to be.
+[server]
+"build" = true

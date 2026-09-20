@@ -397,12 +397,14 @@ def test_verbs_template_all_off_and_matches_verb_table(harness):
     import tomllib
     with open(TEMPLATE_DIR / "verbs.toml", "rb") as fh:
         tmpl = tomllib.load(fh)
-    assert set(tmpl) == {"res-claudette", "res-gable", "plink"}
-    seat_verbs = set(harness.broker.verbs) - {"wake"}
+    assert set(tmpl) == {"res-claudette", "res-gable", "plink", "server"}
+    seat_verbs = set(harness.broker.verbs) - {"wake", "build"}
     for resident in ("res-claudette", "res-gable"):
         assert set(tmpl[resident]) == seat_verbs, resident
     assert set(tmpl["plink"]) == {"wake"}
-    for resident, flags in tmpl.items():
+    assert tmpl["server"] == {"build": True}  # a switch, not a resident's grant
+    for resident in ("res-claudette", "res-gable", "plink"):
+        flags = tmpl[resident]
         assert all(v is False for v in flags.values()), (
             f"{resident} has a verb enabled in the TEMPLATE — defaults are OFF")
         assert "restart-self" not in flags

@@ -141,6 +141,10 @@ class Settings(BaseSettings):
         "sudo", "-n", "/usr/local/lib/disjorn/disjorn-apps-launch",
     ]
 
+    BROKER_SOCKET_PATH: str = "/run/disjorn-broker/broker.sock"
+
+    PLATFORM_BUILD_BOT: str = "BuildGable"
+
     @property
     def db_path(self) -> Path:
         return Path(self.DB_PATH)

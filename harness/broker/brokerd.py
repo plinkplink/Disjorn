@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import hashlib
 import json
 import os
 import pwd
@@ -79,6 +80,25 @@ BUILD_ACTIVE_STATES = frozenset(
 # launch.
 BUILD_SIDECAR_SUFFIX = ".build.json"
 BUILD_SIDECAR_SCHEMA = 1
+
+# ------------------------------------------------------------- the server
+# The Disjorn server runs under plink's own uid, so the peer uid alone cannot
+# tell the two apart: the peer pid's cgroup must name [server].unit as well.
+SERVER_PEER_IDENTITY = "plink"
+SERVER_IDENTITY = "server"
+DEFAULT_SERVER_UNIT = "disjorn.service"
+BUILD_VERB = "build"
+BUILD_REFUSED = "build-refused"
+MAX_BUILD_TEXT_CHARS = 4000
+# A message seq / channel id / session id: any positive 32-bit row key.
+MAX_SEQ = 2 ** 31 - 1
+BUILD_SLUG_WORDS = 5
+# A slug stem must still fit _SPEC_STEM_RE after a uniqueness suffix.
+MAX_BUILD_SLUG_STEM = 45
+MAX_BUILD_SLUG_TRIES = 99
+_SLUG_WORD_RE = re.compile(r"[a-z0-9]+")
+# Mirrors server/app/privacy.py BOT_HIDDEN_FLAGS; the two must not drift.
+BOT_HIDDEN_FLAGS = ("secret", "off_the_record")
 
 # --------------------------------------------------------------- apps-build
 # SPECS/2026-09-06-apps-builder-seat.md §B/§E. An APP BUILD TURN is launched the
@@ -254,6 +274,22 @@ def build_unit_name(slug: str) -> str:
     except ValueError:
         raise _bad(f"slug date is not a real date: {slug!r}") from None
     return f"{BUILD_UNIT_PREFIX}{slug}.service"
+
+
+def read_peer_cgroup(pid: int) -> str:
+    """`/proc/<pid>/cgroup` for a socket peer; empty when the peer is already gone."""
+    try:
+        with open(f"/proc/{int(pid)}/cgroup", "r", encoding="utf-8") as fh:
+            return fh.read()
+    except (OSError, ValueError):
+        return ""
+
+
+def hidden_from_bots(privacy_flags: Any) -> bool:
+    """The rule in server/app/privacy.py, restated where no server import exists."""
+    if not isinstance(privacy_flags, dict) or not privacy_flags:
+        return False
+    return any(bool(privacy_flags.get(f)) for f in BOT_HIDDEN_FLAGS)
 
 
 class VerbError(Exception):
@@ -492,6 +528,28 @@ def _sdk_transport(disjorn_cfg: dict, body: str) -> dict:
         client = DisjornClient(url, api_key=api_key)
         try:
             msg = await client.send(channel_id, body)
+        finally:
+            await client.aclose()
+        return {"seq": msg.get("seq"), "message_id": msg.get("id")}
+
+    return asyncio.run(_post())
+
+
+def _sdk_channel_transport(disjorn_cfg: dict, channel_id: int,
+                           body: str) -> dict:
+    """POST body to ONE named channel, rather than to #custodian."""
+    import asyncio
+
+    from disjorn_sdk import DisjornClient  # deferred import: not needed in tests
+
+    url = disjorn_cfg["url"]
+    with open(disjorn_cfg["api_key_path"], "r", encoding="utf-8") as fh:
+        api_key = fh.read().strip()
+
+    async def _post() -> dict:
+        client = DisjornClient(url, api_key=api_key)
+        try:
+            msg = await client.send(int(channel_id), body)
         finally:
             await client.aclose()
         return {"seq": msg.get("seq"), "message_id": msg.get("id")}
@@ -797,6 +855,37 @@ def build_session_prompt(spec_text: str, *, slug: str, branch: str) -> str:
     )
 
 
+def strip_build_command(content: str) -> str:
+    """`/build <what to do>` -> `<what to do>`; the word is stripped only when it
+    leads."""
+    text = (content or "").strip()
+    parts = text.split(None, 1)
+    if parts and parts[0].lower() == f"/{BUILD_VERB}":
+        text = parts[1] if len(parts) > 1 else ""
+    return text.strip()
+
+
+def slug_from_build_text(text: str, today: str) -> str:
+    """`YYYY-MM-DD-<up to five words>`, kebab, ASCII, bounded."""
+    stem = "-".join(_SLUG_WORD_RE.findall(text.lower())[:BUILD_SLUG_WORDS])
+    stem = stem[:MAX_BUILD_SLUG_STEM].strip("-")
+    return f"{today}-{stem}" if stem else ""
+
+
+def build_chat_prompt(text: str, *, slug: str, branch: str) -> str:
+    """The chat request under the same preamble a spec build gets."""
+    return (
+        f"Build exactly what the request below describes.\n"
+        f"Your branch `{branch}` is already created and checked out in every "
+        f"clone under `~/work`. Your worktree and the rules you work under are "
+        f"in your CLAUDE.md; this message is the whole request and there is NO "
+        f"SPEC FILE to read.\n"
+        f"When you are finished OR you have stopped, print the final JSON "
+        f"object your CLAUDE.md describes as the last thing on stdout.\n\n"
+        f"--- REQUEST ({slug}) ---\n{text}"
+    )
+
+
 _FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.S)
 
 
@@ -969,6 +1058,15 @@ def format_build_done(*, slug: str, branch: str, files: str, tests: str,
     return (f"build done | {slug} -> {branch} | tier {tier} | {outcome} | "
             f"files: {files} | tests: {tests} | diff: {diff} | {closing}"
             + _quarantine_suffix(quarantined) + mirror)
+
+
+def format_seq_build_banner(*, slug: str, tests: str, diffstat: str) -> str:
+    """The four lines that close a build started from chat."""
+    return (f"tests: {tests or 'n/a'} (self-reported; broker-run gates arrive "
+            f"with slice 2)\n"
+            f"tier: pending gates (slice 2)\n"
+            f"diffstat: {diffstat}\n"
+            f"next: /merge {slug} (slice 2); until then, keyboard merge")
 
 
 # The wrapper's exit code for "this seat cannot run a test; nothing started".
@@ -1236,6 +1334,7 @@ class Broker:
         verbs_path: str,
         *,
         transport: Optional[Callable[[dict, str], dict]] = None,
+        channel_transport: Optional[Callable[[dict, int, str], dict]] = None,
         build_spawn: Optional[Callable[[list[str]], Any]] = None,
         planroom_api: Optional[Callable[..., dict]] = None,
         apps_spawn: Optional[Callable[..., Any]] = None,
@@ -1243,6 +1342,10 @@ class Broker:
         self.config = config
         self.verbs_path = verbs_path
         self.transport = transport or _sdk_transport
+        # How a banner reaches the channel a `/build` was typed in.
+        self.channel_transport = channel_transport or _sdk_channel_transport
+        # How the server principal is told apart from plink at the keyboard.
+        self._read_peer_cgroup: Callable[[int], str] = read_peer_cgroup
         # How the board verbs reach the Disjorn server's /planroom surface.
         self.planroom_api = planroom_api or _planroom_http
         # How a detached build session is launched.
@@ -1353,6 +1456,24 @@ class Broker:
                 stake=("A resident that can write the spool can write itself a "
                        "wake, and nothing self-wakes."),
                 uid_map=self.uid_map, residents=self.residents)
+        # The server principal (spec 2026-09-20-build-lane-v2-stage1-2b).
+        server_cfg = config.get("server")
+        unit = ((server_cfg or {}).get("unit", DEFAULT_SERVER_UNIT)
+                if isinstance(server_cfg, dict) else DEFAULT_SERVER_UNIT)
+        if not isinstance(unit, str) or not unit.strip():
+            raise ConfigError(
+                "[server].unit must be a non-empty systemd unit name; refusing "
+                "to start (an empty unit matches every cgroup, which would "
+                "hand the server principal to anything running as plink)")
+        self.server_unit: str = unit.strip()
+        self.build_cfg: dict[str, Any] = config.get("build", {}) or {}
+        self.build_humans: frozenset[str] = frozenset()
+        self.build_seat: str = ""
+        self.build_ledger: str = ""
+        if self.build_cfg:
+            self.build_humans = self._parse_build_humans()
+            self.build_seat = self._parse_build_seat()
+            self.build_ledger = self._parse_build_ledger()
         self._audit_lock = threading.Lock()
         # Build-budget lock (H13-D4): count-with-reservation is held under this, so
         # two concurrent start-builds can NEVER both slip past the cap — the
@@ -1384,6 +1505,8 @@ class Broker:
             "run-server-tests": self._verb_run_server_tests,
             "refresh-mirror": self._verb_refresh_mirror,
             "start-build": self._verb_start_build,
+            # The one verb whose caller is the server, not a seat.
+            BUILD_VERB: self._verb_build,
             "classify-diff": self._verb_classify_diff,
             "read-prod-logs": self._verb_read_prod_logs,
             "read-own-log": self._verb_read_own_log,
@@ -1452,6 +1575,54 @@ class Broker:
                     f"wake.residents names {seat!r}, which is not a resident "
                     "of this house ([uids] / [residents]); refusing to start")
         return frozenset(seats)
+
+    # ------------------------------------------------------- build config
+
+    def _parse_build_humans(self) -> frozenset[str]:
+        """`[build].humans` — the accounts whose `/build` the broker will act on.
+
+        An EMPTY list is legal and means the verb refuses everything; a missing
+        or malformed list is not, because a human list nobody can read is a
+        surface that reads as armed while refusing every call."""
+        humans = self.build_cfg.get("humans")
+        if not isinstance(humans, list) or not all(
+                isinstance(h, str) and h.strip() for h in humans):
+            raise ConfigError(
+                "[build] is configured but build.humans is missing or is not a "
+                "list of usernames; refusing to start")
+        for human in humans:
+            if _BUILD_CALLER_RE.match(human.strip()):
+                raise ConfigError(
+                    f"build.humans names {human!r}, which is a resident seat: "
+                    "only a person may start a build. Refusing to start.")
+        return frozenset(h.strip() for h in humans)
+
+    def _parse_build_seat(self) -> str:
+        """`[build].seat` — the build identity, a resident name WITHOUT `res-`."""
+        seat = self.build_cfg.get("seat")
+        if not isinstance(seat, str) or not seat.strip():
+            raise ConfigError(
+                "[build] is configured but build.seat is missing; refusing to "
+                "start (a build with no seat has nowhere to run)")
+        seat = seat.strip()
+        if _BUILD_CALLER_RE.match(seat):
+            raise ConfigError(
+                f"build.seat is {seat!r}: name the resident WITHOUT the `res-` "
+                "prefix (e.g. `gable`); refusing to start")
+        if f"res-{seat}" not in self.seat_names:
+            raise ConfigError(
+                f"build.seat names {seat!r}, and res-{seat} is not a resident "
+                "of this house ([uids] / [residents]); refusing to start")
+        return seat
+
+    def _parse_build_ledger(self) -> str:
+        """`[build].ledger` — where every accepted `/build` is snapshotted."""
+        path = self.build_cfg.get("ledger")
+        if not isinstance(path, str) or not path.strip():
+            raise ConfigError(
+                "[build] is configured but build.ledger is missing; refusing "
+                "to start (the ledger is the record that a human asked)")
+        return path.strip()
 
     def _wake_session_cap(self) -> int:
         cap = self.wake.get("session_cap_sec", DEFAULT_WAKE_SESSION_CAP_SEC)
@@ -1549,19 +1720,22 @@ class Broker:
         return cap if isinstance(cap, int) else DEFAULT_DAILY_BUILD_CAP
 
     def _count_builds_today(self, resident: str, today: str) -> int:
-        """Builds this resident GENUINELY STARTED today (UTC)."""
+        """Builds this resident GENUINELY STARTED today (UTC).
+
+        A chat build is audited under the `server` principal, so the seat it ran
+        as is named by `build_seat` rather than by the line's own resident."""
         n = 0
         try:
             with open(self.audit_path, "r", encoding="utf-8") as fh:
                 for raw in fh:
-                    if "start-build" not in raw or resident not in raw:
+                    if "build" not in raw or resident not in raw:
                         continue
                     try:
                         rec = json.loads(raw)
                     except json.JSONDecodeError:
                         continue
-                    if (rec.get("resident") == resident
-                            and rec.get("verb") == "start-build"
+                    if (resident in (rec.get("resident"), rec.get("build_seat"))
+                            and rec.get("verb") in ("start-build", BUILD_VERB)
                             and rec.get("allowed") is True
                             and rec.get("build_started") is True
                             and str(rec.get("ts", ""))[:10] == today):
@@ -1617,9 +1791,25 @@ class Broker:
 
     # --------------------------------------------------------------- core
 
-    def dispatch(self, uid: int, verb: Any, args: Any) -> dict:
+    def _caller_identity(self, uid: int, pid: Optional[int]) -> Optional[str]:
+        """The principal behind one connection.
+
+        [uids] answers by peer uid; the server is the one caller that shares a
+        uid with a human, so its cgroup has to name [server].unit as well."""
+        name = self.uid_map.get(uid)
+        if name != SERVER_PEER_IDENTITY or pid is None:
+            return name
+        unit = self.server_unit
+        want = unit if "/" in unit else f"/system.slice/{unit}"
+        if any(line.rstrip().rpartition(":")[2] == want
+               for line in self._read_peer_cgroup(pid).splitlines()):
+            return SERVER_IDENTITY
+        return name
+
+    def dispatch(self, uid: int, verb: Any, args: Any, *,
+                 pid: Optional[int] = None) -> dict:
         """Authorize + execute one request."""
-        resident = self.uid_map.get(uid)
+        resident = self._caller_identity(uid, pid)
         caller = resident if resident is not None else f"uid:{uid}"
 
         if not isinstance(verb, str) or not isinstance(args, dict):
@@ -1673,7 +1863,8 @@ class Broker:
             # marker), so no other handler had to change.
             result, summary, extra = out if len(out) == 3 else (*out, None)
         except VerbError as exc:
-            allowed = exc.code not in ("bad-args", "over-budget", "apps-refused")
+            allowed = exc.code not in ("bad-args", "over-budget", "apps-refused",
+                                       BUILD_REFUSED)
             if reserved and not allowed:
                 self._release_action(resident)
             self._audit(caller, verb, args, allowed,
@@ -2295,6 +2486,8 @@ class Broker:
             "build_resident": meta.get("build_resident", ""),
             "confirmed_by": meta.get("confirmed_by"),
             "seq": meta.get("seq"),
+            # Present only for a build started from chat.
+            "origin": meta.get("origin"),
             "out_path": out_path,
             "err_path": err_path,
             # NO pid, deliberately.
@@ -2342,6 +2535,12 @@ class Broker:
     def _narrate_build_outcome(self, **kwargs) -> None:
         """Every terminal build banner goes through here, so the mirror fetch cannot
         be forgotten on one of the five paths that post one."""
+        origin = kwargs.pop("origin", None)
+        if origin:
+            # A build nobody wrote a spec for: no Status line to stamp, no
+            # #custodian outcome post, and the banner goes where it was asked for.
+            self._seq_build_outcome(origin=origin, **kwargs)
+            return
         publish = kwargs.get("publish") or {}
         kwargs["mirror"] = self._refresh_mirror_for_banner(
             kwargs.get("branch", ""), publish.get("published", []))
@@ -2374,7 +2573,7 @@ class Broker:
                 except Exception:  # noqa: BLE001 — already reaping
                     pass
                 self._narrate_build_outcome(
-                    slug=slug, branch=branch,
+                    slug=slug, branch=branch, origin=meta.get("origin"),
                     publish=self._harvest_report(
                         out_path, self._read_build_tail(out_path)),
                     unit_reason=f"timed out after {timeout}s — killed"
@@ -2384,7 +2583,7 @@ class Broker:
                 return
             except Exception as exc:  # noqa: BLE001 — broken pipe etc. = a failure
                 self._narrate_build_outcome(
-                    slug=slug, branch=branch,
+                    slug=slug, branch=branch, origin=meta.get("origin"),
                     publish=self._harvest_report(
                         out_path, self._read_build_tail(out_path)),
                     unit_reason=f"build error: {exc!r}")
@@ -2405,6 +2604,13 @@ class Broker:
                 resident = meta.get("resident")
                 if resident:
                     self._release_build(resident, slug)
+                if meta.get("origin"):
+                    self._narrate_build_outcome(
+                        slug=slug, branch=branch, publish=publish,
+                        origin=meta["origin"],
+                        unit_reason=(err_s or session_out).strip()[:400]
+                        or "the build seat failed its dependency preflight")
+                    return
                 # Nothing ran, the slot came back — the word comes back too.
                 stamp = self._stamp_spec_status(
                     slug, "confirmed",
@@ -2422,7 +2628,7 @@ class Broker:
                 unit_reason = f"exit {rc}: {(err_s or session_out).strip()[:400]}"
             self._narrate_build_outcome(
                 slug=slug, branch=branch, publish=publish, report=report,
-                unit_reason=unit_reason)
+                unit_reason=unit_reason, origin=meta.get("origin"))
         finally:
             self._unlink_build_logs(out_path, err_path)
             self._remove_build_sidecar(slug)
@@ -2510,6 +2716,7 @@ class Broker:
                     out_path = str(rec.get("out_path") or "")
                     self._narrate_build_outcome(
                         slug=slug, branch=rec.get("branch", f"loop/{slug}"),
+                        origin=rec.get("origin"),
                         publish=self._harvest_report(
                             out_path, self._read_build_tail(out_path)),
                         unit_reason=f"timed out after {rec.get('timeout_sec')}s "
@@ -2549,28 +2756,21 @@ class Broker:
                            "was published" + (f": {note}" if note else ""))
         self._narrate_build_outcome(
             slug=slug, branch=branch, publish=publish, report=report,
-            unit_reason=unit_reason)
+            unit_reason=unit_reason, origin=rec.get("origin"))
 
-    def _verb_start_build(self, resident: str, args: dict) -> tuple[dict, str]:
-        """Launch a DETACHED build of a CONFIRMED spec to `loop/<slug>` (WP-L4)."""
-        _reject_unknown(args, {"spec"})
-        spec_arg = _check_str(args, "spec", required=True, max_len=300)
-        assert spec_arg is not None
-        spec_path = self._resolve_spec_path(spec_arg)
-        meta = self._read_confirmed_spec(spec_path)
+    def _launch_build(self, resident: str, meta: dict, prompt: str, *,
+                      announce: Callable[[int], None],
+                      launch_failed: Callable[[Exception], None],
+                      ) -> tuple[Any, int, Optional[int], int]:
+        """Reserve, spool, spawn and reap ONE build.
 
-        wake = self._active_wake(resident)
-        if wake is not None:
-            self._assert_woken_build_allowed(resident, wake, meta["text"])
-
+        Both entrances — a confirmed spec file and a human's `/build` message —
+        land here, so a build started from chat is the same build in every
+        respect but what it narrates. Returns (proc, used, cap, timeout)."""
         # Build the argv (pure config + validated slug) BEFORE reserving, so a
         # misconfiguration refuses without burning a budget slot.
-        build_resident = build_identity_from_caller(resident)
-        meta["build_resident"] = build_resident
-        argv = self._build_argv(meta["slug"], build_resident)
+        argv = self._build_argv(meta["slug"], meta["build_resident"])
         timeout = int(self.start_build.get("timeout_sec", START_BUILD_DEFAULT_TIMEOUT))
-        prompt = build_session_prompt(
-            meta["text"], slug=meta["slug"], branch=meta["branch"])
 
         # Reserve the budget slot + claim the slug under the lock (H13-D4, BL-D4).
         used, cap = self._reserve_build(resident, meta["slug"])
@@ -2597,20 +2797,7 @@ class Broker:
             raise VerbError("exec-failure",
                             f"cannot record the build: {exc}") from None
 
-        stamp = self._stamp_spec_status(
-            meta["slug"], "building",
-            f"build running as {build_unit_name(meta['slug'])} -> {meta['branch']}, "
-            f"launched by {build_resident} (confirmed by {meta['confirmed_by']}, "
-            f"#custodian seq {meta['seq']}). Not buildable again until this "
-            "line moves.",
-            expect=("confirmed",))
-
-        # 'started' — a state transition; best-effort (a failed post must never sink
-        # a launched build, and is never a heartbeat).
-        self._narrate(format_build_started(
-            slug=meta["slug"], branch=meta["branch"],
-            confirmed_by=meta["confirmed_by"], seq=meta["seq"], eta_sec=timeout)
-            + format_spec_status_note(stamp))
+        announce(timeout)
 
         try:
             proc = self._build_spawn(argv, stdout=out_fh, stderr=err_fh)
@@ -2621,14 +2808,7 @@ class Broker:
             self._close_build_logs(out_fh, err_fh)
             self._unlink_build_logs(out_path, err_path)
             self._remove_build_sidecar(meta["slug"])
-            unstamp = self._stamp_spec_status(
-                meta["slug"], "confirmed",
-                f"the launch failed before anything ran ({_status_comment_text(exc)}); "
-                "no build happened, buildable again.",
-                expect=("building",)) if stamp.get("ok") else {}
-            self._narrate(format_build_failed(
-                slug=meta["slug"], branch=meta["branch"],
-                reason=f"launch failed: {exc}") + format_spec_status_note(unstamp))
+            launch_failed(exc)
             raise VerbError("exec-failure",
                             f"build failed to launch: {exc}") from None
         finally:
@@ -2641,6 +2821,54 @@ class Broker:
             daemon=True)
         self._build_threads.append(t)
         t.start()
+        return proc, used, cap, timeout
+
+    def _verb_start_build(self, resident: str, args: dict) -> tuple[dict, str]:
+        """Launch a DETACHED build of a CONFIRMED spec to `loop/<slug>` (WP-L4)."""
+        _reject_unknown(args, {"spec"})
+        spec_arg = _check_str(args, "spec", required=True, max_len=300)
+        assert spec_arg is not None
+        spec_path = self._resolve_spec_path(spec_arg)
+        meta = self._read_confirmed_spec(spec_path)
+
+        wake = self._active_wake(resident)
+        if wake is not None:
+            self._assert_woken_build_allowed(resident, wake, meta["text"])
+
+        build_resident = build_identity_from_caller(resident)
+        meta["build_resident"] = build_resident
+        prompt = build_session_prompt(
+            meta["text"], slug=meta["slug"], branch=meta["branch"])
+        stamp: dict = {}
+
+        def announce(timeout: int) -> None:
+            stamp.update(self._stamp_spec_status(
+                meta["slug"], "building",
+                f"build running as {build_unit_name(meta['slug'])} -> "
+                f"{meta['branch']}, launched by {build_resident} (confirmed by "
+                f"{meta['confirmed_by']}, #custodian seq {meta['seq']}). Not "
+                "buildable again until this line moves.",
+                expect=("confirmed",)))
+            # 'started' — a state transition; best-effort (a failed post must never
+            # sink a launched build, and is never a heartbeat).
+            self._narrate(format_build_started(
+                slug=meta["slug"], branch=meta["branch"],
+                confirmed_by=meta["confirmed_by"], seq=meta["seq"],
+                eta_sec=timeout) + format_spec_status_note(stamp))
+
+        def launch_failed(exc: Exception) -> None:
+            unstamp = self._stamp_spec_status(
+                meta["slug"], "confirmed",
+                f"the launch failed before anything ran ({_status_comment_text(exc)}); "
+                "no build happened, buildable again.",
+                expect=("building",)) if stamp.get("ok") else {}
+            self._narrate(format_build_failed(
+                slug=meta["slug"], branch=meta["branch"],
+                reason=f"launch failed: {exc}") + format_spec_status_note(unstamp))
+
+        proc, used, cap, _timeout = self._launch_build(
+            resident, meta, prompt, announce=announce,
+            launch_failed=launch_failed)
 
         result = {"started": True, "branch": meta["branch"], "slug": meta["slug"],
                   "pid": getattr(proc, "pid", None),
@@ -2657,6 +2885,211 @@ class Broker:
                 f"build {meta['slug']} -> {meta['branch']} launched "
                 f"(budget {budget_str})",
                 {"build_started": True})
+
+    # ---------------------------------------------------------- build (chat)
+    # THE SECOND ENTRANCE to the same build. `start-build` reads a confirmed spec
+    # file from a resident's hands; `build` reads a human's own message out of the
+    # server DB and trusts nothing the caller says about it.
+
+    def _build_message(self, channel_id: int, seq: int) -> dict:
+        """The `/build` message itself, read from the server DB."""
+        db_path = self._apps_message_db()
+        if not db_path or not os.path.exists(db_path):
+            raise VerbError(BUILD_REFUSED,
+                            "the broker cannot read the message database, so "
+                            "it cannot see what was asked for")
+        try:
+            db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            try:
+                row = db.execute(
+                    "select m.author_type, m.content, m.privacy_flags, "
+                    "m.deleted_at, u.username from messages m "
+                    "left join users u on u.id = m.author_id "
+                    "where m.channel_id = ? and m.seq = ?",
+                    (channel_id, seq)).fetchone()
+            finally:
+                db.close()
+        except sqlite3.Error as exc:
+            raise VerbError(BUILD_REFUSED,
+                            f"the message database could not be read ({exc})"
+                            ) from None
+        if row is None:
+            raise VerbError(BUILD_REFUSED,
+                            f"there is no message {seq} in channel {channel_id}")
+        author_type, content, flags_json, deleted_at, username = row
+        if deleted_at:
+            raise VerbError(BUILD_REFUSED, f"message {seq} was deleted")
+        if author_type != "user":
+            raise VerbError(BUILD_REFUSED, "only a person can start a build")
+        try:
+            flags = json.loads(flags_json or "{}")
+        except ValueError:
+            flags = {}
+        if hidden_from_bots(flags):
+            raise VerbError(BUILD_REFUSED,
+                            "that message is private, so no bot may act on it")
+        if not username:
+            raise VerbError(BUILD_REFUSED,
+                            f"message {seq} names no account this server knows")
+        return {"author": str(username), "content": str(content or "")}
+
+    def _unique_build_slug(self, slug: str) -> str:
+        """The first `<slug>`, `<slug>-2`, … whose `loop/` branch the gatehouse does
+        not already hold."""
+        repo = self._gatehouse_repo()
+        if repo is None:
+            return slug
+        candidate, n = slug, 1
+        while self._git(repo, "rev-parse", "--verify", "--quiet",
+                        f"refs/heads/loop/{candidate}").returncode == 0:
+            n += 1
+            if n > MAX_BUILD_SLUG_TRIES:
+                raise VerbError(BUILD_REFUSED,
+                                f"loop/{slug} and every suffix up to "
+                                f"{MAX_BUILD_SLUG_TRIES} already exist")
+            candidate = f"{slug}-{n}"
+        return candidate
+
+    def _gatehouse_repo(self) -> Optional[str]:
+        """`[gate].canonical_repo`, or None when this broker has no gatehouse."""
+        gate = self.config.get("gate")
+        repo = gate.get("canonical_repo") if isinstance(gate, dict) else None
+        if not isinstance(repo, str) or not repo or not os.path.isdir(repo):
+            return None
+        return repo
+
+    def _gatehouse_diffstat(self, branch: str) -> str:
+        """`git diff --shortstat main..<branch>` in the gatehouse."""
+        repo = self._gatehouse_repo()
+        if repo is None:
+            return "no commits"
+        try:
+            cp = self._git(repo, "diff", "--shortstat", f"main..{branch}")
+        except VerbError:
+            return "no commits"
+        if cp.returncode != 0:
+            return "no commits"
+        return " ".join((cp.stdout or "").split()) or "no commits"
+
+    def _build_ledger_line(self, record: dict) -> None:
+        """One JSON line per accepted `/build`, append-only."""
+        try:
+            parent = os.path.dirname(self.build_ledger)
+            if parent:
+                os.makedirs(parent, mode=0o700, exist_ok=True)
+            with open(self.build_ledger, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except OSError as exc:
+            self._audit("broker", BUILD_VERB, {"seq": record.get("seq")}, True,
+                        f"build ledger unwritable: {exc}")
+
+    def _post_to_channel(self, channel_id: int, body: str) -> None:
+        """One post to a named channel, as the broker's own bot."""
+        try:
+            self.channel_transport(self.disjorn, int(channel_id), body)
+        except Exception:  # noqa: BLE001 — a banner is legibility, not control
+            pass
+
+    def _seq_build_outcome(self, *, slug: str, branch: str, publish: dict,
+                           origin: dict, report: Optional[dict] = None,
+                           unit_reason: Optional[str] = None) -> None:
+        """The end of a build started from chat: stage events into its session,
+        then ONE banner in the channel the request came from."""
+        session = int(origin.get("session_id") or 0)
+        report = report or {"files": "n/a", "tests": "n/a", "diff": "n/a"}
+        published = publish.get("published", [])
+        if build_outcome_class(publish, unit_reason) != "done":
+            self._apps_post_stage(session, "scoped",
+                                  {"turn": 1, "halted": "error",
+                                   "reason": unit_reason or NO_HARVEST_REASON})
+        elif published:
+            # The branch the room is watching is the platform repo's, whatever
+            # else this seat was entitled to publish.
+            sha = next((s for repo, s in published if repo.startswith("disjorn")),
+                       published[0][1])
+            self._apps_post_stage(session, "files_written",
+                                  {"turn": 1, "summary": report["files"]})
+            self._apps_post_stage(session, "deployed",
+                                  {"turn": 1, "branch": branch, "sha": sha})
+        else:
+            self._apps_post_stage(session, "files_written",
+                                  {"turn": 1, "no_changes": True})
+        self._post_to_channel(int(origin.get("channel_id") or 0),
+                              format_seq_build_banner(
+                                  slug=slug, tests=report["tests"],
+                                  diffstat=self._gatehouse_diffstat(branch)))
+
+    def _verb_build(self, caller: str, args: dict) -> tuple[dict, str, dict]:
+        """Start a build from a human's `/build` message, named by its seq."""
+        _reject_unknown(args, {"seq", "channel_id", "session_id"})
+        for key in ("seq", "channel_id", "session_id"):
+            if key not in args:
+                raise _bad(f"missing required arg: {key}")
+        seq = _check_int(args, "seq", 0, 1, MAX_SEQ)
+        channel_id = _check_int(args, "channel_id", 0, 1, MAX_SEQ)
+        session_id = _check_int(args, "session_id", 0, 1, MAX_SEQ)
+        if not self.build_cfg:
+            raise VerbError(BUILD_REFUSED,
+                            "chat builds are not configured on this broker")
+
+        message = self._build_message(channel_id, seq)
+        author = message["author"]
+        if author not in self.build_humans:
+            raise VerbError(BUILD_REFUSED,
+                            f"{author} is not on the broker's human list")
+        text = strip_build_command(message["content"])
+        if not text:
+            raise VerbError(BUILD_REFUSED, "a build needs something to build")
+        if len(text) > MAX_BUILD_TEXT_CHARS:
+            raise VerbError(BUILD_REFUSED,
+                            f"a build request must be at most "
+                            f"{MAX_BUILD_TEXT_CHARS} characters")
+
+        today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
+        slug = slug_from_build_text(text, today)
+        if not slug:
+            raise VerbError(BUILD_REFUSED,
+                            "a build request needs at least one word a branch "
+                            "name can carry")
+        slug = self._unique_build_slug(slug)
+        branch = f"loop/{slug}"
+        self._build_ledger_line({
+            "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            "seq": seq, "channel_id": channel_id, "author": author,
+            "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "slug": slug, "session_id": session_id})
+
+        meta = {"slug": slug, "branch": branch, "build_resident": self.build_seat,
+                "confirmed_by": author, "seq": seq,
+                # Carried into the sidecar so a re-adopted build still knows
+                # which room to answer in.
+                "origin": {"channel_id": channel_id, "session_id": session_id}}
+        prompt = build_chat_prompt(text, slug=slug, branch=branch)
+        # The daily build budget belongs to the SEAT that runs the build, so a
+        # chat build and a spec build spend the same allowance.
+        seat_caller = f"res-{self.build_seat}"
+
+        def announce(_timeout: int) -> None:
+            self._apps_post_stage(session_id, "scoped",
+                                  {"turn": 1,
+                                   "model": self.start_build.get("model")})
+
+        def launch_failed(exc: Exception) -> None:
+            self._apps_post_stage(session_id, "scoped",
+                                  {"turn": 1, "halted": "error",
+                                   "reason": f"launch failed: {exc}"})
+
+        proc, used, cap, _timeout = self._launch_build(
+            seat_caller, meta, prompt, announce=announce,
+            launch_failed=launch_failed)
+
+        result = {"started": True, "slug": slug, "branch": branch,
+                  "session_id": session_id, "pid": getattr(proc, "pid", None)}
+        budget_str = f"{used}/{cap}" if cap is not None else str(used)
+        return (result,
+                f"build {slug} -> {branch} launched for {author} "
+                f"(#{channel_id} seq {seq}, budget {budget_str})",
+                {"build_started": True, "build_seat": seat_caller})
 
     # ------------------------------------------------------- apps-build (§E)
     # THE SHAPE OF THIS VERB, and why it is not start-build with different strings.
@@ -4151,7 +4584,7 @@ class Broker:
             # Kernel-asserted peer credentials: (pid, uid, gid).
             creds = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
                                     struct.calcsize("3i"))
-            _pid, uid, _gid = struct.unpack("3i", creds)
+            peer_pid, uid, _gid = struct.unpack("3i", creds)
             buf = b""
             while b"\n" not in buf:
                 chunk = conn.recv(4096)
@@ -4178,7 +4611,8 @@ class Broker:
                 return
             if not isinstance(req, dict):
                 req = {"verb": None, "args": None}
-            resp = self.dispatch(uid, req.get("verb"), req.get("args", {}))
+            resp = self.dispatch(uid, req.get("verb"), req.get("args", {}),
+                                 pid=peer_pid)
             self._send(conn, resp)
         except Exception:  # noqa: BLE001 — a bad client never kills the daemon
             pass

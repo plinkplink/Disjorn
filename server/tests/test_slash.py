@@ -11,6 +11,8 @@ Plus the BUILD-LOOP red-team regressions:
   BL-D6 — backlog text cap, bounded in-channel listing, paginated GET /backlog,
           per-actor slash dispatch rate limit."""
 
+import json
+
 import pytest
 
 from app import db, events
@@ -581,3 +583,187 @@ async def test_rate_limit_does_not_block_plain_chat(client):
         await post(client, ch, f"/backlog spam {i}")
     r = await client.post(f"/channels/{ch}/messages", json={"content": "hi everyone"})
     assert r.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# /build — the platform build lane's chat entrance
+# ---------------------------------------------------------------------------
+
+BUILD_BOT_NAME = "BuildGable"
+BUILD_BOT_KEY = "build-bot-key"
+SLUG = "2026-09-20-fix-the-login-typo"
+
+
+def ok_response(slug: str = SLUG) -> dict:
+    return {
+        "ok": True,
+        "verb": "build",
+        "result": {"started": True, "slug": slug, "branch": f"loop/{slug}",
+                   "session_id": 1, "pid": 4242},
+    }
+
+
+def record_broker(monkeypatch, response=None, error=None) -> list:
+    """Stand in for the broker; returns the list its calls land in."""
+    calls: list = []
+
+    async def fake(verb, args, **kwargs):
+        calls.append({"verb": verb, "args": args, "kwargs": kwargs})
+        if error is not None:
+            raise error
+        return response
+
+    monkeypatch.setattr(slash.broker_client, "call_broker", fake)
+    return calls
+
+
+async def sessions() -> list[dict]:
+    return await db.fetch_all("SELECT * FROM app_sessions ORDER BY id")
+
+
+async def test_build_from_a_bot_is_refused_without_reaching_the_broker(
+    client, monkeypatch, caplog
+):
+    calls = record_broker(monkeypatch, ok_response())
+    bot_id = await make_bot("claw")
+    await make_bot(BUILD_BOT_NAME, BUILD_BOT_KEY)
+    ch = await main_feed_id()
+    await db.execute(
+        "INSERT INTO channel_members (channel_id, member_type, member_id) "
+        "VALUES (?, 'bot', ?)",
+        (ch, bot_id),
+    )
+
+    with caplog.at_level("WARNING"):
+        r = await client.post(
+            f"/channels/{ch}/messages",
+            json={"content": "/build fix the login typo"},
+            headers={"X-Api-Key": BOT_KEY},
+        )
+    assert r.status_code == 200
+
+    assert calls == []
+    assert await sessions() == []
+    posted = await db.fetch_all(
+        "SELECT content FROM messages WHERE channel_id = ? ORDER BY seq", (ch,)
+    )
+    assert posted[-1]["content"] == "Only a person can start a build."
+    assert any("/build refused" in rec.getMessage() for rec in caplog.records)
+
+
+async def test_build_with_no_argument_answers_usage(client, monkeypatch):
+    calls = record_broker(monkeypatch, ok_response())
+    await make_user("alice")
+    await make_bot(BUILD_BOT_NAME, BUILD_BOT_KEY)
+    await login(client, "alice")
+    ch = await main_feed_id()
+
+    await post(client, ch, "/build")
+    assert calls == []
+    assert await sessions() == []
+    replies = [m["content"] for m in await channel_messages(client, ch)]
+    assert replies[-1].startswith("Usage: `/build ")
+
+
+async def test_build_opens_a_repo_session_on_the_origin_channel(client, monkeypatch):
+    """The session is repo-mode, borrows the channel, spends no app quota, and
+    the broker is handed the seq and nothing else."""
+    calls = record_broker(monkeypatch, ok_response())
+    await make_user("alice")
+    build_bot = await make_bot(BUILD_BOT_NAME, BUILD_BOT_KEY)
+    await login(client, "alice")
+    ch = await main_feed_id()
+
+    posted = await post(client, ch, "/build fix the login typo")
+
+    rows = await sessions()
+    assert len(rows) == 1
+    session = rows[0]
+    assert session["mode"] == "repo"
+    assert session["channel_id"] == ch
+    assert session["builder_bot_id"] == build_bot
+    assert session["app_id"] == "disjornrepo2"
+    assert session["repo_slug"] == SLUG
+    assert session["ended_at"] is None
+
+    assert len(calls) == 1
+    assert calls[0]["verb"] == "build"
+    assert calls[0]["args"] == {
+        "seq": posted["seq"],
+        "channel_id": ch,
+        "session_id": session["id"],
+    }
+
+    # No channel and no members were minted for it.
+    assert await db.fetch_all(
+        "SELECT id FROM channels WHERE type = 'app_build'"
+    ) == []
+    assert (await client.get("/apps/quota")).json()["used"] == 0
+
+    stages = await db.fetch_all(
+        "SELECT stage, detail FROM app_stage_events WHERE session_id = ?",
+        (session["id"],),
+    )
+    assert len(stages) == 1
+    assert stages[0]["stage"] == "scoped"
+    assert json.loads(stages[0]["detail"]) == {
+        "turn": 1, "summary": f"queued: loop/{SLUG}"
+    }
+
+    replies = [m["content"] for m in await channel_messages(client, ch)]
+    assert replies[-1] == (
+        f"Build started on `loop/{SLUG}` (session {session['id']})."
+    )
+
+
+async def test_build_inside_an_app_room_is_refused_before_the_broker(client, monkeypatch):
+    calls = record_broker(monkeypatch, ok_response())
+    await make_user("alice")
+    await make_bot(BUILD_BOT_NAME, BUILD_BOT_KEY)
+    await login(client, "alice")
+    row = await db.fetch_one(
+        "INSERT INTO channels (type, name, visibility) VALUES ('app_build', 'room', 'private') RETURNING id"
+    )
+    await db.execute(
+        "INSERT INTO channel_members (channel_id, member_type, member_id) "
+        "SELECT ?, 'user', id FROM users WHERE username = 'alice'", (row["id"],)
+    )
+    await post(client, row["id"], "/build change the platform")
+    lines = await channel_messages(client, row["id"])
+    assert any("is for the platform" in m["content"] for m in lines)
+    assert calls == [] and await sessions() == []
+
+
+async def test_build_refused_by_the_broker_ends_the_session(client, monkeypatch):
+    refusal = slash.broker_client.BrokerError(
+        "build-refused", "plink is the only human who may start a build."
+    )
+    calls = record_broker(monkeypatch, error=refusal)
+    await make_user("alice")
+    await make_bot(BUILD_BOT_NAME, BUILD_BOT_KEY)
+    await login(client, "alice")
+    ch = await main_feed_id()
+
+    await post(client, ch, "/build fix the login typo")
+
+    assert len(calls) == 1
+    rows = await sessions()
+    assert len(rows) == 1
+    assert rows[0]["ended_at"] is not None
+    assert rows[0]["repo_slug"] is None
+    replies = [m["content"] for m in await channel_messages(client, ch)]
+    assert replies[-1] == "plink is the only human who may start a build."
+
+
+async def test_build_without_a_build_bot_starts_nothing(client, monkeypatch):
+    calls = record_broker(monkeypatch, ok_response())
+    await make_user("alice")
+    await login(client, "alice")
+    ch = await main_feed_id()
+
+    await post(client, ch, "/build fix the login typo")
+
+    assert calls == []
+    assert await sessions() == []
+    replies = [m["content"] for m in await channel_messages(client, ch)]
+    assert replies[-1].startswith("No build bot")

@@ -434,7 +434,9 @@ async def create_message(
     # untouched. Local import avoids a messages<->slash import cycle.
     from . import slash
 
-    await slash.dispatch(channel_id, body.content, actor, flags)
+    await slash.dispatch(
+        channel_id, body.content, actor, flags, message_seq=payload["seq"]
+    )
 
     return payload
 

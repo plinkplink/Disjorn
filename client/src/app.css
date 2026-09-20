@@ -3502,6 +3502,44 @@
   color: var(--text-0);
 }
 
+/* A repo build's heading. Same weight as an app's name, without the affordance
+   — there is nothing here to rename. */
+.app-build-title {
+  padding: var(--space-1) var(--space-2);
+  color: var(--text-0);
+  font-size: var(--text-lg);
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-build-landed {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-m);
+  background: var(--bg-2);
+}
+
+.app-build-landed-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.app-build-landed-row code {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-0);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .app-name-button {
   padding: var(--space-1) var(--space-2);
   border: 1px solid transparent;
