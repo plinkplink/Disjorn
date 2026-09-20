@@ -479,5 +479,7 @@ def test_the_repo_verbs_template_ships_every_verb_off():
     arriving through a code path nobody reviews as a grant."""
     data = tomllib.loads(gen.VERBS_TOML.read_text(encoding="utf-8"))
     for resident, section in data.items():
+        if resident == "server":  # not a seat; its switch arms the wire itself
+            continue
         for verb, enabled in section.items():
             assert enabled is False, f"{resident}.{verb} ships ON"

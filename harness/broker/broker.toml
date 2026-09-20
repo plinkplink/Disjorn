@@ -50,6 +50,11 @@ audit_log = "/var/log/disjorn-broker/audit.jsonl"
 # broker refuses this identity every other verb in code, so listing it here
 # widens nothing: it only makes a human at the keyboard nameable at the socket.
 # Without this line the wake surface cannot start.
+#
+# The same line is ALSO what makes the `server` principal reachable: the Disjorn
+# server (deploy/disjorn.service) runs as uid 1000 too, and the broker tells the
+# two apart by reading the peer pid's cgroup (see [server] below). Without this
+# line `/build` cannot start either.
 # "1000" = "plink"
 
 [residents.res-claudette]
@@ -486,6 +491,33 @@ daily_build_cap = 10
 # The per-session ACTION cap is not here: a woken session runs on the same
 # /config/budget.json the summon seat does (harness/cc/config-template), which
 # is the spec's "same per-session action cap" and needs no second knob.
+
+[server]
+# THE SERVER PRINCIPAL (SPECS/2026-09-20-build-lane-v2-stage1-2b.md). The
+# Disjorn server shares plink's uid, so SO_PEERCRED alone cannot tell the two
+# apart. A caller is resolved to `server` only when its uid maps to "plink" in
+# [uids] AND /proc/<peer pid>/cgroup names this unit; anything else is whatever
+# [uids] says. An empty value is a refusal to start: it would match every
+# cgroup and hand the server principal to every process plink runs.
+unit = "disjorn.service"
+
+[build]
+# `/build <what to do>` from chat. With this block ABSENT the verb still exists
+# and answers "chat builds are not configured on this broker"; with it present
+# every key below is validated at boot and a bad one is a refusal to start.
+#
+# The accounts whose `/build` the broker will act on. Usernames on this server,
+# never a `res-*` seat — only a person may start a build, and a seat named here
+# is a refusal to start. An EMPTY list is legal and means the verb refuses
+# everything, which is how you disarm `/build` without editing verbs.toml.
+humans = ["plink"]
+# The resident the build RUNS as, without the `res-` prefix. It must be a
+# resident of this house ([uids] / [residents]); it spends that seat's daily
+# build budget, the same one [start_build] caps.
+seat = "gable"
+# One JSON line per accepted `/build`: ts, seq, channel_id, author,
+# text_sha256, slug, session_id. Keep it somewhere no resident can write.
+ledger = "/var/lib/disjorn-broker/build-ledger.jsonl"
 
 [disjorn]
 # file-proposal posts to #custodian AS THE BROKER'S OWN bot identity — the

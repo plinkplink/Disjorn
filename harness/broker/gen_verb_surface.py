@@ -87,8 +87,8 @@ ADAPTER_KEYS = {"seat", "module", "args", "description"}
 SURFACE_TABLES = {"verbs", "adapter_tools"}
 
 # A verbs.toml section that is a SEAT — the sections a generated schema is made
-# from. The kill-switch file also holds the wake caller ([plink]), whose verb no
-# seat may call; see verb_names.
+# from. The kill-switch file also holds non-seat callers ([plink], [server]),
+# whose verbs no seat may call; see verb_names.
 SEAT_SECTION_RE = re.compile(r"^res-[a-z][a-z0-9-]*$")
 
 
@@ -105,12 +105,11 @@ def verb_names(verbs_path: Path = VERBS_TOML) -> list[str]:
     other is a normal state of this house (that is what a per-resident kill
     switch is FOR), and every seat's schema still has to describe it.
 
-    SEAT sections only (`res-<name>`), because since 2026-08-25 verbs.toml also
-    carries a non-seat caller: [plink], holding the wake verb. A seat may not
-    call `wake` and must not be handed a button for it — a tool in a resident's
-    list that the broker refuses by identity is a button wired to a refusal,
-    which is the failure this generator exists to prevent in the other
-    direction."""
+    SEAT sections only (`res-<name>`), because verbs.toml also carries non-seat
+    callers: [plink] (wake) and [server] (build). A seat may not call either
+    and must not be handed a button for one — a tool in a resident's list that
+    the broker refuses by identity is a button wired to a refusal, which is
+    the failure this generator exists to prevent in the other direction."""
     data = tomllib.loads(verbs_path.read_text(encoding="utf-8"))
     seen: list[str] = []
     for name, section in data.items():
