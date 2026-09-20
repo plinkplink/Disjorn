@@ -1158,6 +1158,8 @@ async def test_harness_view_is_publisher_gated_and_answers_the_four_checks(
         "ended_at": None,
         "locked_until": session["locked_until"],
         "stop_requested_at": None,
+        "mode": "app",
+        "repo_slug": None,
     }
 
     # A session nobody minted is 404, not an empty view.
@@ -1767,3 +1769,48 @@ def test_a_capped_summary_says_it_was_capped():
                        "summary": long})
     assert line.endswith('\u2026"')
     assert _one_line("short") == "short"
+
+
+async def test_migration_015_adds_mode_and_repo_slug(app):
+    columns = {
+        r["name"]: r for r in await db.fetch_all("PRAGMA table_info(app_sessions)")
+    }
+    assert columns["mode"]["notnull"] == 1
+    assert columns["mode"]["dflt_value"] == "'app'"
+    assert columns["repo_slug"]["notnull"] == 0
+    ddl = await db.fetch_one(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'app_sessions'"
+    )
+    assert "mode IN ('app', 'repo')" in ddl["sql"]
+
+
+async def test_a_repo_session_reads_back_as_repo_in_both_views(
+    client, app, settings_env, seat_toml
+):
+    from app.routers import apps as apps_router
+
+    session = await build_fixture(client, settings_env, seat_toml)
+    assert (session["mode"], session["repo_slug"]) == ("app", None)
+
+    await make_bot("BuildGable", "buildgable-key")
+    settings_env(PLATFORM_BUILD_BOT="BuildGable")
+    feed = await db.fetch_one("SELECT id FROM channels WHERE type = 'main_feed'")
+    owner = session["app"]["owner_user_id"]
+    repo = await apps_router.create_repo_session(owner, feed["id"])
+    await apps_router.mark_repo_queued(repo, "2026-09-20-a-slug")
+
+    body = (await client.get(f"/apps/sessions/{repo['id']}")).json()
+    assert body["mode"] == "repo"
+    assert body["repo_slug"] == "2026-09-20-a-slug"
+    assert body["channel_id"] == feed["id"]
+    assert body["app"]["id"] == "disjornrepo2"
+    assert body["stage"] == "scoped"
+
+    view = (
+        await client.get(
+            f"/apps/sessions/{repo['id']}/harness-view",
+            headers=as_bot(client, BROKER_KEY),
+        )
+    ).json()
+    assert (view["mode"], view["repo_slug"]) == ("repo", "2026-09-20-a-slug")
+    assert view["channel_id"] == feed["id"]

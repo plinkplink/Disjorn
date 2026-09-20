@@ -308,6 +308,8 @@ class SessionOut(BaseModel):
     stage: Optional[AppStage] = None
     stages: list[StageEventOut] = Field(default_factory=list)
     quota: Quota
+    mode: Literal["app", "repo"] = "app"
+    repo_slug: Optional[str] = None
 
 
 class SessionCreate(BaseModel):
@@ -415,6 +417,8 @@ class HarnessView(BaseModel):
     # Slice (iv): set when the owner asked for the running turn to stop. The
     # broker's reaper reads it each poll and sends the unit its stop once.
     stop_requested_at: Optional[str] = None
+    mode: Literal["app", "repo"] = "app"
+    repo_slug: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -507,7 +511,7 @@ async def _quota_for(user_id: int) -> Quota:
     cap = int(get_settings().APPS_DAILY_SESSION_CAP)
     row = await db.fetch_one(
         """SELECT COUNT(*) AS n FROM app_sessions
-            WHERE user_id = ? AND started_at >= ?
+            WHERE user_id = ? AND started_at >= ? AND mode = 'app'
               AND (turns > 0 OR (ended_at IS NULL AND locked_until > ?))""",
         (user_id, _utc_day_start(), _now()),
     )
@@ -751,6 +755,8 @@ async def _session_out(session: dict[str, Any], user: User) -> SessionOut:
         stage=session["stage"],
         stages=await _stages_for(session["id"]),
         quota=await _quota_for(user.id),
+        mode=session["mode"],
+        repo_slug=session["repo_slug"],
     )
 
 
@@ -1127,6 +1133,75 @@ async def create_session(body: SessionCreate, user: CurrentUser) -> SessionOut:
     return await _session_out(session, user)
 
 
+PLATFORM_APP_ID = "disjornrepo2"
+PLATFORM_APP_NAME = "Disjorn platform"
+PLATFORM_BUILD_BOT_MISSING = (
+    "No build bot has an account on this house, so no build can start."
+)
+
+
+class RepoSessionError(RuntimeError):
+    pass
+
+
+async def _platform_build_bot_id() -> int:
+    name = get_settings().PLATFORM_BUILD_BOT
+    row = await db.fetch_one("SELECT id FROM bots WHERE name = ?", (name,))
+    if row is None:
+        logger.warning("no build bot named %s; repo session refused", name)
+        raise RepoSessionError(PLATFORM_BUILD_BOT_MISSING)
+    return row["id"]
+
+
+async def _ensure_platform_app(owner_user_id: int, builder_bot_id: int) -> str:
+    if await db.fetch_one("SELECT 1 FROM apps WHERE id = ?", (PLATFORM_APP_ID,)):
+        return PLATFORM_APP_ID
+    now = _now()
+    await db.execute(
+        """INSERT OR IGNORE INTO apps (id, owner_user_id, name, builder_bot_id,
+                                       created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (PLATFORM_APP_ID, owner_user_id, PLATFORM_APP_NAME, builder_bot_id, now, now),
+    )
+    return PLATFORM_APP_ID
+
+
+async def create_repo_session(user_id: int, channel_id: int) -> dict[str, Any]:
+    builder_bot_id = await _platform_build_bot_id()
+    app_id = await _ensure_platform_app(user_id, builder_bot_id)
+    now = _now()
+    cur = await db.execute(
+        """INSERT INTO app_sessions (app_id, user_id, builder_bot_id, channel_id,
+                                     started_at, locked_until, mode)
+           VALUES (?, ?, ?, ?, ?, ?, 'repo')""",
+        (app_id, user_id, builder_bot_id, channel_id, now, _locked_until(now)),
+    )
+    session = await db.fetch_one(
+        "SELECT * FROM app_sessions WHERE id = ?", (cur.lastrowid,)
+    )
+    assert session is not None
+    return session
+
+
+async def mark_repo_queued(session: dict[str, Any], slug: str) -> None:
+    detail = {"turn": 1, "summary": f"queued: loop/{slug}"}
+    created_at = _now()
+    async with db.transaction() as conn:
+        await conn.execute(
+            "UPDATE app_sessions SET repo_slug = ? WHERE id = ?",
+            (slug, session["id"]),
+        )
+        await _write_stage_event(
+            conn, session, "scoped", json.dumps(detail), created_at
+        )
+    await _publish_stage_frame(session, "scoped", detail, created_at)
+
+
+async def end_repo_session(session_id: int) -> None:
+    async with db.transaction() as conn:
+        await _close_session(conn, session_id, _now())
+
+
 @router.get("/apps/sessions/{session_id}")
 async def get_session(session_id: int, user: CurrentUser) -> SessionOut:
     """The session, its app, its builder, its stages so far, and the meter.
@@ -1347,6 +1422,8 @@ async def harness_view(session_id: int, actor: CurrentActor) -> HarnessView:
         ended_at=session["ended_at"],
         locked_until=session["locked_until"],
         stop_requested_at=session["stop_requested_at"],
+        mode=session["mode"],
+        repo_slug=session["repo_slug"],
     )
 
 
