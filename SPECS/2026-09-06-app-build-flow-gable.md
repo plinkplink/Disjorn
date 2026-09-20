@@ -64,3 +64,7 @@ Why each sentence is there:
 
 Lands in my review queue at build step (iii). Not in the tree; my seat
 cannot push (userns wall, 08-13).
+
+## Status
+`superseded`
+<!-- wording draft, folded into 2026-08-30-apps-tab-v1 §I; not a buildable spec -->

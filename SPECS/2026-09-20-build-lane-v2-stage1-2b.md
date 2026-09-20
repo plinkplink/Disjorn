@@ -93,6 +93,21 @@ nine → two. Tier 2, nine → two plus one reviewer's read.
 - **Not in this rev**: Stage 3 deploy-on-merge, Stage 4 peers, model routing,
   the prose ceiling (its own spec, confirmed seq 2664).
 
+## Folds from review (seq 2684; 2670 stands)
+- Tier 0 excludes test files. A test-only change is Tier 1.
+- Slice 2 requirement: the hook resolves `merge-seq: <n>` — the seq must
+  exist in #custodian and its author must be on the human list; refuse on a
+  miss or a bot author (Claudette #2673, finding 1).
+- Slice 2 requirement: a reviewer's PASS is a #custodian message seq authored
+  by the lane's assigned resident; `/merge` takes it as `review-seq`. Human
+  `/merge` is still required on Tier 2 (finding 2).
+- Slice 2 precondition: `disjorn.git` is owned by res-claudette today. The
+  RW gatehouse mount exists only in res-claudette's resident-cc unit and her
+  adapter never pushes through it; every `loop/*` ref is plink-owned from
+  host-side harvest. Fix pending plink's yes (seq 2684 DECIDE 1): drop the
+  mount from the unit, restart the adapter, chown disjorn.git and
+  claudette.git to plink:gatehouse (finding 3).
+
 ## Lane → Review owner (DETERMINISTIC — filled from the lane, never preference)
 - **Lane**: cross-lane — see split.
 - **Review owner**: per surface, below. One reviewer per surface; the other
