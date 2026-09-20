@@ -139,7 +139,14 @@ function turnFromStages(stages: StageEvent[]): TurnState | null {
 }
 
 function withTurn(session: AppSession): AppSession {
-  return { ...session, lastTurn: turnFromStages(session.stages) };
+  return {
+    ...session,
+    // A payload written before repo mode carries neither field, and every
+    // session entering the store comes through here.
+    mode: session.mode === "repo" ? "repo" : "app",
+    repo_slug: session.repo_slug ?? null,
+    lastTurn: turnFromStages(session.stages),
+  };
 }
 
 /**
@@ -230,6 +237,14 @@ interface AppsState {
    * not a thing that can happen. AppShell consumes this and clears it.
    */
   pendingSessionId: number | null;
+  /**
+   * The session the build modal is showing, or null when none is up.
+   *
+   * AppShell owns that modal and mirrors its state here, because the frame
+   * handler below has to know whether a watch is already open before it takes
+   * the screen for a repo build.
+   */
+  openBuildSessionId: number | null;
 
   /** GET /apps — boot, after any menu change, and on WS reconnect resync. */
   refresh: () => Promise<void>;
@@ -277,6 +292,8 @@ interface AppsState {
   /** Hand a session to AppShell to open the build modal on. */
   requestBuildModal: (sessionId: number) => void;
   clearBuildModalRequest: () => void;
+  /** AppShell's only writer for `openBuildSessionId`. */
+  setOpenBuildSession: (sessionId: number | null) => void;
 
   /* ---- WS frame handlers (owner's sockets only) ---- */
   onStage: (frame: AppStageFrame) => void;
@@ -321,6 +338,37 @@ export const useApps = create<AppsState>()((set, get) => {
     void get().loadCard(appId, true);
   };
 
+  /** Sessions being fetched after a frame arrived for one we had never
+      loaded; one fetch each, however many frames land while it is in
+      flight. */
+  const adopting = new Set<number>();
+
+  /**
+   * Take in a session whose first stage frame beat its row here.
+   *
+   * A repo build is started from a chat message, not from the apps sidebar,
+   * so its modal is the only place it can be watched — nothing else on screen
+   * would offer it. It takes the screen only when no build modal is already
+   * open: a watch in progress outranks an auto-open.
+   */
+  const adoptSession = (sessionId: number): void => {
+    if (adopting.has(sessionId)) return;
+    adopting.add(sessionId);
+    void get()
+      .loadSession(sessionId)
+      .then(
+        (session) => {
+          adopting.delete(sessionId);
+          if (session.mode === "repo" && get().openBuildSessionId === null) {
+            get().requestBuildModal(sessionId);
+          }
+        },
+        () => {
+          adopting.delete(sessionId);
+        },
+      );
+  };
+
   /** Keep a cached card's status honest when the app row moves under it. A
       card that says `draft` next to an Open button that works is worse than
       no chip; the card endpoint is the source, this only follows it. */
@@ -345,6 +393,7 @@ export const useApps = create<AppsState>()((set, get) => {
     originBase: "",
     cards: {},
     pendingSessionId: null,
+    openBuildSessionId: null,
 
     refresh: async () => {
       const { apps, quota } = await listApps();
@@ -508,6 +557,8 @@ export const useApps = create<AppsState>()((set, get) => {
 
     clearBuildModalRequest: () => set({ pendingSessionId: null }),
 
+    setOpenBuildSession: (sessionId) => set({ openBuildSessionId: sessionId }),
+
     onStage: (frame) => {
       const session = get().sessions[frame.session_id];
       if (session !== undefined) {
@@ -521,6 +572,8 @@ export const useApps = create<AppsState>()((set, get) => {
             }),
           },
         });
+      } else {
+        adoptSession(frame.session_id);
       }
       // `live` is also a status change the server writes on the app row
       // itself; mirror it so the sidebar chip does not wait for a refresh.
