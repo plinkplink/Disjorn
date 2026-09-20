@@ -111,7 +111,7 @@ Nothing user-facing. The house sees:
     owner Gable.
   - server (routers/apps.py sweep) → review owner per the server lane's
     owner of record.
-- **Split agreed in #custodian**: binds at the confirm seq for this spec.
+- **Split agreed in #custodian**: 2664
 
 ## Expected diff tier
 Slice 1 (rule text, counter, test, baseline, digest line): Tier 1. Sweep
