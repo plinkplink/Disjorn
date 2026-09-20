@@ -488,10 +488,12 @@ def derive_cards(config: Optional[dict] = None, *, repo: Optional[Path] = None,
     if not specs_dir.is_dir():
         notes.append(f"no SPECS/ directory at {specs_dir} — nothing to derive")
 
+    reviewed: set[str] = set()
     for f in sorted(specs_dir.glob("*.md")) if specs_dir.is_dir() else []:
         if f.stem in {"README", "TEMPLATE"} or f.stem.startswith("PASSDOWN"):
             continue
         text = f.read_text(encoding="utf-8", errors="replace")
+        reviewed |= _reviewed_shas(text)
         status = brokerd().parse_spec_status(text) or ""
         word = _status_word(status)
         gate = b.spec_gate(f)
@@ -585,7 +587,7 @@ def derive_cards(config: Optional[dict] = None, *, repo: Optional[Path] = None,
         ))
 
     # -- 3. Review auto-cards: the drift report wearing a UI.
-    cards.extend(_keyboard_cards(drift, lane_owners))
+    cards.extend(_keyboard_cards(drift, lane_owners, reviewed))
 
     face = {
         "derived_at": _now().isoformat(timespec="seconds"),
@@ -622,25 +624,36 @@ def _lane_owner(hits: list, lane_owners: dict) -> Optional[str]:
     return None
 
 
-def _keyboard_cards(drift: dict, lane_owners: dict) -> list:
-    """Auto-cards for the Review column (ruled seq 1391 item 1).
+REVIEW_RECORD_HEADING = re.compile(r"^##\s+Review record\b", re.MULTILINE)
+_HEX_TOKEN = re.compile(r"\b[0-9a-f]{7,40}\b")
 
-    Two kinds, both derived from Phase 0's push log and neither of which has a
-    spec file yet:
-      * uncited `main` commits — nothing covered them, or their trailer does
-        not resolve. Flagged **uncited**; a Tier 2 among them is the digest's
-        LANE VIOLATION, carried here under the same name.
-      * keyboard merges whose review is still owed — a push that landed on an
-        `override-seq`, or on a `review-seq` the pusher wrote themselves.
-    A keyboard card's identity is its shas, not a slug — it has no spec file
-    yet. Its EXIT from this column is the retro spec plus the paid review, and
-    the card says so, because a card that cannot say how it leaves is a card
-    nobody can clear."""
+
+def _reviewed_shas(spec_text: str) -> set[str]:
+    """Sha prefixes a spec names, if it carries a Review record: a retro spec
+    plus a paid review is how a keyboard card leaves Review."""
+    if not REVIEW_RECORD_HEADING.search(spec_text):
+        return set()
+    return {t.lower() for t in _HEX_TOKEN.findall(spec_text)}
+
+
+def _is_reviewed(sha: str, reviewed: set[str]) -> bool:
+    sha = sha.lower()
+    return any(sha.startswith(t) for t in reviewed)
+
+
+def _keyboard_cards(drift: dict, lane_owners: dict,
+                    reviewed: Optional[set] = None) -> list:
+    """Review auto-cards from the push log: uncited main commits (a Tier 2 among
+    them is the LANE VIOLATION) and keyboard merges whose review is owed. A card
+    leaves when a retro spec names its sha and carries a Review record."""
     out: list[dict] = []
     mirror = (drift.get("paths") or {}).get("mirror") or ""
 
+    reviewed = reviewed or set()
     for c in drift.get("classified", []):
         sha = c.get("sha") or ""
+        if _is_reviewed(sha, reviewed):
+            continue
         hits = c.get("hits") or []
         flags = ["uncited"]
         if c.get("tier") == 2:
@@ -674,7 +687,7 @@ def _keyboard_cards(drift: dict, lane_owners: dict) -> list:
         push = cit.get("push") or {}
         new = str(push.get("new") or "")
         slug = f"{KEYBOARD_PREFIX}{new[:12]}"
-        if not new or slug in seen:
+        if not new or slug in seen or _is_reviewed(new, reviewed):
             continue
         seen.add(slug)
         owner = cit.get("author") or None

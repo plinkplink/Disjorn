@@ -291,6 +291,47 @@ def test_a_properly_cited_push_makes_no_card(repo, gatehouse):
             if c["kind"] == "keyboard"] == []
 
 
+RETRO = """\
+# Spec: retro
+
+> RETROACTIVE. Merged as `{sha}`.
+
+## Request
+- **Verbatim**: "x"
+- **Requester**: plink
+
+## Review record
+- Gable, #custodian seq 2647: PASS.
+
+## Status
+`merged`
+"""
+
+
+def test_a_retro_spec_with_a_paid_review_clears_the_keyboard_card(repo, gatehouse):
+    sha = "b" * 40
+    drift = {"paths": {"mirror": str(repo)}, "citations": [
+        {"holds": True, "kind": "override-seq", "seq": 1500, "self_cited": False,
+         "author": "plink", "push": {"new": sha, "old": "c" * 40}}],
+        "classified": [{"sha": "a" * 40, "subject": "uncited", "hits": ["server/app/x.py"],
+                        "tier": 2, "reasons": [], "error": None}]}
+    (repo / "SPECS" / "2026-09-14-retro-b.md").write_text(RETRO.format(sha=sha[:7]))
+    (repo / "SPECS" / "2026-09-14-retro-a.md").write_text(RETRO.format(sha="a" * 12))
+    cards = derive(repo, gatehouse, drift=drift)["cards"]
+    assert [c for c in cards if c["kind"] == "keyboard"] == []
+
+
+def test_a_spec_naming_the_sha_without_a_review_record_clears_nothing(repo, gatehouse):
+    sha = "b" * 40
+    drift = {"paths": {"mirror": str(repo)}, "citations": [
+        {"holds": True, "kind": "override-seq", "seq": 1500, "self_cited": False,
+         "author": "plink", "push": {"new": sha, "old": "c" * 40}}]}
+    (repo / "SPECS" / "2026-09-14-retro-b.md").write_text(
+        RETRO.replace("## Review record\n- Gable, #custodian seq 2647: PASS.\n", "").format(sha=sha[:7]))
+    c = by_slug(derive(repo, gatehouse, drift=drift))["keyboard-" + "b" * 12]
+    assert "review-pending" in c["flags"]
+
+
 def test_an_unmapped_lane_reads_unassigned_rather_than_guessing(repo, gatehouse):
     """There is no lane→owner map compiled into this module on purpose: that is
     house policy, ruled in channel, and a guess in a harness file is the
