@@ -857,7 +857,7 @@ export function AppBuildModal({
           >
             {showPreview ? "Chat" : "Progress"}
           </button>
-          {turnRunning && !ended && (
+          {turnRunning && !ended && !repoMode && (
             <button
               className="btn btn-danger"
               disabled={stopping}
@@ -869,7 +869,7 @@ export function AppBuildModal({
           <button
             className="btn"
             disabled={ended || ending}
-            onClick={() => (turnRunning ? setConfirming("end") : endNow())}
+            onClick={() => (turnRunning && !repoMode ? setConfirming("end") : endNow())}
           >
             {ending ? "Ending…" : ended ? "Ended" : "End session"}
           </button>
