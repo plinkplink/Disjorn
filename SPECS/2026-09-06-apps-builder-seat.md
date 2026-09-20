@@ -632,5 +632,6 @@ table, verb, ledger, stage derivation, §H line, §J server/client;
 <!-- No Confirm record → no build. This is the gate. -->
 
 ## Status
-`building`
+merged
+<!-- advanced from `building` by `board --mark-merged` on 2026-09-20: build merged as f023942. The word `building` on a merged spec made it indistinguishable from a buildable one. -->
 <!-- set at the keyboard 2026-09-06 (was `confirm`, a typo for `confirmed` — the broker parser wants the full word): slice (i) (seat, shelf, brief, shim, harvest) building on loop/2026-09-06-apps-builder-seat-s1, two Opus hands, Fable orchestrating; confirmed by plink #2302. -->

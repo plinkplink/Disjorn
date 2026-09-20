@@ -31,4 +31,5 @@ refused_shapes in core.py is per-turn, so recurrence across turns is invisible. 
 - **Confirmed at**: 9/10/2026
 
 ## Status
-`confirmed`
+merged
+<!-- advanced from `confirmed` by `board --mark-merged` on 2026-09-20: build merged as 35acefe. The word `confirmed` on a merged spec made it indistinguishable from a buildable one. -->

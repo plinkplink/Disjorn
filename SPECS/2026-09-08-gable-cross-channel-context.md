@@ -154,4 +154,5 @@ One build slot each.
 - **Confirmed at**: 9/8/2026
 
 ## Status
-`confirmed`
+merged
+<!-- advanced from `confirmed` by `board --mark-merged` on 2026-09-20: build merged as dc57a8c. The word `confirmed` on a merged spec made it indistinguishable from a buildable one. -->

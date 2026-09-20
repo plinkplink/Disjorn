@@ -135,4 +135,5 @@ one build slot each. brokerd.py first because it is the one behind the read cap.
 - **Confirmed at**: 9/20/2026
 
 ## Status
-`confirmed`
+merged
+<!-- advanced from `confirmed` by `board --mark-merged` on 2026-09-20: build merged as 489f2bb. The word `confirmed` on a merged spec made it indistinguishable from a buildable one. -->
