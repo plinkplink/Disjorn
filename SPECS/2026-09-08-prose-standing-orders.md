@@ -130,9 +130,9 @@ one build slot each. brokerd.py first because it is the one behind the read cap.
   hit short helpers → allowance = max(25%, 1 KB).
 
 ## Confirm record
-- **Confirmed by**:
-- **#custodian seq**:
-- **Confirmed at**:
+- **Confirmed by**: plink
+- **#custodian seq**: 2664
+- **Confirmed at**: 9/20/2026
 
 ## Status
-`draft`
+`confirmed`
