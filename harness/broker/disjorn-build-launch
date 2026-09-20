@@ -42,6 +42,7 @@ CONTRACT
 --------
     disjorn-build-launch run  <resident> <slug> [session argv...]
     disjorn-build-launch stop <resident> <slug>
+    disjorn-build-launch gate <resident> <slug>
 
 `run` execs, with stdin/stdout/stderr passed through untouched (`--pipe`):
 
@@ -78,7 +79,11 @@ SYSTEMCTL = "/usr/bin/systemctl"
 # The ONLY program this helper will ever start. Not an argument: a caller that
 # could name the program could run anything as a resident.
 WRAPPER = "/usr/local/lib/disjorn/run-build.sh"
+# The gate run's own wrapper and unit stem. A distinct prefix so a gate can
+# never collide with, or be mistaken for, the build of the same slug.
+GATE_WRAPPER = "/usr/local/lib/disjorn/run-gates.sh"
 UNIT_PREFIX = "disjorn-build-"
+GATE_UNIT_PREFIX = "disjorn-gate-"
 
 # ------------------------------------------------------------- fixed envelope
 # Deliberately NOT arguments. A limit a caller can widen is not a limit, and
@@ -99,6 +104,9 @@ RUNTIME_MAX_SEC = 14400          # 4h
 LIMIT_FSIZE = 512 * 1024 * 1024  # 512 MiB per file
 MEMORY_MAX = "8G"
 TASKS_MAX = 1024
+# The gate's outer backstop. Keep it comfortably LONGER than the broker's
+# [build].gate_timeout_sec so the two never race.
+GATE_RUNTIME_MAX_SEC = 1800      # 30m
 
 # run-build.sh's documented defaults assume they are read from plink's account;
 # a res-* uid cannot traverse /home/plink (0700). These are the same three
@@ -154,6 +162,7 @@ SPINE_MIRROR_ROOT = "/srv/disjorn-spine"
 SLUG_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})-([a-z0-9][a-z0-9-]{0,50})$")
 RESIDENT_RE = re.compile(r"^[a-z][a-z0-9]{0,30}$")
 UNIT_RE = re.compile(r"^disjorn-build-[0-9a-z][0-9a-z.-]{0,80}\.service$")
+GATE_UNIT_RE = re.compile(r"^disjorn-gate-[0-9a-z][0-9a-z.-]{0,80}\.service$")
 MAX_FORWARDED_ARGS = 64
 MAX_ARG_LEN = 4096
 
@@ -318,6 +327,45 @@ def build_run_argv(resident: str, slug: str, forwarded: "list", wrapper: str,
     ]
 
 
+def build_gate_argv(resident: str, slug: str, wrapper: str) -> "list":
+    """The gate run: same identity and envelope as a build, synchronous, and
+    with NO forwarded argv at all — the gate is a fixed program, so there is
+    nothing for a caller to steer."""
+    account, pw, group = check_resident(resident)
+    slug = check_slug(slug)
+    unit = f"{GATE_UNIT_PREFIX}{slug}"
+    if not GATE_UNIT_RE.match(unit + ".service"):    # unreachable; asserted anyway
+        die(f"refusing to create unit {unit!r}")
+    return [
+        SYSTEMD_RUN,
+        f"--unit={unit}",
+        f"--description=Disjorn gates {slug} ({account})",
+        f"--uid={account}",
+        f"--gid={group}",
+        "--collect",
+        # --pipe hands our stdout/stderr to the service; --wait keeps this
+        # process alive until it finishes, so the broker's subprocess.run
+        # gets the gate's own exit status; --quiet keeps systemd's own
+        # narration out of the stream the broker parses.
+        "--pipe",
+        "--wait",
+        "--quiet",
+        f"--property=RuntimeMaxSec={GATE_RUNTIME_MAX_SEC}",
+        f"--property=LimitFSIZE={LIMIT_FSIZE}",
+        "--property=LimitCORE=0",
+        f"--property=MemoryMax={MEMORY_MAX}",
+        "--property=MemorySwapMax=0",
+        f"--property=TasksMax={TASKS_MAX}",
+        f"--setenv=XDG_RUNTIME_DIR=/run/user/{pw.pw_uid}",
+        f"--setenv=RESIDENT_GATEHOUSE={GATEHOUSE}",
+        # Named rather than left to $HOME: the checkout must land in the
+        # resident's own tree whatever PID 1 decides $HOME is.
+        f"--setenv=RESIDENT_GATE_RUNS={pw.pw_dir}/gate-runs",
+        "--",
+        wrapper, resident, slug,
+    ]
+
+
 def build_stop_argv(resident: str, slug: str) -> "list":
     check_resident(resident)          # refuse a bogus resident even to stop
     slug = check_slug(slug)
@@ -334,25 +382,31 @@ def main(argv: "list") -> int:
     # any caller a second code path.
     dry = os.environ.get("DISJORN_BUILD_LAUNCH_DRY_RUN") == "1"
     wrapper = WRAPPER
+    gate_wrapper = GATE_WRAPPER
     spine_root = SPINE_MIRROR_ROOT
     if dry and os.environ.get("DISJORN_BUILD_LAUNCH_WRAPPER"):
-        wrapper = os.environ["DISJORN_BUILD_LAUNCH_WRAPPER"]
+        wrapper = gate_wrapper = os.environ["DISJORN_BUILD_LAUNCH_WRAPPER"]
     if dry and os.environ.get("DISJORN_BUILD_LAUNCH_SPINE_ROOT"):
         spine_root = os.environ["DISJORN_BUILD_LAUNCH_SPINE_ROOT"]
 
     if len(argv) < 4:
-        die("usage: disjorn-build-launch run|stop <resident> <slug> [args...]")
+        die("usage: disjorn-build-launch run|gate|stop <resident> <slug> [args...]")
     mode, resident, slug = argv[1], argv[2], argv[3]
 
     if mode == "run":
         check_wrapper(wrapper)
         out = build_run_argv(resident, slug, argv[4:], wrapper, spine_root)
+    elif mode == "gate":
+        if len(argv) > 4:
+            die("gate takes exactly <resident> <slug>")
+        check_wrapper(gate_wrapper)
+        out = build_gate_argv(resident, slug, gate_wrapper)
     elif mode == "stop":
         if len(argv) > 4:
             die("stop takes exactly <resident> <slug>")
         out = build_stop_argv(resident, slug)
     else:
-        die(f"unknown mode {mode!r} (expected 'run' or 'stop')")
+        die(f"unknown mode {mode!r} (expected 'run', 'gate' or 'stop')")
 
     if dry:
         print(json.dumps(out))
