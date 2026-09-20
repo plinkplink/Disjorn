@@ -194,11 +194,9 @@ def test_sudoers_drop_in_stays_a_boundary():
     body = " ".join(rules)
     # It grants exactly one program, by absolute installed path.
     assert INSTALLED_HELPER in body
-    # run + stop per resident. Two residents hold build grants since BR-1
-    # enabled Claudette's pair (identity is the caller's, so anyone whose
-    # start-build flips true needs their lines here). Still asserted exactly:
-    # a fifth mention means someone widened the surface.
-    assert body.count(INSTALLED_HELPER) == 4
+    # run + stop per resident, plus gate for the seat the broker runs gates
+    # as. Counted exactly: one more mention means someone widened the surface.
+    assert body.count(INSTALLED_HELPER) == 5
     assert "DISJORN_BUILD_GABLE" in body and "DISJORN_BUILD_CLAUDETTE" in body
     # It NEVER names a general-purpose privileged tool. A wildcard-bearing
     # sudoers rule for systemd-run is equivalent to a grant of full root
@@ -211,6 +209,7 @@ def test_sudoers_drop_in_stays_a_boundary():
     # `*` argument may appear.
     assert " *" not in body and body.count("^") == body.count("$") >= 2
     assert "^run gable " in body and "^stop gable " in body
+    assert "^gate gable " in body
     # Only plink (the uid the broker runs as) gets it, and only as root.
     assert re.search(r"^plink ALL=\(root\) NOPASSWD:", text, re.M)
     assert not re.search(r"^\s*%", text, re.M)        # no group grants

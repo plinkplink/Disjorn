@@ -9,6 +9,9 @@
 #   sudo install -D -o root -g root -m 0755 \
 #       /home/plink/Disjorn/Disjorn/harness/broker/disjorn-build-launch \
 #       /usr/local/lib/disjorn/disjorn-build-launch
+#   sudo install -D -o root -g root -m 0755 \
+#       /home/plink/Disjorn/Disjorn/harness/cc/run-gates.sh \
+#       /usr/local/lib/disjorn/run-gates.sh
 #   sudo visudo -cf /home/plink/Disjorn/Disjorn/harness/keyboard/91-disjorn-build.sudoers
 #   sudo install -o root -g root -m 0440 \
 #       /home/plink/Disjorn/Disjorn/harness/keyboard/91-disjorn-build.sudoers \
@@ -16,8 +19,9 @@
 #
 # WHAT IT GRANTS
 #   plink (the uid the broker runs as) may run exactly one root program — the
-#   disjorn-build-launch helper — in exactly two modes, for exactly one named
-#   resident, with a slug-shaped third argument. The helper takes NO path, NO
+#   disjorn-build-launch helper — in its three fixed modes, for exactly one
+#   named resident, with a slug-shaped third argument. `gate` takes NO trailing
+#   argument run: it names a fixed wrapper with nothing to forward. The helper takes NO path, NO
 #   unit name, NO uid and NO resource limit from its caller: it derives all of
 #   them from (mode, resident, slug) and execs a fixed systemd-run argv that
 #   runs the build AS res-<resident>, never as root.
@@ -59,6 +63,7 @@
 
 Cmnd_Alias DISJORN_BUILD_GABLE = \
     /usr/local/lib/disjorn/disjorn-build-launch ^run gable [0-9]{4}-[0-9]{2}-[0-9]{2}-[a-z0-9][a-z0-9-]{0,50}( .*)?$, \
+    /usr/local/lib/disjorn/disjorn-build-launch ^gate gable [0-9]{4}-[0-9]{2}-[0-9]{2}-[a-z0-9][a-z0-9-]{0,50}$, \
     /usr/local/lib/disjorn/disjorn-build-launch ^stop gable [0-9]{4}-[0-9]{2}-[0-9]{2}-[a-z0-9][a-z0-9-]{0,50}$
 
 Cmnd_Alias DISJORN_BUILD_CLAUDETTE = \

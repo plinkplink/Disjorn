@@ -4,7 +4,7 @@
 [files]
 "harness/broker/gen_verb_surface.py" = 7199
 "harness/broker/tests/test_broker_budget.py" = 1870
-"harness/broker/tests/test_broker_build_unit.py" = 12899
+"harness/broker/tests/test_broker_build_unit.py" = 12771
 "harness/broker/tests/test_broker_file_vision.py" = 6441
 "harness/broker/tests/test_broker_publish_path.py" = 6923
 "harness/broker/tests/test_broker_spec_status.py" = 6681
