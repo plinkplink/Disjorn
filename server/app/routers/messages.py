@@ -49,28 +49,19 @@ CurrentActor = Annotated[Actor, Depends(get_actor)]
 
 SEARCH_LIMIT = 50
 
-# Hard cap on message content, in characters (BL-D6).
-#
-# Why 16000: Discord ships 2000 (4000 for Nitro), but this house is explicitly
-# friendlier to long bot output — a resident posts whole build reports, and the
-# largest cap anywhere else in the stack is the harness's 4000-char file-proposal
-# contract (harness/consolidation/poster.py PROPOSAL_TEXT_CAP = 3900). 16000
-# leaves ~4x headroom over that so no legitimate bot post is broken, while still
-# turning "a 2MB /backlog stored verbatim" into a 422 instead of a row. It is
-# also comfortably under SQLite's default 1e9-byte string limit and small enough
-# that a full 200-message history page stays a few MB.
+# Hard cap on message content, in characters (BL-D6). Sized for long bot output
+# — a resident posts whole build reports — with headroom over the harness's
+# file-proposal contract, while still turning a 2MB body into a 422 rather than
+# a row.
 #
 # Server-authored messages (slash replies via deliver_message) do not pass
 # through this pydantic model, so their own rendering must stay bounded — see
 # slash._render_list.
 MAX_MESSAGE_CHARS = 16000
 
-# Same idea for the free-form JSON fields on a message create. Without this,
-# `content` is capped but `emote_refs` / `privacy_flags` are an uncapped side
-# channel into the same row (both are json.dumps'd straight into the DB).
-# 4000 chars is generous: a realistic emote_refs is one or two
-# "chibi:pack/Category/File.png" strings, and privacy_flags is a handful of
-# booleans.
+# Same idea for the free-form JSON fields on a create: without this, `content`
+# is capped but `emote_refs` / `privacy_flags` are an uncapped side channel
+# into the same row (both are json.dumps'd straight into the DB).
 MAX_METADATA_CHARS = 4000
 
 
@@ -395,12 +386,19 @@ async def create_message(
                 status_code=400, detail="reply_to message not found in this channel"
             )
 
+    # Local import avoids a messages<->slash import cycle.
+    from . import slash
+
+    # Text commands (/shrug) rewrite the sender's own message before anything
+    # is persisted, so detection below runs on the text that will be stored.
+    content = slash.apply_text_command(body.content)
+
     # Caller-supplied flags merged with server-side NL detection. Detection
     # runs on user messages (bots set their own flags explicitly). Merge only
     # ever adds flags.
     flags = _merge_flags(
         body.privacy_flags,
-        _detect_flags(body.content) if actor.type == "user" else {},
+        _detect_flags(content) if actor.type == "user" else {},
     )
 
     # emote_refs / emotion: bot authors only; silently ignored for users.
@@ -422,7 +420,7 @@ async def create_message(
         channel_id,
         actor.type,
         actor.id,
-        body.content,
+        content,
         flags=flags,
         emote_refs=emote_refs,
         reply_to_id=body.reply_to_id,
@@ -430,10 +428,8 @@ async def create_message(
 
     # Slash-command dispatch (WP-L2): the user's message is persisted as normal
     # chat above; if its content is a registered /command, the server handles it
-    # and posts its own reply. Unknown /commands (e.g. /shrug) pass through
-    # untouched. Local import avoids a messages<->slash import cycle.
-    from . import slash
-
+    # and posts its own reply. Unknown /commands pass through untouched.
+    # Dispatch sees what was TYPED, never a text command's rewrite.
     await slash.dispatch(
         channel_id, body.content, actor, flags, message_seq=payload["seq"]
     )

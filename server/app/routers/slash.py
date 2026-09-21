@@ -8,6 +8,9 @@ message is already persisted by the messages create path.
 Commands register with @command("name"); a handler receives a :class:`Ctx` and
 may return reply text, or None to post nothing.
 
+Text commands (/shrug, /shrugs) are a separate, smaller kind: they rewrite the
+sender's own message in place and post nothing. See apply_text_command.
+
 /backlog:
     /backlog             -> lists the backlog (server-rendered reply, no LLM,
                             no bot summon), compact: id, short text, author, status.
@@ -35,9 +38,8 @@ public, bot-readable table:
       verbatim, with their author, in the next public `/backlog` listing;
     - the text exceeds MAX_BACKLOG_CHARS (BL-D6).
 
-Replies are authored by the seeded 'system' bot and posted via
-messages.deliver_message, so they take the normal message path (seq allocation,
-bus publish, privacy inheritance) and are ordinary public chat visible to bots.
+Replies are authored by the seeded 'system' bot via messages.deliver_message,
+so they take the normal message path and are ordinary public chat.
 
 GET /backlog: paginated JSON read of the table (``from_id`` cursor + ``limit``)
 so residents can triage via the SDK without scraping chat.
@@ -69,27 +71,19 @@ SYSTEM_BOT_NAME = "system"
 # Longest text shown inline in the `/backlog` listing before it is ellipsised.
 _LIST_TEXT_MAX = 80
 
-# Most items rendered into one in-channel `/backlog` listing. Keeps the
-# server-authored reply bounded: server-authored messages bypass
-# MessageCreate.max_length, so an unbounded listing over a large backlog would
-# be the one way to manufacture a giant message. 25 * (~80 chars + framing)
-# stays around 3KB — well inside messages.MAX_MESSAGE_CHARS. Residents wanting
-# the whole table use GET /backlog (paginated).
+# Most items in one in-channel `/backlog` listing. Server-authored replies
+# bypass MessageCreate.max_length, so the listing must bound itself; the whole
+# table is at GET /backlog.
 _LIST_MAX_ITEMS = 25
 
-# Hard cap on a single backlog item's text, in characters (BL-D6). Tighter than
-# messages.MAX_MESSAGE_CHARS on purpose: a backlog row is a one-line feature
-# request that gets rendered into chat listings and read by residents, not a
-# document. 2000 is Discord's whole-message limit and is roughly a dense
-# paragraph — anything longer belongs in a spec, not the intake table.
+# Hard cap on one backlog item's text (BL-D6). Tighter than
+# messages.MAX_MESSAGE_CHARS: a row is a one-line request rendered into chat
+# listings, not a document.
 MAX_BACKLOG_CHARS = 2000
 
-# Per-actor slash-command rate limit (BL-D6). In-process and deliberately
-# crude: a fixed window, a dict keyed by (actor_type, actor_id), no storage.
-# 10 commands per 60s is far above any human's chat cadence and above a
-# resident's, but low enough that a runaway loop can't fill the backlog table
-# or the channel. Each dispatched command costs a persisted system reply, so
-# this is the throttle on server-authored write amplification too.
+# Per-actor dispatch rate limit (BL-D6), an in-process fixed window. Each
+# dispatched command costs a persisted system reply, so this is the throttle
+# on server-authored write amplification.
 SLASH_RATE_MAX = 10
 SLASH_RATE_WINDOW = 60.0
 
@@ -124,20 +118,14 @@ class Ctx:
         self.args = args
         self.actor = actor
         self.message_seq = message_seq
-        # Effective privacy flags of the message that carried this command
-        # (caller-supplied + server NL detection, already merged by the create
-        # path). Handlers that persist command text to bot-readable surfaces
-        # must honor these — see /backlog.
+        # Effective privacy flags of the carrying message. Handlers that
+        # persist command text to bot-readable surfaces must honor these.
         self.flags = flags or {}
-        # channels.type of the channel the command was posted in ('main_feed',
-        # 'text', 'dm_1to1', 'app_build'). Resolved once by dispatch. None only
-        # if the channel vanished between insert and dispatch — treated as
-        # private (fail closed), see is_private_channel.
+        # channels.type, resolved once by dispatch. None if the channel
+        # vanished between insert and dispatch — treated as private.
         self.channel_type = channel_type
-        # channels.visibility ('public' | 'private'). A private text channel is
-        # readable only by its members, so it is private in exactly the sense
-        # is_private_channel means. Defaults to 'public' so a caller that
-        # predates per-channel membership behaves as it always did.
+        # channels.visibility. Defaults to 'public' so a caller that predates
+        # per-channel membership behaves as it always did.
         self.channel_visibility = channel_visibility
 
     @property
@@ -160,13 +148,8 @@ class Ctx:
         channel — counts as private. Fail closed: a new channel type is private
         until someone deliberately adds it here.
 
-        `app_build` (SPECS/2026-08-30-apps-tab-v1.md) is spelled out rather
-        than left to the fall-through below. It would answer True either way —
-        it is not in the public tuple and it is created `private` — but a build
-        chat is a two-person room whose whole contents are one user thinking
-        out loud, and "/backlog can never file from here" is a rule that should
-        be findable by searching for the type, not only by reasoning about a
-        default.
+        `app_build` is spelled out though the fall-through would also answer
+        True, so the rule is findable by searching for the type.
         """
         if self.channel_type == "app_build":
             return True
@@ -206,10 +189,9 @@ def init() -> None:
 def _rate_check(actor: Actor) -> str:
     """Fixed-window per-actor limiter.
 
-    Returns "allow", "deny_notify" (first refusal in this window — tell the
-    actor once) or "deny_silent" (keep refusing without adding chat noise; a
+    "allow", "deny_notify" (first refusal in this window) or "deny_silent" — a
     refusal reply is itself a persisted message, so it must not be a free
-    amplifier).
+    amplifier.
     """
     key = (actor.type, actor.id)
     now = time.monotonic()
@@ -239,6 +221,36 @@ def _parse(content: str) -> Optional[tuple[str, str]]:
         return None
     args = parts[1] if len(parts) > 1 else ""
     return name, args
+
+
+# ---------------------------------------------------------------------------
+# Text commands — rewrite the sender's own message instead of replying
+# ---------------------------------------------------------------------------
+
+SHRUG = "¯\\_(ツ)_/¯"
+
+# Command word -> text appended to the rest of the message. Both spellings of
+# shrug are registered because both get typed.
+_TEXT_COMMANDS: dict[str, str] = {"shrug": SHRUG, "shrugs": SHRUG}
+
+
+def apply_text_command(content: str) -> str:
+    """`/shrug rough day` -> `rough day ¯\\_(ツ)_/¯`; other content unchanged.
+
+    Applied on the create path BEFORE the message is persisted, so the shrug is
+    part of what the sender said rather than a reply from the system bot. The
+    rewritten text must never be fed to dispatch: `/shrug /backlog x` would
+    otherwise file a backlog item nobody asked for.
+    """
+    parsed = _parse(content)
+    if parsed is None:
+        return content
+    name, args = parsed
+    suffix = _TEXT_COMMANDS.get(name)
+    if suffix is None:
+        return content
+    rest = args.rstrip()
+    return f"{rest} {suffix}" if rest else suffix
 
 
 async def dispatch(
@@ -366,10 +378,8 @@ def _render_list(items: list[dict[str, Any]], total: int, open_count: int) -> st
 def _normalize_verb(word: str) -> str:
     """Lowercase, and treat a curly apostrophe as the straight one.
 
-    A phone keyboard turns `spec'd` into `spec’d` without being asked. Without
-    this the verb would miss, the reserved-word check would miss with it, and
-    the message would be FILED as a backlog item reading "spec’d 6 <slug>" —
-    the exact silent wrong turn the reserved words exist to prevent.
+    A phone keyboard turns `spec'd` into `spec’d`; without this the verb misses
+    and the triage is FILED as a backlog item instead.
     """
     return word.replace("’", "'").lower()
 
@@ -385,10 +395,8 @@ def _usage(verb: str) -> str:
 async def _backlog_triage(ctx: Ctx, verb: str, status: str, rest: str) -> str:
     """Parse `<id>` (and `<slug>` for spec'd), then make the one write.
 
-    Every refusal below names the reserved word, because from the typist's side
-    the surprising outcome is not "that was rejected" — it is "I typed a
-    sentence and nothing was filed". Saying which word was reserved is what
-    makes that recoverable.
+    Every refusal names the reserved word: the surprise to recover from is "I
+    typed a sentence and nothing was filed".
     """
     parts = rest.split()
     if not parts:
@@ -441,29 +449,22 @@ async def _backlog(ctx: Ctx) -> str:
                                      words[1] if len(words) > 1 else "")
 
     # ------------------------------------------------------------------ walls
-    # Each refusal below returns WITHOUT echoing ctx.args: the whole point is
-    # that the text is not fit for the public/bot-readable surface, and the
-    # refusal is itself posted into chat.
+    # No refusal below may echo ctx.args: the refusal is itself posted into
+    # chat, and the text is what was judged unfit for a public surface.
     #
-    # 1. The wall (HIGH fix). The backlog table and GET /backlog are
-    #    bot-readable. If the carrying message was flagged bot-hidden (secret /
-    #    off_the_record — by NL detection or explicit privacy_flags), refuse at
-    #    intake rather than copy the text onto a public surface. "Never in any
-    #    form": filtering the read side is not enough while the row persists as
-    #    bot-readable data, so the row must never be written.
+    # 1. Bot-hidden content (secret / off_the_record, by NL detection or
+    #    explicit flags). The backlog table and GET /backlog are bot-readable,
+    #    so the row must never be written — filtering the read side is not
+    #    enough while the row persists.
     if privacy.hidden_from_bots(ctx.flags):
         return (
             "Can't file that: the message is marked private (secret / "
             "off-the-record) and the backlog is readable by bots. Rephrase "
             "the request without the private content and file it again."
         )
-    # 2. The footgun above the wall (BL-D5). The backlog is public feature
-    #    requests by design (Architecture §13): one item filed in a DM is
-    #    reprinted verbatim, with its author, by the next `/backlog` listing in
-    #    #main. Text that is merely sensitive — not flag-worthy — would leak
-    #    that way, and the person who typed it in a DM had no reason to expect
-    #    it. So filing is refused outside house-public channels; listing still
-    #    works everywhere (public data going to a private place is fine).
+    # 2. DMs (BL-D5). An item is reprinted verbatim, with its author, by the
+    #    next `/backlog` listing in #main, so merely-sensitive DM text would
+    #    leak. Filing is refused outside house-public channels; listing is not.
     if ctx.is_private_channel:
         return (
             "Can't file from a DM: the backlog is a public list — every item is "
@@ -501,16 +502,13 @@ async def list_backlog(
 ) -> list[BacklogItem]:
     """Backlog table as JSON, oldest first. Any authenticated actor may read it.
 
-    Paginated with the same cursor idiom as GET /channels/{id}/messages:
-    ``from_id`` is an inclusive lower bound on the item id, ``limit`` caps the
-    page (default BACKLOG_PAGE_DEFAULT, max BACKLOG_PAGE_MAX). Page forward with
-    ``from_id = last_id + 1`` until a short page comes back.
+    ``from_id`` is an inclusive lower bound on the item id, as in GET
+    /channels/{id}/messages; page forward with ``from_id = last_id + 1`` until
+    a short page comes back.
 
-    Lets residents triage via the SDK without scraping the server-rendered
-    /backlog chat listing. Backlog items are public feature requests by
-    construction: the filing path refuses bot-hidden content, DM-filed items and
-    oversized text at intake, so no row here can carry secret / off-the-record
-    text. No read-side filtering is needed.
+    No read-side privacy filtering: the filing path refuses bot-hidden content,
+    DM-filed items and oversized text at intake, so no row can carry secret or
+    off-the-record text.
     """
     return [BacklogItem(**it) for it in await _items_page(from_id, limit)]
 
