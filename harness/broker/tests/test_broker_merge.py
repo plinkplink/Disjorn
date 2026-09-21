@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import datetime as dt
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -33,7 +34,7 @@ def earlier(seconds: int = 3600) -> str:
 def arm(h, *, slug: str = SLUG, author: str = "plink",
         author_type: str = "user", flags: str = "{}", content: str | None = None,
         path: str = "docs/new.md", branch: bool = True, tier: int = 1,
-        gate_exit: int = 0, message: bool = True):
+        gate_exit: int = 0, message: bool = True, on_gates=None):
     """A `server` caller, the verb on, a real gatehouse, and the gates stubbed."""
     h.become_server()
     h.set_verbs("server", merge=True, build=True)
@@ -46,7 +47,8 @@ def arm(h, *, slug: str = SLUG, author: str = "plink",
     h.set_tier(tier)
     return h.stub_gates(exit_code=gate_exit,
                         tests=(gate_exit == 0),
-                        summary="server 12 passed; harness 4 passed")
+                        summary="server 12 passed; harness 4 passed",
+                        on_run=on_gates)
 
 
 def call(h, *, slug: str = SLUG, seq: int = SEQ, channel: int = CHANNEL,
@@ -57,8 +59,27 @@ def call(h, *, slug: str = SLUG, seq: int = SEQ, channel: int = CHANNEL,
     return h.call("merge", args)
 
 
+def merge(h, **kw) -> list[str]:
+    """The whole async `/merge`: the acknowledgement, the thread, the one post
+    the room is left with."""
+    resp = call(h, **kw)
+    assert resp["ok"] is True, resp
+    assert resp["result"] == {"started": True, "slug": kw.get("slug", SLUG),
+                              "branch": f"loop/{kw.get('slug', SLUG)}"}
+    h.finish_merges()
+    return h.merge_outcomes()[-1]
+
+
 def refusal(resp) -> tuple[str, str]:
     return resp["error"]["reason"], resp["error"]["message"]
+
+
+def late_refusal(h, **kw) -> tuple[str, str, list[str]]:
+    """A `/merge` that is taken and then refused: (reason, message, post)."""
+    assert call(h, **kw)["ok"] is True
+    h.finish_merges()
+    reason, message = h.merge_denials()[-1]
+    return reason, message, h.merge_outcomes()[-1]
 
 
 # ── the wire ─────────────────────────────────────────────────────────────
@@ -79,7 +100,28 @@ def test_the_arg_schema_admits_no_caller_supplied_gates(harness, args):
 
 def test_pass_seq_is_optional(harness):
     arm(harness, tier=1)
-    assert call(harness)["ok"] is True
+    assert merge(harness)[0].startswith(f"merge: merged {SLUG} as ")
+
+
+def test_the_call_returns_before_the_gates_answer(harness):
+    """`/merge` has `/build`'s shape: the socket gets an acknowledgement and the
+    room gets the outcome."""
+    started = threading.Event()
+    release = threading.Event()
+
+    def wait():
+        started.set()
+        release.wait(timeout=10)
+
+    arm(harness, tier=1, on_gates=wait)
+    resp = call(harness)
+    assert resp["result"]["started"] is True
+    assert started.wait(timeout=10)
+    assert harness.merge_outcomes() == []
+    assert harness.main_subjects() == ["init"]
+    release.set()
+    harness.finish_merges()
+    assert harness.merge_outcomes()[-1][0].startswith("merge: merged ")
 
 
 # ── step 1: the human ────────────────────────────────────────────────────
@@ -143,10 +185,10 @@ def test_a_branch_missing_merge_never_runs_the_gates(harness):
 def test_the_gates_run_under_the_build_seat_with_the_gate_argv(harness):
     calls = arm(harness)
     harness.broker.start_build["command"] = ["sudo", "-n", "/l/launch", "run"]
-    assert call(harness)["ok"] is True
+    merge(harness)
     assert calls[0]["argv_prefix"] == ["sudo", "-n", "/l/launch", "gate"]
     assert calls[0]["seat"] == "test" and calls[0]["slug"] == SLUG
-    assert calls[0]["timeout"] == 30
+    assert calls[0]["timeout"] == 1320
     assert calls[0]["log_dir"].endswith("gate-logs")
 
 
@@ -154,9 +196,11 @@ def test_a_red_gate_is_tier_two_and_refuses_without_a_pass(harness):
     """The red gate is NOT special-cased: the classifier answers Tier 2 and the
     Tier 2 rule is what refuses."""
     arm(harness, gate_exit=1, tier=0)
-    reason, message = refusal(call(harness))
+    reason, message, post = late_refusal(harness)
     assert reason == "pass-missing"
     assert "Tier 2" in message and f"/merge {SLUG} pass <seq>" in message
+    assert post[0] == f"merge: refused {SLUG} — {message}"
+    assert post[1] == "next: fix the red gate, then /build again"
     assert harness.main_subjects() == ["init"]
 
 
@@ -165,11 +209,10 @@ def test_a_red_gate_is_tier_two_and_refuses_without_a_pass(harness):
 @pytest.mark.parametrize("tier", [0, 1])
 def test_a_tier_below_two_merges_and_stamps_merge_seq_last(harness, tier):
     arm(harness, tier=tier)
-    resp = call(harness)
-    assert resp["ok"] is True
-    result = resp["result"]
-    assert result == {"merged": True, "slug": SLUG, "sha": result["sha"],
-                      "tier": tier}
+    lines = merge(harness)
+    sha = harness.build_ledger_lines()[-1]["sha"]
+    assert lines == [f"merge: merged {SLUG} as {sha} (tier {tier})",
+                     "next: deploy at the keyboard"]
     assert harness.main_subjects()[0] == (
         f"merge: {SLUG} (/merge by plink, tier {tier})")
     body = harness.commit_message().strip().splitlines()
@@ -179,7 +222,7 @@ def test_a_tier_below_two_merges_and_stamps_merge_seq_last(harness, tier):
 
 def test_the_merge_commit_is_a_no_ff_merge_by_the_broker(harness):
     arm(harness, tier=1)
-    call(harness)
+    merge(harness)
     import broker_testlib as T
     assert T._git(harness.gatehouse, "log", "-1", "--format=%an <%ae>",
                   "main").strip() == "disjorn-broker <broker@disjorn.local>"
@@ -190,16 +233,27 @@ def test_the_merge_commit_is_a_no_ff_merge_by_the_broker(harness):
 
 def test_the_merge_line_lands_on_the_ledger(harness):
     arm(harness, tier=1)
-    sha = call(harness)["result"]["sha"]
+    sha = merge(harness)[0].split(" as ")[1].split(" ")[0]
     line = harness.build_ledger_lines()[-1]
     assert line == {"ts": line["ts"], "kind": "merge", "seq": SEQ,
                     "channel_id": CHANNEL, "author": "plink", "slug": SLUG,
-                    "tier": 1, "sha": sha, "pass_seq": None}
+                    "tier": 1, "sha": sha, "pass_seq": None,
+                    "self_merge": False}
+
+
+def test_the_merge_is_audited_once_it_has_happened(harness):
+    arm(harness, tier=1)
+    merge(harness)
+    sha = harness.build_ledger_lines()[-1]["sha"]
+    done = [e for e in harness.audit_lines()
+            if e["verb"] == "merge" and e["allowed"] is True]
+    assert done[0]["result_summary"].startswith(f"merge {SLUG} started")
+    assert done[-1]["merged_sha"] == sha and done[-1]["merge_tier"] == 1
 
 
 def test_the_mirror_and_the_board_follow_the_merge(harness):
     arm(harness, tier=1)
-    assert call(harness)["ok"] is True
+    merge(harness)
     ran = [a for a in harness.recorded_argv() if "--ff-only" in a]
     assert ran, "the mirror was never fast-forwarded after the merge"
 
@@ -208,8 +262,10 @@ def test_the_mirror_and_the_board_follow_the_merge(harness):
 
 def test_tier_two_without_a_pass_is_refused(harness):
     arm(harness, tier=2)
-    reason, message = refusal(call(harness))
+    reason, message, post = late_refusal(harness)
     assert reason == "pass-missing" and "#custodian" in message
+    assert post[1] == (f"next: PASS from Claudette in #custodian, then "
+                       f"/merge {SLUG} pass <seq>")
     assert harness.main_subjects() == ["init"]
 
 
@@ -217,8 +273,8 @@ def test_a_valid_pass_merges_with_review_seq_after_merge_seq(harness):
     arm(harness, tier=2)
     harness.add_custodian_post(PASS_SEQ, f"PASS {SLUG} — read it, it is fine",
                                author="Claudette", created_at=later())
-    resp = call(harness, pass_seq=PASS_SEQ)
-    assert resp["ok"] is True and resp["result"]["tier"] == 2
+    lines = merge(harness, pass_seq=PASS_SEQ)
+    assert lines[0].endswith("(tier 2)")
     body = harness.commit_message().strip().splitlines()
     assert body[0] == f"merge: {SLUG} (/merge by plink, tier 2)"
     assert body[-2] == f"merge-seq: {CHANNEL}:{SEQ}"
@@ -230,7 +286,7 @@ def test_a_pass_from_the_wrong_reviewer_is_refused(harness):
     arm(harness, tier=2)
     harness.add_custodian_post(PASS_SEQ, f"PASS {SLUG}", author="Gable",
                                created_at=later())
-    reason, message = refusal(call(harness, pass_seq=PASS_SEQ))
+    reason, message, _post = late_refusal(harness, pass_seq=PASS_SEQ)
     assert reason == "pass-invalid"
     assert "Gable's" in message and "Claudette" in message
     assert harness.main_subjects() == ["init"]
@@ -240,7 +296,7 @@ def test_a_pass_from_a_person_is_not_a_reviewers_post(harness):
     arm(harness, tier=2)
     harness.add_custodian_post(PASS_SEQ, f"PASS {SLUG}", author="plink",
                                author_type="user", created_at=later())
-    reason, message = refusal(call(harness, pass_seq=PASS_SEQ))
+    reason, message, _post = late_refusal(harness, pass_seq=PASS_SEQ)
     assert reason == "pass-invalid" and "reviewer's post" in message
 
 
@@ -248,15 +304,35 @@ def test_a_post_that_never_says_pass_is_refused(harness):
     arm(harness, tier=2)
     harness.add_custodian_post(PASS_SEQ, f"{SLUG} looks fine to me",
                                author="Claudette", created_at=later())
-    reason, message = refusal(call(harness, pass_seq=PASS_SEQ))
+    reason, message, _post = late_refusal(harness, pass_seq=PASS_SEQ)
     assert reason == "pass-invalid" and "does not say PASS" in message
+
+
+def test_a_pass_that_also_blocks_is_not_a_pass(harness):
+    """A mixed verdict is a BLOCK: the reviewer said not to merge this."""
+    arm(harness, tier=2)
+    harness.add_custodian_post(
+        PASS_SEQ, f"PASS on the docs, BLOCK on the schema change in {SLUG}",
+        author="Claudette", created_at=later())
+    reason, message, _post = late_refusal(harness, pass_seq=PASS_SEQ)
+    assert reason == "pass-invalid"
+    assert message == (f"seq {PASS_SEQ} says BLOCK as well as PASS, so it is "
+                       "not a PASS")
+    assert harness.main_subjects() == ["init"]
+
+
+def test_a_lowercase_block_does_not_unmake_a_pass(harness):
+    arm(harness, tier=2)
+    harness.add_custodian_post(PASS_SEQ, f"PASS {SLUG}; nothing blocks it",
+                               author="Claudette", created_at=later())
+    assert merge(harness, pass_seq=PASS_SEQ)[0].startswith("merge: merged ")
 
 
 def test_a_pass_that_names_another_slug_is_refused(harness):
     arm(harness, tier=2)
     harness.add_custodian_post(PASS_SEQ, "PASS 2026-09-20-something-else",
                                author="Claudette", created_at=later())
-    assert refusal(call(harness, pass_seq=PASS_SEQ))[0] == "pass-invalid"
+    assert late_refusal(harness, pass_seq=PASS_SEQ)[0] == "pass-invalid"
 
 
 def test_a_pass_posted_before_the_tip_is_refused(harness):
@@ -264,7 +340,7 @@ def test_a_pass_posted_before_the_tip_is_refused(harness):
     arm(harness, tier=2)
     harness.add_custodian_post(PASS_SEQ, f"PASS {SLUG}", author="Claudette",
                                created_at=earlier())
-    reason, message = refusal(call(harness, pass_seq=PASS_SEQ))
+    reason, message, _post = late_refusal(harness, pass_seq=PASS_SEQ)
     assert reason == "pass-invalid" and "before the tip" in message
 
 
@@ -272,7 +348,7 @@ def test_a_pass_in_another_channel_is_refused(harness):
     arm(harness, tier=2)
     harness.add_custodian_post(PASS_SEQ, f"PASS {SLUG}", author="Claudette",
                                created_at=later(), channel_id=CHANNEL + 50)
-    reason, message = refusal(call(harness, pass_seq=PASS_SEQ))
+    reason, message, _post = late_refusal(harness, pass_seq=PASS_SEQ)
     assert reason == "pass-invalid"
     assert f"no message {PASS_SEQ} in #custodian" in message
 
@@ -281,36 +357,95 @@ def test_a_changed_path_with_no_lane_owner_is_a_keyboard_merge(harness):
     arm(harness, tier=2, path="harness/broker/brokerd.py")
     harness.add_custodian_post(PASS_SEQ, f"PASS {SLUG}", author="Claudette",
                                created_at=later())
-    reason, message = refusal(call(harness, pass_seq=PASS_SEQ))
+    reason, message, post = late_refusal(harness, pass_seq=PASS_SEQ)
     assert reason == "pass-invalid"
     assert message == ("no lane owner for harness/broker/brokerd.py; "
                        "keyboard merge")
+    assert post[1] == "next: merge it at the keyboard"
 
 
 def test_a_pass_is_ignored_below_tier_two(harness):
     arm(harness, tier=1)
     harness.add_custodian_post(PASS_SEQ, "nothing to do with it",
                                author="Gable", created_at=earlier())
-    assert call(harness, pass_seq=PASS_SEQ)["ok"] is True
+    assert merge(harness, pass_seq=PASS_SEQ)[0].startswith("merge: merged ")
     assert "review-seq" not in harness.commit_message()
 
 
 # ── step 7: the merge itself ─────────────────────────────────────────────
 
 def test_a_conflict_refuses_and_moves_nothing(harness):
-    arm(harness, tier=1, path="docs/a.md")
-    harness.move_main()
-    before = harness.main_subjects()
-    reason, message = refusal(call(harness))
+    """Main can only conflict with a branch that contained it a moment ago, so
+    the conflicting commit has to land while the gates run."""
+    arm(harness, tier=1, path="docs/a.md",
+        on_gates=lambda: harness.move_main())
+    reason, message, post = late_refusal(harness)
     assert reason == "conflict" and "nothing moved" in message
-    assert harness.main_subjects() == before
+    assert post[1] == "next: fold main into the branch, then /merge again"
+    assert harness.main_subjects() == ["main moves", "init"]
 
 
 def test_the_merge_workspace_is_thrown_away(harness):
     arm(harness, tier=1)
-    assert call(harness)["ok"] is True
+    merge(harness)
     work = Path(harness.broker.merge_work_dir)
     assert list(work.iterdir()) == []
+
+
+# ── the message, the ancestry and the one run per slug ───────────────────
+
+def test_a_message_that_does_not_name_the_slug_is_refused(harness):
+    calls = arm(harness, content="/merge 2026-09-20-some-other-branch")
+    reason, message = refusal(call(harness))
+    assert reason == "slug-mismatch"
+    assert message == f"message {SEQ} does not ask to merge {SLUG}"
+    assert calls == [] and harness.main_subjects() == ["init"]
+
+
+@pytest.mark.parametrize("content", [
+    f"/merge {SLUG}", f"/merge loop/{SLUG}", f"/merge `{SLUG}` please",
+])
+def test_the_slug_is_read_as_a_whole_token(harness, content):
+    arm(harness, content=content)
+    assert call(harness)["ok"] is True
+    harness.finish_merges()
+
+
+def test_a_branch_behind_main_is_refused_before_the_gates(harness):
+    calls = arm(harness, tier=1)
+    harness.move_main(path="docs/elsewhere.md")
+    before = harness.main_subjects()
+    reason, message = refusal(call(harness))
+    assert reason == "moved"
+    assert message == f"loop/{SLUG} is behind main; fold main into the branch first"
+    assert calls == [] and harness.main_subjects() == before
+
+
+def test_main_moving_while_the_gates_run_refuses_the_push(harness):
+    arm(harness, tier=1,
+        on_gates=lambda: harness.move_main(path="docs/elsewhere.md"))
+    reason, message, post = late_refusal(harness)
+    assert reason == "moved"
+    assert message == "main moved while the gates ran; /merge again"
+    assert post[1] == "next: fold main into the branch, then /merge again"
+    assert [s for s in harness.main_subjects() if s.startswith("merge: ")] == []
+
+
+def test_a_second_merge_while_the_gates_run_is_refused(harness):
+    seen: list = []
+    arm(harness, tier=1, on_gates=lambda: seen.append(call(harness)))
+    assert merge(harness)[0].startswith("merge: merged ")
+    reason, message = refusal(seen[0])
+    assert reason == "busy"
+    assert message == f"a gate run for {SLUG} is already in flight"
+
+
+def test_a_merge_while_a_build_end_gate_run_is_up_is_refused(harness):
+    seen: list = []
+    arm(harness, tier=1, on_gates=lambda: seen.append(call(harness)))
+    outcome(harness)
+    assert refusal(seen[0]) == (
+        "busy", f"a gate run for {SLUG} is already in flight")
 
 
 # ── the /build end: gates, the banner, and the Tier 0 self-merge ─────────
@@ -394,19 +529,52 @@ def test_the_tier_zero_budget_is_counted_from_the_ledger(harness):
     arm(harness, tier=0)
     (Path(harness.broker._protected_paths())
      .write_text("[limits]\ndaily_auto_apply_budget = 1\n"))
-    harness.push_branch("2026-09-20-second-typo", path="docs/second.md")
     assert outcome(harness)[3].startswith("next: merged ")
+    # The first merge moved main, so the second branch is cut from where main
+    # is now — a branch behind main never reaches the budget at all.
+    harness.push_branch("2026-09-20-second-typo", path="docs/second.md")
     lines = outcome(harness, slug="2026-09-20-second-typo")
     assert lines[3] == "next: Tier 0 budget spent today; /merge 2026-09-20-second-typo"
     merges = [x for x in harness.main_subjects() if x.startswith("merge: ")]
     assert len(merges) == 1
 
 
+def test_the_self_merge_says_so_on_the_ledger(harness):
+    arm(harness, tier=0)
+    outcome(harness)
+    assert harness.build_ledger_lines()[-1]["self_merge"] is True
+
+
+def test_human_merges_never_spend_the_tier_zero_budget(harness):
+    """Only a self-merge is budgeted, so the day's human merges cannot use up
+    a build's own."""
+    arm(harness, tier=0)
+    (Path(harness.broker._protected_paths())
+     .write_text("[limits]\ndaily_auto_apply_budget = 1\n"))
+    for n, slug in enumerate(("2026-09-20-one", "2026-09-20-two"), start=1):
+        harness.push_branch(slug, path=f"docs/{slug}.md")
+        harness.add_message(CHANNEL, SEQ + n, f"/merge {slug}")
+        assert merge(harness, slug=slug, seq=SEQ + n)[0].startswith(
+            "merge: merged ")
+    harness.push_branch(SLUG, path="docs/new.md")
+    assert outcome(harness)[3].startswith("next: merged ")
+
+
 def test_a_human_merge_is_never_budgeted(harness):
     arm(harness, tier=0)
     (Path(harness.broker._protected_paths())
      .write_text("[limits]\ndaily_auto_apply_budget = 0\n"))
-    assert call(harness)["ok"] is True
+    assert merge(harness)[0].startswith("merge: merged ")
+
+
+def test_a_build_whose_branch_fell_behind_main_gates_nothing(harness):
+    calls = arm(harness, tier=0)
+    harness.move_main(path="docs/elsewhere.md")
+    lines = outcome(harness)
+    assert calls == []
+    assert lines[0] == "tests: n/a — nothing was gated"
+    assert lines[3] == f"next: fold main into the branch, then /merge {SLUG}"
+    assert [s for s in harness.main_subjects() if s.startswith("merge: ")] == []
 
 
 def test_a_build_with_no_commits_gates_nothing_and_says_so(harness):
@@ -471,6 +639,8 @@ def fresh(harness, **build_cfg) -> Broker:
     ({"daily_build_cap": 0}, "build.daily_build_cap"),
     ({"daily_build_cap": "four"}, "build.daily_build_cap"),
     ({"gate_timeout_sec": -1}, "build.gate_timeout_sec"),
+    ({"gate_timeout_sec": 900}, "build.gate_timeout_sec"),
+    ({"gate_timeout_sec": 1200}, "build.gate_timeout_sec"),
     ({"gate_log_dir": "gate-logs"}, "build.gate_log_dir"),
     ({"merge_work_dir": ""}, "build.merge_work_dir"),
 ])
@@ -480,6 +650,14 @@ def test_a_bad_gate_or_merge_knob_refuses_to_start(harness, cfg, fragment):
     assert fragment in str(ei.value)
 
 
+def test_a_gate_timeout_under_the_units_own_cap_says_why(harness):
+    with pytest.raises(ConfigError) as ei:
+        fresh(harness, gate_timeout_sec=1200)
+    assert ("the gate unit's own runtime cap is 1200 seconds; the broker must "
+            "outwait it") in str(ei.value)
+    assert fresh(harness, gate_timeout_sec=1201).gate_timeout == 1201
+
+
 def test_the_defaults_are_the_shipped_ones(harness):
     config = {k: v for k, v in harness.broker.config.items()}
     config["build"] = {"humans": ["plink"], "seat": "test",
@@ -487,6 +665,6 @@ def test_the_defaults_are_the_shipped_ones(harness):
     broker = Broker(config, str(harness.verbs_path),
                     transport=lambda cfg, b: {})
     assert broker.chat_build_cap == 4
-    assert broker.gate_timeout == 900
+    assert broker.gate_timeout == 1320
     assert broker.gate_log_dir == "/var/lib/disjorn-broker/gate-logs"
     assert broker.merge_work_dir == "/var/lib/disjorn-broker/merge-work"

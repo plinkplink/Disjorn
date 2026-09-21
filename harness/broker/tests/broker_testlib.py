@@ -434,21 +434,47 @@ class BrokerHarness:
                    typecheck: bool | None = None, build: bool | None = None,
                    exit_code: int = 0, summary: str = "server 12 passed",
                    log_path: str = "/var/lib/disjorn-broker/gate-logs/x.log",
-                   ) -> list[dict]:
+                   on_run=None) -> list[dict]:
         """Answer gates.run_gates without launching anything. Returns the list
         every call lands in, so a test can assert the argv prefix and the
-        timeout the broker asked for."""
+        timeout the broker asked for. `on_run` runs WHILE the gates are up —
+        the only window in which main can move under a merge."""
         calls: list[dict] = []
 
         def fake(argv_prefix, seat, slug, *, timeout, log_dir):
             calls.append({"argv_prefix": list(argv_prefix), "seat": seat,
                           "slug": slug, "timeout": timeout, "log_dir": log_dir})
+            if on_run is not None:
+                on_run()
             return gates.GateResult(tests, typecheck, build, exit_code,
                                     log_path, summary)
 
         gates.run_gates = fake
         self.gate_calls = calls
         return calls
+
+    def finish_merges(self, timeout: float = 30) -> None:
+        """Wait for every background `/merge`. Production never waits: the room
+        hears the outcome as a post."""
+        for thread in list(self.broker._merge_threads):
+            thread.join(timeout=timeout)
+            assert not thread.is_alive(), "a merge thread never finished"
+
+    def merge_outcomes(self) -> list[list[str]]:
+        """Every `merge: …` outcome post, split into its two lines."""
+        return [c["body"].splitlines() for c in self.channel_posts
+                if c["body"].startswith("merge: ")]
+
+    def merge_denials(self) -> list[tuple[str, str]]:
+        """(reason, message) for every merge the audit log records as denied."""
+        out = []
+        for entry in self.audit_lines():
+            if entry["verb"] != "merge" or entry["allowed"] is not False:
+                continue
+            summary = entry["result_summary"][len("denied: "):]
+            message, _, reason = summary.rpartition(" (")
+            out.append((reason.rstrip(")"), message))
+        return out
 
     # -- #custodian, where a reviewer's PASS lives ------------------------
     def add_custodian_post(self, seq: int, content: str, *,
@@ -507,11 +533,15 @@ class BrokerHarness:
         return tip
 
     def move_main(self, path: str = "docs/a.md", content: str = "ours\n") -> None:
-        """Move main under a branch's feet — the conflict the broker refuses."""
+        """Move main under a branch's feet. The default path is one every
+        branch here also touches, which is the conflict the broker refuses."""
         work = self._gate_work
         _git(work, "checkout", "-q", "-B", "main", "origin/main")
-        (work / path).write_text(content)
-        _git(work, "commit", "-q", "-am", "main moves")
+        target = work / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content)
+        _git(work, "add", "-A")
+        _git(work, "commit", "-q", "-m", "main moves")
         _git(work, "push", "-q", "origin", "main")
         _git(work, "fetch", "-q", "origin")
 
@@ -854,7 +884,7 @@ def harness(tmp_path: Path):
         seat = "test"
         ledger = "{build_ledger}"
         daily_build_cap = 2
-        gate_timeout_sec = 30
+        gate_timeout_sec = 1320
         gate_log_dir = "{tmp_path / 'gate-logs'}"
         merge_work_dir = "{tmp_path / 'merge-work'}"
     """))

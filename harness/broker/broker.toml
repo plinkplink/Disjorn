@@ -527,8 +527,10 @@ ledger = "/var/lib/disjorn-broker/build-ledger.jsonl"
 # THE GATES, AND WHOSE HANDS THEY RUN IN. The broker launches the suite itself
 # through the same sudo helper a build uses (`disjorn-build-launch gate`), reads
 # the verdict off the launcher's stdout, and merges nothing without a green run
-# it started. A caller-supplied gate result has no slot to arrive in.
-gate_timeout_sec = 900
+# it started. A caller-supplied gate result has no slot to arrive in. The gate
+# unit's own RuntimeMaxSec (1200s) is the kill that works, so the broker must
+# outwait it: a value of 1200 or less is refused at boot.
+gate_timeout_sec = 1320
 # The full stdout+stderr of each gate run, 0600. Never a resident-writable dir.
 gate_log_dir = "/var/lib/disjorn-broker/gate-logs"
 # Where `/merge` clones, merges and pushes from. A throwaway tree per merge, so
