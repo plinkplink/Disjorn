@@ -899,12 +899,10 @@ def resolve_seq(db, seq: int, custodian_channel_id, *,
                 humans: Optional[list] = None) -> dict:
     """Does this seq exist, where does it live, and who wrote it?
 
-    `seq` is per-channel (server migration 001), so "resolves somewhere else"
-    is a real and different answer from "does not resolve" — and both mean the
-    citation does not hold. A review or an override must land in #custodian and
-    that is what `in_custodian` answers. A `merge-seq` names its own channel
-    and must be a human's own line, so `channel_id` picks the channel it lives
-    in and `human` is what that citation turns on."""
+    `seq` is per-channel, so "resolves somewhere else" is a different answer
+    from "does not resolve" and both mean the citation does not hold. A review
+    or an override must land in #custodian (`in_custodian`); a merge-seq names
+    its own channel and must be a human's own line (`human`)."""
     want = custodian_channel_id if channel_id is None else channel_id
     out = {"seq": seq, "channel_id": channel_id, "resolves": False,
            "in_custodian": False, "human": False, "author": None, "detail": ""}
@@ -933,12 +931,10 @@ def resolve_seq(db, seq: int, custodian_channel_id, *,
         out["in_custodian"] = True
         return out
     if hit["author_type"] != "user":
-        out["detail"] = (f"{out['author']} is a bot; a merge is a human's own "
-                         f"line and a resident cannot write one")
+        out["detail"] = f"{out['author']} is a bot, not a human"
         return out
     if not humans:
-        out["detail"] = ("no [build].humans is configured, so no account can "
-                         "authorise a merge")
+        out["detail"] = "no [build].humans is configured"
         return out
     if out["author"] not in humans:
         out["detail"] = f"{out['author']} is not on [build].humans"
@@ -1609,8 +1605,12 @@ def compose_drift_block(drift: dict, *, verbose: bool = False) -> str:
     # motion baseline, the head as the start of its window.
     L.append(f"mirror head: {drift.get('mirror_head') or 'UNREADABLE'}")
     window, uncited = drift.get("window", []), drift.get("uncited", [])
+    # An uncited commit that touched no guarded lane is one the gate lets
+    # through by design, so the count says how much of it is a finding.
+    doc_only = sum(1 for c in drift.get("classified", []) if not c["hits"])
     L.append(f"commits on main {drift.get('window_source', '')}: "
-             f"{len(window)} ({len(uncited)} uncited)")
+             f"{len(window)} ({len(uncited)} uncited"
+             + (f", {doc_only} doc-only)" if uncited else ")"))
     if drift.get("strict_fallback"):
         L.append("  NOTE: no push log, so citation fell back to strict "
                  "per-commit trailer presence — no reachability inference. "

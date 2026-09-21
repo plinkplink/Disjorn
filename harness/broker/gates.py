@@ -1,9 +1,11 @@
 """The broker's own gate run for a loop/<slug> branch.
 
-The broker never merges on a seat's self-report: it launches run-gates.sh
-through the same privileged helper `start-build` uses and reads four lines of
-its stdout. Everything else the run prints is log, kept on disk at 0600 and
-never parsed.
+A green gate proves the run happened and was not skipped; it runs the branch's
+own suite, so it is not a review. Only the four GATE lines decide anything —
+everything else the run prints is log, kept at 0600 and never parsed.
+`node_modules` is mounted read-only from the deployed tree, so a branch that
+adds a dependency is typechecked and built without it and will read red until
+the keyboard installs it.
 """
 
 from __future__ import annotations
@@ -16,7 +18,9 @@ from dataclasses import dataclass
 
 GATE_LINE_RE = re.compile(r"^GATE (tests|typecheck|build) (pass|fail|skipped)$")
 GATE_EXIT_RE = re.compile(r"^GATE exit (\d+)$")
-PASSED_RE = re.compile(r"(\d+) passed")
+# Only pytest's own final summary line may move a count; a suite that prints
+# "3 passed" in its own output is not a result.
+SUMMARY_RE = re.compile(r"^=+ .*?\b(\d+) passed\b.* in [\d.]+s", re.M)
 
 
 @dataclass
@@ -30,9 +34,9 @@ class GateResult:
 
 
 def gates_json(r: GateResult) -> dict:
-    """The classifier's `--gates` payload. A skipped client gate is true (the
-    branch cannot break what it did not touch); a gate that never ran is
-    false, so a launch failure classifies fail-closed."""
+    """The classifier's `--gates` payload: a skipped client gate is true, and
+    a gate that never ran is false, so a launch failure classifies
+    fail-closed."""
     return {
         "tests": bool(r.tests),
         "typecheck": True if r.typecheck is None else bool(r.typecheck),
@@ -50,8 +54,7 @@ def _write_log(log_dir: str, slug: str, body: str) -> str:
 
 
 def _parse(stdout: str) -> "tuple[dict, int | None]":
-    """Only the four GATE lines decide anything. A line that is absent stays
-    absent here and is read as a fail by the caller."""
+    """A line that is absent stays absent here; the caller reads it as a fail."""
     seen: dict = {}
     exit_code = None
     for line in stdout.splitlines():
@@ -68,7 +71,9 @@ def _parse(stdout: str) -> "tuple[dict, int | None]":
 
 
 def _summary(seen: dict, output: str) -> str:
-    counts = PASSED_RE.findall(output)
+    """The first summary line is the server suite, the second the harness one;
+    the gate runs them in that order."""
+    counts = SUMMARY_RE.findall(output)
     parts = []
     if seen.get("tests") is True and len(counts) >= 2:
         parts.append(f"server {counts[0]} passed; harness {counts[1]} passed")
@@ -90,9 +95,7 @@ def _word(value: "bool | None") -> str:
 
 def run_gates(argv_prefix: "list[str]", seat: str, slug: str, *,
               timeout: int, log_dir: str) -> GateResult:
-    """Run the gates for loop/<slug> synchronously and read the verdict.
-
-    A missing GATE line is a fail, never a pass. Only a launch that never
+    """A missing GATE line is a fail, never a pass; only a launch that never
     produced a process leaves the gates None."""
     argv = [*argv_prefix, seat, slug]
     try:

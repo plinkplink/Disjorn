@@ -17,14 +17,19 @@
 #       /home/plink/Disjorn/Disjorn/harness/keyboard/91-disjorn-build.sudoers \
 #       /etc/sudoers.d/91-disjorn-build
 #
+# The gate also reads the client toolchain from /srv/disjorn-client-node-modules
+# (res-readable; a res-* uid cannot traverse /home/plink). Without that copy a
+# branch that touches client/ reads red.
+#
 # WHAT IT GRANTS
 #   plink (the uid the broker runs as) may run exactly one root program — the
 #   disjorn-build-launch helper — in its three fixed modes, for exactly one
-#   named resident, with a slug-shaped third argument. `gate` takes NO trailing
-#   argument run: it names a fixed wrapper with nothing to forward. The helper takes NO path, NO
-#   unit name, NO uid and NO resource limit from its caller: it derives all of
-#   them from (mode, resident, slug) and execs a fixed systemd-run argv that
-#   runs the build AS res-<resident>, never as root.
+#   named resident, with a slug-shaped third argument. `gate` takes no trailing
+#   argument at all: it names a fixed wrapper with nothing to forward. The
+#   helper takes NO path, NO unit name, NO uid and NO resource limit from its
+#   caller: it derives all of them from (mode, resident, slug) and execs a
+#   fixed systemd-run argv that runs the build AS res-<resident>, never as
+#   root.
 #
 # WHY NOT `sudo systemd-run …` DIRECTLY, WITH A PATTERN
 #   Because it cannot be written safely. sudoers matches command arguments as
