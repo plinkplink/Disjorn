@@ -143,6 +143,20 @@ def test_the_counts_come_only_from_pytests_own_summary_lines(tmp_path):
     assert "passed" not in r.summary
 
 
+def test_a_quiet_summary_line_counts_without_the_rule(tmp_path):
+    """`pytest -q` prints its final line with no `=====` rule around it."""
+    green = ("GATE tests pass\nGATE typecheck skipped\n"
+             "GATE build skipped\nGATE exit 0")
+    r = gate(tmp_path, green,
+             stderr="..s..\n510 passed in 94.20s\n"
+                    "2 skipped, 850 passed, 1 warning in 60.11s")
+    assert "server 510 passed; harness 850 passed" in r.summary
+    r = gate(tmp_path, green,
+             stderr=f"a run of 3 passed in 4.0s so far\n{SERVER_SUMMARY}\n"
+                    f"{HARNESS_SUMMARY}")
+    assert "server 510 passed; harness 850 passed" in r.summary
+
+
 def test_the_seat_and_slug_are_appended_to_the_prefix(tmp_path):
     gate(tmp_path, "GATE tests pass\nGATE exit 0")
     assert (tmp_path / "argv").read_text().split() == ["gable", SLUG]
