@@ -221,7 +221,7 @@ def test_a_branch_that_leaves_client_alone_skips_and_mounts_nothing(rig):
     cp = rig.run(NAME, SLUG, node_modules=str(node_modules))
     assert "GATE typecheck skipped" in cp.stdout
     argv = podman_argv(rig)
-    assert not any("node_modules" in a for a in argv)
+    assert not any(a.startswith(str(node_modules)) for a in argv)
     assert "GATE_CLIENT=0" in argv
 
 
@@ -234,7 +234,8 @@ def test_a_client_change_mounts_the_toolchain_read_only(rig):
     assert gate_lines(cp)[:3] == ["GATE tests pass", "GATE typecheck pass",
                                   "GATE build pass"]
     argv = podman_argv(rig)
-    assert f"{node_modules}:/work/client/node_modules:ro" in argv
+    assert f"{node_modules}:/opt/node_modules:ro" in argv
+    assert not any(a.endswith("/work/client/node_modules:ro") for a in argv)
     assert "GATE_CLIENT=1" in argv
 
 
