@@ -10,6 +10,7 @@ may return reply text, or None to post nothing.
 
 Text commands (/shrug, /shrugs) are a separate, smaller kind: they rewrite the
 sender's own message in place and post nothing. See apply_text_command.
+An edit is never rewritten.
 
 /backlog:
     /backlog             -> lists the backlog (server-rendered reply, no LLM,
@@ -32,11 +33,10 @@ what was typed.
 
 Filing is refused (never echoing the text) when the request is not fit for a
 public, bot-readable table:
-    - the carrying message is privacy-flagged (secret / off_the_record) — the
-      HIGH fix; the wall, see privacy.hidden_from_bots;
-    - the command was posted from a DM (BL-D5) — DM-filed items would surface
-      verbatim, with their author, in the next public `/backlog` listing;
-    - the text exceeds MAX_BACKLOG_CHARS (BL-D6).
+    - the carrying message is privacy-flagged, see privacy.hidden_from_bots;
+    - the command was posted from a DM: the item would surface verbatim, with
+      its author, in the next public `/backlog` listing;
+    - the text exceeds MAX_BACKLOG_CHARS.
 
 Replies are authored by the seeded 'system' bot via messages.deliver_message,
 so they take the normal message path and are ordinary public chat.
@@ -229,8 +229,9 @@ def _parse(content: str) -> Optional[tuple[str, str]]:
 
 SHRUG = "¯\\_(ツ)_/¯"
 
-# Command word -> text appended to the rest of the message. Both spellings of
-# shrug are registered because both get typed.
+# Command word -> text appended to the rest of the message. No name here may
+# also be an @command: dispatch runs on the typed text, so an overlap
+# stores one message and executes another.
 _TEXT_COMMANDS: dict[str, str] = {"shrug": SHRUG, "shrugs": SHRUG}
 
 
@@ -462,7 +463,7 @@ async def _backlog(ctx: Ctx) -> str:
             "off-the-record) and the backlog is readable by bots. Rephrase "
             "the request without the private content and file it again."
         )
-    # 2. DMs (BL-D5). An item is reprinted verbatim, with its author, by the
+    # 2. DMs. An item is reprinted verbatim, with its author, by the
     #    next `/backlog` listing in #main, so merely-sensitive DM text would
     #    leak. Filing is refused outside house-public channels; listing is not.
     if ctx.is_private_channel:

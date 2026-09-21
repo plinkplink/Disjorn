@@ -167,6 +167,25 @@ async def test_shrug_does_not_smuggle_in_a_second_command(client):
     assert contents == [f"/backlog add a gif picker {SHRUG}"]
 
 
+def test_text_commands_and_dispatch_commands_are_disjoint():
+    """A name in both tables would store one message and execute another."""
+    assert not (slash._TEXT_COMMANDS.keys() & slash._COMMANDS.keys())
+
+
+async def test_a_shrug_that_would_pass_the_cap_is_refused(client):
+    """The cap holds on the stored text, so every stored message stays editable."""
+    await make_user("alice")
+    await login(client, "alice")
+    ch = await main_feed_id()
+
+    r = await client.post(
+        f"/channels/{ch}/messages", json={"content": "/shrug " + "x" * 15993}
+    )
+
+    assert r.status_code == 422
+    assert await channel_messages(client, ch) == []
+
+
 async def test_shrug_is_flagged_on_the_text_that_is_stored(client):
     """NL privacy detection runs after the rewrite, so a shrugged secret is
     still bot-hidden."""

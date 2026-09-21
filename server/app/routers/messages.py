@@ -49,14 +49,11 @@ CurrentActor = Annotated[Actor, Depends(get_actor)]
 
 SEARCH_LIMIT = 50
 
-# Hard cap on message content, in characters (BL-D6). Sized for long bot output
-# — a resident posts whole build reports — with headroom over the harness's
-# file-proposal contract, while still turning a 2MB body into a 422 rather than
-# a row.
+# Hard cap on message content, in characters: sized for a resident's whole
+# build report, while a 2MB body is still a 422 rather than a row.
 #
-# Server-authored messages (slash replies via deliver_message) do not pass
-# through this pydantic model, so their own rendering must stay bounded — see
-# slash._render_list.
+# Server-authored replies skip this pydantic model, so slash._render_list
+# bounds itself; a text command's rewrite is re-checked in create_message.
 MAX_MESSAGE_CHARS = 16000
 
 # Same idea for the free-form JSON fields on a create: without this, `content`
@@ -392,6 +389,10 @@ async def create_message(
     # Text commands (/shrug) rewrite the sender's own message before anything
     # is persisted, so detection below runs on the text that will be stored.
     content = slash.apply_text_command(body.content)
+    if len(content) > MAX_MESSAGE_CHARS:
+        raise HTTPException(
+            status_code=422, detail="message too long once the shrug is added"
+        )
 
     # Caller-supplied flags merged with server-side NL detection. Detection
     # runs on user messages (bots set their own flags explicitly). Merge only
