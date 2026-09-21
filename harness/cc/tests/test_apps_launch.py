@@ -2176,6 +2176,8 @@ NOT_THE_APPS_SURFACE = {
     ("classify_diff.py", "_git"),          # the house repo, read-only
     ("metrics.py", "_git"),                # the house repo, read-only
     ("metrics.py", "_blob_sha"),           # the house repo, read-only
+    ("ratio.py", "tracked_files"),         # the house repo, read-only
+    ("ratio.py", "repo_root"),             # the house repo, read-only
 }
 
 

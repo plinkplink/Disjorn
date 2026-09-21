@@ -1,15 +1,12 @@
 """Slash-command framework + /backlog (WP-L2).
 
 When a posted message's content starts with a registered ``/command``, the
-server handles it and posts its own server-rendered reply into the same channel
-(so absent users and bots see it async — the loop's intake half). Unknown
-``/commands`` (people type ``/shrug``) pass through untouched as plain text: the
-user's message is already persisted as normal chat by the messages create path,
-and dispatch simply does nothing for them.
+server handles it and posts its own server-rendered reply into the same
+channel. An unknown ``/command`` passes through untouched as plain text: the
+message is already persisted by the messages create path.
 
-The registry is deliberately tiny — later commands register with @command("name")
-and slot in. Command handlers receive a :class:`Ctx` and may return reply text
-to post; returning None posts nothing.
+Commands register with @command("name"); a handler receives a :class:`Ctx` and
+may return reply text, or None to post nothing.
 
 /backlog:
     /backlog             -> lists the backlog (server-rendered reply, no LLM,
@@ -22,18 +19,13 @@ to post; returning None posts nothing.
     /backlog built <id>             -> status 'built'
     /backlog spec'd <id> <slug>     -> status "spec'd" + spec_ref = <slug>
 
-The four triage verbs are RESERVED FIRST WORDS. `/backlog reject the login
-flow` files nothing and says so, rather than guessing which of the two things
-you meant. The alternative — treat it as a subcommand only when the rest
-happens to parse as an id — turns `/backlog reject 5 please` into a filed item
-reading "reject 5 please" while the person who typed it believes #5 is
-rejected. A refusal you can read beats a silent wrong turn; that is the same
-reason `duplicate` exists at all.
+The four triage verbs are RESERVED FIRST WORDS: `/backlog reject the login flow`
+files nothing and says so, or a triage word whose rest does not parse as an id
+files an item while the person who typed it believes it was triaged.
 
-The verbs are authenticated-HUMAN-only and bots are refused server-side, in
-services/backlog.py rather than here — one write path, one gate, reached both
-from chat and from the Plan Room's reject button. Nothing in this file decides
-who may write; it decides what was typed.
+Who may write is decided in services/backlog.py, not here — one write path, one
+gate, reached from chat and from the Plan Room alike. This file decides only
+what was typed.
 
 Filing is refused (never echoing the text) when the request is not fit for a
 public, bot-readable table:
@@ -43,14 +35,12 @@ public, bot-readable table:
       verbatim, with their author, in the next public `/backlog` listing;
     - the text exceeds MAX_BACKLOG_CHARS (BL-D6).
 
-Replies are authored by the seeded 'system' bot (migration 006) and posted via
-messages.deliver_message, so they flow through the normal message path (seq
-allocation, bus publish, privacy inheritance) — they are ordinary public chat
-messages, visible to everyone in the channel including bots.
+Replies are authored by the seeded 'system' bot and posted via
+messages.deliver_message, so they take the normal message path (seq allocation,
+bus publish, privacy inheritance) and are ordinary public chat visible to bots.
 
-GET /backlog: paginated JSON read of the table (``from_id`` cursor + ``limit``,
-mirroring the messages endpoints' ``from_seq``+``limit`` idiom) so residents can
-triage via the SDK without scraping chat.
+GET /backlog: paginated JSON read of the table (``from_id`` cursor + ``limit``)
+so residents can triage via the SDK without scraping chat.
 
 Dispatch is rate limited per actor (SLASH_RATE_MAX per SLASH_RATE_WINDOW
 seconds), in-process — this is a 5-user house, not a public service.
@@ -569,3 +559,57 @@ async def _build(ctx: Ctx) -> str:
     slug = (response.get("result") or {}).get("slug")
     await apps.mark_repo_queued(session, slug)
     return f"Build started on `loop/{slug}` (session {session['id']})."
+
+
+MERGE_NOT_A_PERSON = "Only a person can merge a branch."
+
+MERGE_NOT_IN_APP_ROOM = "This room builds its app; /merge is for the platform. Type it in another channel."
+MERGE_USAGE = (
+    "Usage: `/merge <slug> [pass <seq>]` — e.g. "
+    "`/merge 2026-09-20-fix-the-login-typo pass 2704`."
+)
+
+
+def parse_merge_args(raw: str) -> Optional[tuple[str, Optional[int]]]:
+    """`<slug>`, or `<slug> pass <seq>`. Anything else is None, which is usage."""
+    parts = raw.split()
+    if len(parts) == 1:
+        return parts[0], None
+    if (len(parts) == 3 and parts[1].lower() == "pass"
+            and parts[2].isdigit() and int(parts[2]) > 0):
+        return parts[0], int(parts[2])
+    return None
+
+
+@command("merge")
+async def _merge(ctx: Ctx) -> str:
+    if ctx.actor.type != "user" or ctx.actor.user is None:
+        logger.warning(
+            "/merge refused: %s %s is not a person", ctx.actor.type, ctx.actor.id
+        )
+        return MERGE_NOT_A_PERSON
+    parsed = parse_merge_args(ctx.args.strip())
+    if parsed is None:
+        return MERGE_USAGE
+    if ctx.channel_type == "app_build":
+        return MERGE_NOT_IN_APP_ROOM
+    slug, pass_seq = parsed
+
+    try:
+        response = await broker_client.call_broker(
+            "merge",
+            {
+                "seq": ctx.message_seq,
+                "channel_id": ctx.channel_id,
+                "slug": slug,
+                "pass_seq": pass_seq,
+            },
+        )
+    except broker_client.BrokerError as exc:
+        return exc.message
+
+    result = response.get("result") or {}
+    return (
+        f"Merge of `{result.get('slug') or slug}` started: the gates are "
+        "running; the result will post here."
+    )

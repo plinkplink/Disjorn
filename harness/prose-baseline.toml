@@ -4,7 +4,7 @@
 [files]
 "harness/broker/gen_verb_surface.py" = 7199
 "harness/broker/tests/test_broker_budget.py" = 1870
-"harness/broker/tests/test_broker_build_unit.py" = 12899
+"harness/broker/tests/test_broker_build_unit.py" = 12771
 "harness/broker/tests/test_broker_file_vision.py" = 6441
 "harness/broker/tests/test_broker_publish_path.py" = 6923
 "harness/broker/tests/test_broker_spec_status.py" = 6681
@@ -67,8 +67,8 @@
 "harness/keyboard/tests/test_prose_sweep.py" = 4415
 "harness/keyboard/tests/test_wake_cli.py" = 1338
 "harness/keyboard/wake.py" = 1390
-"harness/metrics/metrics.py" = 31154
-"harness/metrics/tests/test_gate_drift.py" = 13896
+"harness/metrics/metrics.py" = 31142
+"harness/metrics/tests/test_gate_drift.py" = 13730
 "harness/planroom/planroom.py" = 13454
 "harness/residency/adapter.py" = 7679
 "harness/residency/config.py" = 9474
@@ -100,7 +100,7 @@
 "server/app/routers/messages.py" = 11372
 "server/app/routers/notifications.py" = 4703
 "server/app/routers/planroom.py" = 11305
-"server/app/routers/slash.py" = 13006
+"server/app/routers/slash.py" = 12360
 "server/app/routers/summarize.py" = 1656
 "server/app/services/backlog.py" = 4599
 "server/app/services/chibi.py" = 4003

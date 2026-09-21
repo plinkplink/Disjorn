@@ -10,6 +10,7 @@ import json
 import os
 import pwd
 import re
+import shutil
 import signal
 import socket
 import sqlite3
@@ -22,6 +23,13 @@ import threading
 import time
 import tomllib
 from typing import Any, Callable, Optional
+
+# The gate runner is a sibling file, and brokerd runs as a script.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
+import gates  # noqa: E402
 
 DEFAULT_CONFIG_PATH = "/etc/disjorn-broker/broker.toml"
 DEFAULT_VERBS_PATH = "/etc/disjorn-broker/verbs.toml"
@@ -56,6 +64,7 @@ SUBPROCESS_TIMEOUTS = {  # seconds, per verb
     "read-prod-logs": 30,
     "refresh-mirror": 120,
     "spec-status": 60,
+    "merge": 300,
 }
 
 START_BUILD_DEFAULT_TIMEOUT = 3600
@@ -99,6 +108,32 @@ MAX_BUILD_SLUG_TRIES = 99
 _SLUG_WORD_RE = re.compile(r"[a-z0-9]+")
 # Mirrors server/app/privacy.py BOT_HIDDEN_FLAGS; the two must not drift.
 BOT_HIDDEN_FLAGS = ("secret", "off_the_record")
+# A chat build spends the SERVER's allowance, not the seat's.
+DEFAULT_CHAT_BUILD_CAP = 4
+
+# ---------------------------------------------------------------- the merge
+# SPECS/2026-09-20-build-lane-v2-stage1-2b.md. `/merge <slug> [pass <seq>]`.
+MERGE_VERB = "merge"
+MERGE_REFUSED = "merge-refused"
+# The closed set of refusal reasons; the wire carries one of these verbatim.
+MERGE_REASONS = frozenset({
+    "human", "branch-missing", "slug-mismatch", "busy", "moved", "gates",
+    "tier", "pass-missing", "pass-invalid", "budget", "conflict", "push"})
+# The gate unit's own RuntimeMaxSec; the broker has to outwait the kill that works.
+GATE_UNIT_RUNTIME_CAP_SEC = 1200
+DEFAULT_GATE_TIMEOUT_SEC = 1320
+DEFAULT_GATE_LOG_DIR = "/var/lib/disjorn-broker/gate-logs"
+DEFAULT_MERGE_WORK_DIR = "/var/lib/disjorn-broker/merge-work"
+# `[limits].daily_auto_apply_budget` in protected-paths.toml, when unreadable.
+DEFAULT_AUTO_APPLY_BUDGET = 12
+MERGE_IDENTITY_NAME = "disjorn-broker"
+MERGE_IDENTITY_EMAIL = "broker@disjorn.local"
+MAX_MERGE_PATHS = 500
+MAX_SLUG_CHARS = 100
+# A PASS cites the slug and says the word; both, or it is not a PASS.
+_PASS_WORD_RE = re.compile(r"\bPASS\b")
+# A verdict that also blocks is not a PASS, whatever else the post says.
+_BLOCK_WORD_RE = re.compile(r"\bBLOCK\b")
 
 # --------------------------------------------------------------- apps-build
 # SPECS/2026-09-06-apps-builder-seat.md §B/§E. An APP BUILD TURN is launched the
@@ -296,11 +331,14 @@ class VerbError(Exception):
     """A verb failed or a request was rejected. code -> PROTOCOL.md error codes."""
 
     def __init__(self, code: str, message: str,
-                 status: Optional[int] = None) -> None:
+                 status: Optional[int] = None,
+                 reason: Optional[str] = None) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.status = status
+        # Which merge rule said no; on the wire beside code and message.
+        self.reason = reason
 
 
 def _bad(msg: str) -> VerbError:
@@ -682,6 +720,66 @@ def format_board_face(face: dict) -> str:
 # isolation, exactly like the argv validators above.
 # --------------------------------------------------------------------------
 
+def _as_utc(value: Any) -> Optional[_dt.datetime]:
+    """An ISO timestamp from the message DB or from git, as an aware UTC time."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        stamp = _dt.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=_dt.timezone.utc)
+
+
+def merge_commit_message(*, slug: str, author: str, tier: int, channel_id: int,
+                         seq: int, pass_seq: Optional[int] = None) -> str:
+    """The merge commit's text. `review-seq` goes AFTER `merge-seq` because the
+    hook's last-trailer-wins rule is what records the review."""
+    lines = [f"merge: {slug} (/merge by {author}, tier {tier})", "",
+             f"merge-seq: {channel_id}:{seq}"]
+    if pass_seq is not None:
+        lines.append(f"review-seq: {pass_seq}")
+    return "\n".join(lines) + "\n"
+
+
+def message_names_slug(content: str, slug: str) -> bool:
+    """A `/merge` may only merge what its own message asks for: the slug, whole,
+    after the command word."""
+    text = (content or "").strip()
+    parts = text.split(None, 1)
+    if parts and parts[0].startswith("/"):
+        text = parts[1] if len(parts) > 1 else ""
+    return re.search(rf"(?<![0-9A-Za-z-]){re.escape(slug)}(?![0-9A-Za-z-])",
+                     text) is not None
+
+
+def format_merge_done(*, slug: str, sha: str, tier: int) -> str:
+    """The two lines a finished `/merge` posts to the room it was typed in."""
+    return (f"merge: merged {slug} as {sha} (tier {tier})\n"
+            "next: deploy at the keyboard")
+
+
+def format_merge_refused(*, slug: str, reason_text: str, next_line: str) -> str:
+    """The same two lines for a merge that did not happen."""
+    return (f"merge: refused {slug} — {' '.join(reason_text.split())[:400]}\n"
+            f"next: {next_line}")
+
+
+def merge_next_step(reason: str, *, slug: str, owner: Optional[str] = None,
+                    gates_red: bool = False) -> str:
+    """What the human does about a refusal, in their own hands."""
+    if gates_red:
+        return "fix the red gate, then /build again"
+    if reason in ("moved", "conflict"):
+        return "fold main into the branch, then /merge again"
+    if reason in ("pass-missing", "pass-invalid") and owner:
+        return f"PASS from {owner} in #custodian, then /merge {slug} pass <seq>"
+    return "merge it at the keyboard"
+
+
 def _clean_field(value: str) -> Optional[str]:
     """A spec field value, or None if it is blank or still the TEMPLATE.md
     placeholder (angle-bracketed `<...>`)."""
@@ -1060,13 +1158,23 @@ def format_build_done(*, slug: str, branch: str, files: str, tests: str,
             + _quarantine_suffix(quarantined) + mirror)
 
 
-def format_seq_build_banner(*, slug: str, tests: str, diffstat: str) -> str:
+def format_seq_build_banner(*, tests: str, tier: str, diffstat: str,
+                            next_line: str) -> str:
     """The four lines that close a build started from chat."""
-    return (f"tests: {tests or 'n/a'} (self-reported; broker-run gates arrive "
-            f"with slice 2)\n"
-            f"tier: pending gates (slice 2)\n"
+    return (f"tests: {tests}\n"
+            f"tier: {tier}\n"
             f"diffstat: {diffstat}\n"
-            f"next: /merge {slug} (slice 2); until then, keyboard merge")
+            f"next: {next_line}")
+
+
+def format_gate_tests_line(result: Any) -> str:
+    """The gate run's own verdict: the launcher's exit code, never a self-report."""
+    return ("pass" if result.exit_code == 0 else "fail") + f" — {result.summary}"
+
+
+def format_tier_line(tier: Any, reasons: Any) -> str:
+    said = [" ".join(str(r).split()) for r in list(reasons or [])[:2]]
+    return (f"{tier} — " + "; ".join(said)) if said else str(tier)
 
 
 # The wrapper's exit code for "this seat cannot run a test; nothing started".
@@ -1470,15 +1578,41 @@ class Broker:
         self.build_humans: frozenset[str] = frozenset()
         self.build_seat: str = ""
         self.build_ledger: str = ""
+        self.chat_build_cap: int = DEFAULT_CHAT_BUILD_CAP
+        self.gate_timeout: int = DEFAULT_GATE_TIMEOUT_SEC
+        self.gate_log_dir: str = DEFAULT_GATE_LOG_DIR
+        self.merge_work_dir: str = DEFAULT_MERGE_WORK_DIR
         if self.build_cfg:
             self.build_humans = self._parse_build_humans()
             self.build_seat = self._parse_build_seat()
             self.build_ledger = self._parse_build_ledger()
+            self.chat_build_cap = self._parse_build_int(
+                "daily_build_cap", DEFAULT_CHAT_BUILD_CAP)
+            self.gate_timeout = self._parse_build_int(
+                "gate_timeout_sec", DEFAULT_GATE_TIMEOUT_SEC,
+                minimum=GATE_UNIT_RUNTIME_CAP_SEC + 1,
+                stake=f"the gate unit's own runtime cap is "
+                      f"{GATE_UNIT_RUNTIME_CAP_SEC} seconds; the broker must "
+                      f"outwait it")
+            self.gate_log_dir = self._parse_build_dir(
+                "gate_log_dir", DEFAULT_GATE_LOG_DIR)
+            self.merge_work_dir = self._parse_build_dir(
+                "merge_work_dir", DEFAULT_MERGE_WORK_DIR)
         self._audit_lock = threading.Lock()
         # Build-budget lock (H13-D4): count-with-reservation is held under this, so
         # two concurrent start-builds can NEVER both slip past the cap — the
         # check-then-act race the red-team flagged is closed here.
         self._build_lock = threading.Lock()
+        # Merge lock: the Tier 0 budget is read and spent, and main is written,
+        # under this one lock — two merges may never race onto main.
+        self._merge_lock = threading.Lock()
+        # One gate run per slug at a time, whether a `/merge` or a build's end
+        # started it: a second run would gate a branch the first is merging.
+        self._gate_lock = threading.Lock()
+        self._gate_runs: set[str] = set()
+        # Background merge threads, kept ONLY so tests can join them; production
+        # never waits — the room hears the outcome as a post.
+        self._merge_threads: list[threading.Thread] = []
         # Wake-budget lock: the day's count is read from the spool and the new
         # record is written under this one lock, so two wakes pressed at once cannot
         # both read the same pre-cap count.
@@ -1507,6 +1641,7 @@ class Broker:
             "start-build": self._verb_start_build,
             # The one verb whose caller is the server, not a seat.
             BUILD_VERB: self._verb_build,
+            MERGE_VERB: self._verb_merge,
             "classify-diff": self._verb_classify_diff,
             "read-prod-logs": self._verb_read_prod_logs,
             "read-own-log": self._verb_read_own_log,
@@ -1624,6 +1759,26 @@ class Broker:
                 "to start (the ledger is the record that a human asked)")
         return path.strip()
 
+    def _parse_build_int(self, key: str, default: int, *, minimum: int = 1,
+                         stake: str = "") -> int:
+        """A positive-integer `[build]` knob, at or above its floor."""
+        value = self.build_cfg.get(key, default)
+        if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
+            floor = ("a positive integer" if minimum == 1
+                     else f"an integer above {minimum - 1}")
+            raise ConfigError(
+                f"build.{key} must be {floor}; refusing to start"
+                + (f" ({stake})" if stake else ""))
+        return value
+
+    def _parse_build_dir(self, key: str, default: str) -> str:
+        """A `[build]` directory the broker writes into, never a resident."""
+        value = self.build_cfg.get(key, default)
+        if not isinstance(value, str) or not value.strip().startswith("/"):
+            raise ConfigError(
+                f"build.{key} must be an absolute path; refusing to start")
+        return value.strip()
+
     def _wake_session_cap(self) -> int:
         cap = self.wake.get("session_cap_sec", DEFAULT_WAKE_SESSION_CAP_SEC)
         return cap if isinstance(cap, int) and cap > 0 else DEFAULT_WAKE_SESSION_CAP_SEC
@@ -1710,7 +1865,13 @@ class Broker:
     # -------------------------------------------------------- build budget
 
     def _daily_build_cap(self, resident: str) -> Optional[int]:
-        """Per-day build cap for a resident."""
+        """Per-day build cap for a resident, or for the server principal.
+
+        A chat build spends `[build].daily_build_cap` under `server` and NEVER
+        the build seat's `[start_build]` allowance: one entrance may not eat the
+        other's day."""
+        if resident == SERVER_IDENTITY:
+            return self.chat_build_cap
         per = self.start_build.get("per_resident")
         if isinstance(per, dict):
             r = per.get(resident)
@@ -1720,10 +1881,8 @@ class Broker:
         return cap if isinstance(cap, int) else DEFAULT_DAILY_BUILD_CAP
 
     def _count_builds_today(self, resident: str, today: str) -> int:
-        """Builds this resident GENUINELY STARTED today (UTC).
-
-        A chat build is audited under the `server` principal, so the seat it ran
-        as is named by `build_seat` rather than by the line's own resident."""
+        """Builds this principal GENUINELY STARTED today (UTC) — a seat's spec
+        builds, or the server's chat builds."""
         n = 0
         try:
             with open(self.audit_path, "r", encoding="utf-8") as fh:
@@ -1734,7 +1893,7 @@ class Broker:
                         rec = json.loads(raw)
                     except json.JSONDecodeError:
                         continue
-                    if (resident in (rec.get("resident"), rec.get("build_seat"))
+                    if (rec.get("resident") == resident
                             and rec.get("verb") in ("start-build", BUILD_VERB)
                             and rec.get("allowed") is True
                             and rec.get("build_started") is True
@@ -1762,6 +1921,10 @@ class Broker:
                 count = self._count_builds_today(resident, today)
             if cap is not None and count >= cap:
                 self._builds[resident] = (today, count)
+                if resident == SERVER_IDENTITY:
+                    raise VerbError(
+                        BUILD_REFUSED,
+                        f"today's chat build budget ({cap}) is spent")
                 raise VerbError("over-budget",
                                 f"daily build budget of {cap} reached for {resident}")
             self._builds[resident] = (today, count + 1)
@@ -1864,12 +2027,13 @@ class Broker:
             result, summary, extra = out if len(out) == 3 else (*out, None)
         except VerbError as exc:
             allowed = exc.code not in ("bad-args", "over-budget", "apps-refused",
-                                       BUILD_REFUSED)
+                                       BUILD_REFUSED, MERGE_REFUSED)
             if reserved and not allowed:
                 self._release_action(resident)
+            reason = f" ({exc.reason})" if exc.reason else ""
             self._audit(caller, verb, args, allowed,
-                        f"{'error' if allowed else 'denied'}: {exc.message}")
-            return self._err(exc.code, exc.message)
+                        f"{'error' if allowed else 'denied'}: {exc.message}{reason}")
+            return self._err(exc.code, exc.message, reason=exc.reason)
         except Exception as exc:  # noqa: BLE001 — never crash the daemon on a verb
             self._audit(caller, verb, args, True, f"error: internal: {exc!r}")
             return self._err("internal", "internal broker error")
@@ -1878,8 +2042,11 @@ class Broker:
         return {"ok": True, "verb": verb, "result": result}
 
     @staticmethod
-    def _err(code: str, message: str) -> dict:
-        return {"ok": False, "error": {"code": code, "message": message}}
+    def _err(code: str, message: str, reason: Optional[str] = None) -> dict:
+        err = {"code": code, "message": message}
+        if reason:
+            err["reason"] = reason
+        return {"ok": False, "error": err}
 
     # ---------------------------------------------------------- subprocess
 
@@ -2891,47 +3058,86 @@ class Broker:
     # file from a resident's hands; `build` reads a human's own message out of the
     # server DB and trusts nothing the caller says about it.
 
-    def _build_message(self, channel_id: int, seq: int) -> dict:
-        """The `/build` message itself, read from the server DB."""
+    def _message_row(self, channel_id: int, seq: int, columns: str,
+                     join: str) -> Optional[tuple]:
+        """One message row, read-only, or None. The DB is the only witness of
+        what was asked for; nothing a caller says about it is used."""
         db_path = self._apps_message_db()
         if not db_path or not os.path.exists(db_path):
             raise VerbError(BUILD_REFUSED,
                             "the broker cannot read the message database, so "
-                            "it cannot see what was asked for")
+                            "it cannot see what was asked for",
+                            reason="human")
         try:
             db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
             try:
-                row = db.execute(
-                    "select m.author_type, m.content, m.privacy_flags, "
-                    "m.deleted_at, u.username from messages m "
-                    "left join users u on u.id = m.author_id "
+                return db.execute(
+                    f"select {columns} from messages m {join} "
                     "where m.channel_id = ? and m.seq = ?",
                     (channel_id, seq)).fetchone()
             finally:
                 db.close()
         except sqlite3.Error as exc:
             raise VerbError(BUILD_REFUSED,
-                            f"the message database could not be read ({exc})"
-                            ) from None
+                            f"the message database could not be read ({exc})",
+                            reason="human") from None
+
+    def _build_message(self, channel_id: int, seq: int, *,
+                       code: str = BUILD_REFUSED,
+                       reason: Optional[str] = None,
+                       act: str = "start a build") -> dict:
+        """The human's own `/build` or `/merge` message, read from the server DB."""
+        try:
+            row = self._message_row(
+                channel_id, seq,
+                "m.author_type, m.content, m.privacy_flags, m.deleted_at, "
+                "u.username",
+                "left join users u on u.id = m.author_id")
+        except VerbError as exc:
+            raise VerbError(code, exc.message, reason=reason) from None
         if row is None:
-            raise VerbError(BUILD_REFUSED,
-                            f"there is no message {seq} in channel {channel_id}")
+            raise VerbError(code,
+                            f"there is no message {seq} in channel {channel_id}",
+                            reason=reason)
         author_type, content, flags_json, deleted_at, username = row
         if deleted_at:
-            raise VerbError(BUILD_REFUSED, f"message {seq} was deleted")
+            raise VerbError(code, f"message {seq} was deleted", reason=reason)
         if author_type != "user":
-            raise VerbError(BUILD_REFUSED, "only a person can start a build")
+            raise VerbError(code, f"only a person can {act}", reason=reason)
         try:
             flags = json.loads(flags_json or "{}")
         except ValueError:
             flags = {}
         if hidden_from_bots(flags):
-            raise VerbError(BUILD_REFUSED,
-                            "that message is private, so no bot may act on it")
+            raise VerbError(code,
+                            "that message is private, so no bot may act on it",
+                            reason=reason)
         if not username:
-            raise VerbError(BUILD_REFUSED,
-                            f"message {seq} names no account this server knows")
+            raise VerbError(code,
+                            f"message {seq} names no account this server knows",
+                            reason=reason)
         return {"author": str(username), "content": str(content or "")}
+
+    def _assert_repo_session(self, session_id: int, author: str) -> None:
+        """The caller names the session; the SERVER says whose it is.
+
+        `session_id` arrives on the wire, so an open repo session belonging to
+        the message's author is the only one a build may post its stages into."""
+        try:
+            view = self._apps_harness_view(session_id)
+        except VerbError as exc:
+            raise VerbError(BUILD_REFUSED,
+                            f"build session {session_id} cannot be read "
+                            f"({exc.message})") from None
+        if not view.get("open"):
+            raise VerbError(BUILD_REFUSED,
+                            f"build session {session_id} has ended")
+        if view.get("mode") != "repo":
+            raise VerbError(BUILD_REFUSED,
+                            f"session {session_id} is not a repo build")
+        if view.get("owner_username") != author:
+            raise VerbError(BUILD_REFUSED,
+                            f"session {session_id} does not belong to {author}")
 
     def _unique_build_slug(self, slug: str) -> str:
         """The first `<slug>`, `<slug>-2`, … whose `loop/` branch the gatehouse does
@@ -2998,7 +3204,17 @@ class Broker:
         session = int(origin.get("session_id") or 0)
         report = report or {"files": "n/a", "tests": "n/a", "diff": "n/a"}
         published = publish.get("published", [])
+        # READ BEFORE THE MERGE: once loop/<slug> is in main, main..loop/<slug>
+        # is empty and the diffstat would read "no commits".
+        diffstat = self._gatehouse_diffstat(branch)
+        # THE BANNER IS THE ONLY THING THE ROOM SEES for a repo build: no turn
+        # line follows it, so a build that published nothing still says why here.
+        banner = {"tests": "n/a — nothing was gated",
+                  "tier": "n/a — nothing to classify",
+                  "next": "no commits — /build again with more detail"}
         if build_outcome_class(publish, unit_reason) != "done":
+            halted = " ".join((unit_reason or NO_HARVEST_REASON).split())[:300]
+            banner["next"] = f"build halted — {halted}; /build again"
             self._apps_post_stage(session, "scoped",
                                   {"turn": 1, "halted": "error",
                                    "reason": unit_reason or NO_HARVEST_REASON})
@@ -3007,17 +3223,21 @@ class Broker:
             # else this seat was entitled to publish.
             sha = next((s for repo, s in published if repo.startswith("disjorn")),
                        published[0][1])
+            banner = self._build_end_gates(slug=slug, origin=origin)
             self._apps_post_stage(session, "files_written",
                                   {"turn": 1, "summary": report["files"]})
-            self._apps_post_stage(session, "deployed",
-                                  {"turn": 1, "branch": branch, "sha": sha})
+            detail = {"turn": 1, "branch": branch, "sha": sha}
+            if banner.get("merged_sha"):
+                detail["tier"] = banner["merged_tier"]
+                detail["merged_sha"] = banner["merged_sha"]
+            self._apps_post_stage(session, "deployed", detail)
         else:
             self._apps_post_stage(session, "files_written",
                                   {"turn": 1, "no_changes": True})
         self._post_to_channel(int(origin.get("channel_id") or 0),
                               format_seq_build_banner(
-                                  slug=slug, tests=report["tests"],
-                                  diffstat=self._gatehouse_diffstat(branch)))
+                                  tests=banner["tests"], tier=banner["tier"],
+                                  diffstat=diffstat, next_line=banner["next"]))
 
     def _verb_build(self, caller: str, args: dict) -> tuple[dict, str, dict]:
         """Start a build from a human's `/build` message, named by its seq."""
@@ -3045,6 +3265,8 @@ class Broker:
                             f"a build request must be at most "
                             f"{MAX_BUILD_TEXT_CHARS} characters")
 
+        self._assert_repo_session(session_id, author)
+
         today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
         slug = slug_from_build_text(text, today)
         if not slug:
@@ -3062,12 +3284,10 @@ class Broker:
         meta = {"slug": slug, "branch": branch, "build_resident": self.build_seat,
                 "confirmed_by": author, "seq": seq,
                 # Carried into the sidecar so a re-adopted build still knows
-                # which room to answer in.
-                "origin": {"channel_id": channel_id, "session_id": session_id}}
+                # which room to answer in, and whose seq a self-merge cites.
+                "origin": {"channel_id": channel_id, "session_id": session_id,
+                           "seq": seq, "author": author}}
         prompt = build_chat_prompt(text, slug=slug, branch=branch)
-        # The daily build budget belongs to the SEAT that runs the build, so a
-        # chat build and a spec build spend the same allowance.
-        seat_caller = f"res-{self.build_seat}"
 
         def announce(_timeout: int) -> None:
             self._apps_post_stage(session_id, "scoped",
@@ -3080,7 +3300,7 @@ class Broker:
                                    "reason": f"launch failed: {exc}"})
 
         proc, used, cap, _timeout = self._launch_build(
-            seat_caller, meta, prompt, announce=announce,
+            SERVER_IDENTITY, meta, prompt, announce=announce,
             launch_failed=launch_failed)
 
         result = {"started": True, "slug": slug, "branch": branch,
@@ -3089,7 +3309,516 @@ class Broker:
         return (result,
                 f"build {slug} -> {branch} launched for {author} "
                 f"(#{channel_id} seq {seq}, budget {budget_str})",
-                {"build_started": True, "build_seat": seat_caller})
+                {"build_started": True, "build_seat": f"res-{self.build_seat}"})
+
+    # ------------------------------------------------------------------ merge
+    # SPECS/2026-09-20-build-lane-v2-stage1-2b.md; the design is
+    # harness/cc/MERGE-CONTRACT.md. The broker never merges anything without a
+    # green gate run IT launched: a caller-supplied gate result has no schema
+    # slot to arrive in.
+
+    @staticmethod
+    def _merge_refused(message: str, reason: str) -> VerbError:
+        # The reason is on the wire, so it is a closed set or it is noise.
+        assert reason in MERGE_REASONS, reason
+        return VerbError(MERGE_REFUSED, message, reason=reason)
+
+    def _gatehouse_or_refuse(self) -> str:
+        repo = self._gatehouse_repo()
+        if repo is None:
+            raise self._merge_refused(
+                "this broker has no gatehouse, so there is nothing to merge into",
+                "branch-missing")
+        return repo
+
+    def _gate_argv_prefix(self) -> list[str]:
+        """`[start_build].command` aimed at `gate` instead of `run`."""
+        command = self.start_build.get("command", [])
+        if (not isinstance(command, list) or not command
+                or not all(isinstance(a, str) for a in command)):
+            raise VerbError("internal",
+                            "start_build.command must be a non-empty list of strings")
+        return ["gate" if a == "run" else a for a in command]
+
+    def _gate_branch(self, slug: str) -> Any:
+        """One synchronous gate run over `loop/<slug>`."""
+        try:
+            return gates.run_gates(self._gate_argv_prefix(), self.build_seat,
+                                   slug, timeout=self.gate_timeout,
+                                   log_dir=self.gate_log_dir)
+        except OSError as exc:
+            raise self._merge_refused(
+                f"the gate run could not start ({exc})", "gates") from None
+
+    def _gate_and_classify(self, slug: str) -> tuple[Any, dict]:
+        """The gates, then the classifier over the same range with their result.
+
+        A red gate is NOT special-cased here: the classifier answers Tier 2 on
+        a failed gate, and that fail-closed answer is the only one used."""
+        repo = self._gatehouse_or_refuse()
+        result = self._gate_branch(slug)
+        classification = self._classify(repo, f"main...loop/{slug}",
+                                        gates.gates_json(result))
+        return result, classification
+
+    def _claim_gate_run(self, slug: str) -> bool:
+        """False when this slug is already being gated somewhere else."""
+        with self._gate_lock:
+            if slug in self._gate_runs:
+                return False
+            self._gate_runs.add(slug)
+            return True
+
+    def _release_gate_run(self, slug: str) -> None:
+        with self._gate_lock:
+            self._gate_runs.discard(slug)
+
+    def _main_is_ancestor(self, slug: str) -> str:
+        """Main's sha, returned only once loop/<slug> already contains main —
+        a merge of a branch that does not is a merge of a tree nobody gated."""
+        repo = self._gatehouse_or_refuse()
+        cp = self._git(repo, "rev-parse", "--verify", "--quiet",
+                       "refs/heads/main")
+        sha = (cp.stdout or "").strip()
+        if cp.returncode != 0 or not sha:
+            raise self._merge_refused(
+                "the gatehouse has no main to merge into", "branch-missing")
+        if self._git(repo, "merge-base", "--is-ancestor", "refs/heads/main",
+                     f"refs/heads/loop/{slug}").returncode != 0:
+            raise self._merge_refused(
+                f"loop/{slug} is behind main; fold main into the branch first",
+                "moved")
+        return sha
+
+    def _assert_main_unmoved(self, slug: str, before: str) -> None:
+        """Main where the gates saw it, or this push would land a tree that was
+        never gated."""
+        try:
+            now = self._main_is_ancestor(slug)
+        except VerbError as exc:
+            if exc.reason != "moved":
+                raise
+            now = ""
+        if now != before:
+            raise self._merge_refused(
+                "main moved while the gates ran; /merge again", "moved")
+
+    @staticmethod
+    def _tier_of(classification: dict) -> int:
+        tier = classification.get("tier")
+        if not isinstance(tier, int) or tier not in (0, 1, 2):
+            raise Broker._merge_refused(
+                "the classifier did not answer with a tier", "tier")
+        return tier
+
+    def _changed_paths(self, repo: str, slug: str) -> list[str]:
+        cp = self._git(repo, "diff", "--name-only", f"main...loop/{slug}")
+        if cp.returncode != 0:
+            raise self._merge_refused(
+                f"loop/{slug} cannot be compared with main", "branch-missing")
+        return [ln.strip() for ln in (cp.stdout or "").splitlines()
+                if ln.strip()][:MAX_MERGE_PATHS]
+
+    def _branch_tip_time(self, repo: str, slug: str) -> Optional[_dt.datetime]:
+        cp = self._git(repo, "log", "-1", "--format=%cI",
+                       f"refs/heads/loop/{slug}")
+        return _as_utc(cp.stdout) if cp.returncode == 0 else None
+
+    def _lane_owner(self, path: str) -> Optional[str]:
+        """`[planroom].lane_owners`, prefix map, first match wins. There is no
+        default map in code: an unmapped path has no reviewer, which is true."""
+        owners = self.planroom.get("lane_owners")
+        if not isinstance(owners, dict):
+            return None
+        low = path.lower()
+        for prefix, owner in owners.items():
+            if low.startswith(str(prefix).lower()):
+                return str(owner)
+        return None
+
+    def _pass_message(self, pass_seq: int) -> dict:
+        """The reviewer's post, which is only ever a bot's, only ever in
+        #custodian."""
+        channel = self.disjorn.get("custodian_channel_id")
+        if not isinstance(channel, int) or channel < 1:
+            raise self._merge_refused(
+                "this broker has no #custodian to read a PASS from", "pass-invalid")
+        try:
+            row = self._message_row(
+                channel, pass_seq,
+                "m.author_type, m.content, m.deleted_at, m.created_at, b.name",
+                "left join bots b on b.id = m.author_id")
+        except VerbError as exc:
+            raise self._merge_refused(exc.message, "pass-invalid") from None
+        if row is None or row[2]:
+            raise self._merge_refused(
+                f"there is no message {pass_seq} in #custodian", "pass-invalid")
+        author_type, content, _deleted, created_at, bot_name = row
+        if author_type != "bot" or not bot_name:
+            raise self._merge_refused(
+                f"message {pass_seq} in #custodian is not a reviewer's post",
+                "pass-invalid")
+        return {"author": str(bot_name), "content": str(content or ""),
+                "created_at": created_at}
+
+    def _check_pass(self, *, pass_seq: int, slug: str, paths: list[str],
+                    tip_at: Optional[_dt.datetime]) -> str:
+        """The four things that make a PASS hold: the right reviewer, after the
+        tip, in #custodian, saying PASS for this slug."""
+        if not paths:
+            raise self._merge_refused(
+                f"loop/{slug} changes no files", "pass-invalid")
+        owners: list[str] = []
+        for path in paths:
+            owner = self._lane_owner(path)
+            if owner is None:
+                raise self._merge_refused(
+                    f"no lane owner for {path}; keyboard merge", "pass-invalid")
+            if owner not in owners:
+                owners.append(owner)
+        message = self._pass_message(pass_seq)
+        author = message["author"]
+        if author.lower() not in {o.lower() for o in owners}:
+            raise self._merge_refused(
+                f"seq {pass_seq} is {author}'s, and this lane's reviewer is "
+                f"{' or '.join(owners)}", "pass-invalid")
+        posted = _as_utc(message["created_at"])
+        if tip_at is not None and (posted is None or posted <= tip_at):
+            raise self._merge_refused(
+                f"seq {pass_seq} was posted before the tip of loop/{slug}",
+                "pass-invalid")
+        text = message["content"]
+        if not _PASS_WORD_RE.search(text) or slug not in text:
+            raise self._merge_refused(
+                f"seq {pass_seq} does not say PASS for {slug}", "pass-invalid")
+        if _BLOCK_WORD_RE.search(text):
+            raise self._merge_refused(
+                f"seq {pass_seq} says BLOCK as well as PASS, so it is not a PASS",
+                "pass-invalid")
+        return author
+
+    def _auto_apply_budget(self) -> int:
+        """`[limits].daily_auto_apply_budget` from the classifier's own config."""
+        try:
+            with open(self._protected_paths(), "rb") as fh:
+                cfg = tomllib.load(fh)
+        except (OSError, tomllib.TOMLDecodeError):
+            return DEFAULT_AUTO_APPLY_BUDGET
+        limits = cfg.get("limits")
+        budget = limits.get("daily_auto_apply_budget") if isinstance(limits, dict) else None
+        return (budget if isinstance(budget, int) and not isinstance(budget, bool)
+                and budget >= 0 else DEFAULT_AUTO_APPLY_BUDGET)
+
+    def _auto_merges_today(self) -> int:
+        """Self-merges on the ledger today (UTC). A human `/merge` is not
+        budgeted, so only the `self_merge` flag counts — never the tier."""
+        today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
+        n = 0
+        try:
+            with open(self.build_ledger, "r", encoding="utf-8") as fh:
+                for raw in fh:
+                    try:
+                        rec = json.loads(raw)
+                    except ValueError:
+                        continue
+                    if (rec.get("kind") == MERGE_VERB
+                            and rec.get("self_merge") is True
+                            and str(rec.get("ts", ""))[:10] == today):
+                        n += 1
+        except OSError:
+            return 0
+        return n
+
+    def _merge_branch(self, *, slug: str, author: str, tier: int,
+                      channel_id: int, seq: int, pass_seq: Optional[int],
+                      main_sha: str) -> str:
+        """Clone, merge, push — in a throwaway tree, so a half-done merge is a
+        directory nobody reads rather than a gatehouse nobody can build from."""
+        repo = self._gatehouse_or_refuse()
+        git = self._argv("spec_repo_git", ["git"])
+        timeout = SUBPROCESS_TIMEOUTS["merge"]
+        try:
+            os.makedirs(self.merge_work_dir, mode=0o700, exist_ok=True)
+            work = tempfile.mkdtemp(prefix=f"{slug}-", dir=self.merge_work_dir)
+        except OSError as exc:
+            raise VerbError("exec-failure",
+                            f"no merge workspace ({exc})") from None
+        clone = os.path.join(work, "repo")
+        try:
+            cp = self._run([*git, "clone", "--quiet", "--no-tags", "--branch",
+                            "main", repo, clone], timeout)
+            if cp.returncode != 0:
+                raise self._merge_refused(
+                    "the gatehouse would not clone "
+                    f"({(cp.stderr or cp.stdout).strip()[:200]})", "push")
+            cp = self._run([*git, "-C", clone, "fetch", "--quiet", "origin",
+                            f"refs/heads/loop/{slug}"], timeout)
+            if cp.returncode != 0:
+                raise self._merge_refused(
+                    f"loop/{slug} is not in the gatehouse", "branch-missing")
+            cp = self._run(
+                [*git, "-C", clone,
+                 "-c", f"user.name={MERGE_IDENTITY_NAME}",
+                 "-c", f"user.email={MERGE_IDENTITY_EMAIL}",
+                 "merge", "--no-ff", "--no-edit", "-m",
+                 merge_commit_message(slug=slug, author=author, tier=tier,
+                                      channel_id=channel_id, seq=seq,
+                                      pass_seq=pass_seq),
+                 "FETCH_HEAD"], timeout)
+            if cp.returncode != 0:
+                self._run([*git, "-C", clone, "merge", "--abort"], timeout)
+                raise self._merge_refused(
+                    f"loop/{slug} does not merge cleanly into main; nothing "
+                    "moved", "conflict")
+            cp = self._run([*git, "-C", clone, "rev-parse", "HEAD"], timeout)
+            sha = (cp.stdout or "").strip()
+            self._assert_main_unmoved(slug, main_sha)
+            cp = self._run([*git, "-C", clone, "push", "--quiet", "origin",
+                            "HEAD:refs/heads/main"], timeout)
+            if cp.returncode != 0:
+                raise self._merge_refused(
+                    "the gatehouse refused the push "
+                    f"({(cp.stderr or cp.stdout).strip()[:300]})", "push")
+            return sha
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    def _refresh_after_merge(self) -> str:
+        """main moved, so the mirror and the board follow it."""
+        timeout = SUBPROCESS_TIMEOUTS["refresh-mirror"]
+        try:
+            self._ff_mirror_main(timeout)
+            self._fetch_gatehouse_into_mirror(timeout)
+        except VerbError as exc:
+            return f"; mirror NOT refreshed ({exc.message})"
+        except Exception as exc:  # noqa: BLE001 — the merge already landed
+            return f"; mirror NOT refreshed ({exc!r})"
+        self._planroom_rebuild(MERGE_VERB)
+        return ""
+
+    def _merge_now(self, *, slug: str, author: str, tier: int, channel_id: int,
+                   seq: int, pass_seq: Optional[int], self_merge: bool,
+                   main_sha: str) -> tuple[str, str]:
+        """Budget, merge, ledger, refresh — under one lock, so two merges can
+        never both read the same pre-cap count or race each other onto main.
+        Only a self-merge is budgeted, and the ledger says which kind this was."""
+        with self._merge_lock:
+            if self_merge:
+                budget = self._auto_apply_budget()
+                if self._auto_merges_today() >= budget:
+                    raise self._merge_refused(
+                        f"today's Tier 0 auto-merge budget ({budget}) is spent",
+                        "budget")
+            sha = self._merge_branch(slug=slug, author=author, tier=tier,
+                                     channel_id=channel_id, seq=seq,
+                                     pass_seq=pass_seq, main_sha=main_sha)
+            self._build_ledger_line({
+                "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                "kind": MERGE_VERB, "seq": seq, "channel_id": channel_id,
+                "author": author, "slug": slug, "tier": tier, "sha": sha,
+                "pass_seq": pass_seq, "self_merge": self_merge})
+        return sha, self._refresh_after_merge()
+
+    def _verb_merge(self, caller: str, args: dict) -> tuple[dict, str, dict]:
+        """Take a human's `/merge`: everything the message itself decides is
+        settled here; the gates and the merge run in a thread, like `/build`."""
+        _reject_unknown(args, {"seq", "channel_id", "slug", "pass_seq"})
+        for key in ("seq", "channel_id", "slug"):
+            if key not in args:
+                raise _bad(f"missing required arg: {key}")
+        seq = _check_int(args, "seq", 0, 1, MAX_SEQ)
+        channel_id = _check_int(args, "channel_id", 0, 1, MAX_SEQ)
+        slug = _check_str(args, "slug", required=True, max_len=MAX_SLUG_CHARS)
+        assert slug is not None
+        pass_seq = None
+        if args.get("pass_seq") is not None:
+            pass_seq = _check_int(args, "pass_seq", 0, 1, MAX_SEQ)
+        if not self.build_cfg:
+            raise self._merge_refused(
+                "chat merges are not configured on this broker", "human")
+
+        message = self._build_message(channel_id, seq, code=MERGE_REFUSED,
+                                      reason="human", act="merge a branch")
+        author = message["author"]
+        if author not in self.build_humans:
+            raise self._merge_refused(
+                f"{author} is not on the broker's human list", "human")
+
+        repo = self._gatehouse_or_refuse()
+        if not _SPEC_STEM_RE.match(slug):
+            raise self._merge_refused(f"{slug} is not a build slug",
+                                      "branch-missing")
+        if self._git(repo, "rev-parse", "--verify", "--quiet",
+                     f"refs/heads/loop/{slug}").returncode != 0:
+            raise self._merge_refused(
+                f"there is no loop/{slug} in the gatehouse", "branch-missing")
+        if not message_names_slug(message["content"], slug):
+            raise self._merge_refused(
+                f"message {seq} does not ask to merge {slug}", "slug-mismatch")
+        main_sha = self._main_is_ancestor(slug)
+        if not self._claim_gate_run(slug):
+            raise self._merge_refused(
+                f"a gate run for {slug} is already in flight", "busy")
+
+        thread = threading.Thread(
+            target=self._merge_in_background, args=(dict(args),),
+            kwargs={"slug": slug, "author": author, "channel_id": channel_id,
+                    "seq": seq, "pass_seq": pass_seq, "main_sha": main_sha},
+            daemon=True)
+        self._merge_threads.append(thread)
+        try:
+            thread.start()
+        except RuntimeError:
+            self._release_gate_run(slug)
+            raise
+        return ({"started": True, "slug": slug, "branch": f"loop/{slug}"},
+                f"merge {slug} started for {author} "
+                f"(#{channel_id} seq {seq}); the gates are running",
+                {"merge_started": True})
+
+    def _merge_in_background(self, args: dict, *, slug: str, author: str,
+                             channel_id: int, seq: int,
+                             pass_seq: Optional[int], main_sha: str) -> None:
+        """The merge, off the socket thread. Nothing above it would catch, so
+        it must never raise and must always give the slug back."""
+        try:
+            self._merge_and_post(args, slug=slug, author=author,
+                                 channel_id=channel_id, seq=seq,
+                                 pass_seq=pass_seq, main_sha=main_sha)
+        except Exception:  # noqa: BLE001 — even an unwritable audit log
+            pass
+        finally:
+            self._release_gate_run(slug)
+
+    def _merge_and_post(self, args: dict, *, slug: str, author: str,
+                        channel_id: int, seq: int, pass_seq: Optional[int],
+                        main_sha: str) -> None:
+        """The gates, the tier, the PASS and the merge, then the one post the
+        room is left with."""
+        note: dict = {"owner": None, "gates_red": False}
+        try:
+            body = self._merge_gated(
+                args, slug=slug, author=author, channel_id=channel_id,
+                seq=seq, pass_seq=pass_seq, main_sha=main_sha, note=note)
+        except VerbError as exc:
+            reason = exc.reason if exc.reason in MERGE_REASONS else "gates"
+            self._audit(SERVER_IDENTITY, MERGE_VERB, args, False,
+                        f"denied: {exc.message} ({reason})")
+            body = format_merge_refused(
+                slug=slug, reason_text=exc.message,
+                next_line=merge_next_step(reason, slug=slug, **note))
+        except Exception as exc:  # noqa: BLE001 — the room is owed an answer
+            self._audit(SERVER_IDENTITY, MERGE_VERB, args, True,
+                        f"error: internal: {exc!r}")
+            body = format_merge_refused(
+                slug=slug, reason_text=f"the merge broke ({exc!r})",
+                next_line=merge_next_step("internal", slug=slug))
+        self._post_to_channel(channel_id, body)
+
+    def _merge_gated(self, args: dict, *, slug: str, author: str,
+                     channel_id: int, seq: int, pass_seq: Optional[int],
+                     main_sha: str, note: dict) -> str:
+        """Steps 3–7 of the merge; `note` carries what a refusal line needs."""
+        result, classification = self._gate_and_classify(slug)
+        note["gates_red"] = result.exit_code != 0
+        tier = self._tier_of(classification)
+        reviewer = None
+        if tier == 2:
+            note["owner"] = self._first_lane_owner(slug)
+            if pass_seq is None:
+                raise self._merge_refused(
+                    f"loop/{slug} is Tier 2: it needs a reviewer's PASS in "
+                    f"#custodian, then `/merge {slug} pass <seq>`",
+                    "pass-missing")
+            reviewer = self._check_pass(
+                pass_seq=pass_seq, slug=slug,
+                paths=self._changed_paths(self._gatehouse_or_refuse(), slug),
+                tip_at=self._branch_tip_time(self._gatehouse_or_refuse(), slug))
+        stamped = pass_seq if tier == 2 else None
+        sha, mirror = self._merge_now(slug=slug, author=author, tier=tier,
+                                      channel_id=channel_id, seq=seq,
+                                      pass_seq=stamped, self_merge=False,
+                                      main_sha=main_sha)
+        cited = f", PASS from {reviewer} (seq {pass_seq})" if reviewer else ""
+        self._audit(SERVER_IDENTITY, MERGE_VERB, args, True,
+                    f"merged loop/{slug} into main as {sha} for {author} "
+                    f"(tier {tier}{cited})" + mirror,
+                    extra={"merge_tier": tier, "merged_sha": sha})
+        return format_merge_done(slug=slug, sha=sha, tier=tier)
+
+    def _first_lane_owner(self, slug: str) -> Optional[str]:
+        """Who the banner names on a Tier 2 build."""
+        try:
+            paths = self._changed_paths(self._gatehouse_or_refuse(), slug)
+        except VerbError:
+            return None
+        for path in paths:
+            owner = self._lane_owner(path)
+            if owner is not None:
+                return owner
+        return None
+
+    def _build_end_gates(self, *, slug: str, origin: dict) -> dict:
+        """The build's own gate run, one per slug at a time: a `/merge` typed
+        while it runs is refused rather than gating the branch twice."""
+        if not self._claim_gate_run(slug):
+            return {"tests": f"n/a — a gate run for {slug} is already in flight",
+                    "tier": "n/a — nothing to classify",
+                    "next": f"/merge {slug}"}
+        try:
+            return self._build_end_banner(slug=slug, origin=origin)
+        finally:
+            self._release_gate_run(slug)
+
+    def _build_end_banner(self, *, slug: str, origin: dict) -> dict:
+        """The gates, the tier and — for a green Tier 0 in budget — the merge
+        this build's own `/build` seq authorizes. Never raises: it runs in the
+        reaper, where an exception would eat the banner."""
+        try:
+            main_sha = self._main_is_ancestor(slug)
+            result, classification = self._gate_and_classify(slug)
+            tier = self._tier_of(classification)
+        except VerbError as exc:
+            if exc.reason == "moved":
+                return {"tests": "n/a — nothing was gated",
+                        "tier": "n/a — nothing to classify",
+                        "next": f"fold main into the branch, then /merge {slug}"}
+            return {"tests": f"fail — {exc.message}",
+                    "tier": "unknown — the gates did not run",
+                    "next": "fix the red gate, then /build again"}
+        except Exception as exc:  # noqa: BLE001 — a banner is legibility
+            return {"tests": f"fail — {exc!r}",
+                    "tier": "unknown — the gates did not run",
+                    "next": "fix the red gate, then /build again"}
+        out = {"tests": format_gate_tests_line(result),
+               "tier": format_tier_line(tier, classification.get("reasons"))}
+        if result.exit_code != 0:
+            out["next"] = "fix the red gate, then /build again"
+        elif tier == 0 and origin.get("seq"):
+            # The self-merge's message named no slug: the broker minted it from
+            # that message, so there is nothing to compare it against.
+            try:
+                sha, _note = self._merge_now(
+                    slug=slug, author=str(origin.get("author") or "the broker"),
+                    tier=0, channel_id=int(origin.get("channel_id") or 0),
+                    seq=int(origin.get("seq") or 0), pass_seq=None,
+                    self_merge=True, main_sha=main_sha)
+            except VerbError as exc:
+                out["next"] = (f"Tier 0 budget spent today; /merge {slug}"
+                               if exc.reason == "budget" else f"/merge {slug}")
+            except Exception:  # noqa: BLE001 — a banner is legibility
+                out["next"] = f"/merge {slug}"
+            else:
+                out["next"] = f"merged {sha}"
+                out["merged_tier"] = 0
+                out["merged_sha"] = sha
+        elif tier == 2:
+            owner = self._first_lane_owner(slug) or "a reviewer"
+            out["next"] = (f"PASS from {owner} in #custodian, then "
+                           f"/merge {slug} pass <seq>")
+        else:
+            out["next"] = f"/merge {slug}"
+        return out
 
     # ------------------------------------------------------- apps-build (§E)
     # THE SHAPE OF THIS VERB, and why it is not start-build with different strings.
@@ -4187,28 +4916,36 @@ class Broker:
         gates = args.get("gates", {})
         if not isinstance(gates, dict):
             raise _bad("gates must be an object")
-        gates_json = json.dumps(gates, ensure_ascii=False)
-        if len(gates_json) > MAX_GATES_JSON:
+        classification = self._classify(repo, rng, gates)
+        tier = classification.get("tier") if isinstance(classification, dict) else None
+        return ({"classification": classification}, f"classified: tier={tier}")
+
+    def _protected_paths(self) -> str:
+        return self.paths.get(
+            "protected_paths",
+            "/home/plink/Disjorn/Disjorn/harness/classifier/protected-paths.toml")
+
+    def _classify(self, repo: str, rng: str, gates_obj: dict) -> dict:
+        """One classifier run — the same argv for a resident's `classify-diff` and
+        for the broker's own pre-merge classification."""
+        gates_text = json.dumps(gates_obj, ensure_ascii=False)
+        if len(gates_text) > MAX_GATES_JSON:
             raise _bad(f"gates JSON exceeds {MAX_GATES_JSON} bytes")
         classifier = self.paths.get(
             "classifier",
             "/home/plink/Disjorn/Disjorn/harness/classifier/classify_diff.py")
-        protected = self.paths.get(
-            "protected_paths",
-            "/home/plink/Disjorn/Disjorn/harness/classifier/protected-paths.toml")
         argv = self._argv("classify_diff", [sys.executable, classifier])
         argv += ["--repo", repo, "--range", rng,
-                 "--config", protected, "--gates", gates_json]
+                 "--config", self._protected_paths(), "--gates", gates_text]
         cp = self._run(argv, SUBPROCESS_TIMEOUTS["classify-diff"])
         if cp.returncode != 0:
             raise VerbError("exec-failure",
                             f"classifier exit {cp.returncode}: {cp.stderr.strip()[:500]}")
         try:
-            classification = json.loads(cp.stdout)
+            out = json.loads(cp.stdout)
         except json.JSONDecodeError:
             raise VerbError("exec-failure", "classifier emitted non-JSON output") from None
-        tier = classification.get("tier") if isinstance(classification, dict) else None
-        return ({"classification": classification}, f"classified: tier={tier}")
+        return out if isinstance(out, dict) else {}
 
     def _verb_read_prod_logs(self, resident: str, args: dict) -> tuple[dict, str]:
         _reject_unknown(args, {"lines"})

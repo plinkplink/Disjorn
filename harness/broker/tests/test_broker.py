@@ -398,11 +398,11 @@ def test_verbs_template_all_off_and_matches_verb_table(harness):
     with open(TEMPLATE_DIR / "verbs.toml", "rb") as fh:
         tmpl = tomllib.load(fh)
     assert set(tmpl) == {"res-claudette", "res-gable", "plink", "server"}
-    seat_verbs = set(harness.broker.verbs) - {"wake", "build"}
+    seat_verbs = set(harness.broker.verbs) - {"wake", "build", "merge"}
     for resident in ("res-claudette", "res-gable"):
         assert set(tmpl[resident]) == seat_verbs, resident
     assert set(tmpl["plink"]) == {"wake"}
-    assert tmpl["server"] == {"build": True}  # a switch, not a resident's grant
+    assert tmpl["server"] == {"build": True, "merge": True}  # switches, not grants
     for resident in ("res-claudette", "res-gable", "plink"):
         flags = tmpl[resident]
         assert all(v is False for v in flags.values()), (

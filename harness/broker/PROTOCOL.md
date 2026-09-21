@@ -64,6 +64,7 @@ Failure:
 | `exec-failure`   | verb was authorized but its execution failed (exit/timeout/IO) |
 | `apps-refused`   | an `apps-build` check refused the handoff; the message is the flat sentence |
 | `build-refused`  | a `build` check refused the request; the message is the plain reason |
+| `merge-refused`  | a `merge` rule said no; the error also carries `reason` (below) |
 | `internal`       | broker-side problem (bad config, unexpected exception)         |
 
 Every request — success, failure, or denial — appends exactly one line to the
@@ -74,14 +75,17 @@ A verb may add extra FACT fields to its own line; they can never overwrite the
 six core keys. `start-build` and `build` success lines carry
 `"build_started": true`, which is how the build budget distinguishes "a build
 ran" from "the call was authorized but nothing ever launched" (BL-D3); a
-`build` line adds `"build_seat"`, because its own `resident` is `server` and
-the budget belongs to the seat the build ran as.
+`build` line adds `"build_seat"` as a fact about where the build ran, while its
+budget is the `server` principal's. A `merge` writes two lines: `"merge_started":
+true` when the call is taken, then `"merge_tier"` and `"merged_sha"` when the
+merge itself lands.
 
 ## Verb table
 
 All verbs are per-caller toggleable in `verbs.toml` and default OFF.
-`restart-self` does not exist and never will (plink's ruling #3). `wake` and
-`build` are in the table but in no seat's section — see their entries below.
+`restart-self` does not exist and never will (plink's ruling #3). `wake`,
+`build` and `merge` are in the table but in no seat's section — see their
+entries below.
 
 ### `restart-disjorn`
 - args: none.
@@ -382,15 +386,21 @@ the message DB.
      `server/app/privacy.py`, restated in `brokerd.hidden_from_bots`);
   3. its author is on `[build].humans`;
   4. its text — the content with a leading `/build` word stripped — is 1..4000
-     characters.
+     characters;
+  5. `session_id` is the caller's word, so the SERVER is asked whose it is: the
+     harness view must show the session open, `mode` `repo`, and
+     `owner_username` equal to the message's author.
 - The slug is `YYYY-MM-DD-<up to five words of the text, kebab>`, suffixed
   `-2`, `-3`, … until `loop/<slug>` is free in the gatehouse. Branch
   `loop/<slug>`.
 - Every accepted request appends one line to `[build].ledger`: ts, seq,
   channel_id, author, text_sha256, slug, session_id.
-- The launch is `start-build`'s, verbatim: same slug claim, same daily build
-  budget (spent by `res-<[build].seat>`, not by the caller), same
+- The launch is `start-build`'s, verbatim: same slug claim, same
   `run-build.sh` argv, same sidecar, same restart re-adoption, same reaper.
+  The DAY'S BUDGET IS NOT THE SEAT'S: a chat build reserves against
+  `[build].daily_build_cap` (default 4) under the `server` principal, and the
+  build seat's `[start_build]` allowance is untouched. Over the cap is
+  `build-refused`, "today's chat build budget (N) is spent".
   The prompt on stdin is the message text, wrapped the way a spec is, saying
   there is no spec file. No spec Status stamping — there is no spec.
 - What the room sees is the APPS BUILD MODAL, not #custodian: stage events go
@@ -398,9 +408,114 @@ the message DB.
   `files_written {no_changes}`, or `scoped {halted: "error"}`), and ONE
   four-line banner goes to the ORIGIN channel — `tests`, `tier`, `diffstat`,
   `next`. A seq-started build posts no #custodian outcome line at all.
+- AT THE END OF A PUBLISHED BUILD the broker runs its own gates and the
+  classifier over `main...loop/<slug>` and the banner says what they found:
+  `tests: pass|fail — <gate summary>`, `tier: <N> — <first two reasons>`,
+  `diffstat: …`, and `next:` one of `merged <sha>` (a green Tier 0 inside
+  `[limits].daily_auto_apply_budget`, merged on the spot citing this build's
+  own seq), `/merge <slug>` (Tier 1), `PASS from <owner> in #custodian, then
+  /merge <slug> pass <seq>` (Tier 2), `fix the red gate, then /build again`,
+  or `Tier 0 budget spent today; /merge <slug>`. When a self-merge happened the
+  `deployed` detail also carries `tier` and `merged_sha`. A branch that fell
+  behind main while it was building is gated by nobody: the banner says
+  `fold main into the branch, then /merge <slug>` and nothing is merged.
+- A build that published nothing still posts its banner, and `next` carries the
+  reason: `build halted — <reason>; /build again`, or `no commits — /build
+  again with more detail`. It is the only line the room gets.
 - With `[build]` absent the verb answers "chat builds are not configured on
   this broker". Every key in `[build]` is validated at boot and a bad one is a
   refusal to start; `humans = []` is legal and refuses every request.
+
+### `merge`
+
+SPECS/2026-09-20-build-lane-v2-stage1-2b.md; the design is
+`harness/cc/MERGE-CONTRACT.md`. The human's `/merge <slug> [pass <seq>]`, read
+the same way `build` reads its message. The gate result the broker acts on is
+its own run, and there is no argument by which a caller can supply one: what
+that result proves is **the run happened and was not skipped**. It is the
+branch's own suite, so the wall is the classifier plus a human on Tier 1 and 2.
+
+- args: `{"seq": int, "channel_id": int, "slug": str, "pass_seq": int|null}` —
+  the first three required and positive, `pass_seq` optional, nothing else.
+- IT IS ASYNCHRONOUS, in `build`'s shape. The call validates the message, the
+  author, the slug, the branch and the ancestry, then returns
+  `{"started": true, "slug": str, "branch": str}` and runs the gates, the
+  classifier, the PASS check, the merge and the push in a background thread.
+  The outcome is ONE post to the origin channel, by the broker's bot:
+
+  ```
+  merge: merged <slug> as <sha> (tier N)
+  next: deploy at the keyboard
+  ```
+
+  or `merge: refused <slug> — <plain reason>` with `next:` the human's own next
+  step (`fold main into the branch, then /merge again`, `PASS from <owner> in
+  #custodian, then /merge <slug> pass <seq>`, `fix the red gate, then /build
+  again`, or `merge it at the keyboard`).
+- Every refusal — before the answer or after it — is `merge-refused` with a
+  plain message, an audit line whose summary starts `denied: ` and ends with
+  its reason in brackets, and a `reason` from this closed set. A refusal
+  reached synchronously comes back on the wire; a later one is the post above.
+
+| reason           | the rule that said no                                    |
+|------------------|----------------------------------------------------------|
+| `human`          | the message, its author, or the human list               |
+| `branch-missing` | no gatehouse, a slug that is not a build slug, no branch |
+| `slug-mismatch`  | the message does not name the slug it is merging         |
+| `busy`           | a gate run for this slug is already in flight            |
+| `moved`          | the branch is behind main, or main moved under the gates |
+| `gates`          | the gate run could not be launched at all                |
+| `tier`           | the classifier answered with no tier                     |
+| `pass-missing`   | Tier 2 and no `pass_seq`                                 |
+| `pass-invalid`   | the PASS does not hold (below)                           |
+| `budget`         | the Tier 0 self-merge budget is spent                    |
+| `conflict`       | the branch does not merge cleanly; nothing moved         |
+| `push`           | the gatehouse would not take the push (the hook, or git) |
+
+- Steps, in order: read the message (a person, not deleted, not private, on
+  `[build].humans`); `loop/<slug>` must exist in the gatehouse; the message
+  must name the slug as a whole token; `refs/heads/main` must be an ancestor of
+  the branch, and its sha is read here and re-read immediately before the push
+  — a main that moved in between is `moved` and nothing is pushed. Then the
+  gates, then `main...loop/<slug>` classified with their result. **A red gate
+  is not special-cased** — the classifier answers Tier 2 fail-closed and that
+  answer is the one used.
+- One gate run per slug at a time, whether a `/merge` or a build's own end
+  started it; a second `/merge` for that slug is refused `busy` on the spot.
+- Tier 0 and Tier 1 merge on this call: it IS the human step. Tier 2 needs
+  `pass_seq`, and that PASS holds only when the message is in
+  `[disjorn].custodian_channel_id`, authored by a BOT whose name is the review
+  owner for the changed paths (`[planroom].lane_owners`, prefix map, first
+  match wins), posted AFTER the branch tip's commit time, and says the word
+  `PASS` and the slug and NOT the word `BLOCK` (both whole words, case
+  sensitive). A changed path with no owner is `pass-invalid`, "no lane owner
+  for `<path>`; keyboard merge".
+- Only SELF-merges (from `/build`, always Tier 0) are budgeted, against
+  `[limits].daily_auto_apply_budget` in protected-paths.toml, counted off the
+  ledger's `self_merge` flag. A human `/merge` is never budgeted and never
+  counts.
+- The merge runs in a throwaway clone under `[build].merge_work_dir`: clone the
+  gatehouse's main, fetch the branch, `git merge --no-ff --no-edit` as
+  `disjorn-broker <broker@disjorn.local>` with
+
+  ```
+  merge: <slug> (/merge by <author>, tier N)
+
+  merge-seq: <channel_id>:<seq>
+  review-seq: <pass_seq>
+  ```
+
+  — `review-seq` AFTER `merge-seq`, because the hook's last-trailer-wins rule is
+  what records the review — then push `HEAD:refs/heads/main`. The mirror is
+  fast-forwarded, the gatehouse re-fetched and the plan room rebuilt afterwards.
+- One ledger line per merge: `{ts, kind: "merge", seq, channel_id, author,
+  slug, tier, sha, pass_seq, self_merge}`.
+- With `[build]` absent the verb answers "chat merges are not configured on
+  this broker"; the same block's human list gates both verbs.
+- `[build]` also carries this verb's knobs: `gate_timeout_sec` (1320),
+  `gate_log_dir`, `merge_work_dir`. Each is validated at boot, and a
+  `gate_timeout_sec` of 1200 or less is refused: the gate unit's own runtime
+  cap is 1200 seconds and the broker has to outwait it.
 
 ### `classify-diff`
 - args: `{"repo": str, "range": str, "gates": object}`

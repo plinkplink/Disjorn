@@ -1148,6 +1148,7 @@ async def test_harness_view_is_publisher_gated_and_answers_the_four_checks(
         "session_id": session["id"],
         "app_id": session["app"]["id"],
         "owner_user_id": session["app"]["owner_user_id"],
+        "owner_username": "alice",
         "builder_bot_id": session["builder"]["bot_id"],
         "channel_id": session["channel_id"],
         "stage": None,
@@ -1831,3 +1832,4 @@ async def test_a_repo_session_reads_back_as_repo_in_both_views(
     ).json()
     assert (view["mode"], view["repo_slug"]) == ("repo", "2026-09-20-a-slug")
     assert view["channel_id"] == feed["id"]
+    assert view["owner_username"] == "alice"

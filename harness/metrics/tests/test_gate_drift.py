@@ -5,21 +5,21 @@ a mirror with the hook committed in it, a canonical git-dir with the hook
 symlinked and a push log beside it, a prod tree, and a #custodian table with
 resolvable and unresolvable seqs. The hook's own log grammar is exercised
 end-to-end in harness/gatehouse/tests; here the log is written by hand, because
-what these tests are about is what the DIGEST concludes from a log — including
-the logs no healthy hook would ever write.
+what these tests are about is what the DIGEST concludes from a log, including
+the logs no healthy hook would write.
 
 The four things worth stating up front, because each was argued for
 specifically and each has a test that fails if it is quietly re-implemented:
 
   * CITATION COMES FROM PUSH TRUTH (G1/G1b). One trailer on the tip of a
-    five-commit push cites all five; a later trailer-bearing push can never
-    reach back and bless the ancestors of a fail-open push.
+    five-commit push cites all five; a later push can never reach back and
+    bless the ancestors of a fail-open push.
   * THE FLOOR'S PROVENANCE CHANGES WHAT SILENCE MEANS (G1d). Below a seeded
     floor is out of scope; below a lazy floor is unverifiable, and must never
     render as clean.
-  * THE FLOOR-MOTION BASELINE LIVES OUTSIDE THE GIT-DIR. It is parsed back out
-    of the digest's own previous post, so it survives the log being deleted and
-    lazily re-born — the one case both in-log tamper tells miss.
+  * THE FLOOR-MOTION BASELINE LIVES OUTSIDE THE GIT-DIR, parsed back out of the
+    digest's own previous post, so it survives the log being deleted and lazily
+    re-born — the one case both in-log tamper tells miss.
   * A LOST LOG DEGRADES TO MORE FLAGS, NEVER FEWER.
 """
 
@@ -99,8 +99,7 @@ class Lane:
         (self.mirror / "README.md").write_text("start\n")
         git(self.mirror, "add", "-A")
         # Dated the day BEFORE, so it sits outside the reported day's window
-        # the way real history does. Tests that care about it reach for it by
-        # name (the floor tests) rather than finding it in every window.
+        # the way real history does; the floor tests reach for it by name.
         old_day = {**ENV, "GIT_AUTHOR_DATE": "2026-08-19T09:00:00Z",
                    "GIT_COMMITTER_DATE": "2026-08-19T09:00:00Z"}
         git(self.mirror, "commit", "-q", "-m", "initial commit", env=old_day)
@@ -209,11 +208,12 @@ class Lane:
 
     # -- config -------------------------------------------------------------
 
-    def config(self, **over) -> dict:
+    def config(self, *, humans=("plink",), **over) -> dict:
         gate = {"canonical_repo": str(self.canonical), "mirror": str(self.mirror),
                 "deploy_tree": str(self.prod), "message_db": str(self.db_path)}
         gate.update(over)
         return {"gate": gate,
+                "build": {"humans": list(humans)},
                 "disjorn": {"custodian_channel_id": CUSTODIAN,
                             "api_key_path": str(self.key_path)},
                 "paths": {"protected_paths": str(PROTECTED)},
@@ -229,6 +229,11 @@ class Lane:
 @pytest.fixture()
 def lane(tmp_path) -> Lane:
     return Lane(tmp_path)
+
+
+def commits_line(block: str) -> str:
+    return [ln for ln in block.splitlines()
+            if ln.startswith("commits on main")][0]
 
 
 # --------------------------------------------------------------------------
@@ -296,8 +301,6 @@ def test_cc_matches_when_the_image_is_the_committed_pin(lane):
 
 
 def test_cc_mismatch_when_the_pin_was_bumped_but_never_rebuilt(lane, monkeypatch):
-    """The 2026-09-02 shape: a model needing a newer CLI, the pin bumped,
-    the residents still on the old image."""
     _pin_containerfile(lane, "2.1.259")
     monkeypatch.setattr(M, "_image_cc_version", lambda image: ("2.1.215", ""))
     cc = M.cc_version(M.gate_paths(lane.config()))
@@ -579,6 +582,36 @@ def test_a_doc_only_uncited_commit_is_not_a_lane_violation(lane):
     assert d["violations"] == []
 
 
+def test_the_commits_line_splits_the_uncited_by_guarded_lane(lane):
+    """A doc-only commit is uncited and allowed; one line that mixes the two
+    trains the reader to ignore the number."""
+    floor = lane.head()
+    lane.commit("SPECS/2026-08-20-x.md", "a spec\n", "spec: x")
+    sha = lane.commit("server/app/ws.py", "x = 1\n", "server: fanout tweak")
+    lane.write_log(lane.genesis("seeded", floor),
+                   lane.push(floor, sha, "NONE", "failed-open"))
+    line = commits_line(lane.block())
+    assert line.endswith(": 2 (2 uncited, 1 doc-only)")
+
+
+def test_uncited_commits_that_all_touch_a_lane_read_zero_doc_only(lane):
+    floor = lane.head()
+    lane.commit("server/app/ws.py", "x = 1\n", "server: one")
+    sha = lane.commit("harness/x.py", "y = 1\n", "harness: two")
+    lane.write_log(lane.genesis("seeded", floor),
+                   lane.push(floor, sha, "NONE", "failed-open"))
+    assert commits_line(lane.block()).endswith(": 2 (2 uncited, 0 doc-only)")
+
+
+def test_a_window_with_nothing_uncited_keeps_the_plain_count(lane):
+    floor = lane.head()
+    sha = lane.commit("harness/x.py", "x = 1\n",
+                      "harness: x\n\nreview-seq: 1428")
+    lane.write_log(lane.genesis("seeded", floor),
+                   lane.push(floor, sha, "review-seq:1428"))
+    assert commits_line(lane.block()).endswith(": 1 (0 uncited)")
+
+
 def test_a_seq_that_does_not_resolve_does_not_cite(lane):
     """Without G2, `review-seq: 1` passes forever and the gate is a spelling
     test."""
@@ -630,6 +663,136 @@ def test_an_override_is_never_self_cited(lane):
     sha = lane.commit("harness/x.py", "x = 1\n", "harness: x")  # by keyboard
     lane.write_log(lane.genesis("seeded", floor),
                    lane.push(floor, sha, "override-seq:1450"))  # plink's own
+    d = lane.drift()
+    assert d["self_cited"] == []
+    assert d["uncited"] == []
+
+
+# --------------------------------------------------------------------------
+# merge-seq — a merge the broker made because a human typed for it.
+# --------------------------------------------------------------------------
+
+def test_a_merge_seq_by_a_human_cites_its_push(lane):
+    lane.post(2704, CUSTODIAN, "user", 1, "/merge a-slug")
+    floor = lane.head()
+    sha = lane.commit("harness/x.py", "x = 1\n",
+                      "merge: a-slug (/merge by plink, tier 1)\n\n"
+                      "merge-seq: 4:2704")
+    lane.write_log(lane.genesis("seeded", floor),
+                   lane.push(floor, sha, "merge-seq:4:2704"))
+    d = lane.drift()
+    assert d["uncited"] == []
+    assert d["citations"][0]["holds"] is True
+    assert d["citations"][0]["kind"] == "merge-seq"
+
+
+def test_a_merge_seq_is_read_in_the_channel_it_names(lane):
+    """The same number is a different message in another channel."""
+    lane.post(2704, 7, "user", 1, "/merge a-slug")
+    floor = lane.head()
+    sha = lane.commit("harness/x.py", "x = 1\n", "merge: a-slug")
+    lane.write_log(lane.genesis("seeded", floor),
+                   lane.push(floor, sha, "merge-seq:7:2704"))
+    assert lane.drift()["uncited"] == []
+
+    lane.write_log(lane.genesis("seeded", floor),
+                   lane.push(floor, sha, "merge-seq:4:2704"))
+    d = lane.drift()
+    assert d["uncited"] == [sha]
+    assert "not in channel 4" in d["broken_citations"][0]["detail"]
+
+
+def test_a_merge_seq_a_bot_wrote_does_not_cite(lane):
+    """If a bot's seq could cite a merge, chat would be instructions, not data."""
+    lane.post(2704, CUSTODIAN, "bot", 1, "/merge a-slug")
+    floor = lane.head()
+    sha = lane.commit("harness/x.py", "x = 1\n", "merge: a-slug")
+    lane.write_log(lane.genesis("seeded", floor),
+                   lane.push(floor, sha, "merge-seq:4:2704"))
+    d = lane.drift()
+    assert d["uncited"] == [sha]
+    assert "is a bot" in d["broken_citations"][0]["detail"]
+
+
+def test_a_merge_seq_from_an_account_off_the_human_list_does_not_cite(lane):
+    lane.post(2704, CUSTODIAN, "user", 1, "/merge a-slug")
+    floor = lane.head()
+    sha = lane.commit("harness/x.py", "x = 1\n", "merge: a-slug")
+    lane.write_log(lane.genesis("seeded", floor),
+                   lane.push(floor, sha, "merge-seq:4:2704"))
+    d = M.gate_drift(lane.config(humans=["someone-else"]), date=DATE)
+    assert d["uncited"] == [sha]
+    assert "not on [build].humans" in d["broken_citations"][0]["detail"]
+
+
+def test_without_a_human_list_no_merge_seq_can_hold(lane):
+    lane.post(2704, CUSTODIAN, "user", 1, "/merge a-slug")
+    floor = lane.head()
+    sha = lane.commit("harness/x.py", "x = 1\n", "merge: a-slug")
+    lane.write_log(lane.genesis("seeded", floor),
+                   lane.push(floor, sha, "merge-seq:4:2704"))
+    d = M.gate_drift(lane.config(humans=[]), date=DATE)
+    assert d["uncited"] == [sha]
+    assert "no [build].humans" in d["broken_citations"][0]["detail"]
+
+
+def test_a_merge_seq_for_a_message_that_is_not_there_does_not_cite(lane):
+    floor = lane.head()
+    sha = lane.commit("harness/x.py", "x = 1\n", "merge: a-slug")
+    lane.write_log(lane.genesis("seeded", floor),
+                   lane.push(floor, sha, "merge-seq:4:2704"))
+    d = lane.drift()
+    assert d["uncited"] == [sha]
+    assert d["broken_citations"][0]["detail"] == "no such seq in the message store"
+
+
+MERGE_SEQ_REFUSALS = [
+    ("no message", None, ("plink",), "no such seq in the message store"),
+    ("another channel", (7, "user", 1), ("plink",),
+     "the seq resolves, but not in channel 4"),
+    ("a bot", (CUSTODIAN, "bot", 1), ("plink",),
+     "Claudette is a bot, not a human"),
+    ("an unlisted human", (CUSTODIAN, "user", 1), ("someone-else",),
+     "plink is not on [build].humans"),
+    ("no humans list", (CUSTODIAN, "user", 1), (),
+     "no [build].humans is configured"),
+]
+
+
+@pytest.mark.parametrize("author, humans, detail",
+                         [c[1:] for c in MERGE_SEQ_REFUSALS],
+                         ids=[c[0] for c in MERGE_SEQ_REFUSALS])
+def test_each_unresolvable_merge_seq_gets_its_own_plain_reason(
+        lane, author, humans, detail):
+    """Every way a merge-seq fails to hold gets a reason a reader can act on.
+    The trailer is on main either way, so the count line stands beside the
+    named one: counted as a merge, not honoured as a citation."""
+    if author:
+        lane.post(2704, author[0], author[1], author[2], "/merge a-slug")
+    floor = lane.head()
+    sha = lane.commit("harness/x.py", "x = 1\n",
+                      "merge: a-slug (/merge by plink, tier 1)\n\n"
+                      "merge-seq: 4:2704")
+    lane.write_log(lane.genesis("seeded", floor),
+                   lane.push(floor, sha, "merge-seq:4:2704"))
+    d = M.gate_drift(lane.config(humans=list(humans)), date=DATE)
+    assert d["uncited"] == [sha]
+    assert d["broken_citations"][0]["detail"] == detail
+    lines = M.compose_drift_block(d).splitlines()
+    assert [ln for ln in lines if "CITATION DOES NOT RESOLVE" in ln] == [
+        f"  CITATION DOES NOT RESOLVE: merge-seq:4:2704 on {sha[:8]} — "
+        f"{detail}. That range counts as UNCITED."]
+    assert [ln for ln in lines if ln.startswith("chat merges to date:")] == [
+        "chat merges to date: 1 (merge-seq 4:2704)"]
+
+
+def test_a_merge_seq_is_never_self_cited(lane):
+    """A merge-seq IS the human's own line, like an override-seq."""
+    lane.post(2704, CUSTODIAN, "user", 1, "/merge a-slug")
+    floor = lane.head()
+    sha = lane.commit("harness/x.py", "x = 1\n", "merge: a-slug")  # by keyboard
+    lane.write_log(lane.genesis("seeded", floor),
+                   lane.push(floor, sha, "merge-seq:4:2704"))
     d = lane.drift()
     assert d["self_cited"] == []
     assert d["uncited"] == []
@@ -696,10 +859,9 @@ def test_below_a_lazy_floor_is_unverifiable_not_clean(lane):
 
 def test_a_refused_push_is_not_permanent_mirror_drift_noise(lane):
     """A refusal is the hook doing its one job: nothing landed, so the range
-    can never resolve in the mirror. Rev-listing it would increment 'N logged
-    push ranges do not resolve — history was rewritten' on every digest
-    forever, one legitimate refusal at a time — a counter that only goes up
-    and never means anything gets muted in a week."""
+    can never resolve in the mirror. Rev-listing it would increment 'history
+    was rewritten' forever, one legitimate refusal at a time, and a counter
+    that only goes up gets muted in a week."""
     floor = lane.head()
     lane.write_log(lane.genesis("seeded", floor),
                    lane.push(floor, "e" * 40, "NONE", "refused"))
@@ -711,11 +873,7 @@ def test_a_refused_push_is_not_permanent_mirror_drift_noise(lane):
 def test_commits_on_main_whose_only_log_line_is_a_refusal_are_uncovered(lane):
     """A refused line attests a refusal, not a landing. If the range's commits
     are on `main` anyway, they arrived by a path this hook never passed, and
-    which path that was is not for this line to guess. Reading the refusal
-    as coverage would
-    render exactly that arrival as clean, forever, once it ages out of the
-    digest window. (Before the review fix this asserted the opposite:
-    refused ranges counted as covered.)"""
+    reading the refusal as coverage would render that arrival as clean."""
     floor = lane.head()
     sha = lane.commit("harness/x.py", "x = 1\n", "harness: x")
     lane.write_log(lane.genesis("seeded", floor),
@@ -724,13 +882,10 @@ def test_commits_on_main_whose_only_log_line_is_a_refusal_are_uncovered(lane):
 
 
 # --------------------------------------------------------------------------
-# COVERAGE CLASSES above the floor (spec 2026-08-27, seq 2067).
+# COVERAGE CLASSES above the floor.
 #
-# A commit with no covering push-log line never met the hook. That is the whole
-# of what the log knows, and the block used to say more: it printed a flat "the
-# hook was absent" for every one of them, two lines under its own hook MATCH,
-# and the count grew by a row per build and per keyboard session forever. The
-# fix is a class per commit and one finding word.
+# A commit with no covering push-log line never met the hook, and that is the
+# whole of what the log knows: one class per commit, one finding word.
 # --------------------------------------------------------------------------
 
 LOCAL_KEYBOARD_CFG = ["keyboard@example.invalid"]
@@ -927,14 +1082,11 @@ def test_a_local_record_never_covers_and_never_cites(lane):
 
 
 def test_no_source_file_still_asserts_the_cause_it_never_measured():
-    """ACCEPTANCE 2, as a grep over the tracked tree. The old line was a fixed
-    string, so it can be checked as one — and the check has to live somewhere
-    or the sentence grows back the next time someone wants a friendlier word
-    for `unexplained`. SPECS/ is exempt: the specs are the record of what was
-    ruled, including the sentence being retired, and rewriting them to pass a
-    grep would delete the reason this test exists.
-
-    The needle is assembled at runtime so this file is not its own hit."""
+    """ACCEPTANCE 2, as a grep over the tracked tree: the retired sentence is a
+    fixed string, and without this check it grows back the next time someone
+    wants a friendlier word for `unexplained`. SPECS/ is exempt — the specs
+    record what was ruled. The needle is assembled at runtime so this file is
+    not its own hit."""
     root = Path(__file__).resolve().parents[3]
     needle = "the hook was " + "absent or disarmed"
     proc = subprocess.run(["git", "-C", str(root), "grep", "-l", "-F", needle],
@@ -1003,7 +1155,7 @@ def test_overrides_are_derived_from_mains_trailers_not_from_the_log(lane):
     lane.commit("harness/a.py", "x\n", "harness: a\n\noverride-seq: 1450")
     lane.commit("harness/b.py", "y\n", "harness: b\n\noverride-seq: 1451")
     lane.commit("harness/c.py", "z\n", "harness: c\n\nreview-seq: 1428")
-    ov = M.override_trailers(str(lane.mirror))
+    ov = M.seq_trailers(str(lane.mirror), "override-seq")
     assert [o["seq"] for o in ov] == [1451, 1450]  # newest first, as git logs
     assert "overrides to date: 2" in lane.block()  # with no push log at all
     assert "override-seq 1451, 1450" in lane.block()
@@ -1011,6 +1163,23 @@ def test_overrides_are_derived_from_mains_trailers_not_from_the_log(lane):
 
 def test_no_overrides_reports_zero_without_naming_any(lane):
     assert "overrides to date: 0" in lane.block()
+
+
+def test_chat_merges_are_counted_on_their_own_line(lane):
+    lane.commit("harness/a.py", "x\n", "merge: a\n\nmerge-seq: 4:2704")
+    lane.commit("harness/b.py", "y\n",
+                "merge: b\n\nmerge-seq: 7:19\nreview-seq: 1428")
+    lane.commit("harness/c.py", "z\n", "harness: c\n\noverride-seq: 1450")
+    merges = M.seq_trailers(str(lane.mirror), "merge-seq")
+    assert [(m["channel_id"], m["seq"]) for m in merges] == [(7, 19), (4, 2704)]
+    lines = lane.block().splitlines()
+    i = next(n for n, ln in enumerate(lines) if ln.startswith("overrides to date:"))
+    assert lines[i] == "overrides to date: 1 (override-seq 1450)"
+    assert lines[i + 1] == "chat merges to date: 2 (merge-seq 7:19, 4:2704)"
+
+
+def test_no_chat_merges_reports_zero_without_naming_any(lane):
+    assert "chat merges to date: 0" in lane.block()
 
 
 # --------------------------------------------------------------------------
@@ -1050,8 +1219,8 @@ def test_deploy_state_behind_is_drift(lane):
 
 
 def test_a_dirty_prod_tree_is_drift_even_at_the_right_commit(lane):
-    """The ship-by-not-publishing case (seq 1380): code that is running and was
-    never published. Nothing else in the house catches it."""
+    """The ship-by-not-publishing case: code that is running and was never
+    published, which nothing else in the house catches."""
     lane.deploy()
     (lane.prod / "harness" / "hotfix.py").write_text("x = 1\n")
     lane.deploy_dirty = True

@@ -100,12 +100,15 @@ order and for this reason:
    survives the log being deleted and lazily re-born — the one tamper case both
    in-log tells miss.
 
-Then: mirror head, commits since the last digest and how many are uncited,
-`classify_diff` on every uncited commit with an uncited Tier 2 named as a
+Then: mirror head and commits since the last digest, with the uncited split by
+whether they touched a guarded lane — `21 (5 uncited, 5 doc-only)`, where
+doc-only means the gate lets them through, and `(0 uncited)` alone when none
+are. `classify_diff` on every uncited commit with an uncited Tier 2 named as a
 **LANE VIOLATION**, the fail-open count, the coverage classes above the floor,
-overrides to date, a deploy-drift line, and a prose line (`prose: worst <file>
-<ratio>; over baseline: <n>`, from `harness/prose/ratio.py` over the deploy tree;
-report only, the wall is `harness/tests/test_prose_ratio.py`).
+overrides to date, chat merges to date, a deploy-drift line, and a prose line
+(`prose: worst <file> <ratio>; over baseline: <n>`, from
+`harness/prose/ratio.py` over the deploy tree; report only, the wall is
+`harness/tests/test_prose_ratio.py`).
 
 **Coverage above the floor is classified, and only one class is a finding.**
 Every commit above the floor is `covered` (a logged push range holds it),
@@ -126,15 +129,29 @@ reconstructed from reachability, so a five-commit push with one trailer on the
 tip is one cited range rather than one pass and four false violations. A
 `review-seq` whose author is the person who pushed is flagged **self-cited**.
 
-**Nothing here is derived-but-stored.** The override count is recomputed from
-`main`'s trailers every time, so "counted forever" survives a database rebuild.
-The floor baseline is read back out of a post that already exists. The push log
-is the one primary record — push boundaries and fail-open firings exist nowhere
-in git — which puts it in the broker audit log's class, not a cache's.
+**Three trailers, three resolutions.** `review-seq: <n>` and `override-seq:
+<n>` must name a #custodian message. `merge-seq: <channel_id>:<seq>` is the
+trailer the broker writes on a merge it made because a human typed `/build` or
+`/merge`; it carries a channel because seqs are per channel and either command
+may be typed in any of them. It resolves against that channel, and it holds
+only when the message is there, was written by a `user`, and that username is
+on `[build].humans` in the broker config — the same list the broker itself
+acts on. No list, no holding merge-seq. Like an `override-seq`, a `merge-seq`
+is the human's own line, so it is never flagged self-cited. The block counts
+them on their own line, directly under the overrides:
+`chat merges to date: 2 (merge-seq 4:2704, 7:19)`.
 
-Config lives in `broker.toml [gate]`. **With that block absent the digest still
-posts a drift block, and it says `DETECTOR NOT CONFIGURED`** — an empty drift
-block and a disarmed detector must never read alike.
+**Nothing here is derived-but-stored.** The override and chat-merge counts are
+recomputed from `main`'s trailers every time, so "counted forever" survives a
+database rebuild. The floor baseline is read back out of a post that already
+exists. The push log is the one primary record — push boundaries and fail-open
+firings exist nowhere in git — which puts it in the broker audit log's class,
+not a cache's.
+
+Config lives in `broker.toml [gate]`, plus `[build].humans` for merge-seq.
+**With that block absent the digest still posts a drift block, and it says
+`DETECTOR NOT CONFIGURED`** — an empty drift block and a disarmed detector must
+never read alike.
 
 `deploy_state()` is exported as a named function on purpose: the Plan Room's
 tri-state badge is the same computation and calls it rather than
