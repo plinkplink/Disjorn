@@ -773,19 +773,18 @@ async def test_build_without_a_build_bot_starts_nothing(client, monkeypatch):
 # /merge — the human step the tiers wait for
 # ---------------------------------------------------------------------------
 
-MERGE_SHA = "9f1c0aa7b3d24e6f8a10bc55d3e7f9012345abcd"
-
-
-def merged_response(tier: int = 1) -> dict:
+def started_response() -> dict:
+    """The broker takes a `/merge` and answers before the gates run; the outcome
+    arrives later, as the broker's own post."""
     return {"ok": True, "verb": "merge",
-            "result": {"merged": True, "slug": SLUG, "sha": MERGE_SHA,
-                       "tier": tier}}
+            "result": {"started": True, "slug": SLUG,
+                       "branch": f"loop/{SLUG}"}}
 
 
 async def test_merge_from_a_bot_is_refused_without_reaching_the_broker(
     client, monkeypatch, caplog
 ):
-    calls = record_broker(monkeypatch, merged_response())
+    calls = record_broker(monkeypatch, started_response())
     bot_id = await make_bot("claw")
     ch = await main_feed_id()
     await db.execute(
@@ -830,7 +829,7 @@ def test_merge_args_parse(raw, expected):
 async def test_merge_with_unparseable_args_answers_usage(
     client, monkeypatch, args
 ):
-    calls = record_broker(monkeypatch, merged_response())
+    calls = record_broker(monkeypatch, started_response())
     await make_user("alice")
     await login(client, "alice")
     ch = await main_feed_id()
@@ -842,7 +841,7 @@ async def test_merge_with_unparseable_args_answers_usage(
 
 
 async def test_merge_hands_the_broker_the_seq_and_the_slug(client, monkeypatch):
-    calls = record_broker(monkeypatch, merged_response(tier=1))
+    calls = record_broker(monkeypatch, started_response())
     await make_user("alice")
     await login(client, "alice")
     ch = await main_feed_id()
@@ -859,12 +858,13 @@ async def test_merge_hands_the_broker_the_seq_and_the_slug(client, monkeypatch):
     }
     replies = [m["content"] for m in await channel_messages(client, ch)]
     assert replies[-1] == (
-        f"Merged `{SLUG}` as {MERGE_SHA} (tier 1). Deploy stays at the keyboard."
+        f"Merge of `{SLUG}` started: the gates are running; the result will "
+        "post here."
     )
 
 
 async def test_merge_passes_a_review_seq_through(client, monkeypatch):
-    calls = record_broker(monkeypatch, merged_response(tier=2))
+    calls = record_broker(monkeypatch, started_response())
     await make_user("alice")
     await login(client, "alice")
     ch = await main_feed_id()
@@ -873,7 +873,29 @@ async def test_merge_passes_a_review_seq_through(client, monkeypatch):
 
     assert calls[0]["args"]["pass_seq"] == 2704
     replies = [m["content"] for m in await channel_messages(client, ch)]
-    assert replies[-1].endswith("(tier 2). Deploy stays at the keyboard.")
+    assert replies[-1].startswith(f"Merge of `{SLUG}` started")
+
+
+async def test_merge_inside_an_app_room_is_refused_before_the_broker(
+    client, monkeypatch
+):
+    calls = record_broker(monkeypatch, started_response())
+    await make_user("alice")
+    await login(client, "alice")
+    row = await db.fetch_one(
+        "INSERT INTO channels (type, name, visibility) VALUES ('app_build', 'room', 'private') RETURNING id"
+    )
+    await db.execute(
+        "INSERT INTO channel_members (channel_id, member_type, member_id) "
+        "SELECT ?, 'user', id FROM users WHERE username = 'alice'", (row["id"],)
+    )
+    await post(client, row["id"], f"/merge {SLUG}")
+    lines = [m["content"] for m in await channel_messages(client, row["id"])]
+    assert lines[-1] == (
+        "This room builds its app; /merge is for the platform. Type it in "
+        "another channel."
+    )
+    assert calls == []
 
 
 async def test_a_refused_merge_replies_with_the_brokers_own_words(
