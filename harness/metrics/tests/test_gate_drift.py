@@ -334,7 +334,10 @@ def test_an_artifact_that_is_not_installed_at_all_is_absent(lane):
     rows = artifacts(lane)
     assert states(rows)["build-kernel.md"] == "ABSENT"
     assert states(rows)["run-gates.sh"] == "MATCH"
-    assert "(ABSENT)" in lane.block()
+    line = [ln for ln in lane.block().splitlines()
+            if ln.startswith("judging artifacts:")][0]
+    assert line == (f"judging artifacts: NOT INSTALLED — "
+                    f"{lane.installed / 'build-kernel.md'} (ABSENT)")
 
 
 def test_an_unreadable_artifact_is_unreadable_not_absent(lane):
@@ -344,7 +347,8 @@ def test_an_unreadable_artifact_is_unreadable_not_absent(lane):
     path.unlink()
     path.mkdir()
     assert states(artifacts(lane))["disjorn-build-launch"] == "UNREADABLE"
-    assert "(UNREADABLE)" in lane.block()
+    assert (f"NOT INSTALLED — {lane.installed / 'disjorn-build-launch'} "
+            "(UNREADABLE)") in lane.block()
 
 
 def test_an_artifact_the_mirror_does_not_carry_is_unknown(lane):

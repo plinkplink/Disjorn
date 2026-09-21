@@ -159,6 +159,18 @@ def test_a_newline_in_a_filename_is_one_quoted_entry(harness, repo):  # noqa: F8
     assert path == repr("we\nird.txt")
 
 
+def test_a_renamed_file_with_a_newline_has_a_quoted_old_path(harness, repo):  # noqa: F811
+    write(repo, "we\nird.txt", "one\ntwo\nthree\n")
+    commit(repo, "main")
+    git(repo, "checkout", "-q", "-b", "feature")
+    git(repo, "mv", "we\nird.txt", "ok.txt")
+    commit(repo, "feature")
+
+    entry = call(harness, "main..feature")["result"]["files"][0]
+    assert entry["status"] == "R" and entry["path"] == "ok.txt"
+    assert entry["old_path"] == repr("we\nird.txt")
+
+
 # ── refusals ─────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("rng", ["main", "HEAD", "abc1234"])

@@ -1613,11 +1613,15 @@ def compose_drift_block(drift: dict, *, verbose: bool = False) -> str:
     # the hook line: not committed is the loud half.
     art = drift.get("judging_artifacts")
     if art:
-        bad = [a for a in art if a["state"] != "MATCH"]
-        if bad:
-            L.append("judging artifacts: INSTALLED IS NOT COMMITTED — "
-                     + ", ".join(f"{a['installed']} ({a['state']})"
-                                 for a in bad))
+        named = lambda rows: ", ".join(  # noqa: E731
+            f"{a['installed']} ({a['state']})" for a in rows)
+        gone = [a for a in art if a["state"] in ("ABSENT", "UNREADABLE")]
+        bad = [a for a in art
+               if a["state"] != "MATCH" and a not in gone]
+        if gone or bad:
+            parts = ([f"NOT INSTALLED — {named(gone)}"] if gone else []) + (
+                [f"INSTALLED IS NOT COMMITTED — {named(bad)}"] if bad else [])
+            L.append("judging artifacts: " + "; ".join(parts))
         else:
             L.append(f"judging artifacts: {len(art)} installed match "
                      f"{drift['paths'].get('branch') or 'main'}")
