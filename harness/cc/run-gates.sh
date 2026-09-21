@@ -64,7 +64,7 @@ mounts=( -v "$WORK:/work" )
 client_gate=1
 if [ -n "$CLIENT_CHANGED" ]; then
   if [ -d "$NODE_MODULES" ]; then
-    mounts+=( -v "$NODE_MODULES:/work/client/node_modules:ro" )
+    mounts+=( -v "$NODE_MODULES:/opt/node_modules:ro" )
   else
     # Unreadable is not skipped: a gate that did not run is red.
     echo "$TAG: client/ changed but $NODE_MODULES is not a directory this uid ($(id -un)) can see — the client gates cannot run" >&2
@@ -86,7 +86,9 @@ else
   echo "GATE tests fail"
 fi
 if [ "${GATE_CLIENT:-0}" = "1" ]; then
-  cd /work/client && npm run typecheck >&2
+  # vite writes node_modules/.vite-temp, so the toolchain is linked into a real directory.
+  cd /work/client && rm -rf node_modules && mkdir node_modules \
+    && ln -s /opt/node_modules/* /opt/node_modules/.bin node_modules/ && npm run typecheck >&2
   _tc=$?
   if [ "$_tc" -eq 0 ]; then
     echo "GATE typecheck pass"
