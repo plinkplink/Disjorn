@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as _dt
 import hashlib
 import json
@@ -756,9 +757,11 @@ def message_names_slug(content: str, slug: str) -> bool:
                      text) is not None
 
 
-def format_merge_done(*, slug: str, sha: str, tier: int) -> str:
+def format_merge_done(*, slug: str, sha: str, tier: int,
+                      folded: bool = False) -> str:
     """The two lines a finished `/merge` posts to the room it was typed in."""
-    return (f"merge: merged {slug} as {sha} (tier {tier})\n"
+    return (f"merge: merged {slug} as {sha}"
+            f"{' after folding main' if folded else ''} (tier {tier})\n"
             "next: deploy at the keyboard")
 
 
@@ -3224,6 +3227,10 @@ class Broker:
             sha = next((s for repo, s in published if repo.startswith("disjorn")),
                        published[0][1])
             banner = self._build_end_gates(slug=slug, origin=origin)
+            if banner.get("folded"):
+                # The diffstat above was read against the main the fold has
+                # since put in the branch.
+                diffstat += " (main folded in)"
             self._apps_post_stage(session, "files_written",
                                   {"turn": 1, "summary": report["files"]})
             detail = {"turn": 1, "branch": branch, "sha": sha}
@@ -3390,6 +3397,92 @@ class Broker:
                 "moved")
         return sha
 
+    def _fold_main_into(self, slug: str) -> Optional[str]:
+        """Main merged into loop/<slug> in the gatehouse: the branch's new
+        tip, or None when the merge moved nothing. Called only from the check
+        that runs BEFORE the gates."""
+        repo = self._gatehouse_or_refuse()
+        git = self._argv("spec_repo_git", ["git"])
+        timeout = SUBPROCESS_TIMEOUTS["merge"]
+        branch = f"loop/{slug}"
+        # NOT under the merge lock: this writes the branch, never main. The
+        # per-slug gate claim its callers hold is what serialises it.
+        with self._merge_workspace(slug) as clone:
+            def head() -> str:
+                return (self._run([*git, "-C", clone, "rev-parse", "HEAD"],
+                                  timeout).stdout or "").strip()
+
+            cp = self._run([*git, "clone", "--quiet", "--no-tags", "--branch",
+                            branch, repo, clone], timeout)
+            if cp.returncode != 0:
+                raise self._merge_refused(
+                    f"{branch} is not in the gatehouse", "branch-missing")
+            before = head()
+            cp = self._run([*git, "-C", clone, "fetch", "--quiet", "origin",
+                            "refs/heads/main"], timeout)
+            if cp.returncode != 0:
+                raise self._merge_refused(
+                    "the gatehouse has no main to merge into",
+                    "branch-missing")
+            main_sha = (self._run(
+                [*git, "-C", clone, "rev-parse", "FETCH_HEAD"],
+                timeout).stdout or "").strip()
+            cp = self._run(
+                [*git, "-C", clone,
+                 "-c", f"user.name={MERGE_IDENTITY_NAME}",
+                 "-c", f"user.email={MERGE_IDENTITY_EMAIL}",
+                 "merge", "--no-edit", "-m",
+                 f"fold main into {branch} (broker, before the gates)",
+                 "FETCH_HEAD"], timeout)
+            if cp.returncode != 0:
+                self._run([*git, "-C", clone, "merge", "--abort"], timeout)
+                raise self._merge_refused(
+                    f"{branch} conflicts with main; fold it at the keyboard",
+                    "moved")
+            tip = head()
+            if tip == before:
+                return None
+            cp = self._run([*git, "-C", clone, "push", "--quiet", "origin",
+                            f"HEAD:refs/heads/{branch}"], timeout)
+            if cp.returncode != 0:
+                raise self._merge_refused(
+                    "the gatehouse refused the fold "
+                    f"({(cp.stderr or cp.stdout).strip()[:300]})", "push")
+        self._build_ledger_line({
+            "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            "kind": "fold", "slug": slug, "from": before, "to": tip,
+            "main": main_sha})
+        return tip
+
+    def _main_before_gates(self, slug: str) -> tuple[str, str, Optional[str]]:
+        """The first check: main's sha, the branch tip everything after this
+        point is pinned to, and the tip a fold left behind when the branch did
+        not already contain main. Runs under the caller's gate claim.
+
+        THE SHA THAT IS GATED IS THE SHA THAT IS MERGED — the fold happens
+        here, before the gates, the classifier and any PASS check, so all three
+        see the folded tip and a PASS posted before the fold stops holding."""
+        try:
+            main_sha, folded = self._main_is_ancestor(slug), None
+        except VerbError as exc:
+            if exc.reason != "moved":
+                raise
+            folded = self._fold_main_into(slug)
+            main_sha = self._main_is_ancestor(slug)
+        repo = self._gatehouse_or_refuse()
+        tip = self._branch_tip(slug)
+        if (self._git(repo, "rev-list", "--count",
+                      f"main..{tip}").stdout or "").strip() == "0":
+            raise self._merge_refused(
+                f"loop/{slug} has no commits of its own to merge",
+                "branch-missing")
+        return main_sha, tip, folded
+
+    def _branch_tip(self, slug: str) -> str:
+        repo = self._gatehouse_or_refuse()
+        return (self._git(repo, "rev-parse", "--verify", "--quiet",
+                          f"refs/heads/loop/{slug}").stdout or "").strip()
+
     def _assert_main_unmoved(self, slug: str, before: str) -> None:
         """Main where the gates saw it, or this push would land a tree that was
         never gated."""
@@ -3402,6 +3495,14 @@ class Broker:
         if now != before:
             raise self._merge_refused(
                 "main moved while the gates ran; /merge again", "moved")
+
+    def _assert_tip_unmoved(self, slug: str, tip: str) -> None:
+        """The branch where the gates saw it: a commit pushed while they ran is
+        a tree nobody gated, and merging it would say otherwise."""
+        if self._branch_tip(slug) != tip:
+            raise self._merge_refused(
+                f"loop/{slug} moved while the gates ran; /merge again",
+                "moved")
 
     @staticmethod
     def _tier_of(classification: dict) -> int:
@@ -3462,7 +3563,8 @@ class Broker:
                 "created_at": created_at}
 
     def _check_pass(self, *, pass_seq: int, slug: str, paths: list[str],
-                    tip_at: Optional[_dt.datetime]) -> str:
+                    tip_at: Optional[_dt.datetime],
+                    folded: Optional[str] = None) -> str:
         """The four things that make a PASS hold: the right reviewer, after the
         tip, in #custodian, saying PASS for this slug."""
         if not paths:
@@ -3484,6 +3586,11 @@ class Broker:
                 f"{' or '.join(owners)}", "pass-invalid")
         posted = _as_utc(message["created_at"])
         if tip_at is not None and (posted is None or posted <= tip_at):
+            if folded:
+                raise self._merge_refused(
+                    f"loop/{slug} was folded onto main as {folded[:7]}, so "
+                    f"PASS {pass_seq} no longer names the gated tree; ask for "
+                    "a fresh PASS", "pass-invalid")
             raise self._merge_refused(
                 f"seq {pass_seq} was posted before the tip of loop/{slug}",
                 "pass-invalid")
@@ -3529,22 +3636,31 @@ class Broker:
             return 0
         return n
 
-    def _merge_branch(self, *, slug: str, author: str, tier: int,
-                      channel_id: int, seq: int, pass_seq: Optional[int],
-                      main_sha: str) -> str:
-        """Clone, merge, push — in a throwaway tree, so a half-done merge is a
-        directory nobody reads rather than a gatehouse nobody can build from."""
-        repo = self._gatehouse_or_refuse()
-        git = self._argv("spec_repo_git", ["git"])
-        timeout = SUBPROCESS_TIMEOUTS["merge"]
+    @contextlib.contextmanager
+    def _merge_workspace(self, slug: str):
+        """A throwaway clone tree, gone on every exit path, so a half-done
+        merge is a directory nobody reads rather than a gatehouse nobody can
+        build from."""
         try:
             os.makedirs(self.merge_work_dir, mode=0o700, exist_ok=True)
             work = tempfile.mkdtemp(prefix=f"{slug}-", dir=self.merge_work_dir)
         except OSError as exc:
             raise VerbError("exec-failure",
                             f"no merge workspace ({exc})") from None
-        clone = os.path.join(work, "repo")
         try:
+            yield os.path.join(work, "repo")
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    def _merge_branch(self, *, slug: str, author: str, tier: int,
+                      channel_id: int, seq: int, pass_seq: Optional[int],
+                      main_sha: str, tip_sha: str) -> str:
+        """Clone, merge, push. What is merged is `tip_sha` and nothing else:
+        an unpinned FETCH_HEAD would merge whatever was pushed last."""
+        repo = self._gatehouse_or_refuse()
+        git = self._argv("spec_repo_git", ["git"])
+        timeout = SUBPROCESS_TIMEOUTS["merge"]
+        with self._merge_workspace(slug) as clone:
             cp = self._run([*git, "clone", "--quiet", "--no-tags", "--branch",
                             "main", repo, clone], timeout)
             if cp.returncode != 0:
@@ -3556,6 +3672,13 @@ class Broker:
             if cp.returncode != 0:
                 raise self._merge_refused(
                     f"loop/{slug} is not in the gatehouse", "branch-missing")
+            fetched = (self._run(
+                [*git, "-C", clone, "rev-parse", "FETCH_HEAD"],
+                timeout).stdout or "").strip()
+            if fetched != tip_sha:
+                raise self._merge_refused(
+                    f"loop/{slug} moved while the gates ran; /merge again",
+                    "moved")
             cp = self._run(
                 [*git, "-C", clone,
                  "-c", f"user.name={MERGE_IDENTITY_NAME}",
@@ -3564,7 +3687,7 @@ class Broker:
                  merge_commit_message(slug=slug, author=author, tier=tier,
                                       channel_id=channel_id, seq=seq,
                                       pass_seq=pass_seq),
-                 "FETCH_HEAD"], timeout)
+                 tip_sha], timeout)
             if cp.returncode != 0:
                 self._run([*git, "-C", clone, "merge", "--abort"], timeout)
                 raise self._merge_refused(
@@ -3573,6 +3696,7 @@ class Broker:
             cp = self._run([*git, "-C", clone, "rev-parse", "HEAD"], timeout)
             sha = (cp.stdout or "").strip()
             self._assert_main_unmoved(slug, main_sha)
+            self._assert_tip_unmoved(slug, tip_sha)
             cp = self._run([*git, "-C", clone, "push", "--quiet", "origin",
                             "HEAD:refs/heads/main"], timeout)
             if cp.returncode != 0:
@@ -3580,8 +3704,6 @@ class Broker:
                     "the gatehouse refused the push "
                     f"({(cp.stderr or cp.stdout).strip()[:300]})", "push")
             return sha
-        finally:
-            shutil.rmtree(work, ignore_errors=True)
 
     def _refresh_after_merge(self) -> str:
         """main moved, so the mirror and the board follow it."""
@@ -3598,7 +3720,7 @@ class Broker:
 
     def _merge_now(self, *, slug: str, author: str, tier: int, channel_id: int,
                    seq: int, pass_seq: Optional[int], self_merge: bool,
-                   main_sha: str) -> tuple[str, str]:
+                   main_sha: str, tip_sha: str) -> tuple[str, str]:
         """Budget, merge, ledger, refresh — under one lock, so two merges can
         never both read the same pre-cap count or race each other onto main.
         Only a self-merge is budgeted, and the ledger says which kind this was."""
@@ -3611,7 +3733,8 @@ class Broker:
                         "budget")
             sha = self._merge_branch(slug=slug, author=author, tier=tier,
                                      channel_id=channel_id, seq=seq,
-                                     pass_seq=pass_seq, main_sha=main_sha)
+                                     pass_seq=pass_seq, main_sha=main_sha,
+                                     tip_sha=tip_sha)
             self._build_ledger_line({
                 "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),
                 "kind": MERGE_VERB, "seq": seq, "channel_id": channel_id,
@@ -3621,7 +3744,11 @@ class Broker:
 
     def _verb_merge(self, caller: str, args: dict) -> tuple[dict, str, dict]:
         """Take a human's `/merge`: everything the message itself decides is
-        settled here; the gates and the merge run in a thread, like `/build`."""
+        settled here; the gates and the merge run in a thread, like `/build`.
+
+        NOTHING THAT TOUCHES THE BRANCH RUNS ON THE SOCKET THREAD: the caller
+        is acknowledged first, and the claim is taken before the thread so a
+        second `/merge` is `busy` before any git runs for this slug."""
         _reject_unknown(args, {"seq", "channel_id", "slug", "pass_seq"})
         for key in ("seq", "channel_id", "slug"):
             if key not in args:
@@ -3655,7 +3782,6 @@ class Broker:
         if not message_names_slug(message["content"], slug):
             raise self._merge_refused(
                 f"message {seq} does not ask to merge {slug}", "slug-mismatch")
-        main_sha = self._main_is_ancestor(slug)
         if not self._claim_gate_run(slug):
             raise self._merge_refused(
                 f"a gate run for {slug} is already in flight", "busy")
@@ -3663,7 +3789,7 @@ class Broker:
         thread = threading.Thread(
             target=self._merge_in_background, args=(dict(args),),
             kwargs={"slug": slug, "author": author, "channel_id": channel_id,
-                    "seq": seq, "pass_seq": pass_seq, "main_sha": main_sha},
+                    "seq": seq, "pass_seq": pass_seq},
             daemon=True)
         self._merge_threads.append(thread)
         try:
@@ -3678,35 +3804,39 @@ class Broker:
 
     def _merge_in_background(self, args: dict, *, slug: str, author: str,
                              channel_id: int, seq: int,
-                             pass_seq: Optional[int], main_sha: str) -> None:
+                             pass_seq: Optional[int]) -> None:
         """The merge, off the socket thread. Nothing above it would catch, so
         it must never raise and must always give the slug back."""
         try:
             self._merge_and_post(args, slug=slug, author=author,
                                  channel_id=channel_id, seq=seq,
-                                 pass_seq=pass_seq, main_sha=main_sha)
+                                 pass_seq=pass_seq)
         except Exception:  # noqa: BLE001 — even an unwritable audit log
             pass
         finally:
             self._release_gate_run(slug)
 
     def _merge_and_post(self, args: dict, *, slug: str, author: str,
-                        channel_id: int, seq: int, pass_seq: Optional[int],
-                        main_sha: str) -> None:
-        """The gates, the tier, the PASS and the merge, then the one post the
-        room is left with."""
-        note: dict = {"owner": None, "gates_red": False}
+                        channel_id: int, seq: int,
+                        pass_seq: Optional[int]) -> None:
+        """The fold, the gates, the tier, the PASS and the merge, then the one
+        post the room is left with."""
+        note: dict = {"owner": None, "gates_red": False, "folded": None}
         try:
             body = self._merge_gated(
                 args, slug=slug, author=author, channel_id=channel_id,
-                seq=seq, pass_seq=pass_seq, main_sha=main_sha, note=note)
+                seq=seq, pass_seq=pass_seq, note=note)
         except VerbError as exc:
             reason = exc.reason if exc.reason in MERGE_REASONS else "gates"
             self._audit(SERVER_IDENTITY, MERGE_VERB, args, False,
-                        f"denied: {exc.message} ({reason})")
+                        f"denied: {exc.message} ({reason})",
+                        extra=({"folded": note["folded"]}
+                               if note["folded"] else None))
             body = format_merge_refused(
                 slug=slug, reason_text=exc.message,
-                next_line=merge_next_step(reason, slug=slug, **note))
+                next_line=merge_next_step(reason, slug=slug,
+                                          owner=note["owner"],
+                                          gates_red=note["gates_red"]))
         except Exception as exc:  # noqa: BLE001 — the room is owed an answer
             self._audit(SERVER_IDENTITY, MERGE_VERB, args, True,
                         f"error: internal: {exc!r}")
@@ -3717,8 +3847,10 @@ class Broker:
 
     def _merge_gated(self, args: dict, *, slug: str, author: str,
                      channel_id: int, seq: int, pass_seq: Optional[int],
-                     main_sha: str, note: dict) -> str:
+                     note: dict) -> str:
         """Steps 3–7 of the merge; `note` carries what a refusal line needs."""
+        main_sha, tip, folded = self._main_before_gates(slug)
+        note["folded"] = folded
         result, classification = self._gate_and_classify(slug)
         note["gates_red"] = result.exit_code != 0
         tier = self._tier_of(classification)
@@ -3733,18 +3865,22 @@ class Broker:
             reviewer = self._check_pass(
                 pass_seq=pass_seq, slug=slug,
                 paths=self._changed_paths(self._gatehouse_or_refuse(), slug),
-                tip_at=self._branch_tip_time(self._gatehouse_or_refuse(), slug))
+                tip_at=self._branch_tip_time(self._gatehouse_or_refuse(), slug),
+                folded=folded)
         stamped = pass_seq if tier == 2 else None
         sha, mirror = self._merge_now(slug=slug, author=author, tier=tier,
                                       channel_id=channel_id, seq=seq,
                                       pass_seq=stamped, self_merge=False,
-                                      main_sha=main_sha)
+                                      main_sha=main_sha, tip_sha=tip)
         cited = f", PASS from {reviewer} (seq {pass_seq})" if reviewer else ""
+        extra = {"merge_tier": tier, "merged_sha": sha}
+        if folded is not None:
+            extra["folded"] = folded
         self._audit(SERVER_IDENTITY, MERGE_VERB, args, True,
                     f"merged loop/{slug} into main as {sha} for {author} "
-                    f"(tier {tier}{cited})" + mirror,
-                    extra={"merge_tier": tier, "merged_sha": sha})
-        return format_merge_done(slug=slug, sha=sha, tier=tier)
+                    f"(tier {tier}{cited})" + mirror, extra=extra)
+        return format_merge_done(slug=slug, sha=sha, tier=tier,
+                                 folded=folded is not None)
 
     def _first_lane_owner(self, slug: str) -> Optional[str]:
         """Who the banner names on a Tier 2 build."""
@@ -3775,14 +3911,14 @@ class Broker:
         this build's own `/build` seq authorizes. Never raises: it runs in the
         reaper, where an exception would eat the banner."""
         try:
-            main_sha = self._main_is_ancestor(slug)
+            main_sha, tip, folded = self._main_before_gates(slug)
             result, classification = self._gate_and_classify(slug)
             tier = self._tier_of(classification)
         except VerbError as exc:
             if exc.reason == "moved":
                 return {"tests": "n/a — nothing was gated",
                         "tier": "n/a — nothing to classify",
-                        "next": f"fold main into the branch, then /merge {slug}"}
+                        "next": f"{exc.message}, then /merge {slug}"}
             return {"tests": f"fail — {exc.message}",
                     "tier": "unknown — the gates did not run",
                     "next": "fix the red gate, then /build again"}
@@ -3792,6 +3928,8 @@ class Broker:
                     "next": "fix the red gate, then /build again"}
         out = {"tests": format_gate_tests_line(result),
                "tier": format_tier_line(tier, classification.get("reasons"))}
+        if folded is not None:
+            out["folded"] = folded
         if result.exit_code != 0:
             out["next"] = "fix the red gate, then /build again"
         elif tier == 0 and origin.get("seq"):
@@ -3802,7 +3940,7 @@ class Broker:
                     slug=slug, author=str(origin.get("author") or "the broker"),
                     tier=0, channel_id=int(origin.get("channel_id") or 0),
                     seq=int(origin.get("seq") or 0), pass_seq=None,
-                    self_merge=True, main_sha=main_sha)
+                    self_merge=True, main_sha=main_sha, tip_sha=tip)
             except VerbError as exc:
                 out["next"] = (f"Tier 0 budget spent today; /merge {slug}"
                                if exc.reason == "budget" else f"/merge {slug}")

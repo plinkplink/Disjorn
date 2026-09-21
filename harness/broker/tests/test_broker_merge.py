@@ -6,6 +6,7 @@ from __future__ import annotations
 import datetime as dt
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import broker_testlib as T  # noqa: E402
 from brokerd import Broker, ConfigError, merge_commit_message  # noqa: E402
 from broker_testlib import harness  # noqa: E402,F401
 
@@ -223,7 +225,6 @@ def test_a_tier_below_two_merges_and_stamps_merge_seq_last(harness, tier):
 def test_the_merge_commit_is_a_no_ff_merge_by_the_broker(harness):
     arm(harness, tier=1)
     merge(harness)
-    import broker_testlib as T
     assert T._git(harness.gatehouse, "log", "-1", "--format=%an <%ae>",
                   "main").strip() == "disjorn-broker <broker@disjorn.local>"
     parents = T._git(harness.gatehouse, "log", "-1", "--format=%P",
@@ -411,14 +412,147 @@ def test_the_slug_is_read_as_a_whole_token(harness, content):
     harness.finish_merges()
 
 
-def test_a_branch_behind_main_is_refused_before_the_gates(harness):
-    calls = arm(harness, tier=1)
+def fold_lines(h) -> list[dict]:
+    return [ln for ln in h.build_ledger_lines() if ln.get("kind") == "fold"]
+
+
+def test_a_branch_behind_main_is_folded_and_gated_at_the_folded_tip(harness):
+    """The branch was cut before main advanced, so the broker folds main in
+    first — and what the gates run against is the tip the fold made."""
+    gated: list[str] = []
+    arm(harness, tier=1,
+        on_gates=lambda: gated.append(harness.branch_tip(SLUG)))
+    old_tip = harness.branch_tip(SLUG)
     harness.move_main(path="docs/elsewhere.md")
+    old_main = harness.sha("refs/heads/main")
+
+    lines = merge(harness)
+    folded = harness.branch_tip(SLUG)
+    assert gated == [folded] and folded != old_tip
+    sha = harness.build_ledger_lines()[-1]["sha"]
+    assert lines == [
+        f"merge: merged {SLUG} as {sha} after folding main (tier 1)",
+        "next: deploy at the keyboard"]
+    assert T._git(harness.gatehouse, "log", "-1", "--format=%s%n%an <%ae>",
+                  folded).splitlines() == [
+        f"fold main into loop/{SLUG} (broker, before the gates)",
+        "disjorn-broker <broker@disjorn.local>"]
+    assert T._git(harness.gatehouse, "log", "-1", "--format=%P",
+                  folded).split() == [old_tip, old_main]
+    history = T._git(harness.gatehouse, "log", "--format=%H", "main").split()
+    assert {old_tip, old_main, folded} <= set(history)
+
+
+def test_a_branch_that_conflicts_with_main_moves_nothing(harness):
+    """A fold that cannot happen is a posted refusal, like every other one
+    the gates' side of the verb reaches."""
+    calls = arm(harness, tier=1, path="docs/a.md")
+    old_tip = harness.branch_tip(SLUG)
+    harness.move_main()
     before = harness.main_subjects()
-    reason, message = refusal(call(harness))
+
+    reason, message, post = late_refusal(harness)
     assert reason == "moved"
-    assert message == f"loop/{SLUG} is behind main; fold main into the branch first"
-    assert calls == [] and harness.main_subjects() == before
+    assert message == (f"loop/{SLUG} conflicts with main; fold it at the "
+                       "keyboard")
+    assert post[0] == f"merge: refused {SLUG} — {message}"
+    assert post[1] == "next: fold main into the branch, then /merge again"
+    assert calls == [] and fold_lines(harness) == []
+    assert harness.main_subjects() == before
+    assert harness.branch_tip(SLUG) == old_tip
+
+
+def test_the_call_is_acknowledged_before_any_branch_work(harness):
+    """The socket thread does no git on the branch: the fold runs in the
+    background, like the gates."""
+    reached, release = threading.Event(), threading.Event()
+    real = harness.broker._fold_main_into
+
+    def blocking(slug: str):
+        reached.set()
+        release.wait(timeout=10)
+        return real(slug)
+
+    arm(harness, tier=1)
+    harness.broker._fold_main_into = blocking
+    harness.move_main(path="docs/elsewhere.md")
+    old_tip = harness.branch_tip(SLUG)
+
+    assert call(harness)["result"]["started"] is True
+    assert reached.wait(timeout=10)
+    assert harness.branch_tip(SLUG) == old_tip
+    release.set()
+    harness.finish_merges()
+    assert harness.merge_outcomes()[-1][0].startswith("merge: merged ")
+
+
+def test_a_commit_pushed_while_the_gates_run_refuses_the_merge(harness):
+    """The merge is pinned to the gated tip: a commit that lands after the
+    gates is a tree nobody ran them against."""
+    arm(harness, tier=1, on_gates=lambda: harness.commit_on_branch(SLUG))
+    reason, message, post = late_refusal(harness)
+    assert reason == "moved"
+    assert message == f"loop/{SLUG} moved while the gates ran; /merge again"
+    assert post[0] == f"merge: refused {SLUG} — {message}"
+    assert harness.main_subjects() == ["init"]
+
+
+@pytest.mark.parametrize("behind", [False, True])
+def test_a_branch_with_nothing_of_its_own_is_refused(harness, behind):
+    arm(harness, tier=1, branch=False)
+    harness.push_empty_branch(SLUG)
+    if behind:
+        harness.move_main(path="docs/elsewhere.md")
+    reason, message, post = late_refusal(harness)
+    assert reason == "branch-missing"
+    assert message == f"loop/{SLUG} has no commits of its own to merge"
+    assert post[1] == "next: merge it at the keyboard"
+    assert [s for s in harness.main_subjects() if s.startswith("merge: ")] == []
+
+
+def test_a_pass_posted_before_the_fold_no_longer_holds(harness):
+    """The fold makes a new tip, so a PASS read against the old one is a PASS
+    for a tree that is not the one being merged."""
+    arm(harness, tier=2)
+    harness.move_main(path="docs/elsewhere.md")
+    harness.add_custodian_post(PASS_SEQ, f"PASS {SLUG}", author="Claudette",
+                               created_at=later(0))
+    # A commit time has one-second resolution; the fold has to land in a later
+    # second than the post or the comparison proves nothing.
+    time.sleep(1.1)
+    reason, message, _post = late_refusal(harness, pass_seq=PASS_SEQ)
+    folded = harness.branch_tip(SLUG)
+    assert reason == "pass-invalid"
+    assert message == (f"loop/{SLUG} was folded onto main as {folded[:7]}, so "
+                       f"PASS {PASS_SEQ} no longer names the gated tree; ask "
+                       "for a fresh PASS")
+    assert fold_lines(harness)[-1]["to"] == folded
+    assert harness.main_subjects() == ["main moves", "init"]
+
+
+def test_the_fold_lands_on_the_ledger_and_the_verbs_audit_line(harness):
+    arm(harness, tier=1)
+    old_tip = harness.branch_tip(SLUG)
+    harness.move_main(path="docs/elsewhere.md")
+    old_main = harness.sha("refs/heads/main")
+
+    assert call(harness)["ok"] is True
+    harness.finish_merges()
+    folded = harness.branch_tip(SLUG)
+    line = fold_lines(harness)[-1]
+    assert line == {"ts": line["ts"], "kind": "fold", "slug": SLUG,
+                    "from": old_tip, "to": folded, "main": old_main}
+    done = [e for e in harness.audit_lines()
+            if e["verb"] == "merge" and e.get("merged_sha")]
+    assert done[-1]["folded"] == folded
+
+
+def test_a_merge_that_folded_nothing_says_nothing_about_folding(harness):
+    arm(harness, tier=1)
+    assert merge(harness)[0] == (
+        f"merge: merged {SLUG} as {harness.sha()} (tier 1)")
+    assert fold_lines(harness) == []
+    assert "folded" not in [k for e in harness.audit_lines() for k in e]
 
 
 def test_main_moving_while_the_gates_run_refuses_the_push(harness):
@@ -440,12 +574,23 @@ def test_a_second_merge_while_the_gates_run_is_refused(harness):
     assert message == f"a gate run for {SLUG} is already in flight"
 
 
-def test_a_merge_while_a_build_end_gate_run_is_up_is_refused(harness):
+def test_a_merge_while_a_build_end_gate_run_is_up_touches_nothing(harness):
+    """The claim is taken before any git runs for the slug, so the refused
+    `/merge` cannot fold a branch the build end is already working on."""
     seen: list = []
-    arm(harness, tier=1, on_gates=lambda: seen.append(call(harness)))
+    tips: list = []
+
+    def probe() -> None:
+        tips.append(harness.branch_tip(SLUG))
+        seen.append(call(harness))
+        tips.append(harness.branch_tip(SLUG))
+
+    arm(harness, tier=1, on_gates=probe)
+    harness.move_main(path="docs/elsewhere.md")
     outcome(harness)
     assert refusal(seen[0]) == (
         "busy", f"a gate run for {SLUG} is already in flight")
+    assert tips[0] == tips[1] and len(fold_lines(harness)) == 1
 
 
 # ── the /build end: gates, the banner, and the Tier 0 self-merge ─────────
@@ -567,13 +712,37 @@ def test_a_human_merge_is_never_budgeted(harness):
     assert merge(harness)[0].startswith("merge: merged ")
 
 
-def test_a_build_whose_branch_fell_behind_main_gates_nothing(harness):
+def test_a_build_whose_branch_fell_behind_main_folds_and_self_merges(harness):
     calls = arm(harness, tier=0)
+    old_tip = harness.branch_tip(SLUG)
     harness.move_main(path="docs/elsewhere.md")
+
+    lines = outcome(harness)
+    folded = harness.branch_tip(SLUG)
+    assert folded != old_tip and fold_lines(harness)[-1]["to"] == folded
+    assert len(calls) == 1 and calls[0]["slug"] == SLUG
+    assert lines[0] == "tests: pass — server 12 passed; harness 4 passed"
+    assert lines[2].endswith(" (main folded in)")
+    sha = harness.build_ledger_lines()[-1]["sha"]
+    assert lines[3] == f"next: merged {sha}"
+    assert harness.main_subjects()[0] == (
+        f"merge: {SLUG} (/merge by plink, tier 0)")
+
+
+def test_a_commit_pushed_while_a_builds_gates_run_stops_the_self_merge(harness):
+    arm(harness, tier=0, on_gates=lambda: harness.commit_on_branch(SLUG))
+    assert outcome(harness)[3] == f"next: /merge {SLUG}"
+    assert harness.main_subjects() == ["init"]
+
+
+def test_a_build_whose_branch_conflicts_with_main_gates_nothing(harness):
+    calls = arm(harness, tier=0, path="docs/a.md")
+    harness.move_main()
     lines = outcome(harness)
     assert calls == []
     assert lines[0] == "tests: n/a — nothing was gated"
-    assert lines[3] == f"next: fold main into the branch, then /merge {SLUG}"
+    assert lines[3] == (f"next: loop/{SLUG} conflicts with main; fold it at "
+                        f"the keyboard, then /merge {SLUG}")
     assert [s for s in harness.main_subjects() if s.startswith("merge: ")] == []
 
 
