@@ -44,6 +44,7 @@
 "refresh-mirror" = false
 "start-build" = false
 "classify-diff" = false
+"changed-files" = false
 "read-prod-logs" = false
 "read-own-log" = false
 "read-metrics" = false
@@ -68,6 +69,7 @@
 "refresh-mirror" = false
 "start-build" = false
 "classify-diff" = false
+"changed-files" = false
 "read-prod-logs" = false
 "read-own-log" = false
 "read-metrics" = false

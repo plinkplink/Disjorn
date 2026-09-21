@@ -194,6 +194,27 @@ VERB_SURFACE = {
             },
         },
     },
+    "changed-files": {
+        "help": "list the files a range changed, with +/- counts",
+        "args": {
+            "repo": {
+                "flag": "--repo",
+                "type": "string",
+                "required": True,
+                "help": "Absolute path to the repo (no '..' segments).",
+                "absolute_path": True,
+                "no_dotdot": True,
+            },
+            "range": {
+                "flag": "--range",
+                "type": "string",
+                "required": True,
+                "help": "Git range 'A..B' or 'A...B' (both read as merge-base form), max 200 chars, charset [A-Za-z0-9._~^/{}-], neither side starting with '-'.",
+                "pattern": "^[A-Za-z0-9._~^/{}-]{1,200}$",
+                "no_leading_dash": True,
+            },
+        },
+    },
     "read-prod-logs": {
         "help": "tail the Disjorn service journal",
         "args": {

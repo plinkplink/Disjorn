@@ -78,21 +78,9 @@ def _today_str(now: Optional[_dt.datetime] = None) -> str:
 def _yesterday_str(now: Optional[_dt.datetime] = None) -> str:
     """The previous complete UTC day — what the daily digest reports.
 
-    It used to report TODAY at 23:55, which left the last five minutes of every
-    day in no digest at all: those events are stamped with today's date, but
-    today's digest has already posted and tomorrow's reports tomorrow.
-
-    Five minutes sounds like a rounding error and was not one. 12 of 103 audit
-    events landed in it — 34x over-represented — because the traffic there was
-    not random: it was Claudette reading her own audit 5-40 seconds after the
-    digest posted, checking the number against her memory of what she did. The
-    hole sat exactly over the resident auditing the ledger, so the ledger could
-    not record that it had been checked. One of the twelve is #custodian seq
-    599, a correction SHE FILED ABOUT THE DIGEST 27 seconds after it posted.
-
-    Reporting the previous complete day removes the window entirely rather than
-    shrinking it. Her post-digest audit now lands in the next digest, which is
-    correct, because that is the day it happened on."""
+    Never report the day in progress: the minutes between the post and midnight
+    land in no digest at all, and the traffic there is not random — it is a
+    resident auditing the ledger moments after the ledger posts."""
     return ((now or _utc_now()) - _dt.timedelta(days=1)).strftime("%Y-%m-%d")
 
 
@@ -430,7 +418,7 @@ def write_metrics(config: dict, doc: dict) -> str:
 # The pre-receive hook (harness/gatehouse/hooks/pre-receive-main-review) is
 # deliberately dumb: paths plus a trailer, a presence check on text. Everything
 # it delegates lands HERE, and it has to actually exist here or `review-seq: 1`
-# passes forever and the whole gate is a spelling test (seq 1428, G2).
+# passes forever and the whole gate is a spelling test.
 #
 # This half computes, for one day:
 #
@@ -440,23 +428,20 @@ def write_metrics(config: dict, doc: dict) -> str:
 #     logged push covers it AND that push's trailer resolves (the seq exists,
 #     lives in #custodian). Push boundaries come from the hook's log and are
 #     never reconstructed from reachability — a five-commit push with one
-#     trailer on the tip is ONE cited range, not one pass and four false
-#     violations. Coverage is per logged range, so a later trailer-bearing push
-#     cannot bless its ancestors: a push that landed only because the hook
-#     failed open stays uncited forever.
-#   * SELF-CITATION — a `review-seq` whose author is the person who pushed. The
-#     comfortable failure mode, named so it cannot pass as review. An
+#     trailer on the tip is ONE cited range. Coverage is per logged range, so a
+#     later trailer-bearing push cannot bless the ancestors of a push that
+#     landed only because the hook failed open.
+#   * SELF-CITATION — a `review-seq` whose author is the person who pushed. An
 #     `override-seq` and a `merge-seq` ARE the pusher's own line by design; no
 #     check there.
 #   * COVERAGE CLASSES above the genesis floor. No covering log line means the
 #     commit never met the hook, and that is ALL the log knows. It does NOT
 #     mean the hook was down: commits made locally in the canonical repo never
-#     push, so they never could have a log line. Nothing here asserts a hook
-#     state it did not measure. Each commit above the floor lands in exactly
-#     one class: `covered` (a logged push range holds it), `local-stamp` (the
-#     actor left a positive record naming the sha as it committed),
-#     `local-keyboard` (no record, but the committer is an identity this
-#     deployment declares local), or UNEXPLAINED. Only unexplained is a
+#     push, so they never could have a log line. Each commit above the floor
+#     lands in exactly one class: `covered` (a logged push range holds it),
+#     `local-stamp` (the actor left a positive record naming the sha as it
+#     committed), `local-keyboard` (no record, but the committer is an identity
+#     this deployment declares local), or UNEXPLAINED. Only unexplained is a
 #     finding.
 #   * FLOOR MOTION — the floor this digest sees against the floor its own
 #     PREVIOUS post reported. That baseline lives in the message store, outside
@@ -465,10 +450,9 @@ def write_metrics(config: dict, doc: dict) -> str:
 #
 # NOTHING HERE IS DERIVED-BUT-STORED (G5). The override and chat-merge counts
 # are recomputed from `main`'s trailers every time, so "counted forever"
-# survives a database rebuild. The floor-motion baseline is read back out of
-# the previous post. The push log is the one primary record — push boundaries
-# and fail-open firings exist nowhere in git and cannot be derived after the
-# fact, which makes it the same class as the broker audit log, not a cache.
+# survives a database rebuild. The push log is the one primary record — push
+# boundaries and fail-open firings exist nowhere in git and cannot be derived
+# after the fact, which makes it the same class as the broker audit log.
 
 GATE_GUARDED_PREFIXES = ("server/", "client/", "sdk/", "harness/")
 HOOK_REPO_PATH = "harness/gatehouse/hooks/pre-receive-main-review"
@@ -502,16 +486,16 @@ def trailer_parts(m) -> tuple:
     return (kind.lower(), int(nums[0]) if len(nums) == 2 else None, int(nums[-1]))
 
 
-# THE LOCAL COVERAGE LOG — the push log's sibling (seq 2067). Written by the
-# actors that commit into the canonical repo WITHOUT pushing, read here.
+# THE LOCAL COVERAGE LOG — the push log's sibling. Written by the actors that
+# commit into the canonical repo WITHOUT pushing, read here.
 #
 #   LOCAL <ts> <sha> <outcome>
 #
 # A local commit can never have a push-log line, because there was no push. The
-# fix is not a cleverer inference, it is a POSITIVE RECORD from the one process
-# that knows: this sha, this time, this word.
+# answer is not a cleverer inference, it is a POSITIVE RECORD from the one
+# process that knows: this sha, this time, this word.
 #
-# A SEPARATE FILE, ON PURPOSE. Putting a second writer inside the one file the
+# A SEPARATE FILE, ON PURPOSE. A second writer inside the one file the
 # detector's integrity rests on would trade the push log's genesis and
 # truncation tells for tidiness. Deleting THIS file degrades every record it
 # held to local-keyboard or UNEXPLAINED, never to clean.
@@ -794,44 +778,102 @@ def parse_local_log(path: Optional[str]) -> dict:
 
 # -- liveness (G3) ----------------------------------------------------------
 
-def hook_liveness(paths: dict) -> dict:
-    """Is the detector armed? The installed path, the sha of the file the
-    symlink ACTUALLY resolves to, and the mirror's sha for the same file.
+def _installed_vs_mirror(path: Optional[str], repo_path: str,
+                         mirror: Optional[str], branch: str) -> dict:
+    """One installed file against the mirror's committed copy of it.
 
     The comparison is against the DEPLOYED COPY (G4), never a working clone: a
-    `git checkout` in a clone would silently disarm the gate, and this line is
-    what would notice."""
+    `git checkout` in a clone would silently disarm the gate, and this is what
+    would notice. Every installed-vs-committed line in the block goes through
+    here, so they cannot drift into different answers."""
+    out = {"target": None, "state": "ABSENT", "deployed_sha": None,
+           "mirror_sha": None, "error": None}
+    target, exists = _resolve_link(path)
+    out["target"] = target
+    if not target or not exists:
+        return out
+    data, err = _read_bytes(target)
+    if data is None:
+        out["state"] = "UNREADABLE"
+        out["error"] = err
+        return out
+    out["deployed_sha"] = _blob_sha(mirror, data)
+    mirror_sha = _git(mirror or "", "rev-parse", f"{branch}:{repo_path}")
+    out["mirror_sha"] = mirror_sha.strip() if mirror_sha else None
+    if out["mirror_sha"] is None:
+        out["state"] = "UNKNOWN"
+    elif out["mirror_sha"] == out["deployed_sha"]:
+        out["state"] = "MATCH"
+    else:
+        out["state"] = "MISMATCH"
+    return out
+
+
+def hook_liveness(paths: dict) -> dict:
+    """Is the detector armed? The installed path, the sha of the file the
+    symlink ACTUALLY resolves to, and the mirror's sha for the same file."""
     link = paths.get("hook_link")
     out = {"link": link, "target": None, "state": "ABSENT",
            "deployed_sha": None, "mirror_sha": None, "detail": ""}
     if not link:
         out["detail"] = "no [gate].canonical_repo / hook_link configured"
         return out
-    target, exists = _resolve_link(link)
-    out["target"] = target
-    if not target or not exists:
+    r = _installed_vs_mirror(link, HOOK_REPO_PATH, paths.get("mirror"),
+                             paths.get("branch", "main"))
+    out.update(target=r["target"], state=r["state"],
+               deployed_sha=r["deployed_sha"], mirror_sha=r["mirror_sha"])
+    if r["state"] == "ABSENT":
         out["detail"] = ("the pre-receive symlink is missing or dangling — "
                          "the gate is NOT installed")
-        return out
-    data, err = _read_bytes(target)
-    if data is None:
-        out["state"] = "UNREADABLE"
-        out["detail"] = f"cannot read the deployed hook: {err}"
-        return out
-    out["deployed_sha"] = _blob_sha(paths.get("mirror"), data)
-    mirror_sha = _git(paths.get("mirror") or "", "rev-parse",
-                      f"{paths.get('branch', 'main')}:{HOOK_REPO_PATH}")
-    out["mirror_sha"] = mirror_sha.strip() if mirror_sha else None
-    if out["mirror_sha"] is None:
-        out["state"] = "UNKNOWN"
+    elif r["state"] == "UNREADABLE":
+        out["detail"] = f"cannot read the deployed hook: {r['error']}"
+    elif r["state"] == "UNKNOWN":
         out["detail"] = (f"the mirror has no {HOOK_REPO_PATH} to compare "
                          f"against")
-    elif out["mirror_sha"] == out["deployed_sha"]:
-        out["state"] = "MATCH"
-    else:
-        out["state"] = "MISMATCH"
+    elif r["state"] == "MISMATCH":
         out["detail"] = ("the installed hook is NOT the committed one — "
                          "committed is not installed")
+    return out
+
+
+# What a build is judged BY: the gate script, the launcher and the kernel the
+# build session is handed. A branch is measured by the installed copies, so an
+# installed copy that is not the committed one makes every verdict a verdict of
+# something nobody reviewed.
+JUDGING_ARTIFACTS = [
+    ("/usr/local/lib/disjorn/run-gates.sh", "harness/cc/run-gates.sh"),
+    ("/usr/local/lib/disjorn/disjorn-build-launch",
+     "harness/broker/disjorn-build-launch"),
+    ("/usr/local/lib/disjorn/build-kernel.md", "harness/cc/build-kernel.md"),
+]
+
+
+def judging_rows(config: dict) -> list:
+    """The artifact table, overridable at `[drift].judging_artifacts` (a list of
+    [installed, repo_path] pairs) so no test has to read /usr/local. A malformed
+    override falls back whole, never half-applied."""
+    d = config.get("drift")
+    raw = d.get("judging_artifacts") if isinstance(d, dict) else None
+    if not isinstance(raw, list) or not raw:
+        return list(JUDGING_ARTIFACTS)
+    rows = []
+    for item in raw:
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            return list(JUDGING_ARTIFACTS)
+        rows.append((str(item[0]), str(item[1])))
+    return rows
+
+
+def judging_artifacts(paths: dict, config: dict) -> list:
+    """Every row of the table, deployed against committed. A fourth artifact is
+    a row here, never a branch anywhere."""
+    mirror, branch = paths.get("mirror"), paths.get("branch", "main")
+    out = []
+    for installed, repo_path in judging_rows(config):
+        r = _installed_vs_mirror(installed, repo_path, mirror, branch)
+        out.append({"installed": installed, "repo_path": repo_path,
+                    "state": r["state"], "deployed_sha": r["deployed_sha"],
+                    "mirror_sha": r["mirror_sha"]})
     return out
 
 
@@ -1390,6 +1432,7 @@ def gate_drift(config: dict, *, date: str, now: Optional[_dt.datetime] = None,
     drift["genesis"] = genesis
     drift["liveness"] = hook_liveness(paths)
     drift["cc"] = cc_version(paths)
+    drift["judging_artifacts"] = judging_artifacts(paths, config)
 
     db = _open_db(paths["message_db"])
     try:
@@ -1565,6 +1608,23 @@ def compose_drift_block(drift: dict, *, verbose: bool = False) -> str:
         L.append(f"claude-code: image {cc.get('deployed') or '?'} vs mirror pin "
                  f"{cc.get('pinned') or '?'} ({cc['state']})"
                  + (f" — {cc['detail']}" if cc.get("detail") else ""))
+
+    # 1c. the artifacts the build lane judges by, same shape, same weight as
+    # the hook line: not committed is the loud half.
+    art = drift.get("judging_artifacts")
+    if art:
+        named = lambda rows: ", ".join(  # noqa: E731
+            f"{a['installed']} ({a['state']})" for a in rows)
+        gone = [a for a in art if a["state"] in ("ABSENT", "UNREADABLE")]
+        bad = [a for a in art
+               if a["state"] != "MATCH" and a not in gone]
+        if gone or bad:
+            parts = ([f"NOT INSTALLED — {named(gone)}"] if gone else []) + (
+                [f"INSTALLED IS NOT COMMITTED — {named(bad)}"] if bad else [])
+            L.append("judging artifacts: " + "; ".join(parts))
+        else:
+            L.append(f"judging artifacts: {len(art)} installed match "
+                     f"{drift['paths'].get('branch') or 'main'}")
 
     # 2. the log's genesis
     g = drift["genesis"]

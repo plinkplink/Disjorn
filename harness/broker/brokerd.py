@@ -47,6 +47,9 @@ MAX_LOG_LINES = 500
 MAX_AUDIT_ENTRIES = 500
 MAX_GREP_CHARS = 200
 MAX_GATES_JSON = 8192
+# One `changed-files` answer has to fit a reviewer's context, so the file list
+# is capped and the totals keep counting past the cap.
+MAX_CHANGED_FILES = 500
 # Plan Room (SPECS/2026-08-20-plan-room.md).
 MAX_BOARD_CARDS = 200
 MAX_BOARD_COMMENT_CHARS = 4000
@@ -62,6 +65,7 @@ SUBPROCESS_TIMEOUTS = {  # seconds, per verb
     "restart-disjorn": 60,
     "run-server-tests": 900,
     "classify-diff": 120,
+    "changed-files": 60,
     "read-prod-logs": 30,
     "refresh-mirror": 120,
     "spec-status": 60,
@@ -535,6 +539,64 @@ def _reject_unknown(args: dict, allowed: set[str]) -> None:
         raise _bad(f"unknown args: {sorted(unknown)}")
 
 
+def _split_diff_range(rng: str) -> tuple[str, str]:
+    """Both sides of `A..B` / `A...B`; a bare rev names no pair and is refused."""
+    sep = "..." if "..." in rng else ".."
+    sides = rng.split(sep)
+    if len(sides) != 2 or not all(sides):
+        raise _bad("range must be A..B or A...B")
+    return sides[0], sides[1]
+
+
+def _safe_path(path: str) -> str:
+    """A control character in a filename could forge a line in a reviewer's
+    context, so such a path is handed back quoted rather than raw."""
+    if any(ch < " " or ch == "\x7f" for ch in path):
+        return repr(path)
+    return path
+
+
+def _parse_numstat(out: str) -> dict[str, tuple[Optional[int], Optional[int]]]:
+    """`git diff --numstat -z`: a rename's record ends in an empty path field
+    and the old and new names follow as two more NUL-separated fields; a binary
+    file counts `-` on both sides."""
+    fields = out.split("\0")
+    counts: dict[str, tuple[Optional[int], Optional[int]]] = {}
+    i = 0
+    while i < len(fields):
+        record = fields[i]
+        i += 1
+        if not record:
+            continue
+        added, removed, path = record.split("\t", 2)
+        if not path:
+            path = fields[i + 1]
+            i += 2
+        counts[path] = (None if added == "-" else int(added),
+                        None if removed == "-" else int(removed))
+    return counts
+
+
+def _parse_name_status(out: str) -> list[tuple[str, str, Optional[str]]]:
+    """`git diff --name-status -z` as (status letter, path, old path or None);
+    R and C carry a similarity score after the letter and two path fields."""
+    fields = out.split("\0")
+    rows: list[tuple[str, str, Optional[str]]] = []
+    i = 0
+    while i < len(fields):
+        code = fields[i]
+        i += 1
+        if not code:
+            continue
+        if code[0] in ("R", "C"):
+            rows.append((code[0], fields[i + 1], fields[i]))
+            i += 2
+        else:
+            rows.append((code[0], fields[i], None))
+            i += 1
+    return rows
+
+
 def _check_date(args: dict, key: str) -> str:
     v = _check_str(args, key, required=True, max_len=10)
     assert v is not None
@@ -736,10 +798,12 @@ def _as_utc(value: Any) -> Optional[_dt.datetime]:
 
 
 def merge_commit_message(*, slug: str, author: str, tier: int, channel_id: int,
-                         seq: int, pass_seq: Optional[int] = None) -> str:
+                         seq: int, pass_seq: Optional[int] = None,
+                         self_merge: bool = False) -> str:
     """The merge commit's text. `review-seq` goes AFTER `merge-seq` because the
     hook's last-trailer-wins rule is what records the review."""
-    lines = [f"merge: {slug} (/merge by {author}, tier {tier})", "",
+    command = "/build" if self_merge else "/merge"
+    lines = [f"merge: {slug} ({command} by {author}, tier {tier})", "",
              f"merge-seq: {channel_id}:{seq}"]
     if pass_seq is not None:
         lines.append(f"review-seq: {pass_seq}")
@@ -1646,6 +1710,7 @@ class Broker:
             BUILD_VERB: self._verb_build,
             MERGE_VERB: self._verb_merge,
             "classify-diff": self._verb_classify_diff,
+            "changed-files": self._verb_changed_files,
             "read-prod-logs": self._verb_read_prod_logs,
             "read-own-log": self._verb_read_own_log,
             "read-metrics": self._verb_read_metrics,
@@ -2060,11 +2125,15 @@ class Broker:
         return list(argv)
 
     def _run(self, argv: list[str], timeout: int,
-             cwd: Optional[str] = None) -> subprocess.CompletedProcess:
+             cwd: Optional[str] = None,
+             errors: Optional[str] = None) -> subprocess.CompletedProcess:
         # Fixed argv list, shell NEVER involved.
+        # `errors` pins the decode for output that carries filenames: a name is
+        # arbitrary bytes and must not raise under the daemon's locale.
         try:
             return subprocess.run(  # noqa: S603 — argv list, no shell
                 argv, capture_output=True, text=True, timeout=timeout, cwd=cwd,
+                encoding="utf-8" if errors else None, errors=errors,
             )
         except subprocess.TimeoutExpired:
             raise VerbError("exec-failure", f"command timed out after {timeout}s") from None
@@ -3654,7 +3723,8 @@ class Broker:
 
     def _merge_branch(self, *, slug: str, author: str, tier: int,
                       channel_id: int, seq: int, pass_seq: Optional[int],
-                      main_sha: str, tip_sha: str) -> str:
+                      main_sha: str, tip_sha: str,
+                      self_merge: bool = False) -> str:
         """Clone, merge, push. What is merged is `tip_sha` and nothing else:
         an unpinned FETCH_HEAD would merge whatever was pushed last."""
         repo = self._gatehouse_or_refuse()
@@ -3686,7 +3756,8 @@ class Broker:
                  "merge", "--no-ff", "--no-edit", "-m",
                  merge_commit_message(slug=slug, author=author, tier=tier,
                                       channel_id=channel_id, seq=seq,
-                                      pass_seq=pass_seq),
+                                      pass_seq=pass_seq,
+                                      self_merge=self_merge),
                  tip_sha], timeout)
             if cp.returncode != 0:
                 self._run([*git, "-C", clone, "merge", "--abort"], timeout)
@@ -3734,7 +3805,7 @@ class Broker:
             sha = self._merge_branch(slug=slug, author=author, tier=tier,
                                      channel_id=channel_id, seq=seq,
                                      pass_seq=pass_seq, main_sha=main_sha,
-                                     tip_sha=tip_sha)
+                                     tip_sha=tip_sha, self_merge=self_merge)
             self._build_ledger_line({
                 "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),
                 "kind": MERGE_VERB, "seq": seq, "channel_id": channel_id,
@@ -5030,12 +5101,10 @@ class Broker:
                        f"available roots: {sorted(path_map)}")
         return path_map[best].rstrip("/") + path[len(best.rstrip("/")):]
 
-    def _verb_classify_diff(self, resident: str, args: dict) -> tuple[dict, str]:
-        """Contract with harness/classifier/classify_diff.py (WP-H4): argv:
-        <classify_diff.py> --repo <abs path> --range <git range> --config
-        <protected-paths.toml> --gates <json object>; stdout: one JSON object (the
-        classification), exit 0."""
-        _reject_unknown(args, {"repo", "range", "gates"})
+    def _check_diff_args(self, resident: str, args: dict) -> tuple[str, str]:
+        """The repo/range pair every diff verb takes: one mapped host path, and
+        a range each side of which is split off and handed to git as a bare
+        positional, so no side may parse as a flag."""
         repo = _check_str(args, "repo", required=True, max_len=300)
         assert repo is not None
         if not repo.startswith("/") or "/../" in repo or repo.endswith("/.."):
@@ -5045,18 +5114,93 @@ class Broker:
         if rng.startswith("-") or not _RANGE_RE.match(rng):
             raise _bad("range must be a plain git rev/range "
                        "(letters, digits, . _ ~ ^ / { } -, no leading dash)")
-        # WP-H13 F3: the classifier splits A..B (or A...B) and hands each side to
-        # git as a bare positional.
-        for _side in rng.replace("...", "..").split(".."):
-            if _side.startswith("-"):
+        for side in rng.replace("...", "..").split(".."):
+            if side.startswith("-"):
                 raise _bad("neither side of the range may start with '-'")
-        repo = self._map_resident_path(resident, repo, label="repo")
+        return self._map_resident_path(resident, repo, label="repo"), rng
+
+    def _verb_classify_diff(self, resident: str, args: dict) -> tuple[dict, str]:
+        """Contract with harness/classifier/classify_diff.py (WP-H4): argv:
+        <classify_diff.py> --repo <abs path> --range <git range> --config
+        <protected-paths.toml> --gates <json object>; stdout: one JSON object (the
+        classification), exit 0."""
+        _reject_unknown(args, {"repo", "range", "gates"})
+        repo, rng = self._check_diff_args(resident, args)
         gates = args.get("gates", {})
         if not isinstance(gates, dict):
             raise _bad("gates must be an object")
         classification = self._classify(repo, rng, gates)
         tier = classification.get("tier") if isinstance(classification, dict) else None
         return ({"classification": classification}, f"classified: tier={tier}")
+
+    def _verb_changed_files(self, resident: str, args: dict) -> tuple[dict, str]:
+        """What a branch DID to the tree. `A..B` and `A...B` both answer for
+        `A...B` — a reviewer means the branch's own changes, never main's."""
+        _reject_unknown(args, {"repo", "range"})
+        repo, rng = self._check_diff_args(resident, args)
+        left, right = _split_diff_range(rng)
+        timeout = SUBPROCESS_TIMEOUTS["changed-files"]
+        git = self._argv("git", ["git"])
+        from_sha = self._rev_sha(git, repo, left, "left", timeout)
+        to_sha = self._rev_sha(git, repo, right, "right", timeout)
+        merge_base = self._run(
+            [*git, "-C", repo, "merge-base", from_sha, to_sha], timeout)
+        if merge_base.returncode != 0:
+            raise _bad(f"the two sides of {rng} share no history")
+        spec = f"{from_sha}...{to_sha}"
+        numstat = self._git_diff(git, repo, ["--numstat", spec], timeout)
+        name_status = self._git_diff(git, repo, ["--name-status", spec], timeout)
+        try:
+            counts = _parse_numstat(numstat)
+            rows = _parse_name_status(name_status)
+        except (IndexError, ValueError):
+            raise VerbError("exec-failure", "git diff output did not parse") from None
+
+        files = []
+        added_total = removed_total = 0
+        for status, path, old_path in sorted(rows, key=lambda row: row[1]):
+            added, removed = counts.get(path, (None, None))
+            added_total += added or 0
+            removed_total += removed or 0
+            entry = {"path": _safe_path(path), "status": status,
+                     "added": added, "removed": removed,
+                     "binary": added is None and removed is None}
+            if old_path is not None:
+                entry["old_path"] = _safe_path(old_path)
+            files.append(entry)
+        truncated = len(files) > MAX_CHANGED_FILES
+        summary = (f"changed-files: {len(files)} files, "
+                   f"+{added_total} -{removed_total}"
+                   + (" (truncated)" if truncated else ""))
+        return ({"base": merge_base.stdout.strip(), "from": from_sha,
+                 "to": to_sha, "files": files[:MAX_CHANGED_FILES],
+                 "totals": {"files": len(files), "added": added_total,
+                            "removed": removed_total},
+                 "truncated": truncated}, summary)
+
+    def _rev_sha(self, git: list[str], repo: str, rev: str, side: str,
+                 timeout: int) -> str:
+        """A rev a reviewer named, resolved to a commit sha — or refused by the
+        side it came from, because `exec-failure` tells them nothing."""
+        cp = self._run([*git, "-C", repo, "rev-parse", "--verify",
+                        "--end-of-options", f"{rev}^{{commit}}"], timeout)
+        if cp.returncode != 0:
+            if "not a git repository" in cp.stderr:
+                raise VerbError("exec-failure", "repo is not a git repository")
+            raise _bad(f"the {side} side of the range does not resolve: {rev}")
+        return cp.stdout.strip()
+
+    def _git_diff(self, git: list[str], repo: str, rest: list[str],
+                  timeout: int) -> str:
+        """One `-z` diff. The trailing `--` closes the revision list, so nothing
+        after it can be read as an option."""
+        cp = self._run([*git, "-C", repo, "diff", "-z", "-M", *rest, "--"],
+                       timeout, errors="replace")
+        if cp.returncode != 0:
+            raise VerbError(
+                "exec-failure",
+                f"git diff exit {cp.returncode}: {cp.stderr.strip()[:300]}")
+        return cp.stdout
 
     def _protected_paths(self) -> str:
         return self.paths.get(

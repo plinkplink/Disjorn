@@ -100,6 +100,18 @@ order and for this reason:
    survives the log being deleted and lazily re-born — the one tamper case both
    in-log tells miss.
 
+**The judging artifacts get the same line.** `judging artifacts: 3 installed
+match main`, or `judging artifacts: INSTALLED IS NOT COMMITTED — <path>
+(<state>)` naming every row that is not a `MATCH`. The rows are
+`metrics.JUDGING_ARTIFACTS` — the gate script, the build launcher and the build
+kernel — each an installed copy under `/usr/local/lib/disjorn` against the
+mirror's committed file, by the same sha method as the hook line. A build is
+measured by the installed copies, so a mismatch means the verdicts came from
+something nobody reviewed. A fourth artifact is a row in that table, and
+`[drift].judging_artifacts` (a list of `[installed, repo_path]` pairs)
+overrides the table whole — which is how the tests avoid reading `/usr/local`.
+The same list is in the drift JSON under `judging_artifacts`.
+
 Then: mirror head and commits since the last digest, with the uncited split by
 whether they touched a guarded lane — `21 (5 uncited, 5 doc-only)`, where
 doc-only means the gate lets them through, and `(0 uncited)` alone when none

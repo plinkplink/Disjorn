@@ -1,15 +1,13 @@
 """Tests for the keyboard-lane GATE DRIFT block — the detector of record.
 
-WHAT IS UNDER TEST. Real git repos and a real sqlite message store in tmp_path:
-a mirror with the hook committed in it, a canonical git-dir with the hook
-symlinked and a push log beside it, a prod tree, and a #custodian table with
-resolvable and unresolvable seqs. The hook's own log grammar is exercised
-end-to-end in harness/gatehouse/tests; here the log is written by hand, because
-what these tests are about is what the DIGEST concludes from a log, including
-the logs no healthy hook would write.
+Real git repos and a real sqlite message store in tmp_path: a mirror with the
+hook committed in it, a canonical git-dir with the hook symlinked and a push
+log beside it, a prod tree, and a #custodian table with resolvable and
+unresolvable seqs. The hook's own log grammar is exercised end-to-end in
+harness/gatehouse/tests; the logs here are written by hand, including the ones
+no healthy hook would write.
 
-The four things worth stating up front, because each was argued for
-specifically and each has a test that fails if it is quietly re-implemented:
+Four invariants, each with a test that fails if it is quietly re-implemented:
 
   * CITATION COMES FROM PUSH TRUTH (G1/G1b). One trailer on the tip of a
     five-commit push cites all five; a later push can never reach back and
@@ -18,8 +16,8 @@ specifically and each has a test that fails if it is quietly re-implemented:
     floor is out of scope; below a lazy floor is unverifiable, and must never
     render as clean.
   * THE FLOOR-MOTION BASELINE LIVES OUTSIDE THE GIT-DIR, parsed back out of the
-    digest's own previous post, so it survives the log being deleted and lazily
-    re-born — the one case both in-log tamper tells miss.
+    digest's own previous post, so it survives the log being deleted and
+    lazily re-born.
   * A LOST LOG DEGRADES TO MORE FLAGS, NEVER FEWER.
 """
 
@@ -43,10 +41,14 @@ HOOK_SRC = (Path(__file__).resolve().parents[2]
 PROTECTED = (Path(__file__).resolve().parents[2]
              / "classifier" / "protected-paths.toml")
 
-# Commit dates are PINNED to the reported day. The digest's window falls back
-# to `--since/--until` on that day when there is no previous post to measure
-# from, so a suite whose commits carry the real wall-clock date would test the
-# fallback against an empty window and prove nothing.
+# The judging-artifact table as this suite installs it: a basename under the
+# lane's own installed/ dir, and the repo path the mirror commits it at.
+ARTIFACTS = [("run-gates.sh", "harness/cc/run-gates.sh"),
+             ("disjorn-build-launch", "harness/broker/disjorn-build-launch"),
+             ("build-kernel.md", "harness/cc/build-kernel.md")]
+
+# Commit dates are PINNED to the reported day: with wall-clock dates the
+# no-previous-post fallback would be tested against an empty window.
 ENV = {
     **os.environ,
     "GIT_AUTHOR_NAME": "keyboard", "GIT_AUTHOR_EMAIL": "plink@example.invalid",
@@ -97,12 +99,24 @@ class Lane:
         hook_dst.mkdir(parents=True)
         shutil.copy2(HOOK_SRC, hook_dst / "pre-receive-main-review")
         (self.mirror / "README.md").write_text("start\n")
+        for name, rel in ARTIFACTS:
+            p = self.mirror / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(f"committed {name}\n", encoding="utf-8")
         git(self.mirror, "add", "-A")
         # Dated the day BEFORE, so it sits outside the reported day's window
         # the way real history does; the floor tests reach for it by name.
         old_day = {**ENV, "GIT_AUTHOR_DATE": "2026-08-19T09:00:00Z",
                    "GIT_COMMITTER_DATE": "2026-08-19T09:00:00Z"}
         git(self.mirror, "commit", "-q", "-m", "initial commit", env=old_day)
+
+        # -- the judging artifacts, installed outside /usr/local
+        self.installed = root / "installed"
+        self.installed.mkdir()
+        for name, rel in ARTIFACTS:
+            src = self.mirror / rel
+            (self.installed / name).write_text(src.read_text(encoding="utf-8"),
+                                               encoding="utf-8")
 
         # -- the canonical git-dir: hooks/ with a symlink to the deployed copy
         (self.canonical / "hooks").mkdir(parents=True)
@@ -208,11 +222,15 @@ class Lane:
 
     # -- config -------------------------------------------------------------
 
+    def artifact_rows(self) -> list:
+        return [[str(self.installed / name), rel] for name, rel in ARTIFACTS]
+
     def config(self, *, humans=("plink",), **over) -> dict:
         gate = {"canonical_repo": str(self.canonical), "mirror": str(self.mirror),
                 "deploy_tree": str(self.prod), "message_db": str(self.db_path)}
         gate.update(over)
         return {"gate": gate,
+                "drift": {"judging_artifacts": self.artifact_rows()},
                 "build": {"humans": list(humans)},
                 "disjorn": {"custodian_channel_id": CUSTODIAN,
                             "api_key_path": str(self.key_path)},
@@ -275,8 +293,96 @@ def test_the_liveness_line_comes_first(lane):
     assert lines[0].startswith(M.DRIFT_HEADER)
     assert lines[1].startswith("hook:")
     assert lines[2].startswith("claude-code:")
-    assert lines[3].startswith("push log:")
-    assert lines[4].startswith("floor:")
+    assert lines[3].startswith("judging artifacts:")
+    assert lines[4].startswith("push log:")
+    assert lines[5].startswith("floor:")
+
+
+# --------------------------------------------------------------------------
+# Judging artifacts — line 1c: what a build is measured BY.
+# --------------------------------------------------------------------------
+
+def artifacts(lane, config=None) -> list:
+    return M.judging_artifacts(M.gate_paths(config or lane.config()),
+                               config or lane.config())
+
+
+def states(rows) -> dict:
+    return {Path(r["installed"]).name: r["state"] for r in rows}
+
+
+def test_installed_artifacts_that_match_the_mirror_are_one_quiet_line(lane):
+    rows = artifacts(lane)
+    assert [r["state"] for r in rows] == ["MATCH"] * 3
+    assert all(r["deployed_sha"] == r["mirror_sha"] for r in rows)
+    assert [r["repo_path"] for r in rows] == [rel for _, rel in ARTIFACTS]
+    assert "judging artifacts: 3 installed match main" in lane.block()
+
+
+def test_an_installed_artifact_that_is_not_the_committed_one_is_named(lane):
+    (lane.installed / "run-gates.sh").write_text("tampered\n")
+    assert states(artifacts(lane))["run-gates.sh"] == "MISMATCH"
+    line = [ln for ln in lane.block().splitlines()
+            if ln.startswith("judging artifacts:")][0]
+    assert "INSTALLED IS NOT COMMITTED" in line
+    assert f"{lane.installed / 'run-gates.sh'} (MISMATCH)" in line
+    assert "build-kernel.md" not in line
+
+
+def test_an_artifact_that_is_not_installed_at_all_is_absent(lane):
+    (lane.installed / "build-kernel.md").unlink()
+    rows = artifacts(lane)
+    assert states(rows)["build-kernel.md"] == "ABSENT"
+    assert states(rows)["run-gates.sh"] == "MATCH"
+    line = [ln for ln in lane.block().splitlines()
+            if ln.startswith("judging artifacts:")][0]
+    assert line == (f"judging artifacts: NOT INSTALLED — "
+                    f"{lane.installed / 'build-kernel.md'} (ABSENT)")
+
+
+def test_an_unreadable_artifact_is_unreadable_not_absent(lane):
+    """A directory where a file belongs: unreadable by every path _read_bytes
+    has, including the sudo fallback, so the state does not depend on uid."""
+    path = lane.installed / "disjorn-build-launch"
+    path.unlink()
+    path.mkdir()
+    assert states(artifacts(lane))["disjorn-build-launch"] == "UNREADABLE"
+    assert (f"NOT INSTALLED — {lane.installed / 'disjorn-build-launch'} "
+            "(UNREADABLE)") in lane.block()
+
+
+def test_an_artifact_the_mirror_does_not_carry_is_unknown(lane):
+    git(lane.mirror, "rm", "-q", "harness/cc/build-kernel.md")
+    git(lane.mirror, "commit", "-q", "-m", "drop the kernel")
+    rows = artifacts(lane)
+    assert states(rows)["build-kernel.md"] == "UNKNOWN"
+    assert rows[2]["mirror_sha"] is None and rows[2]["deployed_sha"]
+    assert "(UNKNOWN)" in lane.block()
+
+
+def test_the_table_comes_from_config_when_config_carries_one(lane):
+    assert M.judging_rows({}) == list(M.JUDGING_ARTIFACTS)
+    assert M.judging_rows({"drift": {"judging_artifacts": [["/a", "b"]]}}) \
+        == [("/a", "b")]
+    assert M.judging_rows({"drift": {"judging_artifacts": [["/a"]]}}) \
+        == list(M.JUDGING_ARTIFACTS)
+    rows = artifacts(lane)
+    assert not any(r["installed"].startswith("/usr/local") for r in rows)
+
+
+def test_a_fourth_artifact_is_a_config_row_and_no_code_change(lane):
+    extra = lane.installed / "protected-paths.toml"
+    extra.write_text("committed extra\n")
+    (lane.mirror / "harness" / "classifier").mkdir(parents=True, exist_ok=True)
+    lane.commit("harness/classifier/protected-paths.toml", "committed extra\n",
+                "add the fourth artifact")
+    config = lane.config()
+    config["drift"]["judging_artifacts"].append(
+        [str(extra), "harness/classifier/protected-paths.toml"])
+    rows = M.judging_artifacts(M.gate_paths(config), config)
+    assert len(rows) == 4 and rows[3]["state"] == "MATCH"
+    block = M.compose_drift_block(M.gate_drift(config, date=DATE))
+    assert "judging artifacts: 4 installed match main" in block
 
 
 # --------------------------------------------------------------------------
@@ -434,11 +540,9 @@ def test_the_block_round_trips_its_own_floor_line(lane):
 
 
 def test_no_one_else_can_write_the_baseline(lane):
-    """The baseline moved into the message store to survive a log delete —
-    but the store is a CHANNEL, writable by everyone. Without the author
-    filter, anyone quoting a drift block (verbatim, floor line and all)
-    becomes the baseline: chat as detector input, the G1d hole one layer
-    out."""
+    """The store is a CHANNEL, writable by everyone: without the author filter
+    anyone quoting a drift block verbatim becomes the baseline, which is the
+    G1d hole one layer out."""
     lane.write_log(lane.genesis("seeded", lane.head()))
     quote = (f"{M.DRIFT_HEADER} — keyboard lane\n"
              f"floor: {'c' * 40}\nmirror head: {'c' * 40}")
@@ -859,9 +963,8 @@ def test_below_a_lazy_floor_is_unverifiable_not_clean(lane):
 
 def test_a_refused_push_is_not_permanent_mirror_drift_noise(lane):
     """A refusal is the hook doing its one job: nothing landed, so the range
-    can never resolve in the mirror. Rev-listing it would increment 'history
-    was rewritten' forever, one legitimate refusal at a time, and a counter
-    that only goes up gets muted in a week."""
+    can never resolve in the mirror, and rev-listing it would increment
+    'history was rewritten' forever."""
     floor = lane.head()
     lane.write_log(lane.genesis("seeded", floor),
                    lane.push(floor, "e" * 40, "NONE", "refused"))
@@ -972,9 +1075,8 @@ def test_a_clean_day_is_one_coverage_line_and_no_commit_rows(lane):
     assert ("coverage above floor: 3 commits — covered 1, local-stamp 1, "
             "local-keyboard 1, unexplained 0") in block
     assert "UNEXPLAINED" not in block
-    # Not one per-commit row of any class. (`kbd` still appears once, as the
-    # mirror head — that line is load-bearing, the next digest parses its own
-    # window start back out of it — so the check is on the ROWS, not the text.)
+    # Not one per-commit row of any class. `kbd` still appears as the mirror
+    # head, which the next digest parses, so the check is on ROWS, not text.
     assert stamp[:8] not in block
     assert [ln for ln in block.splitlines()
             if ln.startswith(("  local-", "  UNEXPLAINED"))] == []

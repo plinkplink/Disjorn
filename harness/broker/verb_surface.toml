@@ -200,6 +200,43 @@ Optional gate results the classifier folds into its verdict, e.g. {"tests": true
 "typecheck": true}. Max 8 KiB serialized.\
 """
 
+# ── changed-files ────────────────────────────────────────────────────────
+[verbs.changed-files]
+tool_name = "changed_files"
+cli_help = "list the files a range changed, with +/- counts"
+announce_preface = false
+description = """\
+List what a range changed, via the house broker: one entry per file with its \
+status (A added, M modified, D deleted, R renamed, C copied, T type-changed), \
+its added and removed line counts, `old_path` for a rename, and `binary` true \
+for a file with no line counts. Also `base`, `from` and `to` (resolved shas) \
+and `totals`. Over 500 files the list is cut and `truncated` is true; `totals` \
+still counts every file.\n\nThe answer is always MERGE-BASE form: 'A..B' and \
+'A...B' both report what B did since it left A, never what A did meanwhile. A \
+bare rev is refused.\n\n`repo` is /opt/disjorn from inside your container — the \
+read-only mirror. A gatehouse branch is named 'gatehouse/<repo>/<branch>', so \
+the usual review call is range 'main...gatehouse/disjorn/loop/<slug>'. Run \
+refresh_mirror first if the branch is new to you, or its name will not resolve. \
+This returns NO file bodies: read those with read_repo_file at the `to` sha.\
+"""
+
+[verbs.changed-files.args.repo]
+type = "string"
+required = true
+absolute_path = true
+no_dotdot = true
+description = "Absolute path to the repo (no '..' segments)."
+
+[verbs.changed-files.args.range]
+type = "string"
+required = true
+no_leading_dash = true
+pattern = "^[A-Za-z0-9._~^/{}-]{1,200}$"
+description = """\
+Git range 'A..B' or 'A...B' (both read as merge-base form), max 200 chars, \
+charset [A-Za-z0-9._~^/{}-], neither side starting with '-'.\
+"""
+
 # ── read-prod-logs ───────────────────────────────────────────────────────
 [verbs.read-prod-logs]
 tool_name = "read_prod_logs"

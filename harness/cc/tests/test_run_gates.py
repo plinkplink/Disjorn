@@ -5,6 +5,9 @@ a contract: four GATE lines, in order, and nothing else. Real git repos in
 tmp_path — whether a branch exists and whether it touched client/ are git's
 questions — and a fake podman, because the container is the one thing these
 tests do not need.
+
+Podman is stubbed here, so nothing in this file runs the inner script: the link
+step and its toolchain precondition are asserted as text, never executed.
 """
 
 from __future__ import annotations
@@ -237,6 +240,20 @@ def test_a_client_change_mounts_the_toolchain_read_only(rig):
     assert f"{node_modules}:/opt/node_modules:ro" in argv
     assert not any(a.endswith("/work/client/node_modules:ro") for a in argv)
     assert "GATE_CLIENT=1" in argv
+
+
+def test_the_inner_script_refuses_a_toolchain_that_is_not_there(rig):
+    text = RUN_GATES.read_text()
+    tsc = text.index("[ ! -x /opt/node_modules/.bin/tsc ]")
+    link = text.index("ln -s /opt/node_modules/*")
+    assert tsc < link
+    misconfigured = ('echo "gate misconfigured: /opt/node_modules has no '
+                     'toolchain (expected .bin/tsc)" >&2')
+    assert misconfigured in text
+    after = text[tsc:link]
+    assert misconfigured in after
+    assert 'echo "GATE typecheck fail"' in after
+    assert 'echo "GATE build fail"' in after
 
 
 def test_a_client_change_with_no_toolchain_is_red_not_skipped(rig):

@@ -29,7 +29,8 @@ from brokerd import Broker, VerbError, load_config  # noqa: E402
 PY = sys.executable
 ALL_VERBS = [
     "restart-disjorn", "run-server-tests", "refresh-mirror", "start-build",
-    "classify-diff", "read-prod-logs", "read-own-log", "read-metrics",
+    "classify-diff", "changed-files",
+    "read-prod-logs", "read-own-log", "read-metrics",
     "file-proposal", "query-own-audit",
     "board-list", "board-card", "board-search", "board-flag", "board-comment",
     "summon-hop", "apps-build", "build", "merge",

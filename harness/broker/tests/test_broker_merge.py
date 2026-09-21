@@ -726,7 +726,7 @@ def test_a_build_whose_branch_fell_behind_main_folds_and_self_merges(harness):
     sha = harness.build_ledger_lines()[-1]["sha"]
     assert lines[3] == f"next: merged {sha}"
     assert harness.main_subjects()[0] == (
-        f"merge: {SLUG} (/merge by plink, tier 0)")
+        f"merge: {SLUG} (/build by plink, tier 0)")
 
 
 def test_a_commit_pushed_while_a_builds_gates_run_stops_the_self_merge(harness):
