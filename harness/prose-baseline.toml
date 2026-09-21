@@ -67,8 +67,8 @@
 "harness/keyboard/tests/test_prose_sweep.py" = 4415
 "harness/keyboard/tests/test_wake_cli.py" = 1338
 "harness/keyboard/wake.py" = 1390
-"harness/metrics/metrics.py" = 31145
-"harness/metrics/tests/test_gate_drift.py" = 13835
+"harness/metrics/metrics.py" = 31142
+"harness/metrics/tests/test_gate_drift.py" = 13730
 "harness/planroom/planroom.py" = 13454
 "harness/residency/adapter.py" = 7679
 "harness/residency/config.py" = 9474

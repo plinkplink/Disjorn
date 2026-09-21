@@ -23,6 +23,8 @@ from gates import GateResult, gates_json, run_gates  # noqa: E402
 
 HELPER = Path(__file__).resolve().parent.parent / "disjorn-build-launch"
 SLUG = "2026-09-20-a-slug"
+SERVER_SUMMARY = "======== 510 passed in 94.20s ========"
+HARNESS_SUMMARY = "==== 2 skipped, 850 passed in 60.11s ===="
 
 
 def fake_gate(tmp_path: Path, stdout: str, stderr: str = "", rc: int = 0,
@@ -120,10 +122,25 @@ def test_the_log_holds_both_streams_and_is_private(tmp_path):
 def test_the_summary_is_one_line_naming_every_gate(tmp_path):
     r = gate(tmp_path, "GATE tests pass\nGATE typecheck pass\n"
                        "GATE build pass\nGATE exit 0",
-             stderr="510 passed in 94s\n850 passed in 60s")
+             stderr=f"{SERVER_SUMMARY}\n{HARNESS_SUMMARY}")
     assert "\n" not in r.summary
     assert "510 passed" in r.summary and "850 passed" in r.summary
     assert "typecheck ok" in r.summary and "build ok" in r.summary
+
+
+def test_the_counts_come_only_from_pytests_own_summary_lines(tmp_path):
+    """A suite that prints `3 passed` on an ordinary line is output, not a
+    result: the first summary line is the server suite, the second the
+    harness one."""
+    green = ("GATE tests pass\nGATE typecheck skipped\n"
+             "GATE build skipped\nGATE exit 0")
+    r = gate(tmp_path, green,
+             stderr=f"collected 3 items\nkept the 3 passed cases\n"
+                    f"{SERVER_SUMMARY}\n{HARNESS_SUMMARY}")
+    assert "server 510 passed; harness 850 passed" in r.summary
+    r = gate(tmp_path, green, stderr="3 passed\n7 passed here too")
+    assert r.summary.startswith("tests ok")
+    assert "passed" not in r.summary
 
 
 def test_the_seat_and_slug_are_appended_to_the_prefix(tmp_path):
@@ -192,6 +209,24 @@ def test_gate_mode_carries_the_gatehouse_and_a_run_root_it_can_write():
     assert any(a.startswith("--setenv=XDG_RUNTIME_DIR=/run/user/") for a in setenv)
     assert any(a.startswith("--setenv=RESIDENT_GATE_RUNS=/home/res-gable/")
                for a in setenv)
+
+
+@needs_resident
+def test_gate_mode_names_the_res_readable_client_toolchain():
+    """A res-* uid cannot traverse /home/plink, so no part of a gate may name a
+    path under it."""
+    argv = json.loads(helper("gate", "gable", SLUG).stdout)
+    assert ("--setenv=RESIDENT_CLIENT_NODE_MODULES=/srv/disjorn-client-node-modules"
+            in argv)
+    assert not any("/home/plink" in a for a in argv)
+
+
+@needs_resident
+def test_the_gate_unit_carries_the_cap_that_actually_kills_it():
+    """The unit's cap is the kill that works; the broker's gate_timeout_sec
+    only outwaits it."""
+    argv = json.loads(helper("gate", "gable", SLUG).stdout)
+    assert "--property=RuntimeMaxSec=1200" in argv
 
 
 def test_an_unknown_mode_is_refused():

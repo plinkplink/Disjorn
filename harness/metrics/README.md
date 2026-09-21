@@ -100,8 +100,10 @@ order and for this reason:
    survives the log being deleted and lazily re-born — the one tamper case both
    in-log tells miss.
 
-Then: mirror head, commits since the last digest and how many are uncited,
-`classify_diff` on every uncited commit with an uncited Tier 2 named as a
+Then: mirror head and commits since the last digest, with the uncited split by
+whether they touched a guarded lane — `21 (5 uncited, 5 doc-only)`, where
+doc-only means the gate lets them through, and `(0 uncited)` alone when none
+are. `classify_diff` on every uncited commit with an uncited Tier 2 named as a
 **LANE VIOLATION**, the fail-open count, the coverage classes above the floor,
 overrides to date, chat merges to date, a deploy-drift line, and a prose line
 (`prose: worst <file> <ratio>; over baseline: <n>`, from

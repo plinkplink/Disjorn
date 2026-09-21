@@ -22,11 +22,29 @@ NAME = "gable"
 SLUG = "2026-09-20-a-slug"
 BRANCH = f"loop/{SLUG}"
 
+# Every non-`run` call is logged with the number of entries left in the run
+# root, so the teardown ORDER is visible to a test.
 FAKE_PODMAN = r"""#!/usr/bin/env bash
+if [ "$1" != run ]; then
+  printf '%s|%s\n' "$*" "$(ls "$RESIDENT_GATE_RUNS" | wc -l)" >> "$DUMP_DIR/other"
+  exit 0
+fi
 printf '%s\0' "$@" > "$DUMP_DIR/argv"
 [ -n "${FAKE_GATE_STDOUT:-}" ] && printf '%s\n' "$FAKE_GATE_STDOUT"
 echo "container noise" >&2
 exit "${FAKE_PODMAN_RC:-0}"
+"""
+
+# A container that kills the shell waiting on it, by the pid the container name
+# carries: the signal path, without a race.
+KILLER_PODMAN = r"""#!/usr/bin/env bash
+if [ "$1" != run ]; then
+  printf '%s|%s\n' "$*" "$(ls "$RESIDENT_GATE_RUNS" | wc -l)" >> "$DUMP_DIR/other"
+  exit 0
+fi
+printf '%s\0' "$@" > "$DUMP_DIR/argv"
+for a in "$@"; do case "$a" in disjorn-gate-*) kill -TERM "${a##*-}" ;; esac; done
+exit 137
 """
 
 GREEN = "GATE tests pass\nGATE typecheck skipped\nGATE build skipped"
@@ -110,6 +128,20 @@ def gate_lines(cp) -> list[str]:
 def podman_argv(rig) -> list[str]:
     raw = (rig.dump / "argv").read_bytes().decode()
     return [a for a in raw.split("\0") if a]
+
+
+def other_calls(rig) -> list[str]:
+    path = rig.dump / "other"
+    return path.read_text().splitlines() if path.exists() else []
+
+
+def container_name(rig) -> str:
+    argv = podman_argv(rig)
+    return argv[argv.index("--name") + 1]
+
+
+def work_mount(rig) -> str:
+    return [a for a in podman_argv(rig) if a.endswith(":/work")][0].split(":")[0]
 
 
 # ======================================================================
@@ -235,6 +267,7 @@ def test_the_checkout_is_the_branch_tip_and_is_removed_afterwards(rig):
     podman = rig.tmp / "bin" / "podman"
     podman.write_text(
         "#!/usr/bin/env bash\n"
+        '[ "$1" = run ] || exit 0\n'
         'printf "%s\\0" "$@" > "$DUMP_DIR/argv"\n'
         'for a in "$@"; do case "$a" in *:/work) '
         f'git -C "${{a%%:*}}" rev-parse HEAD > {probe} ;; esac; done\n'
@@ -244,4 +277,49 @@ def test_the_checkout_is_the_branch_tip_and_is_removed_afterwards(rig):
     cp = rig.run(NAME, SLUG)
     assert cp.returncode == 0
     assert probe.read_text().strip() == tip
+    assert list(rig.runs.iterdir()) == []
+
+
+def test_two_runs_of_one_slug_never_share_a_checkout(rig):
+    """A second gate for the same slug must not land in the tree the first one
+    is still reading."""
+    rig.branch("server/app/thing.py")
+    rig.run(NAME, SLUG)
+    first = work_mount(rig)
+    rig.run(NAME, SLUG)
+    second = work_mount(rig)
+    assert first != second
+    for work in (first, second):
+        assert Path(work).parent == rig.runs
+        assert Path(work).name.startswith(f"{SLUG}.")
+        assert len(Path(work).name) == len(SLUG) + 7
+
+
+def test_the_container_is_named_for_the_slug_and_this_process(rig):
+    rig.branch("server/app/thing.py")
+    rig.run(NAME, SLUG)
+    name = container_name(rig)
+    assert name.startswith(f"disjorn-gate-{SLUG}-")
+    assert name.rsplit("-", 1)[1].isdigit()
+
+
+def test_a_finished_run_removes_its_own_container(rig):
+    rig.branch("server/app/thing.py")
+    rig.run(NAME, SLUG)
+    name = container_name(rig)
+    assert any(f"rm -f -t 0 --ignore {name}|" in ln for ln in other_calls(rig))
+
+
+def test_a_killed_run_removes_the_container_before_the_checkout(rig):
+    """Killing the podman client leaves the container running, so the trap
+    removes the container first and the tree it mounts second."""
+    rig.branch("server/app/thing.py")
+    podman = rig.tmp / "bin" / "podman"
+    podman.write_text(KILLER_PODMAN)
+    podman.chmod(0o755)
+    rig.run(NAME, SLUG)
+    name = container_name(rig)
+    calls = other_calls(rig)
+    assert calls, "the trap never ran"
+    assert calls[0] == f"rm -f -t 0 --ignore {name}|1"
     assert list(rig.runs.iterdir()) == []

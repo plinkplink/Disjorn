@@ -104,9 +104,9 @@ RUNTIME_MAX_SEC = 14400          # 4h
 LIMIT_FSIZE = 512 * 1024 * 1024  # 512 MiB per file
 MEMORY_MAX = "8G"
 TASKS_MAX = 1024
-# The gate's outer backstop. Keep it comfortably LONGER than the broker's
-# [build].gate_timeout_sec so the two never race.
-GATE_RUNTIME_MAX_SEC = 1800      # 30m
+# The unit's cap is the kill that actually works on a gate; the broker's
+# [build].gate_timeout_sec only outwaits it and must stay larger.
+GATE_RUNTIME_MAX_SEC = 1200      # 20m
 
 # run-build.sh's documented defaults assume they are read from plink's account;
 # a res-* uid cannot traverse /home/plink (0700). These are the same three
@@ -121,6 +121,9 @@ BUILD_HOME_NAME = "build-home"          # under the res-* user's own $HOME
 BUILD_KERNEL = "/usr/local/lib/disjorn/build-kernel.md"
 GATEHOUSE = "/var/lib/disjorn-broker/gatehouse"
 HOUSE_MEMORY = "/usr/local/lib/disjorn/house_memory"
+# The res-readable copy of the client toolchain the deploy step publishes; a
+# res-* uid cannot traverse /home/plink, so no gate may name a path under it.
+CLIENT_NODE_MODULES = "/srv/disjorn-client-node-modules"
 DISJORN_RO = "/srv/disjorn-ro"
 # THE SPINE MIRROR ROOT. run-build.sh mounts <root>/<resident> read-only at
 # /opt/spine and REFUSES TO LAUNCH if that directory is writable by the uid it
@@ -358,6 +361,7 @@ def build_gate_argv(resident: str, slug: str, wrapper: str) -> "list":
         f"--property=TasksMax={TASKS_MAX}",
         f"--setenv=XDG_RUNTIME_DIR=/run/user/{pw.pw_uid}",
         f"--setenv=RESIDENT_GATEHOUSE={GATEHOUSE}",
+        f"--setenv=RESIDENT_CLIENT_NODE_MODULES={CLIENT_NODE_MODULES}",
         # Named rather than left to $HOME: the checkout must land in the
         # resident's own tree whatever PID 1 decides $HOME is.
         f"--setenv=RESIDENT_GATE_RUNS={pw.pw_dir}/gate-runs",

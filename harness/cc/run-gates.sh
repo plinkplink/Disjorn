@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 # run-gates.sh <resident> <slug> — the broker's test run for loop/<slug>.
 #
-# Runs on the host as res-<resident>, one container for the suites. Stdout
-# carries only these lines; every other byte goes to stderr.
+# A green gate proves the run happened and was not skipped; it runs the
+# branch's own suite, so it is not a review. Stdout carries only these lines;
+# every other byte goes to stderr.
 #
 #   GATE tests pass|fail
 #   GATE typecheck pass|fail|skipped
 #   GATE build pass|fail|skipped
 #   GATE exit <n>
 #
-# Nothing here reads a self-report from the branch. `skipped` is only ever a
-# client gate on a branch that touched no client/ path.
+# node_modules is mounted read-only from the deployed tree, so a branch that
+# adds a dependency is typechecked and built without it and will read red
+# until the keyboard installs it.
 set -uo pipefail
 
 TAG=run-gates
@@ -21,7 +23,7 @@ die() { echo "$TAG: $*" >&2; exit 2; }
 NAME="$1"
 SLUG="$2"
 
-# Re-validated against the launcher's patterns: reachable as a resident uid.
+# Re-validated here too: this script is reachable as a resident uid.
 [[ "$NAME" =~ ^[a-z][a-z0-9]{0,30}$ ]] || die "resident is not a plain lowercase name: $NAME"
 [ "${#SLUG}" -le 64 ] || die "slug too long"
 [[ "$SLUG" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}-[a-z0-9][a-z0-9-]{0,50}$ ]] \
@@ -30,20 +32,24 @@ SLUG="$2"
 IMAGE="${RESIDENT_IMAGE:-localhost/disjorn-resident:latest}"
 GATEHOUSE="${RESIDENT_GATEHOUSE:-/var/lib/disjorn-broker/gatehouse}"
 # Mounted, not installed: `npm install` needs a network this gate lacks.
-NODE_MODULES="${RESIDENT_CLIENT_NODE_MODULES:-/home/plink/Disjorn/Disjorn/client/node_modules}"
+NODE_MODULES="${RESIDENT_CLIENT_NODE_MODULES:-/srv/disjorn-client-node-modules}"
 BARE="$GATEHOUSE/disjorn.git"
 BRANCH="loop/$SLUG"
 RUN_ROOT="${RESIDENT_GATE_RUNS:-$HOME/gate-runs}"
-WORK="$RUN_ROOT/$SLUG"
 
 [ -d "$GATEHOUSE" ] || die "gatehouse missing: $GATEHOUSE"
 [ -d "$BARE" ] || die "gatehouse repo missing: $BARE"
 
-# Scratch: removed on every exit path, so a killed run leaves no tree
-# behind.
-rm -rf "$WORK"
-trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$RUN_ROOT" || die "cannot create $RUN_ROOT"
+# A checkout of its own per run, and the container is torn down before the
+# tree it mounts: killing the podman client leaves the container up.
+WORK="$(mktemp -d "$RUN_ROOT/$SLUG.XXXXXX")" || die "cannot create a run dir in $RUN_ROOT"
+CONTAINER="disjorn-gate-$SLUG-$$"
+cleanup() {
+  podman rm -f -t 0 --ignore "$CONTAINER" >/dev/null 2>&1
+  rm -rf "$WORK"
+}
+trap cleanup EXIT INT TERM
 
 git clone --quiet --single-branch --branch main "$BARE" "$WORK" >&2 \
   || die "cannot clone $BARE"
@@ -66,8 +72,7 @@ if [ -n "$CLIENT_CHANGED" ]; then
   fi
 fi
 
-# Each suite's output goes to stderr inside the container. PYTHONPATH names
-# the in-tree house_memory package; the image installs no copy of it.
+# PYTHONPATH names the in-tree house_memory package; the image has no copy.
 INNER='
 set -u
 cd /work/server && python3 -m pytest tests -q -p no:cacheprovider >&2
@@ -94,17 +99,16 @@ if [ "${GATE_CLIENT:-0}" = "1" ]; then
 fi
 '
 
-# No network, ever: a gate that could reach one could install its way to a
-# green result.
+# No network, ever: a gate that had one could install its way to green.
 out="$(podman run --rm --network none \
+  --name "$CONTAINER" \
   --userns "keep-id:uid=1000,gid=1000" \
   "${mounts[@]}" \
   -e "GATE_CLIENT=$([ -n "$CLIENT_CHANGED" ] && [ "$client_gate" = 1 ] && echo 1 || echo 0)" \
   "$IMAGE" bash -c "$INNER")"
 podman_rc=$?
 
-# A gate that was supposed to run and printed no line is a fail, never a
-# skip.
+# A gate that printed no line is a fail, never a skip.
 tests=fail
 if [ -n "$CLIENT_CHANGED" ]; then
   typecheck=fail
