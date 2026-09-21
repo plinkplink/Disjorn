@@ -594,7 +594,10 @@ branch's own suite, so the wall is the classifier plus a human on Tier 1 and 2.
     `C` only; `added`/`removed` are `null` for a binary file and `binary` is
     then true.
   - `files` is sorted by path and capped at 500. Over the cap it holds the
-    first 500, `truncated` is true, and `totals` still counts every file.
+    first 500 in path order (a prefix, not a sample), `truncated` is true, and
+    `totals` still counts every file.
+  - `totals.added`/`removed` are text-line totals: a binary file adds nothing
+    to them, so they undercount a change that is mostly binary.
   - A path holding a control character is returned as its Python `repr`, so a
     hostile filename cannot forge a line in a reviewer's context.
 - Always merge-base form: `A..B` and `A...B` both report `A...B`, which is what
