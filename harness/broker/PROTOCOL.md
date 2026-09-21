@@ -418,11 +418,12 @@ the message DB.
   or `Tier 0 budget spent today; /merge <slug>`. When a self-merge happened the
   `deployed` detail also carries `tier` and `merged_sha`.
 - A branch that fell behind main while it was building is FOLDED before the
-  gates run (`merge`, below) and the whole banner then describes the folded
-  tip; the `diffstat` line, which is read before the fold, gains
-  ` (main folded in)`. A branch that CONFLICTS with main cannot be folded: the
-  banner says `tests: n/a — nothing was gated` and
-  `next: fold main into the branch, then /merge <slug>`, and nothing is merged.
+  gates run (`merge`, below), under the same gate claim, and the whole banner
+  then describes the folded tip; the `diffstat` line, which is read before the
+  fold, gains ` (main folded in)`. A branch that CONFLICTS with main cannot be
+  folded: the banner says `tests: n/a — nothing was gated` and
+  `next: loop/<slug> conflicts with main; fold it at the keyboard, then /merge
+  <slug>`, and nothing is merged.
 - A build that published nothing still posts its banner, and `next` carries the
   reason: `build halted — <reason>; /build again`, or `no commits — /build
   again with more detail`. It is the only line the room gets.
@@ -441,11 +442,14 @@ branch's own suite, so the wall is the classifier plus a human on Tier 1 and 2.
 
 - args: `{"seq": int, "channel_id": int, "slug": str, "pass_seq": int|null}` —
   the first three required and positive, `pass_seq` optional, nothing else.
-- IT IS ASYNCHRONOUS, in `build`'s shape. The call validates the message, the
-  author, the slug, the branch and the ancestry, then returns
-  `{"started": true, "slug": str, "branch": str}` and runs the gates, the
-  classifier, the PASS check, the merge and the push in a background thread.
-  The outcome is ONE post to the origin channel, by the broker's bot:
+- IT IS ASYNCHRONOUS, in `build`'s shape. The CALL does only what is cheap:
+  the message, the author, the slug being a build slug, the branch existing,
+  the message naming it, and the gate claim. **Nothing that reads or writes
+  `loop/<slug>`'s history runs on the socket thread.** It then returns
+  `{"started": true, "slug": str, "branch": str}` and runs the ancestry check,
+  the fold, the gates, the classifier, the PASS check, the merge and the push
+  in a background thread. The outcome is ONE post to the origin channel, by the
+  broker's bot:
 
   ```
   merge: merged <slug> as <sha> (tier N)
@@ -467,10 +471,10 @@ branch's own suite, so the wall is the classifier plus a human on Tier 1 and 2.
 | reason           | the rule that said no                                    |
 |------------------|----------------------------------------------------------|
 | `human`          | the message, its author, or the human list               |
-| `branch-missing` | no gatehouse, a slug that is not a build slug, no branch |
+| `branch-missing` | no gatehouse, no branch, or a branch with no own commits |
 | `slug-mismatch`  | the message does not name the slug it is merging         |
 | `busy`           | a gate run for this slug is already in flight            |
-| `moved`          | a conflict with main, or main moved under the gates      |
+| `moved`          | a conflict with main, or main or the branch moved        |
 | `gates`          | the gate run could not be launched at all                |
 | `tier`           | the classifier answered with no tier                     |
 | `pass-missing`   | Tier 2 and no `pass_seq`                                 |
@@ -481,28 +485,41 @@ branch's own suite, so the wall is the classifier plus a human on Tier 1 and 2.
 
 - Steps, in order: read the message (a person, not deleted, not private, on
   `[build].humans`); `loop/<slug>` must exist in the gatehouse; the message
-  must name the slug as a whole token; `refs/heads/main` must be an ancestor of
-  the branch, and its sha is read here and re-read immediately before the push
-  — a main that moved in between is `moved` and nothing is pushed. Then the
-  gates, then `main...loop/<slug>` classified with their result. **A red gate
-  is not special-cased** — the classifier answers Tier 2 fail-closed and that
-  answer is the one used.
+  must name the slug as a whole token; CLAIM THE GATE RUN — a slug already
+  being gated is `busy` on the wire, and nothing after this point runs for a
+  slug someone else holds. Then, in the thread: `refs/heads/main` must be an
+  ancestor of the branch (or it is folded, below) and `main..<tip>` must not be
+  empty — a branch with nothing of its own is `branch-missing`, "`loop/<slug>`
+  has no commits of its own to merge". Then the gates, then
+  `main...loop/<slug>` classified with their result. **A red gate is not
+  special-cased** — the classifier answers Tier 2 fail-closed and that answer
+  is the one used.
+- THE GATED TIP IS PINNED. The first check records `loop/<slug>`'s sha, and
+  that sha — never an unpinned `FETCH_HEAD` — is what the merge commit's second
+  parent is. Main's sha is recorded there too. Both are re-read immediately
+  before the push: a main that moved is `moved`, "main moved while the gates
+  ran; /merge again"; a branch that moved is `moved`, "`loop/<slug>` moved
+  while the gates ran; /merge again". Nothing is pushed either way, and the
+  Tier 0 self-merge at the end of a build pins the same two shas.
 - AT THE FIRST CHECK ONLY, a branch that does not contain main is FOLDED rather
-  than refused: in the same kind of throwaway clone the merge uses, and under
-  the same lock, the broker checks the branch out, `git merge --no-edit`s the
-  gatehouse's main into it as `disjorn-broker <broker@disjorn.local>` with the
-  message `fold main into loop/<slug> (broker, before the gates)`, and pushes
+  than refused: in the same kind of throwaway clone the merge uses, the broker
+  checks the branch out, `git merge --no-edit`s the gatehouse's main into it as
+  `disjorn-broker <broker@disjorn.local>` with the message
+  `fold main into loop/<slug> (broker, before the gates)`, and pushes
   `HEAD:refs/heads/loop/<slug>` (never forced). A conflict aborts and is
   `moved`, "`loop/<slug>` conflicts with main; fold it at the keyboard"; a
-  push the gatehouse will not take is `push`. THE SHA THAT IS GATED IS THE SHA
-  THAT IS MERGED: the gates, the classifier and the PASS check all run after
-  the fold, so a PASS posted before it is no longer after the tip and is
-  `pass-invalid`. The SECOND check, before the push, never folds — main moving
-  under the gates stays `moved`, "main moved while the gates ran; /merge
-  again", and the next `/merge` does the folding.
+  push the gatehouse will not take is `push`. The fold does NOT take the merge
+  lock — it writes the branch, never main, and the gate claim is what
+  serialises it. THE SHA THAT IS GATED IS THE SHA THAT IS MERGED: the gates,
+  the classifier and the PASS check all run after the fold, so a PASS posted
+  before it no longer holds and is `pass-invalid`, "`loop/<slug>` was folded
+  onto main as `<short tip>`, so PASS `<seq>` no longer names the gated tree;
+  ask for a fresh PASS". The SECOND check, before the push, never folds, and
+  the next `/merge` does the folding.
 - A fold appends one line to `[build].ledger`:
   `{ts, kind: "fold", slug, from: <old tip>, to: <new tip>, main: <main sha>}`,
-  and the audit line for the call that folded carries `folded: <new tip>`.
+  and the verb's OUTCOME audit line — the merge, or the denial that followed —
+  carries `folded: <new tip>`.
 - One gate run per slug at a time, whether a `/merge` or a build's own end
   started it; a second `/merge` for that slug is refused `busy` on the spot.
 - Tier 0 and Tier 1 merge on this call: it IS the human step. Tier 2 needs

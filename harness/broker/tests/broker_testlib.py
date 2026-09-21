@@ -545,6 +545,32 @@ class BrokerHarness:
         _git(work, "push", "-q", "origin", "main")
         _git(work, "fetch", "-q", "origin")
 
+    def commit_on_branch(self, slug: str, path: str = "docs/late.md",
+                         content: str = "late\n") -> str:
+        """One more commit on top of `loop/<slug>`, pushed — what can land
+        under a gate run that has already read the tip."""
+        work = self._gate_work
+        _git(work, "fetch", "-q", "origin")
+        _git(work, "checkout", "-q", "-B", f"loop/{slug}",
+             f"origin/loop/{slug}")
+        target = work / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content)
+        _git(work, "add", "-A")
+        _git(work, "commit", "-q", "-m", f"{slug} again")
+        tip = _git(work, "rev-parse", "HEAD").strip()
+        _git(work, "push", "-q", "origin", f"loop/{slug}")
+        _git(work, "checkout", "-q", "main")
+        return tip
+
+    def push_empty_branch(self, slug: str) -> str:
+        """`loop/<slug>` at main exactly: a branch with nothing of its own."""
+        work = self._gate_work
+        _git(work, "fetch", "-q", "origin")
+        _git(work, "push", "-q", "origin",
+             f"origin/main:refs/heads/loop/{slug}")
+        return _git(work, "rev-parse", "origin/main").strip()
+
     def branch_tip(self, slug: str) -> str:
         """The gatehouse's own tip of `loop/<slug>` — the sha the gates see."""
         assert self.gatehouse is not None
