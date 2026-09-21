@@ -798,10 +798,12 @@ def _as_utc(value: Any) -> Optional[_dt.datetime]:
 
 
 def merge_commit_message(*, slug: str, author: str, tier: int, channel_id: int,
-                         seq: int, pass_seq: Optional[int] = None) -> str:
+                         seq: int, pass_seq: Optional[int] = None,
+                         self_merge: bool = False) -> str:
     """The merge commit's text. `review-seq` goes AFTER `merge-seq` because the
     hook's last-trailer-wins rule is what records the review."""
-    lines = [f"merge: {slug} (/merge by {author}, tier {tier})", "",
+    command = "/build" if self_merge else "/merge"
+    lines = [f"merge: {slug} ({command} by {author}, tier {tier})", "",
              f"merge-seq: {channel_id}:{seq}"]
     if pass_seq is not None:
         lines.append(f"review-seq: {pass_seq}")
@@ -3721,7 +3723,8 @@ class Broker:
 
     def _merge_branch(self, *, slug: str, author: str, tier: int,
                       channel_id: int, seq: int, pass_seq: Optional[int],
-                      main_sha: str, tip_sha: str) -> str:
+                      main_sha: str, tip_sha: str,
+                      self_merge: bool = False) -> str:
         """Clone, merge, push. What is merged is `tip_sha` and nothing else:
         an unpinned FETCH_HEAD would merge whatever was pushed last."""
         repo = self._gatehouse_or_refuse()
@@ -3753,7 +3756,8 @@ class Broker:
                  "merge", "--no-ff", "--no-edit", "-m",
                  merge_commit_message(slug=slug, author=author, tier=tier,
                                       channel_id=channel_id, seq=seq,
-                                      pass_seq=pass_seq),
+                                      pass_seq=pass_seq,
+                                      self_merge=self_merge),
                  tip_sha], timeout)
             if cp.returncode != 0:
                 self._run([*git, "-C", clone, "merge", "--abort"], timeout)
@@ -3801,7 +3805,7 @@ class Broker:
             sha = self._merge_branch(slug=slug, author=author, tier=tier,
                                      channel_id=channel_id, seq=seq,
                                      pass_seq=pass_seq, main_sha=main_sha,
-                                     tip_sha=tip_sha)
+                                     tip_sha=tip_sha, self_merge=self_merge)
             self._build_ledger_line({
                 "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),
                 "kind": MERGE_VERB, "seq": seq, "channel_id": channel_id,
