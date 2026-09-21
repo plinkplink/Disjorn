@@ -149,6 +149,8 @@ resident reads and a spec round.
 - Slice 1: Claudette, #custodian seq 2705 (custodian half, four folds); Gable, seq 2708 (gable half, two BLOCKs and notes). All applied before merge `2cfbfa8`.
 - Slice 2: Claudette, seq 2719 (five folds; the hook stays a presence check by her ruling); Gable, seq 2726 (three BLOCKs, four NOTE folds). All applied before merge `8626ad1`. `/merge` is asynchronous and a branch behind main is refused, by both reviewers' recommendation (seq 2728).
 - Gate fix `9e1e078` merged on override-seq 2731; review owed, gable lane.
+- Acceptance, first live `/build` (seq 2735): `24ba423` self-merged as `e2ba489`, Tier 0, docs only, no review owed by design. It was pushed before the new hook was deployed, so the push log reads NONE for it; the hook was installed the same hour.
+- Acceptance, first live `/merge` (seq 2742): `39288b1`, Tier 1, logged `merge-seq:4:2742 passed`.
 
 ## Confirm record
 - **Confirmed by**: plink
