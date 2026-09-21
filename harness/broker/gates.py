@@ -19,8 +19,10 @@ from dataclasses import dataclass
 GATE_LINE_RE = re.compile(r"^GATE (tests|typecheck|build) (pass|fail|skipped)$")
 GATE_EXIT_RE = re.compile(r"^GATE exit (\d+)$")
 # Only pytest's own final summary line may move a count; a suite that prints
-# "3 passed" in its own output is not a result.
-SUMMARY_RE = re.compile(r"^=+ .*?\b(\d+) passed\b.* in [\d.]+s", re.M)
+# "3 passed" in its own output is not a result. The whole line must be the
+# summary, with or without the `=` rule that `-q` leaves off.
+SUMMARY_RE = re.compile(
+    r"^(?:=+ )?(?:\d+ \w+, )*(\d+) passed\b(?:, \d+ \w+)* in [\d.]+s", re.M)
 
 
 @dataclass
