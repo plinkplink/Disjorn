@@ -10,9 +10,8 @@
 #   GATE build pass|fail|skipped
 #   GATE exit <n>
 #
-# node_modules is mounted read-only from the deployed tree, so a branch that
-# adds a dependency is typechecked and built without it and will read red
-# until the keyboard installs it.
+# node_modules is mounted read-only, so a branch that adds a dependency is
+# typechecked without it and reads red until the keyboard installs it.
 set -uo pipefail
 
 TAG=run-gates
@@ -86,17 +85,24 @@ else
   echo "GATE tests fail"
 fi
 if [ "${GATE_CLIENT:-0}" = "1" ]; then
-  # vite writes node_modules/.vite-temp, so the toolchain is linked into a real directory.
-  cd /work/client && rm -rf node_modules && mkdir node_modules \
-    && ln -s /opt/node_modules/* /opt/node_modules/.bin node_modules/ && npm run typecheck >&2
-  _tc=$?
-  if [ "$_tc" -eq 0 ]; then
-    echo "GATE typecheck pass"
-    npm run build >&2
-    if [ "$?" -eq 0 ]; then echo "GATE build pass"; else echo "GATE build fail"; fi
-  else
+  # An unmounted toolchain is a misconfigured gate, never a red branch.
+  if [ ! -x /opt/node_modules/.bin/tsc ]; then
+    echo "gate misconfigured: /opt/node_modules has no toolchain (expected .bin/tsc)" >&2
     echo "GATE typecheck fail"
     echo "GATE build fail"
+  else
+    # vite writes node_modules/.vite-temp, so the toolchain is linked into a real directory.
+    cd /work/client && rm -rf node_modules && mkdir node_modules \
+      && ln -s /opt/node_modules/* /opt/node_modules/.bin node_modules/ && npm run typecheck >&2
+    _tc=$?
+    if [ "$_tc" -eq 0 ]; then
+      echo "GATE typecheck pass"
+      npm run build >&2
+      if [ "$?" -eq 0 ]; then echo "GATE build pass"; else echo "GATE build fail"; fi
+    else
+      echo "GATE typecheck fail"
+      echo "GATE build fail"
+    fi
   fi
 fi
 '
