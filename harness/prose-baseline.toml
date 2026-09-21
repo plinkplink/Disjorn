@@ -97,10 +97,10 @@
 "server/app/routers/bots_admin.py" = 3147
 "server/app/routers/channels.py" = 22399
 "server/app/routers/media.py" = 9425
-"server/app/routers/messages.py" = 11372
+"server/app/routers/messages.py" = 10865
 "server/app/routers/notifications.py" = 4703
 "server/app/routers/planroom.py" = 11305
-"server/app/routers/slash.py" = 12360
+"server/app/routers/slash.py" = 10462
 "server/app/routers/summarize.py" = 1656
 "server/app/services/backlog.py" = 4599
 "server/app/services/chibi.py" = 4003

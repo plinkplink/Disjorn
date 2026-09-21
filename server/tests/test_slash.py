@@ -93,12 +93,153 @@ async def test_unknown_command_passes_through(client):
     await login(client, "alice")
     ch = await main_feed_id()
 
-    payload = await post(client, ch, "/shrug ¯\\_(ツ)_/¯")
+    payload = await post(client, ch, "/teapot short and stout")
     msgs = await channel_messages(client, ch)
-    # The /shrug stays as the user's plain-text message; nothing else posted.
-    assert [m["content"] for m in msgs] == ["/shrug ¯\\_(ツ)_/¯"]
+    # The /teapot stays as the user's plain-text message; nothing else posted.
+    assert [m["content"] for m in msgs] == ["/teapot short and stout"]
     assert msgs[0]["id"] == payload["id"]
     assert msgs[0]["author"]["type"] == "user"
+
+
+# ---------------------------------------------------------------------------
+# /shrug, /shrugs — a text command: it rewrites the sender's own message
+# ---------------------------------------------------------------------------
+
+SHRUG = "¯\\_(ツ)_/¯"
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("/shrug", SHRUG),
+    ("/shrugs", SHRUG),
+    ("/shrug rough day", f"rough day {SHRUG}"),
+    ("/shrugs rough day", f"rough day {SHRUG}"),
+    ("/shrug   who   knows  ", f"who   knows {SHRUG}"),
+    ("/shrug ", SHRUG),
+    ("/SHRUG nope", "/SHRUG nope"),        # command words are case-sensitive
+    ("/shruggie", "/shruggie"),            # only the exact words rewrite
+    ("/shrug/shrug", "/shrug/shrug"),
+    ("hey /shrug", "hey /shrug"),          # must start the message
+    (" /shrug", " /shrug"),
+    ("/backlog add a thing", "/backlog add a thing"),
+    ("plain text", "plain text"),
+    ("", ""),
+])
+def test_apply_text_command(raw, expected):
+    assert slash.apply_text_command(raw) == expected
+
+
+@pytest.mark.parametrize("typed", ["/shrug", "/shrugs"])
+async def test_shrug_rewrites_the_senders_message_with_no_reply(client, typed):
+    await make_user("alice")
+    await login(client, "alice")
+    ch = await main_feed_id()
+
+    payload = await post(client, ch, f"{typed} the build is red again")
+
+    msgs = await channel_messages(client, ch)
+    assert [m["content"] for m in msgs] == [f"the build is red again {SHRUG}"]
+    assert msgs[0]["id"] == payload["id"]
+    assert msgs[0]["author"]["type"] == "user"
+    # The POST response carries the rewrite too — the composer echoes it.
+    assert payload["content"] == f"the build is red again {SHRUG}"
+
+
+async def test_bare_shrug_is_just_the_shrug(client):
+    await make_user("alice")
+    await login(client, "alice")
+    ch = await main_feed_id()
+
+    await post(client, ch, "/shrug")
+    assert [m["content"] for m in await channel_messages(client, ch)] == [SHRUG]
+
+
+async def test_shrug_does_not_smuggle_in_a_second_command(client):
+    """The rewrite is plain chat, never another command: dispatch sees what was
+    typed, so the `/backlog` inside a shrug files nothing."""
+    await make_user("alice")
+    await login(client, "alice")
+    ch = await main_feed_id()
+
+    await post(client, ch, "/shrug /backlog add a gif picker")
+
+    assert await db.fetch_all("SELECT * FROM backlog") == []
+    contents = [m["content"] for m in await channel_messages(client, ch)]
+    assert contents == [f"/backlog add a gif picker {SHRUG}"]
+
+
+def test_text_commands_and_dispatch_commands_are_disjoint():
+    """A name in both tables would store one message and execute another."""
+    assert not (slash._TEXT_COMMANDS.keys() & slash._COMMANDS.keys())
+
+
+async def test_a_shrug_that_would_pass_the_cap_is_refused(client):
+    """The cap holds on the stored text, so every stored message stays editable."""
+    await make_user("alice")
+    await login(client, "alice")
+    ch = await main_feed_id()
+
+    r = await client.post(
+        f"/channels/{ch}/messages", json={"content": "/shrug " + "x" * 15993}
+    )
+
+    assert r.status_code == 422
+    assert await channel_messages(client, ch) == []
+
+
+async def test_shrug_is_flagged_on_the_text_that_is_stored(client):
+    """NL privacy detection runs after the rewrite, so a shrugged secret is
+    still bot-hidden."""
+    await make_user("alice")
+    await login(client, "alice")
+    ch = await main_feed_id()
+
+    payload = await post(client, ch, "/shrug off the record: the price is 50m")
+    assert payload["privacy_flags"].get("off_the_record")
+    row = await db.fetch_one("SELECT content FROM messages WHERE id = ?", (payload["id"],))
+    assert row["content"] == f"off the record: the price is 50m {SHRUG}"
+
+
+async def test_shrug_spends_no_slash_rate_budget(client):
+    """A text command posts no system reply, so it is not write amplification
+    and must not eat the dispatch budget."""
+    await make_user("alice")
+    await login(client, "alice")
+    ch = await main_feed_id()
+
+    for i in range(slash.SLASH_RATE_MAX + 5):
+        await post(client, ch, f"/shrug {i}")
+    await post(client, ch, "/backlog still works")
+
+    rows = await db.fetch_all("SELECT text FROM backlog")
+    assert [r["text"] for r in rows] == ["still works"]
+
+
+async def test_editing_a_message_into_a_shrug_does_not_rewrite(client):
+    """Same rule as dispatch: the edit path is not a second door."""
+    await make_user("alice")
+    await login(client, "alice")
+    ch = await main_feed_id()
+
+    msg = await post(client, ch, "hello")
+    r = await client.patch(f"/messages/{msg['id']}", json={"content": "/shrug hello"})
+    assert r.status_code == 200
+    assert r.json()["content"] == "/shrug hello"
+
+
+async def test_a_bot_can_shrug_too(client):
+    bot_id = await make_bot()
+    ch = await main_feed_id()
+    await db.execute(
+        "INSERT INTO channel_members (channel_id, member_type, member_id) VALUES (?, 'bot', ?)",
+        (ch, bot_id),
+    )
+    r = await client.post(
+        f"/channels/{ch}/messages",
+        json={"content": "/shrug who knows"},
+        headers={"X-Api-Key": BOT_KEY},
+    )
+    assert r.status_code == 200
+    assert r.json()["content"] == f"who knows {SHRUG}"
 
 
 # ---------------------------------------------------------------------------
