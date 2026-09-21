@@ -416,9 +416,13 @@ the message DB.
   own seq), `/merge <slug>` (Tier 1), `PASS from <owner> in #custodian, then
   /merge <slug> pass <seq>` (Tier 2), `fix the red gate, then /build again`,
   or `Tier 0 budget spent today; /merge <slug>`. When a self-merge happened the
-  `deployed` detail also carries `tier` and `merged_sha`. A branch that fell
-  behind main while it was building is gated by nobody: the banner says
-  `fold main into the branch, then /merge <slug>` and nothing is merged.
+  `deployed` detail also carries `tier` and `merged_sha`.
+- A branch that fell behind main while it was building is FOLDED before the
+  gates run (`merge`, below) and the whole banner then describes the folded
+  tip; the `diffstat` line, which is read before the fold, gains
+  ` (main folded in)`. A branch that CONFLICTS with main cannot be folded: the
+  banner says `tests: n/a — nothing was gated` and
+  `next: fold main into the branch, then /merge <slug>`, and nothing is merged.
 - A build that published nothing still posts its banner, and `next` carries the
   reason: `build halted — <reason>; /build again`, or `no commits — /build
   again with more detail`. It is the only line the room gets.
@@ -448,6 +452,9 @@ branch's own suite, so the wall is the classifier plus a human on Tier 1 and 2.
   next: deploy at the keyboard
   ```
 
+  — with ` after folding main` before the tier when the branch had to be folded
+  first (`merge: merged <slug> as <sha> after folding main (tier 1)`) —
+
   or `merge: refused <slug> — <plain reason>` with `next:` the human's own next
   step (`fold main into the branch, then /merge again`, `PASS from <owner> in
   #custodian, then /merge <slug> pass <seq>`, `fix the red gate, then /build
@@ -463,7 +470,7 @@ branch's own suite, so the wall is the classifier plus a human on Tier 1 and 2.
 | `branch-missing` | no gatehouse, a slug that is not a build slug, no branch |
 | `slug-mismatch`  | the message does not name the slug it is merging         |
 | `busy`           | a gate run for this slug is already in flight            |
-| `moved`          | the branch is behind main, or main moved under the gates |
+| `moved`          | a conflict with main, or main moved under the gates      |
 | `gates`          | the gate run could not be launched at all                |
 | `tier`           | the classifier answered with no tier                     |
 | `pass-missing`   | Tier 2 and no `pass_seq`                                 |
@@ -480,6 +487,22 @@ branch's own suite, so the wall is the classifier plus a human on Tier 1 and 2.
   gates, then `main...loop/<slug>` classified with their result. **A red gate
   is not special-cased** — the classifier answers Tier 2 fail-closed and that
   answer is the one used.
+- AT THE FIRST CHECK ONLY, a branch that does not contain main is FOLDED rather
+  than refused: in the same kind of throwaway clone the merge uses, and under
+  the same lock, the broker checks the branch out, `git merge --no-edit`s the
+  gatehouse's main into it as `disjorn-broker <broker@disjorn.local>` with the
+  message `fold main into loop/<slug> (broker, before the gates)`, and pushes
+  `HEAD:refs/heads/loop/<slug>` (never forced). A conflict aborts and is
+  `moved`, "`loop/<slug>` conflicts with main; fold it at the keyboard"; a
+  push the gatehouse will not take is `push`. THE SHA THAT IS GATED IS THE SHA
+  THAT IS MERGED: the gates, the classifier and the PASS check all run after
+  the fold, so a PASS posted before it is no longer after the tip and is
+  `pass-invalid`. The SECOND check, before the push, never folds — main moving
+  under the gates stays `moved`, "main moved while the gates ran; /merge
+  again", and the next `/merge` does the folding.
+- A fold appends one line to `[build].ledger`:
+  `{ts, kind: "fold", slug, from: <old tip>, to: <new tip>, main: <main sha>}`,
+  and the audit line for the call that folded carries `folded: <new tip>`.
 - One gate run per slug at a time, whether a `/merge` or a build's own end
   started it; a second `/merge` for that slug is refused `busy` on the spot.
 - Tier 0 and Tier 1 merge on this call: it IS the human step. Tier 2 needs

@@ -545,6 +545,16 @@ class BrokerHarness:
         _git(work, "push", "-q", "origin", "main")
         _git(work, "fetch", "-q", "origin")
 
+    def branch_tip(self, slug: str) -> str:
+        """The gatehouse's own tip of `loop/<slug>` — the sha the gates see."""
+        assert self.gatehouse is not None
+        return _git(self.gatehouse, "rev-parse",
+                    f"refs/heads/loop/{slug}").strip()
+
+    def sha(self, ref: str = "main") -> str:
+        assert self.gatehouse is not None
+        return _git(self.gatehouse, "rev-parse", ref).strip()
+
     def main_subjects(self) -> list[str]:
         """Every commit subject on the gatehouse's main, newest first."""
         assert self.gatehouse is not None
