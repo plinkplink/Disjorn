@@ -579,6 +579,32 @@ branch's own suite, so the wall is the classifier plus a human on Tier 1 and 2.
   classify repos deliberately exposed to them and never need to know host
   layout. No map configured = pass-through (host-side callers, tests).
 
+### `changed-files`
+- args: `{"repo": str, "range": str}` — both required.
+  - `repo` — absolute path, no `..` segments; mapped through
+    `[residents.<r>.path_map]` and allowlisted by it, exactly as
+    `classify-diff`'s is. Both verbs share one validator.
+  - `range` — same charset and length as `classify-diff`'s, and must name two
+    sides: `A..B` or `A...B`. A bare rev is `bad-args`, "range must be A..B or
+    A...B".
+- result: `{"base": str, "from": str, "to": str, "files": [{"path", "status",
+  "old_path"?, "added", "removed", "binary"}], "totals": {"files", "added",
+  "removed"}, "truncated": bool}`.
+  - `status` is one letter of `A M D R C T`; `old_path` is present for `R` and
+    `C` only; `added`/`removed` are `null` for a binary file and `binary` is
+    then true.
+  - `files` is sorted by path and capped at 500. Over the cap it holds the
+    first 500, `truncated` is true, and `totals` still counts every file.
+  - A path holding a control character is returned as its Python `repr`, so a
+    hostile filename cannot forge a line in a reviewer's context.
+- Always merge-base form: `A..B` and `A...B` both report `A...B`, which is what
+  a reviewer means by "what the branch did". Runs `git -C <repo> diff -z -M
+  --numstat <A sha>...<B sha> --` and the same with `--name-status`, on shas
+  already resolved by `git rev-parse --verify --end-of-options`. A side that
+  does not resolve is `bad-args` naming which side, never `exec-failure`.
+- No file bodies: a reviewer fetches those with the adapter's `read_repo_file`
+  at the returned `to` sha.
+
 ### `read-prod-logs`
 - args: `{"lines": int}` — 1..500, default 100.
 - result: `{"lines": [str, ...]}`.
