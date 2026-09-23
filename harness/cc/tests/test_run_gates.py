@@ -217,6 +217,29 @@ def test_a_container_that_says_nothing_is_red(rig):
 # the client gates
 # ======================================================================
 
+ADAPTER_PIN = "DISJORN_ADAPTER_CORE=/opt/claudette.git:disjorn-port:core.py"
+
+
+def test_the_adapter_repo_is_mounted_read_only_and_pinned(rig):
+    git("init", "--bare", "-q", str(rig.gatehouse / "claudette.git"))
+    rig.branch("server/app/thing.py")
+    rig.run(NAME, SLUG)
+    argv = podman_argv(rig)
+    assert f"{rig.gatehouse}/claudette.git:/opt/claudette.git:ro" in argv
+    assert argv[argv.index(ADAPTER_PIN) - 1] == "-e"
+    assert argv[argv.index("--network") + 1] == "none"
+
+
+def test_a_missing_adapter_repo_is_named_and_the_pin_still_set(rig):
+    """The pin is never dropped, so the drift tests go red naming it."""
+    rig.branch("server/app/thing.py")
+    cp = rig.run(NAME, SLUG)
+    argv = podman_argv(rig)
+    assert ADAPTER_PIN in argv
+    assert not any(a.endswith(":/opt/claudette.git:ro") for a in argv)
+    assert f"adapter repo missing: {rig.gatehouse}/claudette.git" in cp.stderr
+
+
 def test_a_branch_that_leaves_client_alone_skips_and_mounts_nothing(rig):
     rig.branch("server/app/thing.py")
     node_modules = rig.tmp / "node_modules"

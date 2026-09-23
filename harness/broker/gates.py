@@ -22,7 +22,8 @@ GATE_EXIT_RE = re.compile(r"^GATE exit (\d+)$")
 # "3 passed" in its own output is not a result. The whole line must be the
 # summary, with or without the `=` rule that `-q` leaves off.
 SUMMARY_RE = re.compile(
-    r"^(?:=+ )?(?:\d+ \w+, )*(\d+) passed\b(?:, \d+ \w+)* in [\d.]+s", re.M)
+    r"^(?:=+ )?((?:\d+ \w+, )*(\d+) passed\b(?:, \d+ \w+)*) in [\d.]+s", re.M)
+SKIPPED_RE = re.compile(r"\b(\d+) skipped\b")
 
 
 @dataclass
@@ -75,10 +76,10 @@ def _parse(stdout: str) -> "tuple[dict, int | None]":
 def _summary(seen: dict, output: str) -> str:
     """The first summary line is the server suite, the second the harness one;
     the gate runs them in that order."""
-    counts = SUMMARY_RE.findall(output)
+    counts = [_count(m) for m in SUMMARY_RE.finditer(output)]
     parts = []
     if seen.get("tests") is True and len(counts) >= 2:
-        parts.append(f"server {counts[0]} passed; harness {counts[1]} passed")
+        parts.append(f"server {counts[0]}; harness {counts[1]}")
     else:
         parts.append(f"tests {_word(seen.get('tests'))}")
     if seen.get("typecheck") is None and seen.get("build") is None:
@@ -87,6 +88,12 @@ def _summary(seen: dict, output: str) -> str:
         parts.append(f"client typecheck {_word(seen.get('typecheck'))}, "
                      f"build {_word(seen.get('build'))}")
     return "; ".join(parts)
+
+
+def _count(m: "re.Match") -> str:
+    skipped = SKIPPED_RE.search(m.group(1))
+    return f"{m.group(2)} passed" + (f", {skipped.group(1)} skipped"
+                                     if skipped else "")
 
 
 def _word(value: "bool | None") -> str:

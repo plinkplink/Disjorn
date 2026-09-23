@@ -143,6 +143,19 @@ def test_the_counts_come_only_from_pytests_own_summary_lines(tmp_path):
     assert "passed" not in r.summary
 
 
+def test_the_summary_names_each_suites_skips(tmp_path):
+    """A pass count alone reads the same whether a check ran or skipped."""
+    green = ("GATE tests pass\nGATE typecheck skipped\n"
+             "GATE build skipped\nGATE exit 0")
+    r = gate(tmp_path, green, stderr=f"{SERVER_SUMMARY}\n{HARNESS_SUMMARY}")
+    assert r.summary.startswith(
+        "server 510 passed; harness 850 passed, 2 skipped; ")
+    r = gate(tmp_path, green, stderr="3 skipped, 510 passed in 9.1s\n"
+                                     "850 passed, 1 warning in 6.0s")
+    assert r.summary.startswith(
+        "server 510 passed, 3 skipped; harness 850 passed; ")
+
+
 def test_a_quiet_summary_line_counts_without_the_rule(tmp_path):
     """`pytest -q` prints its final line with no `=====` rule around it."""
     green = ("GATE tests pass\nGATE typecheck skipped\n"

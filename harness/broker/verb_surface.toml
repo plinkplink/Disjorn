@@ -633,10 +633,10 @@ description = "Absolute path to the prompt file you just wrote, inside your own 
 # the canonical read is
 #     read_repo_file(path="core.py", rev="gatehouse/claudette/<branch>")
 # `bots/claudette/` is the HOST layout under /home/plink — not a path inside
-# any repo, and reachable from no resident seat. The test reads the mirror's
-# object store for the same reason, and an unresolvable pin FAILS the suite
-# naming what it tried; before 2026-09-09 it skipped, and the skip read as
-# green for weeks.
+# any repo, and reachable from no resident seat. The test reads a git object,
+# never a checkout: the gate pins gatehouse claudette.git's disjorn-port (the
+# branch claudette-update.sh pushes on deploy), a seat reads the mirror, and
+# an unresolvable pin FAILS the suite naming what it tried.
 #
 # SCOPE. Tools DECLARED IN core.py as module-level literals, which is what a
 # static read of that file can see. Three kinds of tool are out of scope and
@@ -644,7 +644,8 @@ description = "Absolute path to the prompt file you just wrote, inside your own 
 # MEMORY_TOOLS from the memory package), `search_topic` (registered by the
 # platform adapter, disjorn_bot.py), and the BROKER VERBS — since the seat
 # started registering them from generated broker_tools.py they are a loop too,
-# and the [verbs] table above is what covers them.
+# and the [verbs] table above is what covers them; a test asserts none of
+# them is declared as a literal in core.py.
 #
 # GRAMMAR: seat, module, args (list), description. All four required.
 
