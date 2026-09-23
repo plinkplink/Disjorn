@@ -76,8 +76,8 @@ resident = "gable"
 # model and never substitutes one.
 # 2026-07-21: Fable confirmed available on plink's credits (probe: HTTP 200,
 # model echoed), so the one-pin upgrade path is taken — Gable-chat runs Fable.
-# Per-resident: Claudette's pin is an Opus id (she IS Opus-4.8); subagent build
-# hands stay Opus by plink's design.
+# Per-resident: Claudette is not on this path (her adapter pins her model in
+# core.py); subagent build hands stay Opus by plink's design.
 # CORRECTION (BL-G1, 2026-07-22) to an earlier note here: the summon path is
 # NOT the raw API. session_argv below runs `claude -p`, i.e. Claude Code, so
 # whatever model-selection behaviour Claude Code has — including a safeguard
@@ -87,7 +87,7 @@ resident = "gable"
 # claude-fable-5-pinned summon reported running claude-opus-4-8. Which is why
 # the pin now has an enforcement lever below rather than only a suffix and an
 # after-the-fact alert.
-model = "claude-fable-5"
+model = "claude-fable-5-1"
 #
 # BL-G1 MODEL GATE — the one line that decides whether the pin is enforced or
 # merely reported. Three explicit states:
