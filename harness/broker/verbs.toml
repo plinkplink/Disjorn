@@ -26,8 +26,10 @@
 #   2. run  python3 harness/broker/gen_verb_surface.py write  to rewrite the
 #      shell seat's CLI table, and
 #      python3 harness/broker/gen_verb_surface.py emit-tools \
+#          --verbs /etc/disjorn-broker/verbs.toml --seat res-<name> \
 #          --out <bot repo>/broker_tools.py
-#      for a bot seat's tool schemas.
+#      for a bot seat's tool schemas: the verbs that seat's live section
+#      lists, on or off. Removing a key removes the tool; false only denies.
 # harness/broker/tests/test_verb_surface.py fails if the two disagree, in
 # EITHER direction — a verb with no surface is a capability nobody can reach,
 # and a surface with no verb is a button wired to nothing. Both have happened;

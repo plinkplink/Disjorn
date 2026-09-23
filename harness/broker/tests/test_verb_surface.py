@@ -78,15 +78,97 @@ def test_the_verb_set_is_the_union_over_residents(tmp_path):
 
 
 def test_the_booleans_are_never_read(tmp_path):
-    """The generator reads NAMES. Whether a resident may call a verb is decided
-    at the socket, per request, by the broker — if generation depended on the
-    switch, flipping one off would silently delete a tool instead of denying a
-    call, and 'verb-disabled' would become 'unknown-verb'."""
+    """Generation reads names only: a switch turned off denies a call, it
+    never deletes a tool."""
     on = tmp_path / "on.toml"
     off = tmp_path / "off.toml"
     on.write_text('[res-claudette]\n"a" = true\n"b" = true\n')
     off.write_text('[res-claudette]\n"a" = false\n"b" = false\n')
     assert gen.verb_names(on) == gen.verb_names(off)
+
+
+# ── one seat's tools ─────────────────────────────────────────────────────
+
+LIVE_SHAPED = ('[res-claudette]\n"restart-disjorn" = false\n'
+               '"changed-files" = true\n"read-metrics" = true\n'
+               '[res-gable]\n"apps-build" = true\n[server]\n"build" = true\n')
+
+
+def test_a_seat_gets_exactly_the_verbs_its_section_lists(tmp_path):
+    verbs = tmp_path / "verbs.toml"
+    verbs.write_text(LIVE_SHAPED)
+    surface = gen.load_surface()
+    seat = gen.seat_surface(verbs, "res-claudette")
+    assert list(seat) == [v for v in surface
+                          if v in {"restart-disjorn", "changed-files",
+                                   "read-metrics"}]
+    names = {t["name"] for t in gen.tool_schemas(seat)}
+    assert "restart_disjorn" in names
+    assert not names & {"apps_build", "summon_hop"}
+
+
+def test_a_seat_filter_reads_names_not_booleans(tmp_path):
+    on = tmp_path / "on.toml"
+    off = tmp_path / "off.toml"
+    on.write_text('[res-claudette]\n"read-metrics" = true\n')
+    off.write_text('[res-claudette]\n"read-metrics" = false\n')
+    assert gen.seat_surface(on, "res-claudette") == \
+        gen.seat_surface(off, "res-claudette")
+
+
+@pytest.mark.parametrize("seat", ["res-nobody", "server", "plink"])
+def test_a_seat_that_is_not_a_listed_seat_section_is_refused(tmp_path, seat):
+    verbs = tmp_path / "verbs.toml"
+    verbs.write_text(LIVE_SHAPED + '[plink]\n"wake" = false\n')
+    with pytest.raises(gen.SurfaceError, match="no seat section"):
+        gen.seat_surface(verbs, seat)
+
+
+def test_a_listed_verb_with_no_surface_is_refused(tmp_path):
+    verbs = tmp_path / "verbs.toml"
+    verbs.write_text('[res-claudette]\n"summon-the-kraken" = true\n')
+    with pytest.raises(gen.SurfaceError, match="summon-the-kraken"):
+        gen.seat_surface(verbs, "res-claudette")
+
+
+def test_emit_tools_for_one_seat_writes_an_importable_module(tmp_path):
+    verbs = tmp_path / "verbs.toml"
+    out = tmp_path / "broker_tools.py"
+    verbs.write_text(LIVE_SHAPED)
+    assert gen.check(verbs) != []
+    assert gen.main(["emit-tools", "--verbs", str(verbs), "--seat",
+                     "res-claudette", "--out", str(out)]) == 0
+    module: dict = {}
+    exec(out.read_text(encoding="utf-8"), module)
+    assert module["SOURCE_VERBS"] == [
+        v for v in gen.load_surface()
+        if v in {"restart-disjorn", "changed-files", "read-metrics"}]
+    assert "[res-claudette] lists in verbs.toml" in module["__doc__"]
+    assert set(module["BROKER_TOOLS_BY_NAME"]) == {
+        t["name"] for t in module["BROKER_TOOLS"]}
+
+
+def test_emit_tools_for_an_unknown_seat_fails_and_writes_nothing(tmp_path,
+                                                                 capsys):
+    verbs = tmp_path / "verbs.toml"
+    out = tmp_path / "broker_tools.py"
+    verbs.write_text(LIVE_SHAPED)
+    assert gen.main(["emit-tools", "--verbs", str(verbs), "--seat",
+                     "res-claudete", "--out", str(out)]) == 1
+    assert not out.exists()
+    assert "no seat section" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("mode", ["check", "emit-cli", "write"])
+def test_seat_is_refused_outside_emit_tools(mode):
+    with pytest.raises(SystemExit) as exc:
+        gen.main([mode, "--seat", "res-claudette"])
+    assert exc.value.code == 2
+
+
+def test_the_unfiltered_module_is_unchanged_by_the_seat_option():
+    module = gen.emit_tools_module(gen.load_surface())
+    assert "The broker verbs this seat can reach, as Anthropic" in module
 
 
 # ── the catalogue's own grammar ──────────────────────────────────────────
