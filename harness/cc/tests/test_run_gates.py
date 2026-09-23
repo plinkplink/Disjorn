@@ -240,6 +240,14 @@ def test_a_missing_adapter_repo_is_named_and_the_pin_still_set(rig):
     assert f"adapter repo missing: {rig.gatehouse}/claudette.git" in cp.stderr
 
 
+def test_both_suites_name_their_skips_in_the_gate_log():
+    """A nested conftest cannot turn on -rs once `pytest harness` has
+    configured its reporter, so the gate asks for it."""
+    lines = [ln for ln in RUN_GATES.read_text().splitlines()
+             if "python3 -m pytest" in ln]
+    assert len(lines) == 2 and all(" -rs " in ln for ln in lines), lines
+
+
 def test_a_branch_that_leaves_client_alone_skips_and_mounts_nothing(rig):
     rig.branch("server/app/thing.py")
     node_modules = rig.tmp / "node_modules"

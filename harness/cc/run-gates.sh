@@ -82,10 +82,10 @@ fi
 # PYTHONPATH names the in-tree house_memory package; the image has no copy.
 INNER='
 set -u
-cd /work/server && python3 -m pytest tests -q -p no:cacheprovider >&2
+cd /work/server && python3 -m pytest tests -q -rs -p no:cacheprovider >&2
 _server=$?
 export PYTHONPATH=/work/harness/house_memory
-cd /work && python3 -m pytest harness -q -p no:cacheprovider --ignore=harness/cc/tests/test_container.sh >&2
+cd /work && python3 -m pytest harness -q -rs -p no:cacheprovider --ignore=harness/cc/tests/test_container.sh >&2
 _harness=$?
 if [ "$_server" -eq 0 ] && [ "$_harness" -eq 0 ]; then
   echo "GATE tests pass"

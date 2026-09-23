@@ -80,7 +80,11 @@ Small. One file of real work, two of prose.
      be unreachable. Every drift failure names the resolved adapter commit
      (`core.py at <sha> (<rev> in <repo>, from <origin>)`).
   6. **Skips named where a human reads**: the gate summary line
-     (`harness/broker/gates.py`) appends each suite's skip count.
+     (`harness/broker/gates.py`) appends each suite's skip count. `run-gates.sh`
+     also passes `-rs` to both suites, because item 5's `conftest.py` hook is
+     inert under the gate's `pytest harness`. A nested conftest loads after
+     the terminal reporter has read its options, so it only names skips when
+     pytest starts inside `harness/broker/tests`.
 
   Claudette's proposal of 2026-09-23 (#custodian #2850, "the static-scan test is
   broken on main and has never shown red") is covered here: the `start_build`
