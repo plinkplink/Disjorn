@@ -163,7 +163,7 @@ APPS_TURN_MAX_SEC = 1800          # launch.toml [apps].turn_max_sec, mirrored
 APPS_DEFAULTS: dict = {
     "runner": "claude-code",
     "seat_bots": {},
-    "model": "claude-opus-5",
+    "model": "claude-opus-5-5",
     "build_token_ceiling": 10_000_000,
     "prompt_max_bytes": 65536,
     "turns_root": "/srv/apps-turns",
