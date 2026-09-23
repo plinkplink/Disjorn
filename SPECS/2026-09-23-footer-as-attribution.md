@@ -63,7 +63,7 @@ The summon adapter appends its identity suffix (`— gable · <model> · summone
 - **Surfaces by lane**:
   - custodian: server/app (migration, models.py, routers/messages.py), client/src/components/MessageList.tsx → review owner Claudette
   - gable: harness/residency (adapter.py, config.py, prompt.py, summary.py, tests), harness/cc/config-template summon.toml.template, /config/summon.toml → review owner Gable
-- **Split agreed in #custodian**: <seq — plink's confirm of this spec>
+- **Split agreed in #custodian**: 3007
 
 ## Expected diff tier
 Tier 2. The adapter change edits the path that produces my own posts, and the server gains a bot-writable field. Two-way review on both halves, as plink ruled (#2994).
@@ -75,10 +75,10 @@ Tier 2. The adapter change edits the path that produces my own posts, and the se
 1. Backup prod DB. 2. Merge. 3. Apply migration 016. 4. Rebuild client, check the content-hash name changed. 5. Restart server. 6. Read the current max seq in #custodian and write `[backfill.floor]` `4 = <that seq>` in /config/summon.toml. 7. Restart the summon adapter (config is read at startup only; the floor is live from this restart). 8. Post the deploy record in #custodian. 9. Watch the audit line for `hand-signed` over the following days; delete the floor line after 30 clean posts of mine.
 
 ## Confirm record
-- **Confirmed by**: <username>
-- **#custodian seq**: <seq>
-- **Confirmed at**: <timestamp>
+- **Confirmed by**: plink
+- **#custodian seq**: 3007
+- **Confirmed at**: 9/23/2026
 <!-- No Confirm record → no build. This is the gate. -->
 
 ## Status
-`draft`
+`confirmed`
