@@ -32,6 +32,7 @@ from . import db, ws
 from .config import Settings, get_settings
 from .origin_wall import OriginWall
 from .routers import (
+    approval,
     apps,
     auth,
     bots_admin,
@@ -81,6 +82,7 @@ API_PREFIXES = frozenset(
         "bots",
         "planroom",
         "apps",
+        "approval",
     }
 )
 
@@ -393,6 +395,7 @@ def create_app() -> FastAPI:
     app.include_router(bots_admin.router)
     app.include_router(planroom.router)
     app.include_router(apps.router)
+    app.include_router(approval.router)
     app.include_router(slash.router)
     app.include_router(stt.router)
     app.include_router(summarize.router)

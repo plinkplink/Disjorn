@@ -34,8 +34,10 @@ and the write path. Governing plan: BUILD-LOOP.md.
    (b) the post names the target path and the sha256 of the exact content
    the verb is about to write; (c) the post is younger than the freshness
    window (config, default 24h); (d) the seq is unconsumed — one record
-   authorizes exactly one write, and the broker's audit log is the
-   consumed-set. Any check failing → refuse + audit line. Same shape as
+   authorizes exactly one write, and the consumed-set is the broker's own
+   append-only state file, fsync'd per mark and never the audit log, so
+   rotating or truncating the audit log re-arms nothing (rev 3). Any check
+   failing → refuse + audit line. Same shape as
    the specs confirm gate: the broker reads the shared artifact, never a
    caller's claim about it.
    **Consume-then-write ordering (rev 2):** the broker writes the
@@ -108,6 +110,42 @@ Medium per slice; two build slots total.
   retry, no free replay), and the record named as a publicity
   requirement, not an approval — no human in the Tier-0/1 path.
   Claudette pre-signed rev 2 on sight at seq 2011.
+- rev 3 — 2026-09-23, folded at the keyboard while porting slice A onto
+  main (`port/approval-object`). Folds 1–3 answer Claudette's review of
+  the rescued branch (card comment 36, #custodian seq 2056); fold 4 is the
+  keyboard port's own finding.
+  1. A record whose #custodian post has been edited or deleted is
+     refused (`post-edited` / `post-deleted`, audited): an edit can
+     rewrite the content and its sha together, so only what was shown
+     counts.
+  2. The consumed-set moves off the audit log into its own state file,
+     `[write_verbs].consumed_ledger`, in a resident-unwritable directory
+     and fsync'd before the target is touched, so consume-then-write
+     holds. Freshness stays as defence in depth.
+  3. Check (a) reads bot authors only (`bots.name`): a person account
+     named like the seat never satisfies it (`not-a-bot-post`).
+  4. The approval object's act endpoint derives the principal. A
+     signed-in human answers only as their own username. Only a bot on
+     `APPROVAL_RELAY_BOT_NAMES` (default: the broker) may name a
+     principal, and only a resident seat's, so a relayed answer is never a
+     person's. Every other bot key is refused. The mirror of fold 3
+     holds here too: a person account named like a resident seat
+     (`res-*`) is not a principal.
+
+## Review record
+- Claudette, #custodian seq 3011, on `261364d`: PASS (all three f2c4bd7
+  findings in; the port's principal derivation accepted). Notes folded
+  before merge: the closed check is re-read inside the write transaction,
+  so a concurrent answer cannot reopen or rewrite a decision; a relayed
+  answer is labelled `res-<seat> (via broker)`. Her third note (two
+  migration 016s) is answered by the footer spec taking 017.
+- Gable, #custodian seq 3012, on `261364d`: PASS on his lane
+  (`[tiers.res-gable]` rows ship empty; regenerated CLI clean). Notes
+  folded before merge: `harness/classifier/protected-paths.toml` joins its
+  own `[protected].files`, so a tier-map edit is Tier 2 at the merge gate;
+  the "lower tier wins a tie" wording now says the tier only labels the
+  audit line. Installing the new file to `/etc/disjorn-broker/` is an
+  arming step, not a merge step.
 
 ## Confirm record
 - **Confirmed by**: plink

@@ -65,6 +65,10 @@ class Settings(BaseSettings):
     # answer — an absent index and an empty board must not read alike.
     PLANROOM_INDEX: str = ""
 
+    APPROVAL_ENABLED: bool = False
+    APPROVAL_PRINCIPALS: str = "plink,res-claudette,res-gable"
+    APPROVAL_RELAY_BOT_NAMES: list[str] = ["broker"]
+
     # APPS tab (SPECS/2026-08-30-apps-tab-v1.md, stage 1).
     #
     # These four live HERE rather than in broker.toml's `[apps]` table because
@@ -148,6 +152,10 @@ class Settings(BaseSettings):
     @property
     def db_path(self) -> Path:
         return Path(self.DB_PATH)
+
+    @property
+    def approval_principals(self) -> list[str]:
+        return [p.strip() for p in self.APPROVAL_PRINCIPALS.split(",") if p.strip()]
 
     @property
     def planroom_index(self) -> Path | None:

@@ -34,6 +34,7 @@ ALL_VERBS = [
     "file-proposal", "query-own-audit",
     "board-list", "board-card", "board-search", "board-flag", "board-comment",
     "summon-hop", "apps-build", "build", "merge",
+    "approval-list", "approval-show", "approval-act", "apply-posted-write",
 ]
 
 RECORD_STUB = textwrap.dedent("""\
@@ -344,6 +345,7 @@ class BrokerHarness:
                  gatehouse: Path | None = None,
                  planroom_calls: list | None = None,
                  planroom_state: dict | None = None,
+                 approval_state: dict | None = None,
                  channel_posts: list | None = None,
                  message_db: Path | None = None,
                  classify_control: Path | None = None) -> None:
@@ -359,6 +361,9 @@ class BrokerHarness:
         # Every /planroom call the broker made, and the fake board it talked to.
         self.planroom_calls = planroom_calls if planroom_calls is not None else []
         self.planroom_state = planroom_state if planroom_state is not None else {}
+        # The fake /approval surface behind the same injected transport.
+        self.approval_state = (approval_state if approval_state is not None
+                               else {"proposals": {}, "http_error": None})
         self.broker = broker
         self.verbs_path = verbs_path
         self.record_file = record_file
@@ -394,6 +399,23 @@ class BrokerHarness:
         self.broker.start_build["command"] = [
             PY, str(self.stub_dir / "flood.py"), str(self.build_record),
             str(megabytes)]
+
+    # -- the approval object ----------------------------------------------
+    def add_proposal(self, proposal_id: int = 1, *, slug: str = "a-proposal",
+                     title: str = "A proposal", text: str = "the text",
+                     principals=("plink", "res-test", "res-other"),
+                     closed_at=None) -> dict:
+        """File a proposal on the fake surface, with a pending row per
+        principal — the server writes them all at creation, so an unanswered
+        principal is a `pending` row and never an absent one."""
+        row = {"id": proposal_id, "slug": slug, "title": title, "text": text,
+               "created_at": "2026-08-26T00:00:00.000Z", "closed_at": closed_at,
+               "decision": "pending",
+               "states": [{"principal": p, "state": "pending", "remarks": None,
+                           "acted_by": None, "acted_at": None}
+                          for p in principals]}
+        self.approval_state["proposals"][proposal_id] = row
+        return row
 
     # -- the server principal (`/build`) ----------------------------------
     def become_server(self, unit: str = "disjorn-test.service") -> None:
@@ -766,6 +788,42 @@ def _write_stub(path: Path, content: str) -> None:
     path.chmod(0o755)
 
 
+def _stub_approval(state: dict, method: str, path: str,
+                   payload: dict | None) -> dict:
+    """A fake /approval surface, composing the same shape the server does.
+
+    Deliberately NOT a second implementation of the rule set: the server owns
+    who-may-answer-as-whom and the derived decision, and its own tests try
+    those. What these tests need from it is that the broker sends the right
+    call and stamps the principal itself."""
+    if state.get("http_error"):
+        raise VerbError("exec-failure", state["http_error"])
+    rest = path[len("/approval/proposals"):]
+    if method == "GET" and (not rest or rest.startswith("?")):
+        rows = list(state["proposals"].values())
+        return {"proposals": rows, "count": len(rows), "truncated": False}
+    proposal_id = int(rest.lstrip("/").split("/")[0])
+    row = state["proposals"].get(proposal_id)
+    if row is None:
+        raise VerbError("exec-failure", "No such approval proposal")
+    if method == "POST" and rest.endswith("/act"):
+        assert payload is not None
+        for st in row["states"]:
+            if st["principal"] == payload["principal"]:
+                st["state"] = payload["action"]
+                st["remarks"] = payload.get("remarks")
+                break
+        else:
+            raise VerbError("exec-failure",
+                            f"'{payload['principal']}' is not a principal")
+        values = [s["state"] for s in row["states"]]
+        row["decision"] = ("denied" if "deny" in values
+                           else "rework" if "rework" in values
+                           else "approved" if all(v == "approve" for v in values)
+                           else "pending")
+    return {"proposal": row}
+
+
 @pytest.fixture()
 def harness(tmp_path: Path):
     """A running broker on a scratch socket, current uid mapped to res-test."""
@@ -933,6 +991,7 @@ def harness(tmp_path: Path):
         return {"seq": 99, "message_id": 1234}
 
     planroom_calls: list = []
+    approval_state: dict = {"proposals": {}, "http_error": None}
     # The server's answer about a build session. A chat build asks before it
     # launches; `sessions` overrides the default per session id.
     planroom_state: dict = {"session": {"open": True, "mode": "repo",
@@ -985,6 +1044,8 @@ def harness(tmp_path: Path):
                 return {"card": card}
             return {"face": face, "card": by_slug.get(slug),
                     "comments": planroom_state["comments"].get(slug, [])}
+        if path.startswith("/approval/proposals"):
+            return _stub_approval(approval_state, method, path, payload)
         raise VerbError("exec-failure", f"unstubbed plan room path {path}")
 
     channel_posts: list = []
@@ -1005,6 +1066,7 @@ def harness(tmp_path: Path):
                       spec_repo=spec_repo, gatehouse=gatehouse,
                       planroom_calls=planroom_calls,
                       planroom_state=planroom_state,
+                      approval_state=approval_state,
                       channel_posts=channel_posts, message_db=message_db,
                       classify_control=classify_control)
     h.set_verbs()  # everything explicitly OFF to start
