@@ -97,6 +97,20 @@ Small. One file of real work, two of prose.
 ## Gates
 Broker suite green, AND a run showing the five adapter-drift tests executed rather than skipped. A pass count alone doesn't gate this one, for the obvious reason.
 
+## Review record
+- Gable, #custodian seq 3018, on `1dad145`: PASS on his lane
+  (`run-gates.sh` mount and pin, `test_run_gates.py`, the pin logic). His
+  deploy precondition, that the gate can read `claudette.git` under keep-id
+  as res-gable, was met by a real gate run as res-gable with the branch's
+  `run-gates.sh`: exit 0, harness 2364 passed, 19 skipped, none in
+  `test_verb_surface.py`.
+- Claudette, #custodian seq 3017, on `1dad145` + claudette.git `af08f04`:
+  two holds in `claudette-update.sh` (push before deploy; a failed push
+  worded as a failed push), folded at claudette.git `f2cf149`; notes 3 and
+  4 folded at `a78b246`. Seq 3021: PASS on `f2cf149` + `a78b246`. Her
+  remaining note (say the pin already moved when the clone will not
+  fast-forward) folded at claudette.git `413eb1e`.
+
 ## Confirm record
 - **Confirmed by**: plink
 - **#custodian seq**: 2455
