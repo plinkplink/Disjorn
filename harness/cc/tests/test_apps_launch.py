@@ -698,7 +698,7 @@ def test_shipped_example_config_parses_and_launches(seat, tmp_path):
     data = tomllib.loads(EXAMPLE_TOML.read_text(encoding="utf-8"))
     assert set(data["prompt_dirs"]) == {"res-gable", "res-claudette"}
     assert data["runner"]["command"][0] == "claude"
-    assert data["runner"]["model"] == "claude-opus-5"
+    assert data["runner"]["model"] == "claude-opus-5-5"
     assert data["apps"]["turn_max_sec"] == 1800
     assert data["apps"]["ponytail_mode"] == "full"
     assert data["apps"]["image"] == "localhost/disjorn-apps-builder:latest"
@@ -736,6 +736,19 @@ def test_apps_image_pins_the_same_claude_code_as_the_resident_image():
     assert apps == resident, (
         f"Containerfile.apps pins claude-code {apps}, Containerfile pins "
         f"{resident} — bump both together or neither")
+
+
+def test_every_build_seat_and_its_subagents_share_one_model_pin():
+    import tomllib
+    broker = CC_DIR.parent / "broker" / "broker.toml"
+    pin = tomllib.loads(broker.read_text(encoding="utf-8"))["start_build"]["model"]
+    example = tomllib.loads(EXAMPLE_TOML.read_text(encoding="utf-8"))
+    assert example["runner"]["model"] == pin
+    for rel in ("build-config/settings.json", "apps/config/settings.json"):
+        settings = json.loads((CC_DIR / rel).read_text(encoding="utf-8"))
+        assert settings["env"]["CLAUDE_CODE_SUBAGENT_MODEL"] == pin, rel
+        assert settings["env"]["CLAUDE_CODE_SUBAGENT_MODEL_FORCE"] == "1", rel
+        assert "modelSettings" not in settings and "effortLevel" not in settings, rel
 
 
 # ───────────────────────────────────────── the prompt rides stdin, root writes nothing ──

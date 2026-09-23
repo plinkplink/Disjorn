@@ -9,7 +9,7 @@
 "harness/broker/tests/test_broker_publish_path.py" = 6923
 "harness/broker/tests/test_broker_spec_status.py" = 6681
 "harness/broker/tests/test_broker_specs_dir_guard.py" = 4044
-"harness/broker/tests/test_broker_start_build.py" = 12362
+"harness/broker/tests/test_broker_start_build.py" = 12295
 "harness/broker/tests/test_broker_summon_hops.py" = 2961
 "harness/broker/tests/test_verb_surface.py" = 8759
 "harness/cc/apps/apps_harvest.py" = 38639

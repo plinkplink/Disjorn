@@ -55,7 +55,7 @@ FROM docker.io/library/debian:trixie-slim
 # the two seats run the same CLI and a silent divergence between them is the
 # copied-value drift shape this project pays for most often.
 # harness/cc/tests/test_apps_launch.py fails if they disagree.
-ARG CLAUDE_CODE_VERSION=2.1.267
+ARG CLAUDE_CODE_VERSION=2.1.280
 
 # Base toolchain, and no more than that. ca-certificates for api.anthropic.com;
 # node+npm as the CC runtime; git because the seat's own tooling reads a repo

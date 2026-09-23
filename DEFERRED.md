@@ -179,17 +179,6 @@ first-run line instead of as a fault.
   existing below-is-unverifiable rendering); test that a seeded floor's
   first digest flags nothing at-or-below the floor.
 
-- **Stale model-pin comment (Claudette #1498; "keyboard doc-card pile" per
-  Gable #1500).** `harness/residency/summon.toml.template:58` still reads
-  "Claudette's pin is an Opus id (she IS Opus-4.8)". She is Opus 5 since
-  07-24 (SUBSTRATE-LOG.md). Doc drift, harmless, but the block is
-  load-bearing enough that it shouldn't carry a stale fact about who she
-  is. One-line comment fix; touches `harness/` so it rides along with the
-  next guarded commit rather than spending a review cycle alone. The live
-  copy `/srv/disjorn-resident-config/res-gable/summon.toml` does not carry
-  the sentence (checked at filing).
-
-
 ## Plan Room deploy-night cards (2026-08-23, filed at the keyboard from #1571/#1572/#1575)
 
 - **Board writes are attributed to a constant, not an author (Gable #1572,

@@ -67,7 +67,7 @@ APP_ID="${3:?usage: run-apps.sh <session> <turn> <app-id>   (prompt on stdin)}"
 [ -t 0 ] && _die "the prompt arrives on stdin (the launcher feeds it); refusing a terminal"
 
 IMAGE="${APPS_IMAGE:-localhost/disjorn-apps-builder:latest}"
-MODEL="${APPS_MODEL:-claude-opus-5}"
+MODEL="${APPS_MODEL:-claude-opus-5-5}"
 PONYTAIL_MODE="${APPS_PONYTAIL_MODE:-full}"
 RUNNER_COMMAND="${APPS_RUNNER_COMMAND:-[\"claude\",\"-p\",\"--output-format\",\"stream-json\",\"--verbose\"]}"
 TURN_MAX_SEC="${APPS_TURN_MAX_SEC:-1800}"
