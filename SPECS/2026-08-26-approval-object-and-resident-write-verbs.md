@@ -154,7 +154,14 @@ Medium per slice; two build slots total.
 <!-- No Confirm record → no build. This is the gate. -->
 
 ## Status
-built@loop/2026-08-26-approval-object-and-resident-write-verbs
+merged
+<!-- SLICE A merged and deployed dark 2026-09-23 (c0622fc; migration 016
+     applied, broker restarted). SLICE B, the client modal, is NOT built:
+     it gets its own spec file citing this confirm (seq 2022) when plink
+     presses it. Its inputs from slice A: bus/WS events on create and act,
+     who files a proposal and what it links to, the 503 render, and room
+     under the prose wall in routers/approval.py. -->
+<!-- advanced from `built@loop/2026-08-26-approval-object-and-resident-write-verbs` by `board --mark-merged` on 2026-09-23: build merged as c0622fc. The word `built@loop/2026-08-26-approval-object-and-resident-write-verbs` on a merged spec made it indistinguishable from a buildable one. -->
 <!-- SLICE A ONLY (object + broker verbs); slice B, the client modal, is a
      separate press and is not on this branch. -->
 <!-- The build was killed at its timeout and the work rescued by hand onto
