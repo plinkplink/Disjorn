@@ -12,50 +12,11 @@ import { ImageModal } from "../components/ImageModal";
 import { ChannelLabel } from "../components/LockGlyph";
 import { MessageList } from "../components/MessageList";
 import { SummarizeModal } from "../components/SummarizeModal";
+import { TypingLine } from "../components/TypingLine";
 import { useChannels } from "../stores/channels";
 import { useMembers } from "../stores/members";
-import { usePresence } from "../stores/presence";
-import { useSession } from "../stores/session";
 import type { Attachment, Message } from "../types";
 import { isChannelMember, isPrivateChannel } from "../types";
-
-function TypingLine({ channelId }: { channelId: number }) {
-  const typists = usePresence((s) => s.typing[channelId]);
-  const me = useSession((s) => s.user);
-  const members = useMembers((s) => s.byChannel[channelId]);
-
-  const others = (typists ?? []).filter(
-    (t) => !(t.authorType === "user" && me !== null && t.authorId === me.id),
-  );
-
-  let text = "";
-  if (others.length > 0) {
-    const names = others.map(
-      (t) =>
-        members?.find((m) => m.type === t.authorType && m.id === t.authorId)
-          ?.name ?? "Someone",
-    );
-    if (names.length === 1) text = `${names[0] ?? "Someone"} is typing`;
-    else if (names.length === 2) text = `${names[0]} and ${names[1]} are typing`;
-    else text = "Several people are typing";
-  }
-
-  // Fixed-height line: reserves space so the feed doesn't jump.
-  return (
-    <div className="typing-line" aria-live="polite">
-      {text.length > 0 && (
-        <>
-          <span className="typing-dots" aria-hidden>
-            <i />
-            <i />
-            <i />
-          </span>
-          {text}…
-        </>
-      )}
-    </div>
-  );
-}
 
 export function ChatView() {
   const activeChannelId = useChannels((s) => s.activeChannelId);

@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from "react";
 
 import { ApiError } from "../api";
 import { AddMembersModal } from "../components/AddMembersModal";
-import { Avatar } from "../components/Avatar";
+import { AppBuildModal } from "../components/AppBuildModal";
+import { AppsChooserModal } from "../components/AppsChooserModal";
+import { Avatar, BotAvatar } from "../components/Avatar";
 import { ChannelDeletedToast } from "../components/ChannelDeletedToast";
 import { CheatSheet } from "../components/CheatSheet";
 import { CreateChannelModal } from "../components/CreateChannelModal";
@@ -16,13 +18,21 @@ import {
   channelIdFromHash,
   writeChannelHash,
 } from "../hashRoute";
+import { POPUP_BLOCKED_NOTE, openMinted } from "../lib/openMinted";
+import { useApps } from "../stores/apps";
 import { useChannels } from "../stores/channels";
 import { useMembers } from "../stores/members";
 import { useMembership } from "../stores/membership";
 import { useMessages } from "../stores/messages";
 import { usePresence } from "../stores/presence";
 import { useSession } from "../stores/session";
-import type { ChannelListItem, SettableStatus, UserStatus } from "../types";
+import type {
+  App,
+  Builder,
+  ChannelListItem,
+  SettableStatus,
+  UserStatus,
+} from "../types";
 import { isChannelMember, isPrivateChannel } from "../types";
 import { socket } from "../ws";
 import { ChatView } from "./ChatView";
@@ -286,7 +296,194 @@ function UserFooter({ onOpenSettings }: { onOpenSettings: () => void }) {
   );
 }
 
+/* ---- apps ---- */
+
+/**
+ * One row of the APPS group. The avatar is the BUILDER's, not the app's: an
+ * app has no face of its own in v1, and the seat that built it is the honest
+ * thing to show. An unknown builder (a seat since removed from the roster)
+ * still gets a row — the app did not stop existing.
+ */
+function AppRow({
+  app,
+  builder,
+  onOpen,
+}: {
+  app: App;
+  builder: Builder | undefined;
+  onOpen: (app: App) => void;
+}) {
+  const building = app.open_session !== null;
+  return (
+    <button className="channel-item app-row" onClick={() => onOpen(app)}>
+      <BotAvatar
+        src={builder?.avatar_url}
+        name={builder?.name ?? app.name}
+        size={20}
+      />
+      <span className="channel-item-text">
+        <span className="name">{app.name}</span>
+      </span>
+      {building && (
+        <span className="app-building" title="A build session is open">
+          <span className="app-building-dot" aria-hidden />
+          building…
+        </span>
+      )}
+      <span className={`app-status-chip ${app.status}`}>{app.status}</span>
+    </button>
+  );
+}
+
+/**
+ * The read-only card for an app you cannot open a session on — someone else's,
+ * or one of yours that is past `draft`. Open is rendered disabled rather than
+ * hidden while the app is not live: the app IS reachable eventually, and
+ * saying when is more use than pretending the button was never designed.
+ *
+ * Share is not here. Sharing is the owner's verb and it lives in the build
+ * modal beside Live, where the thing being shared is on screen (stage 3 D7).
+ */
+function AppCardModal({
+  app,
+  builder,
+  onClose,
+}: {
+  app: App;
+  builder: Builder | undefined;
+  onClose: () => void;
+}) {
+  const originBase = useApps((s) => s.originBase);
+  const [opening, setOpening] = useState(false);
+  const [remixing, setRemixing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  /** The minted URL when the browser refused the tab — rendered as a link the
+      user can click, which is a gesture no popup blocker argues with. */
+  const [blockedUrl, setBlockedUrl] = useState<string | null>(null);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  /* Synchronous tab claim, then navigate when the mint lands — the shared
+     helper, for the same reason the other two Open buttons use it. */
+  const open = () => {
+    if (opening) return;
+    setOpening(true);
+    setError(null);
+    setBlockedUrl(null);
+    void openMinted(() => useApps.getState().openApp(app.id, "live")).then(
+      (result) => {
+        setOpening(false);
+        if (result.kind === "blocked") setBlockedUrl(result.url);
+        if (result.kind === "failed") {
+          setError(
+            result.error instanceof ApiError
+              ? result.error.detail
+              : "Could not open it",
+          );
+        }
+      },
+    );
+  };
+
+  const remix = () => {
+    if (remixing) return;
+    setRemixing(true);
+    setError(null);
+    setBlockedUrl(null);
+    useApps
+      .getState()
+      .remixApp(app.id)
+      .then(
+        (session) => {
+          setRemixing(false);
+          // The shell closes this card and opens the build modal on the copy.
+          useApps.getState().requestBuildModal(session.id);
+        },
+        (err: unknown) => {
+          setRemixing(false);
+          setError(err instanceof ApiError ? err.detail : "Could not remix it");
+        },
+      );
+  };
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div
+        className="create-channel-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label={app.name}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="member-modal-head">
+          <span className="member-modal-title">{app.name}</span>
+          <button className="icon-btn" aria-label="Close" onClick={onClose}>
+            ✕
+          </button>
+        </div>
+        <p className="member-modal-note">
+          {app.description.length > 0
+            ? app.description
+            : "No description yet."}
+        </p>
+        <div className="app-card-meta">
+          <BotAvatar
+            src={builder?.avatar_url}
+            name={builder?.name ?? app.name}
+            size={24}
+          />
+          <span>{builder?.name ?? "Builder no longer listed"}</span>
+          <span className={`app-status-chip ${app.status}`}>{app.status}</span>
+        </div>
+        {error !== null && <p className="form-error">{error}</p>}
+        {blockedUrl !== null && (
+          <p className="app-open-blocked">
+            {POPUP_BLOCKED_NOTE}{" "}
+            <a href={blockedUrl} target="_blank" rel="noopener noreferrer">
+              {app.name}
+            </a>
+          </p>
+        )}
+        <div className="member-modal-actions">
+          {/* Remix is offered on any live app, your own included: a remix of
+              your own app is a new app, not an edit of the one people already
+              have open (stage 3 D10). */}
+          {app.status === "live" && (
+            <button
+              className="btn"
+              disabled={opening || remixing}
+              title="Copy it into an app of your own and build on that"
+              onClick={remix}
+            >
+              {remixing ? "Remixing…" : "Remix"}
+            </button>
+          )}
+          <button
+            className="btn"
+            disabled={opening || app.status !== "live" || originBase === ""}
+            title={
+              originBase === ""
+                ? "Serving is not configured on this house."
+                : app.status === "live"
+                  ? "Open this app in a new tab"
+                  : "This app is not live yet."
+            }
+            onClick={open}
+          >
+            {opening ? "Opening…" : "Open"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ---- shell ---- */
+
 
 export function AppShell() {
   const channels = useChannels((s) => s.channels);
@@ -304,6 +501,12 @@ export function AppShell() {
   const [addingMembers, setAddingMembers] = useState(false);
   const [deletingChannel, setDeletingChannel] = useState(false);
   const [channelMenuOpen, setChannelMenuOpen] = useState(false);
+  const [choosingApp, setChoosingApp] = useState(false);
+  const [buildSessionId, setBuildSessionId] = useState<number | null>(null);
+  const [appCardId, setAppCardId] = useState<string | null>(null);
+  const apps = useApps((s) => s.apps);
+  const builders = useApps((s) => s.builders);
+  const pendingSessionId = useApps((s) => s.pendingSessionId);
   const me = useSession((s) => s.user);
   const overlayRef = useRef(overlay);
   overlayRef.current = overlay;
@@ -312,6 +515,16 @@ export function AppShell() {
   useEffect(() => {
     const st = useChannels.getState();
     void st.refresh();
+    /* The apps menu is its own list — GET /apps, not GET /channels (brief
+       D9) — so it loads alongside, and resyncs alongside on reconnect (ws.ts).
+       Builders come with it because every app row wears its builder's face,
+       not just the chooser's cards. */
+    void useApps.getState().refresh().catch(() => {});
+    void useApps.getState().loadBuilders().catch(() => {});
+    /* The serving gate's origin (stage 3 D10). Boot-time because the message
+       feed needs it to tell an app link from any other link, and a feed that
+       learned the origin late would repaint cards under the reader. */
+    void useApps.getState().loadConfig();
     if (overlayFromHash() === "none") st.setActive(channelIdFromHash());
     socket.connect();
     // Route changes from outside (notification deep-links, back button).
@@ -328,6 +541,23 @@ export function AppShell() {
       socket.disconnect();
     };
   }, []);
+
+  /* A Remix somewhere else in the tree (a card in the feed) asked for the
+     build modal on its new session. The shell owns that modal, so the store
+     is where the two meet; consuming the request clears it. */
+  useEffect(() => {
+    if (pendingSessionId === null) return;
+    setSidebarOpen(false);
+    setAppCardId(null);
+    setBuildSessionId(pendingSessionId);
+    useApps.getState().clearBuildModalRequest();
+  }, [pendingSessionId]);
+
+  /* The store decides whether a repo build may take the screen, and this is
+     the only thing that tells it a modal is already up. */
+  useEffect(() => {
+    useApps.getState().setOpenBuildSession(buildSessionId);
+  }, [buildSessionId]);
 
   // Default to #main once channels arrive (unless a deep link chose one).
   useEffect(() => {
@@ -474,8 +704,16 @@ export function AppShell() {
   const openPlanRoom = () => openOverlay("planroom");
 
   const active = channels.find((c) => c.id === activeChannelId);
-  const dms = channels.filter((c) => c.type === "dm_1to1");
-  const mains = channels.filter((c) => c.type !== "dm_1to1"); // main_feed + text
+  /* app_build channels are real channels the server keeps listing — reconnect
+     resync and unread bookkeeping depend on that — but they are never sidebar
+     rows: their only door is the build modal. Filtered out once, before both
+     groups, so neither can grow one by accident. */
+  const listable = channels.filter((c) => c.type !== "app_build");
+  const dms = listable.filter((c) => c.type === "dm_1to1");
+  const mains = listable.filter((c) => c.type !== "dm_1to1"); // main_feed + text
+  const builderFor = (app: App): Builder | undefined =>
+    builders.find((b) => b.bot_id === app.builder_bot_id);
+  const cardApp = apps.find((a) => a.id === appCardId);
   const select = (id: number) => {
     if (overlayRef.current !== "none") closeOverlay();
     useChannels.getState().setActive(id);
@@ -510,6 +748,35 @@ export function AppShell() {
     (isOwner || me?.is_admin === true);
   const canAddMembers = activePrivate && activeMember && isOwner;
   const canLeave = activePrivate && activeMember;
+
+  /* Clicking an app row: resume the live session if there is one; start a new
+     one if it is my own draft (the server still rules on quota and locks —
+     this only decides which verb to try); otherwise show the read-only card.
+     A refusal is the server's sentence, said out loud. */
+  const openApp = (app: App) => {
+    setSidebarOpen(false);
+    if (app.open_session !== null) {
+      setBuildSessionId(app.open_session.id);
+      return;
+    }
+    if (me !== null && app.owner_user_id === me.id && app.status === "draft") {
+      useApps
+        .getState()
+        .startSession(app.builder_bot_id, app.id)
+        .then(
+          (session) => setBuildSessionId(session.id),
+          (err: unknown) => {
+            window.alert(
+              err instanceof ApiError
+                ? err.detail
+                : "Failed to start the build session",
+            );
+          },
+        );
+      return;
+    }
+    setAppCardId(app.id);
+  };
 
   const leaveActive = () => {
     if (active === undefined) return;
@@ -570,6 +837,30 @@ export function AppShell() {
               channel={c}
               active={c.id === activeChannelId && overlay === "none"}
               onSelect={select}
+            />
+          ))}
+          <div className="channel-section channel-section-row">
+            <span>Apps</span>
+            <button
+              className="icon-btn add-channel-btn"
+              title="Add or build an app"
+              aria-label="Add or build an app"
+              onClick={() => setChoosingApp(true)}
+            >
+              +
+            </button>
+          </div>
+          {apps.length === 0 && (
+            <span className="channel-section" style={{ textTransform: "none" }}>
+              No apps yet
+            </span>
+          )}
+          {apps.map((a) => (
+            <AppRow
+              key={a.id}
+              app={a}
+              builder={builderFor(a)}
+              onOpen={openApp}
             />
           ))}
           <div className="channel-section">Direct messages</div>
@@ -706,6 +997,28 @@ export function AppShell() {
           channelName={active.name ?? ""}
           isPrivate={activePrivate}
           onClose={() => setDeletingChannel(false)}
+        />
+      )}
+      {choosingApp && (
+        <AppsChooserModal
+          onStarted={(session) => {
+            setChoosingApp(false);
+            setBuildSessionId(session.id);
+          }}
+          onClose={() => setChoosingApp(false)}
+        />
+      )}
+      {buildSessionId !== null && (
+        <AppBuildModal
+          sessionId={buildSessionId}
+          onClose={() => setBuildSessionId(null)}
+        />
+      )}
+      {cardApp !== undefined && (
+        <AppCardModal
+          app={cardApp}
+          builder={builderFor(cardApp)}
+          onClose={() => setAppCardId(null)}
         />
       )}
       {/* Added to / removed from a private channel — a modal for now. */}

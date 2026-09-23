@@ -3,11 +3,20 @@
    Errors surface as ApiError with the server's `detail` string. */
 
 import type {
+  AdminUserRow,
+  App,
+  AppCardData,
+  AppRoot,
+  AppSession,
+  AppsConfig,
+  AppStage,
+  AppStatus,
   AvatarUploadResponse,
   BackfillItem,
   BacklogItem,
   BacklogStatus,
   Bot,
+  Builder,
   ChannelListItem,
   ChannelMemberOut,
   ChannelVisibility,
@@ -18,6 +27,7 @@ import type {
   PlanBoard,
   PlanCard,
   PlanCardDetail,
+  Quota,
   SearchResult,
   SettableStatus,
   SummarizeResponse,
@@ -73,21 +83,49 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * How long to wait before re-sending a GET whose fetch never reached the
+ * server. A phone waking an installed PWA from background routinely loses its
+ * first request that way — the network stack is not up yet — and the retry
+ * lands well inside a second.
+ */
+const NETWORK_RETRY_DELAY_MS = 300;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function request<T>(
   method: string,
   path: string,
   body?: unknown,
 ): Promise<T> {
-  let res: Response;
-  try {
-    res = await fetch(path, {
+  const send = (): Promise<Response> =>
+    fetch(path, {
       method,
       credentials: "include",
       headers: body !== undefined ? { "Content-Type": "application/json" } : {},
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
+
+  let res: Response;
+  try {
+    res = await send();
   } catch {
-    throw new ApiError(0, "Network error — server unreachable");
+    // A thrown fetch means the request never got an answer, which is NOT the
+    // same as the server saying no. GETs are idempotent, so re-send once
+    // rather than surfacing a wake-from-background hiccup as an error. Writes
+    // are not re-sent: a lost response could still have been a completed
+    // request on the server side.
+    if (method !== "GET") {
+      throw new ApiError(0, "Network error — server unreachable");
+    }
+    await delay(NETWORK_RETRY_DELAY_MS);
+    try {
+      res = await send();
+    } catch {
+      throw new ApiError(0, "Network error — server unreachable");
+    }
   }
   if (!res.ok) {
     let detail = res.statusText || "Request failed";
@@ -127,6 +165,26 @@ export function changePassword(
 ): Promise<{ ok: boolean }> {
   return request<{ ok: boolean }>("POST", "/auth/password", {
     current_password: currentPassword,
+    new_password: newPassword,
+  });
+}
+
+/** ADMIN: every human account, for the reset picker in Settings. */
+export function listUsers(): Promise<AdminUserRow[]> {
+  return request<AdminUserRow[]>("GET", "/auth/users");
+}
+
+/**
+ * ADMIN: set another account's password. The server marks the account as
+ * owing a rotation and ends all of its sessions, so what the admin knows is
+ * good for exactly one login. There is no self-service "forgot password"
+ * route on purpose: the house has no email, so an admin is the identity check.
+ */
+export function adminResetPassword(
+  userId: number,
+  newPassword: string,
+): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>("POST", `/auth/users/${userId}/password`, {
     new_password: newPassword,
   });
 }
@@ -530,6 +588,238 @@ export function putNotifyPrefs(prefs: NotifyPrefs): Promise<NotifyPrefs> {
    VIEWER changed their own avatar, which left a bot repainted through the
    admin surface showing its old face until the 300s max-age expired. A null
    `avatar_url` is the "no avatar, don't ask" signal; see components/Avatar. */
+
+/* ---- apps (SPECS/2026-08-30-apps-tab-v1.md, stage 1) ---- */
+
+/**
+ * The contract pins the envelope for `GET /apps` and for a session, but not
+ * for the two endpoints that hand back a bare app or a bare list. Both
+ * shapes are accepted here, at the one boundary that can absorb the
+ * difference, so the client half does not depend on which one the server
+ * hand chose. Everything above this line reads a plain `App`.
+ */
+function unwrapApp(payload: App | { app: App }): App {
+  return "app" in payload ? payload.app : payload;
+}
+
+function unwrapApps(payload: App[] | { apps: App[] }): App[] {
+  return Array.isArray(payload) ? payload : payload.apps;
+}
+
+/** GET /apps — the apps on my menu (owned or added) plus my quota meter. */
+export function listApps(): Promise<{ apps: App[]; quota: Quota }> {
+  return request<{ apps: App[]; quota: Quota }>("GET", "/apps");
+}
+
+/** GET /apps/discover — public apps and apps shared with me, minus the ones
+    already on my menu. Empty is the normal state for a new user. */
+export async function discoverApps(): Promise<App[]> {
+  return unwrapApps(
+    await request<App[] | { apps: App[] }>("GET", "/apps/discover"),
+  );
+}
+
+/** GET /apps/builders — the resident seats offered as builders. May be empty
+    (no seats configured); that is a state to render, not an error. */
+export function listBuilders(): Promise<Builder[]> {
+  return request<Builder[]>("GET", "/apps/builders");
+}
+
+/** GET /apps/quota — the meter on its own, for a view with no app list. */
+export function fetchQuota(): Promise<Quota> {
+  return request<Quota>("GET", "/apps/quota");
+}
+
+/**
+ * POST /apps/sessions — start a build session, creating the app when no
+ * `appId` is given. Server-side this also creates the app_build channel, its
+ * two members and the system opener.
+ *
+ * 429 = the daily build cap is spent, 409 = that app already has a live
+ * session lock, 400 = unknown builder. All three arrive as ApiError.detail,
+ * one flat sentence written for a human — show it verbatim.
+ */
+export function startAppSession(
+  builderBotId: number,
+  appId?: string,
+): Promise<AppSession> {
+  return request<AppSession>("POST", "/apps/sessions", {
+    builder_bot_id: builderBotId,
+    ...(appId !== undefined ? { app_id: appId } : {}),
+  });
+}
+
+/** GET /apps/sessions/{id} — owner only; carries the stage history. */
+export function fetchAppSession(sessionId: number): Promise<AppSession> {
+  return request<AppSession>("GET", `/apps/sessions/${sessionId}`);
+}
+
+/**
+ * POST /apps/sessions/{id}/heartbeat — extends the session lock by the
+ * server's TTL. 410 means the session has ended or its lock lapsed; the
+ * build modal treats that as final and stops writing.
+ *
+ * The acknowledgement's fields are not pinned by the contract, so no caller
+ * reads them: success or the ApiError is the whole answer.
+ */
+export function heartbeatAppSession(
+  sessionId: number,
+): Promise<Record<string, unknown>> {
+  return request("POST", `/apps/sessions/${sessionId}/heartbeat`);
+}
+
+/** POST /apps/sessions/{id}/end — idempotent; ending an ended session is not
+    an error, which is what lets the modal end on the way out without racing
+    a lapsed lock. */
+export function endAppSession(
+  sessionId: number,
+): Promise<Record<string, unknown>> {
+  return request("POST", `/apps/sessions/${sessionId}/end`);
+}
+
+/** POST /apps/sessions/{id}/stop — ask for the running turn to stop (slice
+    (iv)). Records a request the broker acts on; nothing here promises when.
+    409 with no turn running, 410 on an ended session, idempotent otherwise. */
+export function stopAppTurn(
+  sessionId: number,
+): Promise<{ id: number; stop_requested_at: string }> {
+  return request("POST", `/apps/sessions/${sessionId}/stop`);
+}
+
+/**
+ * POST /apps/sessions/{id}/stage — the ONLY stage publisher in stage 1, and
+ * it is not for this client: the server admits the `broker` bot (or an admin
+ * user) and 403s everyone else. Wrapped here so the contract is complete and
+ * so an admin tool has a typed way in; the app never calls it in a user flow.
+ */
+export function publishAppStage(
+  sessionId: number,
+  stage: AppStage,
+  detail?: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  return request("POST", `/apps/sessions/${sessionId}/stage`, {
+    stage,
+    ...(detail !== undefined ? { detail } : {}),
+  });
+}
+
+/** PATCH /apps/{id} — owner only. Name <= 60 chars, description <= 300 (D10);
+    the server is the wall, the maxLength on the input is only courtesy. */
+export async function patchApp(
+  appId: string,
+  patch: { name?: string; description?: string },
+): Promise<App> {
+  return unwrapApp(
+    await request<App | { app: App }>(
+      "PATCH",
+      `/apps/${encodeURIComponent(appId)}`,
+      patch,
+    ),
+  );
+}
+
+/** POST /apps/{id}/menu — add a visible app to my menu. 403 if it is not
+    visible to me; the refusal, not a hidden button, is the wall. */
+export function addAppToMenu(appId: string): Promise<Record<string, unknown>> {
+  return request("POST", `/apps/${encodeURIComponent(appId)}/menu`);
+}
+
+/** DELETE /apps/{id}/menu — take it off my menu. An owner cannot remove their
+    own app (400): the menu is not where an app is deleted. */
+export function removeAppFromMenu(
+  appId: string,
+): Promise<Record<string, unknown>> {
+  return request("DELETE", `/apps/${encodeURIComponent(appId)}/menu`);
+}
+
+/* ---- the serving gate (SPECS/2026-09-09-apps-serving-gate.md, stage 3) ---- */
+
+/** GET /apps/config — house-wide apps config. `origin_base` is "" when this
+    house has no serving gate; that is a state to render, not an error. */
+export function fetchAppsConfig(): Promise<AppsConfig> {
+  return request<AppsConfig>("GET", "/apps/config");
+}
+
+/**
+ * POST /apps/{id}/open — mint a grant and get the URL to point at.
+ *
+ * The URL carries the grant in `?t=`, so it is single-use-ish and short-lived
+ * by design (D2/D3): never cache it, never store it, mint again. 503 = no
+ * gate configured on this house, 403 = preview asked for by someone who is
+ * not the owner, 409 = the app has no live root yet.
+ */
+export function openAppUrl(
+  appId: string,
+  root?: AppRoot,
+): Promise<{ url: string }> {
+  return request<{ url: string }>(
+    "POST",
+    `/apps/${encodeURIComponent(appId)}/open`,
+    root !== undefined ? { root } : {},
+  );
+}
+
+/**
+ * POST /apps/sessions/{id}/live — the user's explicit "done" (D7).
+ *
+ * Publishes the preview to the live root and returns the session with its new
+ * stage. 409 while a turn is running or when no turn has deployed; the
+ * buttons mirror those conditions, the server enforces them.
+ */
+export function goAppLive(sessionId: number): Promise<AppSession> {
+  return request<AppSession>("POST", `/apps/sessions/${sessionId}/live`);
+}
+
+/** POST /apps/{id}/revert — swap `live` back to the previous deploy (D6).
+    Owner only; 409 when there is no previous live to go back to. */
+export function revertAppLive(
+  appId: string,
+): Promise<{ ok: boolean; status: AppStatus }> {
+  return request("POST", `/apps/${encodeURIComponent(appId)}/revert`);
+}
+
+/**
+ * POST /apps/{id}/share — post the app's card into a channel.
+ *
+ * The server adds that channel's current members to `app_shares` at share
+ * time and posts the message AS THE SHARING USER (D8), which is why the
+ * answer is a message id and not a card: what lands in the room is an
+ * ordinary message, and an older client shows it as a working link.
+ */
+export function shareApp(
+  appId: string,
+  channelId: number,
+  visibility?: "shared" | "public",
+): Promise<{ message_id: number }> {
+  return request<{ message_id: number }>(
+    "POST",
+    `/apps/${encodeURIComponent(appId)}/share`,
+    {
+      channel_id: channelId,
+      ...(visibility !== undefined ? { visibility } : {}),
+    },
+  );
+}
+
+/** POST /apps/{id}/remix — copy the app into a new one the caller owns, with
+    lineage recorded, and open a build session on the copy. The returned
+    session is opened exactly as a chooser-started one is. */
+export function remixApp(
+  appId: string,
+  builderBotId?: number,
+): Promise<AppSession> {
+  return request<AppSession>(
+    "POST",
+    `/apps/${encodeURIComponent(appId)}/remix`,
+    builderBotId !== undefined ? { builder_bot_id: builderBotId } : {},
+  );
+}
+
+/** GET /apps/{id}/card — what an in-channel card renders. 404 = not entitled,
+    which the card treats as "show the plain link", not as a failure. */
+export function fetchAppCard(appId: string): Promise<AppCardData> {
+  return request<AppCardData>("GET", `/apps/${encodeURIComponent(appId)}/card`);
+}
 
 /* ---- plan room (SPECS/2026-08-20-plan-room.md) ---- */
 

@@ -20,6 +20,13 @@ privileged broker. Deliberately dead simple.
   caller** (`wake`, 2026-08-25): a human at the keyboard, from their own uid,
   who may call that verb and nothing else — and whom no seat may impersonate,
   because the uid is the kernel's word, not the caller's.
+- One identity is resolved by **uid plus cgroup**: the **server** (`build`).
+  The Disjorn server runs under plink's uid, so SO_PEERCRED alone cannot
+  separate it from the human at the keyboard. A caller becomes `server` only
+  when its uid maps to `plink` in `[uids]` AND `/proc/<peer pid>/cgroup` names
+  `[server].unit` (default `disjorn.service`); otherwise it is whatever
+  `[uids]` says. Both halves are the kernel's word about the connection, not
+  the request body's.
 
 ## Request
 
@@ -55,6 +62,9 @@ Failure:
 | `over-budget`    | resident hit the daily action cap in `broker.toml [budgets]`    |
 | `bad-args`       | args failed the verb's schema (also: malformed request JSON)   |
 | `exec-failure`   | verb was authorized but its execution failed (exit/timeout/IO) |
+| `apps-refused`   | an `apps-build` check refused the handoff; the message is the flat sentence |
+| `build-refused`  | a `build` check refused the request; the message is the plain reason |
+| `merge-refused`  | a `merge` rule said no; the error also carries `reason` (below) |
 | `internal`       | broker-side problem (bad config, unexpected exception)         |
 
 Every request — success, failure, or denial — appends exactly one line to the
@@ -62,14 +72,18 @@ audit log: `{ts, resident, verb, args, allowed, result_summary}`. Denials have
 `allowed: false`. Unknown uids are recorded as `"uid:<n>"`.
 
 A verb may add extra FACT fields to its own line; they can never overwrite the
-six core keys. `start-build` success lines carry `"build_started": true`, which
-is how the build budget distinguishes "a build ran" from "the call was
-authorized but nothing ever launched" (BL-D3); `wake` carries `"wake_id"`; and
-`apply-posted-write` carries `"write_applied": true`.
+six core keys. `start-build` and `build` success lines carry
+`"build_started": true`, which is how the build budget distinguishes "a build
+ran" from "the call was authorized but nothing ever launched" (BL-D3); a
+`build` line adds `"build_seat"` as a fact about where the build ran, while its
+budget is the `server` principal's; `wake` carries `"wake_id"`; and
+`apply-posted-write` carries `"write_applied": true`. A `merge` writes two
+lines: `"merge_started": true` when the call is taken, then `"merge_tier"` and
+`"merged_sha"` when the merge itself lands.
 
-**The one exception to one-line-per-call**, and it is deliberate:
-`apply-posted-write` writes a SECOND line, *before* the one above, marking the
-#custodian seq it is about to spend (`"consumed_seq": <n>`). The audit log is
+**`apply-posted-write` also writes two lines, and their order is the point.**
+It appends a line marking the #custodian seq it is about to spend
+(`"consumed_seq": <n>`) *before* the ordinary result line. The audit log is
 that verb's consumed-set, and the mark has to be durable before the target file
 is touched — a mark written afterwards would be a mark a crash could skip,
 which is a free replay. So a successful write appends two lines: the consume
@@ -79,8 +93,9 @@ denial line, and nothing is consumed.
 ## Verb table
 
 All verbs are per-caller toggleable in `verbs.toml` and default OFF.
-`restart-self` does not exist and never will (plink's ruling #3). `wake` is in
-the table but in no seat's section — see its entry below.
+`restart-self` does not exist and never will (plink's ruling #3). `wake`,
+`build` and `merge` are in the table but in no seat's section — see their
+entries below.
 
 ### `restart-disjorn`
 - args: none.
@@ -359,6 +374,199 @@ the table but in no seat's section — see its entry below.
   Intermediate checkpoints are the build session's own choice to mark, from
   inside the session — the broker owns only the started/done/failed transitions.
 
+### `build`
+
+SPECS/2026-09-20-build-lane-v2-stage1-2b.md. The SECOND entrance to the same
+build `start-build` runs. `start-build` takes a confirmed spec file from a
+resident's hands; `build` takes the seq of a human's own `/build` message and
+reads that message itself. **The caller is the server, and nothing the caller
+says about the message is trusted** — author, text and privacy all come out of
+the message DB.
+
+- args: `{"seq": int, "channel_id": int, "session_id": int}`, all three
+  required, all positive, and nothing else. There is no author field and no
+  text field, by design.
+- result: `{"started": true, "slug": str, "branch": str, "session_id": int,
+  "pid": int}`. It returns AT SPAWN, like `start-build`.
+- Checks, in order, each refusing with `build-refused`, a plain reason, and an
+  audit line whose summary starts `denied: `:
+  1. the message exists at `(channel_id, seq)` and is not deleted, and its
+     `author_type` is `user`;
+  2. its `privacy_flags` do not hide it from bots (the rule in
+     `server/app/privacy.py`, restated in `brokerd.hidden_from_bots`);
+  3. its author is on `[build].humans`;
+  4. its text — the content with a leading `/build` word stripped — is 1..4000
+     characters;
+  5. `session_id` is the caller's word, so the SERVER is asked whose it is: the
+     harness view must show the session open, `mode` `repo`, and
+     `owner_username` equal to the message's author.
+- The slug is `YYYY-MM-DD-<up to five words of the text, kebab>`, suffixed
+  `-2`, `-3`, … until `loop/<slug>` is free in the gatehouse. Branch
+  `loop/<slug>`.
+- Every accepted request appends one line to `[build].ledger`: ts, seq,
+  channel_id, author, text_sha256, slug, session_id.
+- The launch is `start-build`'s, verbatim: same slug claim, same
+  `run-build.sh` argv, same sidecar, same restart re-adoption, same reaper.
+  The DAY'S BUDGET IS NOT THE SEAT'S: a chat build reserves against
+  `[build].daily_build_cap` (default 4) under the `server` principal, and the
+  build seat's `[start_build]` allowance is untouched. Over the cap is
+  `build-refused`, "today's chat build budget (N) is spent".
+  The prompt on stdin is the message text, wrapped the way a spec is, saying
+  there is no spec file. No spec Status stamping — there is no spec.
+- What the room sees is the APPS BUILD MODAL, not #custodian: stage events go
+  to `session_id` (`scoped` at spawn, then `files_written` + `deployed`, or
+  `files_written {no_changes}`, or `scoped {halted: "error"}`), and ONE
+  four-line banner goes to the ORIGIN channel — `tests`, `tier`, `diffstat`,
+  `next`. A seq-started build posts no #custodian outcome line at all.
+- AT THE END OF A PUBLISHED BUILD the broker runs its own gates and the
+  classifier over `main...loop/<slug>` and the banner says what they found:
+  `tests: pass|fail — <gate summary>`, `tier: <N> — <first two reasons>`,
+  `diffstat: …`, and `next:` one of `merged <sha>` (a green Tier 0 inside
+  `[limits].daily_auto_apply_budget`, merged on the spot citing this build's
+  own seq), `/merge <slug>` (Tier 1), `PASS from <owner> in #custodian, then
+  /merge <slug> pass <seq>` (Tier 2), `fix the red gate, then /build again`,
+  or `Tier 0 budget spent today; /merge <slug>`. When a self-merge happened the
+  `deployed` detail also carries `tier` and `merged_sha`.
+- A branch that fell behind main while it was building is FOLDED before the
+  gates run (`merge`, below), under the same gate claim, and the whole banner
+  then describes the folded tip; the `diffstat` line, which is read before the
+  fold, gains ` (main folded in)`. A branch that CONFLICTS with main cannot be
+  folded: the banner says `tests: n/a — nothing was gated` and
+  `next: loop/<slug> conflicts with main; fold it at the keyboard, then /merge
+  <slug>`, and nothing is merged.
+- A build that published nothing still posts its banner, and `next` carries the
+  reason: `build halted — <reason>; /build again`, or `no commits — /build
+  again with more detail`. It is the only line the room gets.
+- With `[build]` absent the verb answers "chat builds are not configured on
+  this broker". Every key in `[build]` is validated at boot and a bad one is a
+  refusal to start; `humans = []` is legal and refuses every request.
+
+### `merge`
+
+SPECS/2026-09-20-build-lane-v2-stage1-2b.md; the design is
+`harness/cc/MERGE-CONTRACT.md`. The human's `/merge <slug> [pass <seq>]`, read
+the same way `build` reads its message. The gate result the broker acts on is
+its own run, and there is no argument by which a caller can supply one: what
+that result proves is **the run happened and was not skipped**. It is the
+branch's own suite, so the wall is the classifier plus a human on Tier 1 and 2.
+
+- args: `{"seq": int, "channel_id": int, "slug": str, "pass_seq": int|null}` —
+  the first three required and positive, `pass_seq` optional, nothing else.
+- IT IS ASYNCHRONOUS, in `build`'s shape. The CALL does only what is cheap:
+  the message, the author, the slug being a build slug, the branch existing,
+  the message naming it, and the gate claim. **Nothing that reads or writes
+  `loop/<slug>`'s history runs on the socket thread.** It then returns
+  `{"started": true, "slug": str, "branch": str}` and runs the ancestry check,
+  the fold, the gates, the classifier, the PASS check, the merge and the push
+  in a background thread. The outcome is ONE post to the origin channel, by the
+  broker's bot:
+
+  ```
+  merge: merged <slug> as <sha> (tier N)
+  next: deploy at the keyboard
+  ```
+
+  — with ` after folding main` before the tier when the branch had to be folded
+  first (`merge: merged <slug> as <sha> after folding main (tier 1)`) —
+
+  or `merge: refused <slug> — <plain reason>` with `next:` the human's own next
+  step (`fold main into the branch, then /merge again`, `PASS from <owner> in
+  #custodian, then /merge <slug> pass <seq>`, `fix the red gate, then /build
+  again`, or `merge it at the keyboard`).
+- Every refusal — before the answer or after it — is `merge-refused` with a
+  plain message, an audit line whose summary starts `denied: ` and ends with
+  its reason in brackets, and a `reason` from this closed set. A refusal
+  reached synchronously comes back on the wire; a later one is the post above.
+
+| reason           | the rule that said no                                    |
+|------------------|----------------------------------------------------------|
+| `human`          | the message, its author, or the human list               |
+| `branch-missing` | no gatehouse, no branch, or a branch with no own commits |
+| `slug-mismatch`  | the message does not name the slug it is merging         |
+| `busy`           | a gate run for this slug is already in flight            |
+| `moved`          | a conflict with main, or main or the branch moved        |
+| `gates`          | the gate run could not be launched at all                |
+| `tier`           | the classifier answered with no tier                     |
+| `pass-missing`   | Tier 2 and no `pass_seq`                                 |
+| `pass-invalid`   | the PASS does not hold (below)                           |
+| `budget`         | the Tier 0 self-merge budget is spent                    |
+| `conflict`       | the branch does not merge cleanly; nothing moved         |
+| `push`           | the gatehouse would not take the push (the hook, or git) |
+
+- Steps, in order: read the message (a person, not deleted, not private, on
+  `[build].humans`); `loop/<slug>` must exist in the gatehouse; the message
+  must name the slug as a whole token; CLAIM THE GATE RUN — a slug already
+  being gated is `busy` on the wire, and nothing after this point runs for a
+  slug someone else holds. Then, in the thread: `refs/heads/main` must be an
+  ancestor of the branch (or it is folded, below) and `main..<tip>` must not be
+  empty — a branch with nothing of its own is `branch-missing`, "`loop/<slug>`
+  has no commits of its own to merge". Then the gates, then
+  `main...loop/<slug>` classified with their result. **A red gate is not
+  special-cased** — the classifier answers Tier 2 fail-closed and that answer
+  is the one used.
+- THE GATED TIP IS PINNED. The first check records `loop/<slug>`'s sha, and
+  that sha — never an unpinned `FETCH_HEAD` — is what the merge commit's second
+  parent is. Main's sha is recorded there too. Both are re-read immediately
+  before the push: a main that moved is `moved`, "main moved while the gates
+  ran; /merge again"; a branch that moved is `moved`, "`loop/<slug>` moved
+  while the gates ran; /merge again". Nothing is pushed either way, and the
+  Tier 0 self-merge at the end of a build pins the same two shas.
+- AT THE FIRST CHECK ONLY, a branch that does not contain main is FOLDED rather
+  than refused: in the same kind of throwaway clone the merge uses, the broker
+  checks the branch out, `git merge --no-edit`s the gatehouse's main into it as
+  `disjorn-broker <broker@disjorn.local>` with the message
+  `fold main into loop/<slug> (broker, before the gates)`, and pushes
+  `HEAD:refs/heads/loop/<slug>` (never forced). A conflict aborts and is
+  `moved`, "`loop/<slug>` conflicts with main; fold it at the keyboard"; a
+  push the gatehouse will not take is `push`. The fold does NOT take the merge
+  lock — it writes the branch, never main, and the gate claim is what
+  serialises it. THE SHA THAT IS GATED IS THE SHA THAT IS MERGED: the gates,
+  the classifier and the PASS check all run after the fold, so a PASS posted
+  before it no longer holds and is `pass-invalid`, "`loop/<slug>` was folded
+  onto main as `<short tip>`, so PASS `<seq>` no longer names the gated tree;
+  ask for a fresh PASS". The SECOND check, before the push, never folds, and
+  the next `/merge` does the folding.
+- A fold appends one line to `[build].ledger`:
+  `{ts, kind: "fold", slug, from: <old tip>, to: <new tip>, main: <main sha>}`,
+  and the verb's OUTCOME audit line — the merge, or the denial that followed —
+  carries `folded: <new tip>`.
+- One gate run per slug at a time, whether a `/merge` or a build's own end
+  started it; a second `/merge` for that slug is refused `busy` on the spot.
+- Tier 0 and Tier 1 merge on this call: it IS the human step. Tier 2 needs
+  `pass_seq`, and that PASS holds only when the message is in
+  `[disjorn].custodian_channel_id`, authored by a BOT whose name is the review
+  owner for the changed paths (`[planroom].lane_owners`, prefix map, first
+  match wins), posted AFTER the branch tip's commit time, and says the word
+  `PASS` and the slug and NOT the word `BLOCK` (both whole words, case
+  sensitive). A changed path with no owner is `pass-invalid`, "no lane owner
+  for `<path>`; keyboard merge".
+- Only SELF-merges (from `/build`, always Tier 0) are budgeted, against
+  `[limits].daily_auto_apply_budget` in protected-paths.toml, counted off the
+  ledger's `self_merge` flag. A human `/merge` is never budgeted and never
+  counts.
+- The merge runs in a throwaway clone under `[build].merge_work_dir`: clone the
+  gatehouse's main, fetch the branch, `git merge --no-ff --no-edit` as
+  `disjorn-broker <broker@disjorn.local>` with
+
+  ```
+  merge: <slug> (/merge by <author>, tier N)
+
+  merge-seq: <channel_id>:<seq>
+  review-seq: <pass_seq>
+  ```
+
+  — `review-seq` AFTER `merge-seq`, because the hook's last-trailer-wins rule is
+  what records the review — then push `HEAD:refs/heads/main`. The mirror is
+  fast-forwarded, the gatehouse re-fetched and the plan room rebuilt afterwards.
+- One ledger line per merge: `{ts, kind: "merge", seq, channel_id, author,
+  slug, tier, sha, pass_seq, self_merge}`.
+- With `[build]` absent the verb answers "chat merges are not configured on
+  this broker"; the same block's human list gates both verbs.
+- `[build]` also carries this verb's knobs: `gate_timeout_sec` (1320),
+  `gate_log_dir`, `merge_work_dir`. Each is validated at boot, and a
+  `gate_timeout_sec` of 1200 or less is refused: the gate unit's own runtime
+  cap is 1200 seconds and the broker has to outwait it.
+
 ### `classify-diff`
 - args: `{"repo": str, "range": str, "gates": object}`
   - `repo` — absolute path, no `..` segments.
@@ -380,6 +588,35 @@ the table but in no seat's section — see its entry below.
   a repo outside every mapped root is `bad-args` — so residents can only
   classify repos deliberately exposed to them and never need to know host
   layout. No map configured = pass-through (host-side callers, tests).
+
+### `changed-files`
+- args: `{"repo": str, "range": str}` — both required.
+  - `repo` — absolute path, no `..` segments; mapped through
+    `[residents.<r>.path_map]` and allowlisted by it, exactly as
+    `classify-diff`'s is. Both verbs share one validator.
+  - `range` — same charset and length as `classify-diff`'s, and must name two
+    sides: `A..B` or `A...B`. A bare rev is `bad-args`, "range must be A..B or
+    A...B".
+- result: `{"base": str, "from": str, "to": str, "files": [{"path", "status",
+  "old_path"?, "added", "removed", "binary"}], "totals": {"files", "added",
+  "removed"}, "truncated": bool}`.
+  - `status` is one letter of `A M D R C T`; `old_path` is present for `R` and
+    `C` only; `added`/`removed` are `null` for a binary file and `binary` is
+    then true.
+  - `files` is sorted by path and capped at 500. Over the cap it holds the
+    first 500 in path order (a prefix, not a sample), `truncated` is true, and
+    `totals` still counts every file.
+  - `totals.added`/`removed` are text-line totals: a binary file adds nothing
+    to them, so they undercount a change that is mostly binary.
+  - A path holding a control character is returned as its Python `repr`, so a
+    hostile filename cannot forge a line in a reviewer's context.
+- Always merge-base form: `A..B` and `A...B` both report `A...B`, which is what
+  a reviewer means by "what the branch did". Runs `git -C <repo> diff -z -M
+  --numstat <A sha>...<B sha> --` and the same with `--name-status`, on shas
+  already resolved by `git rev-parse --verify --end-of-options`. A side that
+  does not resolve is `bad-args` naming which side, never `exec-failure`.
+- No file bodies: a reviewer fetches those with the adapter's `read_repo_file`
+  at the returned `to` sha.
 
 ### `read-prod-logs`
 - args: `{"lines": int}` — 1..500, default 100.
@@ -491,7 +728,8 @@ broker-side so both residents' summon adapters spend against ONE counter. The
 adapters are the callers; a session has no reason to press it.
 
 - args: `{"action": "spend"|"unpark", "work_item": str, "summoner": str,
-  "seq": int}` — `action` required; `work_item` required for `unpark`.
+  "seq": int}` — `action` required; `work_item` and `seq` required for
+  `unpark`.
 - `spend` result: `{"allowed": bool, "chain": bool, "work_item": str|null,
   "reason": str, "count": int, "cap": int, "refusal": str}`.
   - `chain: false` is NOT a refusal: it means serve the summon but do not let
@@ -503,11 +741,58 @@ adapters are the callers; a session has no reason to press it.
     human posts on it`.
 - `unpark` result: `{"reset": bool, "count": int, "cap": int}`. Idempotent per
   `seq`, because both adapters see the same human post and both report it.
+  The broker reads the #custodian message at `seq` itself and resets only if it
+  is a person's post (not a bot's, not deleted, not private) that cites
+  `work_item`. Otherwise: `{"reset": false, "reason": "not-a-human-post",
+  "refusal": str}`. An adapter's report is never the evidence, because the
+  adapter runs as the same res-* uid as the model it gates.
 - Caps live in `broker.toml`; with `[summon_hops]` absent there is no wall and
   every `spend` answers `chain: false`.
 
 The clock never unparks a chain: midnight rolls the 24-per-UTC-day ceiling and
 nothing else. A parked work item stays parked until a human posts about it.
+
+### `apps-build`
+
+SPECS/2026-09-06-apps-builder-seat.md §E. Hand ONE build prompt to the
+apps-builder seat for an open app build session. The calling resident does not
+build anything: the turn runs as `res-appsbuilding`, in its own transient unit,
+with the app repo as its only writable path and no house credential of any kind.
+
+- args: `{"session_id": int, "prompt_file": str}`, both required, and NOTHING
+  else — in particular no bot id. Which resident owns which session is
+  `[apps].seat_bots` plus SO_PEERCRED, never an argument.
+- result: `{"turn": int, "unit": str, "app_id": str}`. It RETURNS AT SPAWN: the
+  launcher blocks for the whole turn (minutes), so the broker detaches it and a
+  daemon reaper publishes the outcome. A summon has a clock.
+- `prompt_file` is the CALLER's view of its own filesystem, resolved through
+  `[residents.<r>.path_map]` like `classify-diff`'s `repo` — one implementation,
+  and it is the allowlist as much as the translation. The launcher confines the
+  same file again to the caller's own prompt directory, with O_NOFOLLOW and an
+  owner check; the broker's read is the courtesy half, so a resident hears about
+  a chat marker in words instead of as exit 64.
+- The four checks, in order, each refusing with `apps-refused` and a flat
+  sentence: the session exists and is OPEN (a lapsed user lock does NOT refuse —
+  the lock is the user's chat exclusivity, not the turn's authorization); this
+  seat maps to the session's builder bot; the session is under its token
+  ceiling; no turn is already running for it. A ceiling refusal also POSTS a
+  halted stage event and writes a ledger line, so the room hears why nothing is
+  going to happen even though nothing ran.
+- The broker has NO post right in the room. Everything the user sees is a
+  server-side effect of the stage events it publishes as the `broker` bot.
+- A turn's record is `/srv/apps-turns/<session>/<turn>/result.json`, which the
+  broker READS and never writes; the 0600 spools beside it are the seat's and
+  this daemon never opens them. A unit that ends with no `result.json` is a
+  halt, synthesized after `[apps].result_grace_sec` and marked `synthesized` in
+  the ledger — absence has to mean something or it means "wait forever".
+- Every turn appends one line to `[apps].ledger_path`, naming the column the
+  ceiling summed (`input+output+cache_creation`). The ledger is the record even
+  when a stage post fails.
+- With `[apps]` absent the verb answers "apps-build is not configured on this
+  broker"; with a `seat_bots` map the boot check cannot verify against the
+  server's `bots` table it answers "apps-build is disabled: the seat map failed
+  its boot check — …". Neither is a boot failure: no other resident's hands
+  depend on this wire.
 
 ### `wake`
 

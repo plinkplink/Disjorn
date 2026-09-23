@@ -1,25 +1,23 @@
 """Tests for the keyboard-lane GATE DRIFT block — the detector of record.
 
-WHAT IS UNDER TEST. Real git repos and a real sqlite message store in tmp_path:
-a mirror with the hook committed in it, a canonical git-dir with the hook
-symlinked and a push log beside it, a prod tree, and a #custodian table with
-resolvable and unresolvable seqs. The hook's own log grammar is exercised
-end-to-end in harness/gatehouse/tests; here the log is written by hand, because
-what these tests are about is what the DIGEST concludes from a log — including
-the logs no healthy hook would ever write.
+Real git repos and a real sqlite message store in tmp_path: a mirror with the
+hook committed in it, a canonical git-dir with the hook symlinked and a push
+log beside it, a prod tree, and a #custodian table with resolvable and
+unresolvable seqs. The hook's own log grammar is exercised end-to-end in
+harness/gatehouse/tests; the logs here are written by hand, including the ones
+no healthy hook would write.
 
-The four things worth stating up front, because each was argued for
-specifically and each has a test that fails if it is quietly re-implemented:
+Four invariants, each with a test that fails if it is quietly re-implemented:
 
   * CITATION COMES FROM PUSH TRUTH (G1/G1b). One trailer on the tip of a
-    five-commit push cites all five; a later trailer-bearing push can never
-    reach back and bless the ancestors of a fail-open push.
+    five-commit push cites all five; a later push can never reach back and
+    bless the ancestors of a fail-open push.
   * THE FLOOR'S PROVENANCE CHANGES WHAT SILENCE MEANS (G1d). Below a seeded
     floor is out of scope; below a lazy floor is unverifiable, and must never
     render as clean.
-  * THE FLOOR-MOTION BASELINE LIVES OUTSIDE THE GIT-DIR. It is parsed back out
-    of the digest's own previous post, so it survives the log being deleted and
-    lazily re-born — the one case both in-log tamper tells miss.
+  * THE FLOOR-MOTION BASELINE LIVES OUTSIDE THE GIT-DIR, parsed back out of the
+    digest's own previous post, so it survives the log being deleted and
+    lazily re-born.
   * A LOST LOG DEGRADES TO MORE FLAGS, NEVER FEWER.
 """
 
@@ -43,10 +41,14 @@ HOOK_SRC = (Path(__file__).resolve().parents[2]
 PROTECTED = (Path(__file__).resolve().parents[2]
              / "classifier" / "protected-paths.toml")
 
-# Commit dates are PINNED to the reported day. The digest's window falls back
-# to `--since/--until` on that day when there is no previous post to measure
-# from, so a suite whose commits carry the real wall-clock date would test the
-# fallback against an empty window and prove nothing.
+# The judging-artifact table as this suite installs it: a basename under the
+# lane's own installed/ dir, and the repo path the mirror commits it at.
+ARTIFACTS = [("run-gates.sh", "harness/cc/run-gates.sh"),
+             ("disjorn-build-launch", "harness/broker/disjorn-build-launch"),
+             ("build-kernel.md", "harness/cc/build-kernel.md")]
+
+# Commit dates are PINNED to the reported day: with wall-clock dates the
+# no-previous-post fallback would be tested against an empty window.
 ENV = {
     **os.environ,
     "GIT_AUTHOR_NAME": "keyboard", "GIT_AUTHOR_EMAIL": "plink@example.invalid",
@@ -97,13 +99,24 @@ class Lane:
         hook_dst.mkdir(parents=True)
         shutil.copy2(HOOK_SRC, hook_dst / "pre-receive-main-review")
         (self.mirror / "README.md").write_text("start\n")
+        for name, rel in ARTIFACTS:
+            p = self.mirror / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(f"committed {name}\n", encoding="utf-8")
         git(self.mirror, "add", "-A")
         # Dated the day BEFORE, so it sits outside the reported day's window
-        # the way real history does. Tests that care about it reach for it by
-        # name (the floor tests) rather than finding it in every window.
+        # the way real history does; the floor tests reach for it by name.
         old_day = {**ENV, "GIT_AUTHOR_DATE": "2026-08-19T09:00:00Z",
                    "GIT_COMMITTER_DATE": "2026-08-19T09:00:00Z"}
         git(self.mirror, "commit", "-q", "-m", "initial commit", env=old_day)
+
+        # -- the judging artifacts, installed outside /usr/local
+        self.installed = root / "installed"
+        self.installed.mkdir()
+        for name, rel in ARTIFACTS:
+            src = self.mirror / rel
+            (self.installed / name).write_text(src.read_text(encoding="utf-8"),
+                                               encoding="utf-8")
 
         # -- the canonical git-dir: hooks/ with a symlink to the deployed copy
         (self.canonical / "hooks").mkdir(parents=True)
@@ -182,6 +195,23 @@ class Lane:
              ts=f"{DATE}T09:30:00Z") -> str:
         return f"PUSH {ts} {old}..{new} {trailer} {outcome}"
 
+    # -- the local coverage log ---------------------------------------------
+
+    @property
+    def local_log_path(self) -> Path:
+        return self.canonical / "hooks" / "disjorn-local-log"
+
+    def write_local(self, *lines: str) -> None:
+        self.local_log_path.write_text("".join(ln + "\n" for ln in lines),
+                                       encoding="utf-8")
+
+    def local(self, sha: str, outcome="local-stamp",
+              ts=f"{DATE}T09:15:00Z") -> str:
+        """One record, in the grammar harness/broker/brokerd.py writes. The
+        broker suite asserts the same shape against this module's parser, so
+        the two halves cannot drift apart silently."""
+        return f"LOCAL {ts} {sha} {outcome}"
+
     # -- prod ---------------------------------------------------------------
 
     def deploy(self, ref: str = "main") -> None:
@@ -192,11 +222,16 @@ class Lane:
 
     # -- config -------------------------------------------------------------
 
-    def config(self, **over) -> dict:
+    def artifact_rows(self) -> list:
+        return [[str(self.installed / name), rel] for name, rel in ARTIFACTS]
+
+    def config(self, *, humans=("plink",), **over) -> dict:
         gate = {"canonical_repo": str(self.canonical), "mirror": str(self.mirror),
                 "deploy_tree": str(self.prod), "message_db": str(self.db_path)}
         gate.update(over)
         return {"gate": gate,
+                "drift": {"judging_artifacts": self.artifact_rows()},
+                "build": {"humans": list(humans)},
                 "disjorn": {"custodian_channel_id": CUSTODIAN,
                             "api_key_path": str(self.key_path)},
                 "paths": {"protected_paths": str(PROTECTED)},
@@ -212,6 +247,11 @@ class Lane:
 @pytest.fixture()
 def lane(tmp_path) -> Lane:
     return Lane(tmp_path)
+
+
+def commits_line(block: str) -> str:
+    return [ln for ln in block.splitlines()
+            if ln.startswith("commits on main")][0]
 
 
 # --------------------------------------------------------------------------
@@ -252,8 +292,147 @@ def test_the_liveness_line_comes_first(lane):
     lines = lane.block().splitlines()
     assert lines[0].startswith(M.DRIFT_HEADER)
     assert lines[1].startswith("hook:")
-    assert lines[2].startswith("push log:")
-    assert lines[3].startswith("floor:")
+    assert lines[2].startswith("claude-code:")
+    assert lines[3].startswith("judging artifacts:")
+    assert lines[4].startswith("push log:")
+    assert lines[5].startswith("floor:")
+
+
+# --------------------------------------------------------------------------
+# Judging artifacts — line 1c: what a build is measured BY.
+# --------------------------------------------------------------------------
+
+def artifacts(lane, config=None) -> list:
+    return M.judging_artifacts(M.gate_paths(config or lane.config()),
+                               config or lane.config())
+
+
+def states(rows) -> dict:
+    return {Path(r["installed"]).name: r["state"] for r in rows}
+
+
+def test_installed_artifacts_that_match_the_mirror_are_one_quiet_line(lane):
+    rows = artifacts(lane)
+    assert [r["state"] for r in rows] == ["MATCH"] * 3
+    assert all(r["deployed_sha"] == r["mirror_sha"] for r in rows)
+    assert [r["repo_path"] for r in rows] == [rel for _, rel in ARTIFACTS]
+    assert "judging artifacts: 3 installed match main" in lane.block()
+
+
+def test_an_installed_artifact_that_is_not_the_committed_one_is_named(lane):
+    (lane.installed / "run-gates.sh").write_text("tampered\n")
+    assert states(artifacts(lane))["run-gates.sh"] == "MISMATCH"
+    line = [ln for ln in lane.block().splitlines()
+            if ln.startswith("judging artifacts:")][0]
+    assert "INSTALLED IS NOT COMMITTED" in line
+    assert f"{lane.installed / 'run-gates.sh'} (MISMATCH)" in line
+    assert "build-kernel.md" not in line
+
+
+def test_an_artifact_that_is_not_installed_at_all_is_absent(lane):
+    (lane.installed / "build-kernel.md").unlink()
+    rows = artifacts(lane)
+    assert states(rows)["build-kernel.md"] == "ABSENT"
+    assert states(rows)["run-gates.sh"] == "MATCH"
+    line = [ln for ln in lane.block().splitlines()
+            if ln.startswith("judging artifacts:")][0]
+    assert line == (f"judging artifacts: NOT INSTALLED — "
+                    f"{lane.installed / 'build-kernel.md'} (ABSENT)")
+
+
+def test_an_unreadable_artifact_is_unreadable_not_absent(lane):
+    """A directory where a file belongs: unreadable by every path _read_bytes
+    has, including the sudo fallback, so the state does not depend on uid."""
+    path = lane.installed / "disjorn-build-launch"
+    path.unlink()
+    path.mkdir()
+    assert states(artifacts(lane))["disjorn-build-launch"] == "UNREADABLE"
+    assert (f"NOT INSTALLED — {lane.installed / 'disjorn-build-launch'} "
+            "(UNREADABLE)") in lane.block()
+
+
+def test_an_artifact_the_mirror_does_not_carry_is_unknown(lane):
+    git(lane.mirror, "rm", "-q", "harness/cc/build-kernel.md")
+    git(lane.mirror, "commit", "-q", "-m", "drop the kernel")
+    rows = artifacts(lane)
+    assert states(rows)["build-kernel.md"] == "UNKNOWN"
+    assert rows[2]["mirror_sha"] is None and rows[2]["deployed_sha"]
+    assert "(UNKNOWN)" in lane.block()
+
+
+def test_the_table_comes_from_config_when_config_carries_one(lane):
+    assert M.judging_rows({}) == list(M.JUDGING_ARTIFACTS)
+    assert M.judging_rows({"drift": {"judging_artifacts": [["/a", "b"]]}}) \
+        == [("/a", "b")]
+    assert M.judging_rows({"drift": {"judging_artifacts": [["/a"]]}}) \
+        == list(M.JUDGING_ARTIFACTS)
+    rows = artifacts(lane)
+    assert not any(r["installed"].startswith("/usr/local") for r in rows)
+
+
+def test_a_fourth_artifact_is_a_config_row_and_no_code_change(lane):
+    extra = lane.installed / "protected-paths.toml"
+    extra.write_text("committed extra\n")
+    (lane.mirror / "harness" / "classifier").mkdir(parents=True, exist_ok=True)
+    lane.commit("harness/classifier/protected-paths.toml", "committed extra\n",
+                "add the fourth artifact")
+    config = lane.config()
+    config["drift"]["judging_artifacts"].append(
+        [str(extra), "harness/classifier/protected-paths.toml"])
+    rows = M.judging_artifacts(M.gate_paths(config), config)
+    assert len(rows) == 4 and rows[3]["state"] == "MATCH"
+    block = M.compose_drift_block(M.gate_drift(config, date=DATE))
+    assert "judging artifacts: 4 installed match main" in block
+
+
+# --------------------------------------------------------------------------
+# Claude Code version — line 1b. Deployed image vs the committed pin.
+# --------------------------------------------------------------------------
+
+def _pin_containerfile(lane, version: str) -> None:
+    cf = lane.mirror / "harness" / "cc" / "Containerfile"
+    cf.parent.mkdir(parents=True, exist_ok=True)
+    cf.write_text(f"FROM debian\nARG CLAUDE_CODE_VERSION={version}\n"
+                  "RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}\n")
+    git(lane.mirror, "add", "-A")
+    git(lane.mirror, "commit", "-q", "-m", f"pin cc {version}")
+
+
+def test_cc_matches_when_the_image_is_the_committed_pin(lane):
+    _pin_containerfile(lane, "2.1.259")
+    cc = M.cc_version(M.gate_paths(lane.config()))
+    assert cc["state"] == "MATCH"
+    assert cc["deployed"] == cc["pinned"] == "2.1.259"
+    assert "claude-code: image 2.1.259 vs mirror pin 2.1.259 (MATCH)" in lane.block()
+
+
+def test_cc_mismatch_when_the_pin_was_bumped_but_never_rebuilt(lane, monkeypatch):
+    _pin_containerfile(lane, "2.1.259")
+    monkeypatch.setattr(M, "_image_cc_version", lambda image: ("2.1.215", ""))
+    cc = M.cc_version(M.gate_paths(lane.config()))
+    assert cc["state"] == "MISMATCH"
+    assert "NOT the committed pin" in cc["detail"]
+    assert "image 2.1.215 vs mirror pin 2.1.259 (MISMATCH)" in lane.block()
+
+
+def test_cc_unknown_when_the_mirror_has_no_pin(lane):
+    cc = M.cc_version(M.gate_paths(lane.config()))
+    assert cc["state"] == "UNKNOWN"
+    assert cc["deployed"] == "2.1.259" and cc["pinned"] is None
+    assert "claude-code: image 2.1.259 vs mirror pin ? (UNKNOWN)" in lane.block()
+
+
+def test_cc_unknown_when_the_image_cannot_be_probed(lane, monkeypatch):
+    _pin_containerfile(lane, "2.1.259")
+    monkeypatch.setattr(M, "_image_cc_version", lambda image: (None, "podman: boom"))
+    cc = M.cc_version(M.gate_paths(lane.config()))
+    assert cc["state"] == "UNKNOWN"
+    assert "podman: boom" in cc["detail"]
+
+
+def test_an_old_drift_dict_without_cc_renders_no_cc_line(lane):
+    d = lane.drift(); d.pop("cc")
+    assert "claude-code:" not in M.compose_drift_block(d)
 
 
 # --------------------------------------------------------------------------
@@ -361,11 +540,9 @@ def test_the_block_round_trips_its_own_floor_line(lane):
 
 
 def test_no_one_else_can_write_the_baseline(lane):
-    """The baseline moved into the message store to survive a log delete —
-    but the store is a CHANNEL, writable by everyone. Without the author
-    filter, anyone quoting a drift block (verbatim, floor line and all)
-    becomes the baseline: chat as detector input, the G1d hole one layer
-    out."""
+    """The store is a CHANNEL, writable by everyone: without the author filter
+    anyone quoting a drift block verbatim becomes the baseline, which is the
+    G1d hole one layer out."""
     lane.write_log(lane.genesis("seeded", lane.head()))
     quote = (f"{M.DRIFT_HEADER} — keyboard lane\n"
              f"floor: {'c' * 40}\nmirror head: {'c' * 40}")
@@ -509,6 +686,36 @@ def test_a_doc_only_uncited_commit_is_not_a_lane_violation(lane):
     assert d["violations"] == []
 
 
+def test_the_commits_line_splits_the_uncited_by_guarded_lane(lane):
+    """A doc-only commit is uncited and allowed; one line that mixes the two
+    trains the reader to ignore the number."""
+    floor = lane.head()
+    lane.commit("SPECS/2026-08-20-x.md", "a spec\n", "spec: x")
+    sha = lane.commit("server/app/ws.py", "x = 1\n", "server: fanout tweak")
+    lane.write_log(lane.genesis("seeded", floor),
+                   lane.push(floor, sha, "NONE", "failed-open"))
+    line = commits_line(lane.block())
+    assert line.endswith(": 2 (2 uncited, 1 doc-only)")
+
+
+def test_uncited_commits_that_all_touch_a_lane_read_zero_doc_only(lane):
+    floor = lane.head()
+    lane.commit("server/app/ws.py", "x = 1\n", "server: one")
+    sha = lane.commit("harness/x.py", "y = 1\n", "harness: two")
+    lane.write_log(lane.genesis("seeded", floor),
+                   lane.push(floor, sha, "NONE", "failed-open"))
+    assert commits_line(lane.block()).endswith(": 2 (2 uncited, 0 doc-only)")
+
+
+def test_a_window_with_nothing_uncited_keeps_the_plain_count(lane):
+    floor = lane.head()
+    sha = lane.commit("harness/x.py", "x = 1\n",
+                      "harness: x\n\nreview-seq: 1428")
+    lane.write_log(lane.genesis("seeded", floor),
+                   lane.push(floor, sha, "review-seq:1428"))
+    assert commits_line(lane.block()).endswith(": 1 (0 uncited)")
+
+
 def test_a_seq_that_does_not_resolve_does_not_cite(lane):
     """Without G2, `review-seq: 1` passes forever and the gate is a spelling
     test."""
@@ -565,6 +772,136 @@ def test_an_override_is_never_self_cited(lane):
     assert d["uncited"] == []
 
 
+# --------------------------------------------------------------------------
+# merge-seq — a merge the broker made because a human typed for it.
+# --------------------------------------------------------------------------
+
+def test_a_merge_seq_by_a_human_cites_its_push(lane):
+    lane.post(2704, CUSTODIAN, "user", 1, "/merge a-slug")
+    floor = lane.head()
+    sha = lane.commit("harness/x.py", "x = 1\n",
+                      "merge: a-slug (/merge by plink, tier 1)\n\n"
+                      "merge-seq: 4:2704")
+    lane.write_log(lane.genesis("seeded", floor),
+                   lane.push(floor, sha, "merge-seq:4:2704"))
+    d = lane.drift()
+    assert d["uncited"] == []
+    assert d["citations"][0]["holds"] is True
+    assert d["citations"][0]["kind"] == "merge-seq"
+
+
+def test_a_merge_seq_is_read_in_the_channel_it_names(lane):
+    """The same number is a different message in another channel."""
+    lane.post(2704, 7, "user", 1, "/merge a-slug")
+    floor = lane.head()
+    sha = lane.commit("harness/x.py", "x = 1\n", "merge: a-slug")
+    lane.write_log(lane.genesis("seeded", floor),
+                   lane.push(floor, sha, "merge-seq:7:2704"))
+    assert lane.drift()["uncited"] == []
+
+    lane.write_log(lane.genesis("seeded", floor),
+                   lane.push(floor, sha, "merge-seq:4:2704"))
+    d = lane.drift()
+    assert d["uncited"] == [sha]
+    assert "not in channel 4" in d["broken_citations"][0]["detail"]
+
+
+def test_a_merge_seq_a_bot_wrote_does_not_cite(lane):
+    """If a bot's seq could cite a merge, chat would be instructions, not data."""
+    lane.post(2704, CUSTODIAN, "bot", 1, "/merge a-slug")
+    floor = lane.head()
+    sha = lane.commit("harness/x.py", "x = 1\n", "merge: a-slug")
+    lane.write_log(lane.genesis("seeded", floor),
+                   lane.push(floor, sha, "merge-seq:4:2704"))
+    d = lane.drift()
+    assert d["uncited"] == [sha]
+    assert "is a bot" in d["broken_citations"][0]["detail"]
+
+
+def test_a_merge_seq_from_an_account_off_the_human_list_does_not_cite(lane):
+    lane.post(2704, CUSTODIAN, "user", 1, "/merge a-slug")
+    floor = lane.head()
+    sha = lane.commit("harness/x.py", "x = 1\n", "merge: a-slug")
+    lane.write_log(lane.genesis("seeded", floor),
+                   lane.push(floor, sha, "merge-seq:4:2704"))
+    d = M.gate_drift(lane.config(humans=["someone-else"]), date=DATE)
+    assert d["uncited"] == [sha]
+    assert "not on [build].humans" in d["broken_citations"][0]["detail"]
+
+
+def test_without_a_human_list_no_merge_seq_can_hold(lane):
+    lane.post(2704, CUSTODIAN, "user", 1, "/merge a-slug")
+    floor = lane.head()
+    sha = lane.commit("harness/x.py", "x = 1\n", "merge: a-slug")
+    lane.write_log(lane.genesis("seeded", floor),
+                   lane.push(floor, sha, "merge-seq:4:2704"))
+    d = M.gate_drift(lane.config(humans=[]), date=DATE)
+    assert d["uncited"] == [sha]
+    assert "no [build].humans" in d["broken_citations"][0]["detail"]
+
+
+def test_a_merge_seq_for_a_message_that_is_not_there_does_not_cite(lane):
+    floor = lane.head()
+    sha = lane.commit("harness/x.py", "x = 1\n", "merge: a-slug")
+    lane.write_log(lane.genesis("seeded", floor),
+                   lane.push(floor, sha, "merge-seq:4:2704"))
+    d = lane.drift()
+    assert d["uncited"] == [sha]
+    assert d["broken_citations"][0]["detail"] == "no such seq in the message store"
+
+
+MERGE_SEQ_REFUSALS = [
+    ("no message", None, ("plink",), "no such seq in the message store"),
+    ("another channel", (7, "user", 1), ("plink",),
+     "the seq resolves, but not in channel 4"),
+    ("a bot", (CUSTODIAN, "bot", 1), ("plink",),
+     "Claudette is a bot, not a human"),
+    ("an unlisted human", (CUSTODIAN, "user", 1), ("someone-else",),
+     "plink is not on [build].humans"),
+    ("no humans list", (CUSTODIAN, "user", 1), (),
+     "no [build].humans is configured"),
+]
+
+
+@pytest.mark.parametrize("author, humans, detail",
+                         [c[1:] for c in MERGE_SEQ_REFUSALS],
+                         ids=[c[0] for c in MERGE_SEQ_REFUSALS])
+def test_each_unresolvable_merge_seq_gets_its_own_plain_reason(
+        lane, author, humans, detail):
+    """Every way a merge-seq fails to hold gets a reason a reader can act on.
+    The trailer is on main either way, so the count line stands beside the
+    named one: counted as a merge, not honoured as a citation."""
+    if author:
+        lane.post(2704, author[0], author[1], author[2], "/merge a-slug")
+    floor = lane.head()
+    sha = lane.commit("harness/x.py", "x = 1\n",
+                      "merge: a-slug (/merge by plink, tier 1)\n\n"
+                      "merge-seq: 4:2704")
+    lane.write_log(lane.genesis("seeded", floor),
+                   lane.push(floor, sha, "merge-seq:4:2704"))
+    d = M.gate_drift(lane.config(humans=list(humans)), date=DATE)
+    assert d["uncited"] == [sha]
+    assert d["broken_citations"][0]["detail"] == detail
+    lines = M.compose_drift_block(d).splitlines()
+    assert [ln for ln in lines if "CITATION DOES NOT RESOLVE" in ln] == [
+        f"  CITATION DOES NOT RESOLVE: merge-seq:4:2704 on {sha[:8]} — "
+        f"{detail}. That range counts as UNCITED."]
+    assert [ln for ln in lines if ln.startswith("chat merges to date:")] == [
+        "chat merges to date: 1 (merge-seq 4:2704)"]
+
+
+def test_a_merge_seq_is_never_self_cited(lane):
+    """A merge-seq IS the human's own line, like an override-seq."""
+    lane.post(2704, CUSTODIAN, "user", 1, "/merge a-slug")
+    floor = lane.head()
+    sha = lane.commit("harness/x.py", "x = 1\n", "merge: a-slug")  # by keyboard
+    lane.write_log(lane.genesis("seeded", floor),
+                   lane.push(floor, sha, "merge-seq:4:2704"))
+    d = lane.drift()
+    assert d["self_cited"] == []
+    assert d["uncited"] == []
+
+
 def test_identity_matching_knows_keyboard_is_plink(lane):
     aliases = M.gate_paths(lane.config())["author_aliases"]
     assert M.identity_matches("keyboard", "keyboard <plink@example.invalid>", aliases)
@@ -585,15 +922,16 @@ def test_a_deleted_message_does_not_resolve(lane):
 # --------------------------------------------------------------------------
 
 def test_a_commit_with_no_covering_log_line_is_uncovered(lane):
-    """It entered main while the hook was absent or disarmed."""
+    """`uncovered` is unchanged by the coverage classes: it is still the raw
+    fact — above the floor, inside no logged push range. What changed is what
+    the block SAYS about it, which is now its class and nothing more."""
     floor = lane.head()
     sha = lane.commit("harness/x.py", "x = 1\n", "harness: snuck in")
     lane.write_log(lane.genesis("seeded", floor))  # no push line at all
     d = lane.drift()
     assert d["uncovered"] == [sha]
-    block = lane.block()
-    assert f"UNCOVERED: {sha[:8]}" in block
-    assert "absent or disarmed" in block
+    assert d["coverage"][M.UNEXPLAINED] == [sha]
+    assert f"UNEXPLAINED: {sha[:8]}" in lane.block()
 
 
 def test_below_a_seeded_floor_is_out_of_scope(lane):
@@ -605,7 +943,9 @@ def test_below_a_seeded_floor_is_out_of_scope(lane):
     d = lane.drift()
     assert d["uncovered"] == []
     assert d["unverifiable"] == 0
-    assert "uncovered commits above the floor: 0" in lane.block()
+    assert (f"coverage above floor: {d['above_floor']} commits — covered "
+            f"{d['above_floor']}, local-stamp 0, local-keyboard 0, "
+            f"unexplained 0") in lane.block()
 
 
 def test_below_a_lazy_floor_is_unverifiable_not_clean(lane):
@@ -623,10 +963,8 @@ def test_below_a_lazy_floor_is_unverifiable_not_clean(lane):
 
 def test_a_refused_push_is_not_permanent_mirror_drift_noise(lane):
     """A refusal is the hook doing its one job: nothing landed, so the range
-    can never resolve in the mirror. Rev-listing it would increment 'N logged
-    push ranges do not resolve — history was rewritten' on every digest
-    forever, one legitimate refusal at a time — a counter that only goes up
-    and never means anything gets muted in a week."""
+    can never resolve in the mirror, and rev-listing it would increment
+    'history was rewritten' forever."""
     floor = lane.head()
     lane.write_log(lane.genesis("seeded", floor),
                    lane.push(floor, "e" * 40, "NONE", "refused"))
@@ -637,16 +975,243 @@ def test_a_refused_push_is_not_permanent_mirror_drift_noise(lane):
 
 def test_commits_on_main_whose_only_log_line_is_a_refusal_are_uncovered(lane):
     """A refused line attests a refusal, not a landing. If the range's commits
-    are on `main` anyway, they arrived by a path the hook never passed — the
-    absent-or-disarmed case — and reading the refusal as coverage would
-    render exactly that arrival as clean, forever, once it ages out of the
-    digest window. (Before the review fix this asserted the opposite:
-    refused ranges counted as covered.)"""
+    are on `main` anyway, they arrived by a path this hook never passed, and
+    reading the refusal as coverage would render that arrival as clean."""
     floor = lane.head()
     sha = lane.commit("harness/x.py", "x = 1\n", "harness: x")
     lane.write_log(lane.genesis("seeded", floor),
                    lane.push(floor, sha, "NONE", "refused"))
     assert lane.drift()["uncovered"] == [sha]
+
+
+# --------------------------------------------------------------------------
+# COVERAGE CLASSES above the floor.
+#
+# A commit with no covering push-log line never met the hook, and that is the
+# whole of what the log knows: one class per commit, one finding word.
+# --------------------------------------------------------------------------
+
+LOCAL_KEYBOARD_CFG = ["keyboard@example.invalid"]
+
+
+def test_a_stamp_with_a_coverage_record_is_local_stamp_not_a_finding(lane):
+    """The positive record, from the actor, at the moment it committed. No
+    inference is involved and none is needed."""
+    floor = lane.head()
+    sha = lane.commit("SPECS/x.md", "Status: building\n",
+                      "x: Status -> building", who="disjorn-broker")
+    lane.write_log(lane.genesis("seeded", floor))
+    lane.write_local(lane.local(sha))
+    d = lane.drift()
+    assert d["coverage"][M.LOCAL_STAMP] == [sha]
+    assert d["coverage"][M.UNEXPLAINED] == []
+    assert "local-stamp 1" in lane.block()
+
+
+def test_the_record_outranks_the_committer_rule(lane):
+    """Order matters: a sha the broker NAMED is local-stamp on that record's
+    authority, never on a guess about who its committer was. Here the
+    committer would ALSO match the local list, and the class is still the one
+    the record earned — otherwise the strong evidence would be invisible."""
+    floor = lane.head()
+    sha = lane.commit("SPECS/x.md", "s\n", "x: Status -> building")
+    lane.write_log(lane.genesis("seeded", floor))
+    lane.write_local(lane.local(sha))
+    d = lane.drift(local_committers=LOCAL_KEYBOARD_CFG)
+    assert d["coverage"][M.LOCAL_STAMP] == [sha]
+    assert d["coverage"][M.LOCAL_KEYBOARD] == []
+
+
+def test_a_declared_local_committer_with_no_record_is_local_keyboard(lane):
+    """Acceptance 5: no backfill. The commits already on main when this landed
+    have no record and must not become a permanent alarm."""
+    floor = lane.head()
+    sha = lane.commit("harness/x.py", "x = 1\n", "harness: keyboard commit")
+    lane.write_log(lane.genesis("seeded", floor))
+    d = lane.drift(local_committers=LOCAL_KEYBOARD_CFG)
+    assert d["coverage"][M.LOCAL_KEYBOARD] == [sha]
+    assert d["coverage"][M.UNEXPLAINED] == []
+    assert "local-keyboard 1" in M.compose_drift_block(d)
+
+
+def test_an_unrecorded_undeclared_committer_is_unexplained_and_alarms(lane):
+    """Acceptance 3. This is the case the detector exists for, and the only
+    one the section raises its voice about."""
+    floor = lane.head()
+    sha = lane.commit("harness/x.py", "x = 1\n", "harness: snuck in",
+                      who="stranger")
+    lane.write_log(lane.genesis("seeded", floor))
+    d = lane.drift(local_committers=LOCAL_KEYBOARD_CFG)
+    assert d["coverage"][M.UNEXPLAINED] == [sha]
+    block = M.compose_drift_block(d)
+    assert f"UNEXPLAINED: {sha[:8]}" in block
+    assert "unexplained 1" in block
+
+
+def test_a_covered_commit_is_covered_whoever_committed_it(lane):
+    """Push truth first. A commit inside a logged range is covered even when
+    its committer is on the local list — the classes never reach past a
+    measurement to an explanation."""
+    floor = lane.head()
+    sha = lane.commit("harness/x.py", "x = 1\n", "harness: pushed")
+    lane.write_log(lane.genesis("seeded", floor), lane.push(floor, sha))
+    d = lane.drift(local_committers=LOCAL_KEYBOARD_CFG)
+    assert d["coverage"]["covered"] == [sha]
+    assert d["coverage"][M.LOCAL_KEYBOARD] == []
+
+
+def test_a_clean_day_is_one_coverage_line_and_no_commit_rows(lane):
+    """ACCEPTANCE 1, the whole point. A normal day — a broker stamp, keyboard
+    commits, a real push — reads as one line. Twelve known-benign rows every
+    morning is how the row that matters stops being read."""
+    floor = lane.head()
+    pushed = lane.commit("harness/a.py", "a\n", "harness: a")
+    stamp = lane.commit("SPECS/x.md", "s\n", "x: Status -> building")
+    kbd = lane.commit("SPECS/x.md", "s2\n", "x: typo")
+    lane.write_log(lane.genesis("seeded", floor),
+                   lane.push(floor, pushed, "review-seq:1428"))
+    lane.write_local(lane.local(stamp))
+    block = lane.block(local_committers=LOCAL_KEYBOARD_CFG)
+    assert ("coverage above floor: 3 commits — covered 1, local-stamp 1, "
+            "local-keyboard 1, unexplained 0") in block
+    assert "UNEXPLAINED" not in block
+    # Not one per-commit row of any class. `kbd` still appears as the mirror
+    # head, which the next digest parses, so the check is on ROWS, not text.
+    assert stamp[:8] not in block
+    assert [ln for ln in block.splitlines()
+            if ln.startswith(("  local-", "  UNEXPLAINED"))] == []
+    assert kbd == lane.head()
+
+
+def test_no_line_contradicts_the_hook_state_measured_above_it(lane):
+    """ACCEPTANCE 2, as a property of the composed block rather than a grep:
+    on a day the hook demonstrably MATCHES, nothing below says otherwise."""
+    floor = lane.head()
+    lane.commit("SPECS/x.md", "s\n", "x: Status -> building")
+    lane.write_log(lane.genesis("seeded", floor))
+    block = lane.block()
+    assert "(MATCH)" in block
+    for word in ("disarmed", "absent"):
+        assert word not in block.split("(MATCH)", 1)[1]
+
+
+def test_the_informational_classes_are_named_once_the_section_alarms(lane):
+    """When there IS something to look at, the neighbouring rows are context
+    worth having — which commits the day's benign local work was."""
+    floor = lane.head()
+    stamp = lane.commit("SPECS/x.md", "s\n", "x: Status -> building")
+    bad = lane.commit("harness/x.py", "x\n", "harness: snuck in", who="stranger")
+    lane.write_log(lane.genesis("seeded", floor))
+    lane.write_local(lane.local(stamp))
+    block = lane.block(local_committers=LOCAL_KEYBOARD_CFG)
+    assert f"UNEXPLAINED: {bad[:8]}" in block
+    assert f"local-stamp: {stamp[:8]}" in block
+
+
+def test_verbose_names_them_on_a_quiet_day_and_the_daily_post_does_not(lane):
+    floor = lane.head()
+    stamp = lane.commit("SPECS/x.md", "s\n", "x: Status -> building")
+    lane.write_log(lane.genesis("seeded", floor))
+    lane.write_local(lane.local(stamp))
+    d = lane.drift(local_committers=LOCAL_KEYBOARD_CFG)
+    assert f"local-stamp: {stamp[:8]}" in M.compose_drift_block(d, verbose=True)
+    assert f"local-stamp: {stamp[:8]}" not in M.compose_drift_block(d)
+
+
+def test_an_absent_local_log_is_not_an_error_and_explains_nothing(lane):
+    """It cannot make an unexplained commit look explained: every rule here
+    only ever ADDS an explanation."""
+    floor = lane.head()
+    sha = lane.commit("harness/x.py", "x\n", "harness: snuck in", who="stranger")
+    lane.write_log(lane.genesis("seeded", floor))
+    assert not lane.local_log_path.exists()
+    d = lane.drift()
+    assert d["local_log"]["present"] is False
+    assert d["local_log"]["error"]
+    assert d["coverage"][M.UNEXPLAINED] == [sha]
+
+
+def test_an_unconfigured_local_committer_list_says_why_it_is_loud(lane):
+    """Empty is not silently benign and not silently damning: everything local
+    reads as unexplained, and the block names the missing config as the cause
+    rather than leaving a reader to hunt for a hook fault."""
+    floor = lane.head()
+    lane.commit("harness/x.py", "x\n", "harness: keyboard commit")
+    lane.write_log(lane.genesis("seeded", floor))
+    block = lane.block()          # no local_committers configured
+    assert "unexplained 1" in block
+    assert "[gate].local_committers is empty" in block
+
+
+def test_a_record_for_a_word_this_reader_does_not_know_explains_nothing(lane):
+    """A newer writer's outcome word is kept in the parse — it is not garbage —
+    but it does not classify. Forward compatibility must not become a way to
+    have a commit explained by a word nobody here understands."""
+    floor = lane.head()
+    sha = lane.commit("harness/x.py", "x\n", "harness: ?", who="stranger")
+    lane.write_log(lane.genesis("seeded", floor))
+    lane.write_local(lane.local(sha, outcome="local-something-else"))
+    d = lane.drift()
+    assert d["local_log"]["records"][sha]["outcome"] == "local-something-else"
+    assert d["local_log"]["malformed"] == 0
+    assert d["coverage"][M.UNEXPLAINED] == [sha]
+
+
+def test_a_malformed_local_line_is_counted_and_said_out_loud(lane):
+    floor = lane.head()
+    sha = lane.commit("harness/x.py", "x\n", "harness: ?", who="stranger")
+    lane.write_log(lane.genesis("seeded", floor))
+    lane.write_local("this is not a LOCAL line", lane.local(sha))
+    d = lane.drift()
+    assert d["local_log"]["malformed"] == 1
+    assert d["coverage"][M.LOCAL_STAMP] == [sha]
+    assert "1 unparseable line(s) in the local coverage log" in lane.block()
+
+
+def test_a_local_record_never_covers_and_never_cites(lane):
+    """The classes are REPORTING. A stamp record must not creep into coverage
+    or citation — a local commit is uncited, and if it touched a gated lane it
+    is a LANE VIOLATION exactly as before."""
+    floor = lane.head()
+    sha = lane.commit("server/app/ws.py", "x = 1\n", "server: local Tier 2")
+    lane.write_log(lane.genesis("seeded", floor))
+    lane.write_local(lane.local(sha))
+    d = lane.drift(local_committers=LOCAL_KEYBOARD_CFG)
+    assert d["uncovered"] == [sha]
+    assert sha in d["uncited"]
+    assert f"LANE VIOLATION: {sha[:8]}" in lane.block(
+        local_committers=LOCAL_KEYBOARD_CFG)
+
+
+def test_no_source_file_still_asserts_the_cause_it_never_measured():
+    """ACCEPTANCE 2, as a grep over the tracked tree: the retired sentence is a
+    fixed string, and without this check it grows back the next time someone
+    wants a friendlier word for `unexplained`. SPECS/ is exempt — the specs
+    record what was ruled. The needle is assembled at runtime so this file is
+    not its own hit."""
+    root = Path(__file__).resolve().parents[3]
+    needle = "the hook was " + "absent or disarmed"
+    proc = subprocess.run(["git", "-C", str(root), "grep", "-l", "-F", needle],
+                          capture_output=True, text=True)
+    if proc.returncode > 1:                       # not a git checkout
+        pytest.skip("not a git work tree")
+    hits = [ln for ln in proc.stdout.split() if not ln.startswith("SPECS/")]
+    assert hits == []
+
+
+def test_the_local_log_defaults_beside_the_push_log(lane):
+    """PINNED: brokerd resolves the same two keys by the same rule. Move one
+    without the other and the broker writes records nobody reads."""
+    paths = M.gate_paths(lane.config())
+    assert paths["local_log"] == str(lane.local_log_path)
+    assert paths["local_log"] == str(Path(paths["push_log"]).parent
+                                     / M.LOCAL_LOG_NAME)
+
+
+def test_an_explicit_local_log_path_wins(lane):
+    elsewhere = lane.root / "elsewhere" / "coverage-log"
+    paths = M.gate_paths(lane.config(local_log=str(elsewhere)))
+    assert paths["local_log"] == str(elsewhere)
 
 
 # --------------------------------------------------------------------------
@@ -672,7 +1237,7 @@ def test_without_a_log_citation_falls_back_to_strict_trailer_presence(lane):
 def test_without_a_log_the_unknowables_say_unknown(lane):
     block = lane.block()
     assert "fail-open pushes in the log: UNKNOWN (no log)" in block
-    assert "uncovered commits: UNKNOWN" in block
+    assert "coverage above floor: UNKNOWN" in block
 
 
 def test_a_malformed_log_line_is_counted_not_fatal(lane):
@@ -692,7 +1257,7 @@ def test_overrides_are_derived_from_mains_trailers_not_from_the_log(lane):
     lane.commit("harness/a.py", "x\n", "harness: a\n\noverride-seq: 1450")
     lane.commit("harness/b.py", "y\n", "harness: b\n\noverride-seq: 1451")
     lane.commit("harness/c.py", "z\n", "harness: c\n\nreview-seq: 1428")
-    ov = M.override_trailers(str(lane.mirror))
+    ov = M.seq_trailers(str(lane.mirror), "override-seq")
     assert [o["seq"] for o in ov] == [1451, 1450]  # newest first, as git logs
     assert "overrides to date: 2" in lane.block()  # with no push log at all
     assert "override-seq 1451, 1450" in lane.block()
@@ -700,6 +1265,23 @@ def test_overrides_are_derived_from_mains_trailers_not_from_the_log(lane):
 
 def test_no_overrides_reports_zero_without_naming_any(lane):
     assert "overrides to date: 0" in lane.block()
+
+
+def test_chat_merges_are_counted_on_their_own_line(lane):
+    lane.commit("harness/a.py", "x\n", "merge: a\n\nmerge-seq: 4:2704")
+    lane.commit("harness/b.py", "y\n",
+                "merge: b\n\nmerge-seq: 7:19\nreview-seq: 1428")
+    lane.commit("harness/c.py", "z\n", "harness: c\n\noverride-seq: 1450")
+    merges = M.seq_trailers(str(lane.mirror), "merge-seq")
+    assert [(m["channel_id"], m["seq"]) for m in merges] == [(7, 19), (4, 2704)]
+    lines = lane.block().splitlines()
+    i = next(n for n, ln in enumerate(lines) if ln.startswith("overrides to date:"))
+    assert lines[i] == "overrides to date: 1 (override-seq 1450)"
+    assert lines[i + 1] == "chat merges to date: 2 (merge-seq 7:19, 4:2704)"
+
+
+def test_no_chat_merges_reports_zero_without_naming_any(lane):
+    assert "chat merges to date: 0" in lane.block()
 
 
 # --------------------------------------------------------------------------
@@ -714,6 +1296,21 @@ def test_deploy_state_in_sync(lane):
     assert d["dirty"] is False
 
 
+def test_prose_line_reports_worst_file_and_over_count(lane):
+    lane.commit("harness/big.py", "# " + "x" * 3000 + "\ny = 1\n", "harness: prose-heavy")
+    lane.commit("harness/small.py", "y = 1\n", "harness: lean")
+    lane.deploy()
+    d = lane.drift()
+    assert d["prose"]["worst"] == "harness/big.py" and d["prose"]["over"] == 1
+    line = [l for l in lane.block().splitlines() if l.startswith("prose:")][0]
+    assert line == "prose: worst harness/big.py 100%; over baseline: 1"
+
+
+def test_prose_line_says_unmeasured_when_the_tree_is_gone(lane):
+    d = M.compose_drift_block({**lane.drift(), "prose": M.prose_summary("/nope/prod")})
+    assert "prose: UNMEASURED" in d
+
+
 def test_deploy_state_behind_is_drift(lane):
     lane.deploy()
     lane.commit("harness/new.py", "x\n", "harness: unpublished to prod")
@@ -724,8 +1321,8 @@ def test_deploy_state_behind_is_drift(lane):
 
 
 def test_a_dirty_prod_tree_is_drift_even_at_the_right_commit(lane):
-    """The ship-by-not-publishing case (seq 1380): code that is running and was
-    never published. Nothing else in the house catches it."""
+    """The ship-by-not-publishing case: code that is running and was never
+    published, which nothing else in the house catches."""
     lane.deploy()
     (lane.prod / "harness" / "hotfix.py").write_text("x = 1\n")
     lane.deploy_dirty = True
@@ -813,6 +1410,6 @@ def test_a_long_flag_list_says_how_many_it_dropped(lane):
     for i in range(M.FLAG_CAP + 3):
         lane.commit(f"harness/u{i}.py", "x\n", f"harness: uncovered {i}")
     lane.write_log(lane.genesis("seeded", floor))
-    block = lane.block()
-    assert f"uncovered commits above the floor: {M.FLAG_CAP + 3}" in block
+    block = lane.block(local_committers=["nobody@example.invalid"])
+    assert f"unexplained {M.FLAG_CAP + 3}" in block
     assert "and 3 more, not named here" in block

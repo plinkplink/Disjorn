@@ -1,0 +1,55 @@
+/* fonts.css — house-written, from @fontsource/inter@5.3.0 and
+ * @fontsource/jetbrains-mono@5.3.0 (both OFL-1.1, see LICENSE-inter and
+ * LICENSE-jetbrains-mono). Latin subset only, woff2 only, no unicode-range:
+ * a glyph this subset lacks falls through to the next family in the stack.
+ * The urls are relative to THIS file, so the whole fonts/ directory moves
+ * as one — copy it to vendor/fonts/ and link vendor/fonts/fonts.css.
+ * Regenerate by hand if MANIFEST.toml gains or drops a weight. */
+
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url(inter-latin-400-normal.woff2) format('woff2');
+}
+
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url(inter-latin-500-normal.woff2) format('woff2');
+}
+
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url(inter-latin-600-normal.woff2) format('woff2');
+}
+
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url(inter-latin-700-normal.woff2) format('woff2');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url(jetbrains-mono-latin-400-normal.woff2) format('woff2');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url(jetbrains-mono-latin-700-normal.woff2) format('woff2');
+}

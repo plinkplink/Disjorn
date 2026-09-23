@@ -48,8 +48,29 @@ def _fetch_stub(tmp_path, record, *, stderr: str = "", rc: int = 0):
     return path
 
 
+def _count_stub(tmp_path, counts, *, rc: int = 0):
+    """A stand-in for `git for-each-ref`: prints one refname per ref the mirror
+    is pretending to hold for the repo named in the pattern argument, so the
+    handler counts lines exactly as it will against real git."""
+    counts_file = tmp_path / "gh-counts.json"
+    counts_file.write_text(json.dumps(counts))
+    path = tmp_path / "gh-count.py"
+    path.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        f"counts = json.loads(open({str(counts_file)!r}).read())\n"
+        "pattern = sys.argv[-1]\n"
+        "repo = pattern.split('/')[2]\n"
+        "for i in range(counts.get(repo, 0)):\n"
+        "    print(pattern + 'loop/b%d' % i)\n"
+        f"raise SystemExit({rc})\n")
+    path.chmod(0o755)
+    return path
+
+
 def _configure_gatehouse(harness, tmp_path, repos=("disjorn", "claudette"),
-                         *, stderr: str = "", rc: int = 0):
+                         *, stderr: str = "", rc: int = 0, present=None,
+                         count_rc: int = 0):
     record = tmp_path / "gatehouse-fetch.jsonl"
     stub = _fetch_stub(tmp_path, record, stderr=stderr, rc=rc)
     harness.broker.commands["refresh_mirror_gatehouse_dir"] = GATEHOUSE
@@ -59,6 +80,12 @@ def _configure_gatehouse(harness, tmp_path, repos=("disjorn", "claudette"),
     # deployment actually runs.
     harness.broker.commands["refresh_mirror_gatehouse_fetch"] = [
         harness_python(), str(stub), "--prune"]
+    # Default every repo to a non-empty mirror: an empty one is the alarm case
+    # and no test should arm it by accident.
+    if present is None:
+        present = {r: 3 for r in repos if isinstance(r, str)}
+    harness.broker.commands["refresh_mirror_gatehouse_count"] = [
+        harness_python(), str(_count_stub(tmp_path, present, rc=count_rc))]
     return record
 
 
@@ -221,6 +248,92 @@ def test_the_shipped_default_fetch_prunes(harness, tmp_path):
     assert argv == ["git", "-C", "/srv/disjorn-ro", "fetch", "--prune",
                     f"{GATEHOUSE}/disjorn.git",
                     "+refs/heads/*:refs/gatehouse/disjorn/*"]
+
+
+# ── arrived is a delta; present is the inventory ──────────────────────────
+# The two were indistinguishable from the record, and a resident read an empty
+# `arrived` as "this repo is not entitled for me", asked for a permission that
+# was already granted, and stayed blocked on a file the mirror was holding the
+# whole time. The refs were there; the number saying so was not.
+
+def test_present_counts_what_the_mirror_holds_not_what_moved(harness, tmp_path):
+    """The fix, stated as an assertion: a fetch where nothing moved still says
+    how much is there."""
+    harness.set_verbs(**{"refresh-mirror": True})
+    _configure_gatehouse(harness, tmp_path, repos=("claudette",),
+                         present={"claudette": 6})
+    resp = harness.call("refresh-mirror", {})
+    assert resp["ok"] is True
+    rec, = resp["result"]["gatehouse"]
+    assert rec["arrived"] == [], "nothing moved on this fetch"
+    assert rec["present"] == 6, "and six refs were there the whole time"
+
+
+def test_a_quiet_repo_that_holds_refs_raises_no_alarm(harness, tmp_path):
+    """No news is still no line: `present` exists to be read in the record,
+    not to give a silent verb something to say every time it runs."""
+    harness.set_verbs(**{"refresh-mirror": True})
+    _configure_gatehouse(harness, tmp_path, repos=("claudette",),
+                         present={"claudette": 6})
+    harness.call("refresh-mirror", {})
+    assert "gatehouse" not in harness.audit_lines()[-1]["result_summary"]
+
+
+def test_an_entitled_repo_holding_nothing_is_shouted(harness, tmp_path):
+    """The one case that breaks the silence. A repo on the entitlement list
+    with zero refs is not a quiet repo, and the two are identical from the
+    banner until it says so."""
+    harness.set_verbs(**{"refresh-mirror": True})
+    _configure_gatehouse(harness, tmp_path, repos=("disjorn", "claudette"),
+                         present={"disjorn": 12, "claudette": 0})
+    resp = harness.call("refresh-mirror", {})
+    assert resp["ok"] is True
+    summary = harness.audit_lines()[-1]["result_summary"]
+    named = summary.split("EMPTY for")[1].split(";")[0]
+    assert named.strip() == "claudette"
+    assert "disjorn" not in named, "a repo with refs is never called empty"
+
+
+def test_an_uncountable_repo_is_none_and_never_the_alarm(harness, tmp_path):
+    """A count that fails must not become a report that the mirror is empty,
+    and must not fail a fetch that already succeeded: the refs ARE updated by
+    the time the count runs, and calling that an error would report a real
+    success as a failure."""
+    harness.set_verbs(**{"refresh-mirror": True})
+    _configure_gatehouse(harness, tmp_path, repos=("claudette",),
+                         present={"claudette": 4}, count_rc=1)
+    resp = harness.call("refresh-mirror", {})
+    assert resp["ok"] is True, "the fetch succeeded; the count is best-effort"
+    rec, = resp["result"]["gatehouse"]
+    assert rec["present"] is None, "unknown, stated as unknown"
+    assert "EMPTY" not in harness.audit_lines()[-1]["result_summary"]
+
+
+def test_the_count_reads_only_that_repos_namespace(harness, tmp_path):
+    """One repo's refs must never be counted into another's answer, which is
+    what the trailing-slash pattern buys."""
+    argv = harness.broker._gatehouse_count_argv("claudette")
+    assert argv[-1] == "refs/gatehouse/claudette/"
+
+
+def test_the_shipped_default_count_is_read_only_plumbing(harness):
+    """Asserted on the DEFAULT argv, not a stub: this runs on every refresh,
+    and a deployment that shipped a writing command here would look identical
+    until it wrote."""
+    harness.broker.commands.pop("refresh_mirror_gatehouse_count", None)
+    assert harness.broker._gatehouse_count_argv("gable") == [
+        "git", "-C", "/srv/disjorn-ro", "for-each-ref",
+        "--format=%(refname)", "refs/gatehouse/gable/"]
+
+
+@pytest.mark.parametrize("repo", ["-upload-pack=/bin/sh", "../../../etc",
+                                  "a;rm -rf /", "..", "", 17])
+def test_a_hostile_repo_name_never_reaches_the_count_argv(harness, repo):
+    """The count builds an argv from the same config the fetch does, so it
+    re-checks the same way rather than trusting its caller to have done it."""
+    with pytest.raises(Exception) as exc:
+        harness.broker._gatehouse_count_argv(repo)
+    assert "plain repo name" in str(exc.value)
 
 
 def test_the_parser_reads_git_chatter_and_ignores_the_rest():

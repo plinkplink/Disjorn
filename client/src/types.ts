@@ -2,7 +2,12 @@
    These are the client-side contract for WP10-12 — extend, don't fork. */
 
 export type MemberType = "user" | "bot";
-export type ChannelType = "main_feed" | "dm_1to1" | "text";
+/* `app_build` is the modal chat behind an app build session: exactly two
+   members (the session owner and the builder resident), created by the server
+   with the session. The sidebar never lists one — AppShell filters the type
+   out of both channel groups — but GET /channels keeps returning it so
+   reconnect resync and unread bookkeeping go on working (brief D9). */
+export type ChannelType = "main_feed" | "dm_1to1" | "text" | "app_build";
 /** Per-channel access mode. Everything created before the membership spec —
     and everything created without asking — is `public`. */
 export type ChannelVisibility = "public" | "private";
@@ -27,6 +32,15 @@ export interface User {
   status: UserStatus;
   is_admin: boolean;
   created_at: string;
+}
+
+/** GET /auth/users (admin only): enough to pick an account to reset. */
+export interface AdminUserRow {
+  id: number;
+  username: string;
+  display_name: string;
+  is_admin: boolean;
+  must_change_password: boolean;
 }
 
 export interface MessageAuthor {
@@ -207,6 +221,237 @@ export interface AvatarUploadResponse {
   url: string;
 }
 
+/* ---- apps (SPECS/2026-08-30-apps-tab-v1.md, stage 1) ---- */
+
+/* The stage vocabulary is FIXED and shared with the server's CHECK constraint
+   (brief D7). Order is load-bearing: it is the stage bar, left to right. No
+   percent exists anywhere — a stage is reached or it is not.
+
+   It is also NOT the whole story, and stage 2 is where that starts to matter:
+   a halted turn re-posts its last reached stage with `detail.halted` set, and
+   a turn that changed nothing is `files_written` with `no_changes`. So a
+   renderer keys its LABEL off the detail, never off the stage name
+   (SPECS/2026-09-06-apps-builder-seat.md §A, Claudette #2293). */
+export const APP_STAGES = [
+  "scoped",
+  "scaffolded",
+  "files_written",
+  "deployed",
+  "live",
+] as const;
+
+export type AppStage = (typeof APP_STAGES)[number];
+
+/** Human label for a stage — the wire word is snake_case, the bar is not. */
+export const APP_STAGE_LABELS: Record<AppStage, string> = {
+  scoped: "Scoped",
+  scaffolded: "Scaffolded",
+  files_written: "Files written",
+  deployed: "Deployed",
+  live: "Live",
+};
+
+export type AppVisibility = "private" | "shared" | "public";
+export type AppStatus = "draft" | "live" | "archived";
+
+/** The live build session on an app, if there is one. `stage` is null until
+    the first stage event lands (nothing publishes them in stage 1). */
+export interface AppOpenSession {
+  id: number;
+  channel_id: number;
+  stage: AppStage | null;
+  locked_until: string;
+}
+
+/** AppOut. `id` is a random 12-char base32 string, never a sequence (D4). */
+export interface App {
+  id: string;
+  name: string;
+  description: string;
+  visibility: AppVisibility;
+  status: AppStatus;
+  owner_user_id: number;
+  builder_bot_id: number;
+  /** Lineage — the app this one was remixed from. Recorded from day one
+      because it cannot be retrofitted (Amendment A edit 3). */
+  parent_app_id: string | null;
+  created_at: string;
+  updated_at: string;
+  /** Is it on MY menu (owned, or added from discover)? */
+  on_menu: boolean;
+  open_session: AppOpenSession | null;
+}
+
+/**
+ * BuilderOut — a resident seat offered as a builder.
+ *
+ * `model` is read from the seat's own config at request time and printed as
+ * given (provenance-printing policy). `null` is a real answer, not an error:
+ * the card says the seat does not declare one. Never substitute a model name.
+ */
+export interface Builder {
+  bot_id: number;
+  name: string;
+  avatar_url?: string | null;
+  model: string | null;
+  builds_total: number;
+  builds_live: number;
+}
+
+/** Quota unit = build sessions started per user per UTC day (D5). */
+export interface Quota {
+  cap: number;
+  used: number;
+  left: number;
+  resets_at: string;
+}
+
+/** Why a turn stopped. A closed set: each value is a sentence the server
+    already wrote into the room, and the chip below is its short form. */
+export type HaltReason = "timeout" | "error" | "secret" | "ceiling" | "stopped";
+
+/**
+ * What a stage event says about the turn that produced it (stage 2, §1.2).
+ *
+ * Every key is optional and unknown keys still ride along: `detail` is
+ * free-form on the wire and a stage-1 event's bare `{}` is still a valid
+ * event. These are the keys this client RENDERS, typed so that a renderer
+ * reaching for one that is not there has to say what it does instead.
+ */
+export interface StageDetail {
+  /** 1-based, and the same number on every event of one turn. */
+  turn?: number;
+  /** Paths the turn's commit touched. Capped by the publisher at 40 names
+      plus a literal `"+N more"` entry, which is plain text, not a path. */
+  files?: string[];
+  tokens?: number;
+  model?: string;
+  /** The turn ended clean with an empty diff: an answer, a refusal, or a
+      decision that nothing needed changing. It ENDS the turn. */
+  no_changes?: boolean;
+  /** The runner's one-line report. Plain text, always — never markup. */
+  summary?: string;
+  halted?: HaltReason;
+  reason?: string;
+  [key: string]: unknown;
+}
+
+/** StageEventOut. `detail` is a bounded JSON object (filenames and the like). */
+export interface StageEvent {
+  id: number;
+  session_id: number;
+  stage: AppStage;
+  detail: StageDetail;
+  created_at: string;
+}
+
+/**
+ * The latest turn on a session, derived from its stage events.
+ *
+ * Derived rather than stored: the server sends events, not a turn record, and
+ * a client that kept its own turn row would have two answers the moment a
+ * reload replayed `stages`. `onStage` and the reload path both build this the
+ * same way, from the same input.
+ */
+export interface TurnState {
+  turn: number;
+  files: string[];
+  halted: HaltReason | null;
+  no_changes: boolean;
+  summary: string | null;
+  /** True when the turn stopped WAITING on anything: it halted, or it ended
+      clean with an empty diff. The elapsed clock stops here — a turn that
+      ends must end the bar's wait, not leave the user watching a counter
+      (spec §A). A turn that wrote files does NOT set it: the session goes on,
+      and the clock is the session's, not the turn's. */
+  done: boolean;
+}
+
+/**
+ * What a session is building. `repo` is the platform itself, on a `loop/*`
+ * branch in the gatehouse; there is no app to serve, so no gate verb applies
+ * (SPECS/2026-09-20-build-lane-v2-stage1-2b.md).
+ */
+export type AppSessionMode = "app" | "repo";
+
+/** SessionOut — everything the build modal renders, in one payload. */
+export interface AppSession {
+  id: number;
+  app: App;
+  channel_id: number;
+  builder: Builder;
+  started_at: string;
+  locked_until: string;
+  ended_at: string | null;
+  stage: AppStage | null;
+  stages: StageEvent[];
+  quota: Quota;
+  mode: AppSessionMode;
+  /** The branch is `loop/<repo_slug>`. Null in app mode, and in repo mode
+      until the broker has answered with a slug. */
+  repo_slug: string | null;
+  /** Client-side, derived from `stages` — not a field the server sends. Null
+      until the first event carrying a turn arrives. */
+  lastTurn?: TurnState | null;
+}
+
+/* ---- serving gate (SPECS/2026-09-09-apps-serving-gate.md, stage 3) ---- */
+
+/**
+ * Which tree of an app the gate is being asked for.
+ *
+ * `preview` is the owner's working copy — what the build modal frames — and
+ * `live` is what everyone entitled sees (D4). They are separate roots on the
+ * gate, not two states of one file tree, which is why an app can be live and
+ * still have a preview three turns ahead of it.
+ */
+export type AppRoot = "live" | "preview";
+
+/**
+ * GET /apps/config — the house-wide facts about apps that are not per-app.
+ *
+ * `origin_base` is the gate's origin, e.g. `https://host:10000`, and the
+ * EMPTY STRING is a real answer: this house has no serving gate configured
+ * (D1). Every client path that would build a URL checks for it first and says
+ * so, rather than pointing an iframe at `/<id>/` on the house origin — which
+ * would be the house serving app code, the one thing the walls forbid.
+ *
+ * Extra keys a later server adds ride along ignored; nothing here consumes
+ * the object as a whole.
+ */
+export interface AppsConfig {
+  origin_base: string;
+}
+
+/**
+ * AppCardOut — GET /apps/{id}/card, the payload behind an in-channel card.
+ *
+ * It is deliberately NOT an `App`: a card is shown to anyone entitled to the
+ * app, including people who own nothing about it, so it carries names and
+ * flags rather than the owner's row. 404 means "not entitled", and the client
+ * renders the plain link — never an error — because a link to something you
+ * cannot see should look like a link, not like a locked door.
+ */
+export interface AppCardData {
+  id: string;
+  name: string;
+  description: string;
+  status: AppStatus;
+  builder: { bot_id: number; name: string; avatar_url?: string | null };
+  owner: { id: number; name: string };
+  /** A `live.prev` exists on disk, so Revert has somewhere to go (D6). */
+  has_previous_live: boolean;
+  parent_app_id: string | null;
+  can_remix: boolean;
+  /** Screenshot at live is DEFERRED (D9): null today, and the card draws a
+      generated tile instead. The field is the seam, kept so the card grows a
+      picture without a shape change. */
+  image_url: string | null;
+  /** Null until the app is live — an app with no live root has no URL that
+      would answer. */
+  live_url: string | null;
+}
+
 /* ---- WebSocket frames (server -> client) ---- */
 
 export interface ReadyFrame {
@@ -312,6 +557,28 @@ export interface MemberRemoveFrame extends MemberEventFrame {
   type: "member_remove";
 }
 
+/**
+ * A build reached a stage. Fanned out to EVERY socket of the session's owner
+ * and to nobody else — not the builder bot, not other users (brief D7).
+ *
+ * The frame carries no row id (the persisted event has one; the frame does
+ * not), so the store synthesizes a local id for the events it appends live.
+ */
+export interface AppStageFrame {
+  type: "app_stage";
+  session_id: number;
+  app_id: string;
+  stage: AppStage;
+  detail: StageDetail;
+  created_at: string;
+}
+
+/** An app row changed (rename, status). Owner's sockets only. */
+export interface AppUpdateFrame {
+  type: "app_update";
+  app: App;
+}
+
 export type ServerFrame =
   | ReadyFrame
   | MessageCreateFrame
@@ -322,7 +589,9 @@ export type ServerFrame =
   | ChannelCreateFrame
   | ChannelDeleteFrame
   | MemberAddFrame
-  | MemberRemoveFrame;
+  | MemberRemoveFrame
+  | AppStageFrame
+  | AppUpdateFrame;
 
 /* ---- Web Push payload (WP7 shape; consumed by src/sw.ts) ---- */
 

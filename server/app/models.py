@@ -11,7 +11,11 @@ from typing import Any, Literal, Optional, Union
 from pydantic import BaseModel, Field
 
 MemberType = Literal["user", "bot"]
-ChannelType = Literal["main_feed", "dm_1to1", "text"]
+# 'app_build' is the modal build chat for an app (SPECS/2026-08-30-apps-tab-v1).
+# It is an ordinary channel in every mechanical sense — messages, seq, history,
+# WS fan-out, typing, the privacy filter — and explicit-membership-only, with
+# exactly two members: the session's owner and the builder bot.
+ChannelType = Literal["main_feed", "dm_1to1", "text", "app_build"]
 # 'public': every user in the house is a member (implicit membership).
 # 'private': channel_members is the wall — non-members read nothing.
 ChannelVisibility = Literal["public", "private"]
@@ -20,6 +24,12 @@ UserStatus = Literal["online", "idle", "dnd", "offline"]
 # from 'rejected', which is a decision about the request rather than about the
 # row. Row 3 took 'rejected' on 2026-08-23 for want of it (migration 010).
 BacklogStatus = Literal["open", "spec'd", "built", "rejected", "duplicate"]
+# The five build stages, FIXED (Amendment A edit 4). There is no percent and
+# never will be: a builder's estimate of its own progress is self-report, and
+# rendering self-report as a number is how a progress bar starts lying.
+AppStage = Literal["scoped", "scaffolded", "files_written", "deployed", "live"]
+AppVisibility = Literal["private", "shared", "public"]
+AppStatus = Literal["draft", "live", "archived"]
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +142,44 @@ class Bot(BaseModel):
     avatar_url: Optional[str] = None
     chibi_pack: Optional[str] = None
     created_at: str
+
+
+class OpenSessionRef(BaseModel):
+    """The live build session on an app, if it has one.
+
+    Present only while the session is genuinely open — not ended, and its lock
+    not lapsed. A lapsed lock reads as no open session, which is the same
+    answer every other reader gives (there is no sweeper to make it true
+    later).
+    """
+
+    id: int
+    channel_id: int
+    stage: Optional[AppStage] = None
+    locked_until: str
+
+
+class AppOut(BaseModel):
+    """One app as the API and the `app_update` frame carry it.
+
+    The `apps` row plus two facts that are about the CALLER rather than about
+    the app: `on_menu` (is it in this user's APPS group) and `open_session`
+    (is someone building it right now). Both are recomputed per request; a row
+    read straight out of the table cannot answer either.
+    """
+
+    id: str
+    name: str
+    description: str = ""
+    visibility: AppVisibility = "private"
+    status: AppStatus = "draft"
+    owner_user_id: int
+    builder_bot_id: int
+    parent_app_id: Optional[str] = None
+    created_at: str
+    updated_at: str
+    on_menu: bool = False
+    open_session: Optional[OpenSessionRef] = None
 
 
 class PushSubscription(BaseModel):
@@ -269,6 +317,52 @@ class MemberRemoveEvent(BaseModel):
     channel: ChannelCreateRef
 
 
+class AppStageEvent(BaseModel):
+    """A build session reached one of the five fixed stages.
+
+    AUDIENCE: every socket of the session's OWNER, and nobody else. Not the
+    builder bot (a resident must not read the harness's attestation about its
+    own build as if it were chat), not other users, not admins. The owner is
+    the only person the modal is open for, and the stage bar is the only
+    consumer.
+
+    Fan-out needs the owner's user id, which this frame deliberately does not
+    carry — the bus event does, alongside it, the way channel_delete carries
+    its recipient list. The routing fact stays off the wire.
+
+    `detail` is a bounded JSON object (filenames, a note). There is no percent
+    field and adding one would be a spec change, not a feature.
+
+    The publisher in stage 1 is the REST endpoint alone, and nothing in
+    production calls it yet: this is a subscription interface with the
+    subscriber written first. A second subscriber must be addable without
+    touching a publisher.
+    """
+
+    type: Literal["app_stage"] = "app_stage"
+    channel_id: None = None
+    session_id: int
+    app_id: str
+    stage: AppStage
+    detail: dict[str, Any] = Field(default_factory=dict)
+    created_at: str
+
+
+class AppUpdateEvent(BaseModel):
+    """An app's own record changed (renamed, re-described, gone live).
+
+    AUDIENCE: every socket of the app's OWNER, and nobody else — the same wall
+    as app_stage, for the same reason. Members who merely have the app on their
+    menu learn about a rename on their next GET /apps; a push to them is a
+    later stage's problem, and inventing one now would fan an owner's private
+    draft name out to people the owner has not shared with.
+    """
+
+    type: Literal["app_update"] = "app_update"
+    channel_id: None = None
+    app: AppOut
+
+
 Event = Union[
     MessageCreateEvent,
     MessageEditEvent,
@@ -279,4 +373,6 @@ Event = Union[
     ChannelDeleteEvent,
     MemberAddEvent,
     MemberRemoveEvent,
+    AppStageEvent,
+    AppUpdateEvent,
 ]

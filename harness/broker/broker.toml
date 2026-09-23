@@ -50,6 +50,11 @@ audit_log = "/var/log/disjorn-broker/audit.jsonl"
 # broker refuses this identity every other verb in code, so listing it here
 # widens nothing: it only makes a human at the keyboard nameable at the socket.
 # Without this line the wake surface cannot start.
+#
+# The same line is ALSO what makes the `server` principal reachable: the Disjorn
+# server (deploy/disjorn.service) runs as uid 1000 too, and the broker tells the
+# two apart by reading the peer pid's cgroup (see [server] below). Without this
+# line `/build` cannot start either.
 # "1000" = "plink"
 
 [residents.res-claudette]
@@ -203,6 +208,41 @@ protected_paths = "/etc/disjorn-broker/protected-paths.toml"
 canonical_repo = "/var/lib/disjorn-broker/gatehouse/disjorn.git"
 # hook_link = "/var/lib/disjorn-broker/gatehouse/disjorn.git/hooks/pre-receive"
 # push_log  = "/var/lib/disjorn-broker/gatehouse/disjorn.git/hooks/disjorn-push-log"
+# local_log = "/var/lib/disjorn-broker/gatehouse/disjorn.git/hooks/disjorn-local-log"
+
+# THE LOCAL COVERAGE LOG (spec 2026-08-27, seq 2067). `local_log` above is the
+# push log's sibling: `LOCAL <ts> <sha> local-stamp`, one line per commit this
+# broker makes straight onto the branch without pushing (the `## Status`
+# stamps). Those commits never meet the hook, so they can never have a
+# push-log line — and until this existed the digest reported them as uncovered
+# and asserted a hook state it had never measured, two lines under its own hook
+# MATCH. brokerd resolves `local_log` / `canonical_repo` by the SAME rule as
+# the detector: set one side only and the records go somewhere nobody reads.
+
+# Git identities with a shell on this box that commit directly into the
+# canonical repo. Substrings, matched case-insensitively against
+# "<committer> <email>|<author> <email>". A commit above the floor with no
+# push-log line and no local-stamp record classifies as `local-keyboard` if it
+# matches one of these, and UNEXPLAINED — the digest's only coverage finding —
+# if it does not.
+#
+# THERE IS NO DEFAULT LIST IN THE CODE, on purpose (the same rule the plan
+# room's lane owners follow): who has a shell here is a house fact, and a
+# built-in list would explain away a commit on a deployment that never made
+# one. Leave this empty and every local commit reads as unexplained; the block
+# says so on the line under the count rather than going quiet.
+#
+# Adding an identity here EXPLAINS a commit, it does not bless it: the class
+# is informational, the hook-state signals (the MATCH line, the fail-open
+# count, the override count) are untouched by it, and a pushed commit that
+# dodged the hook still lands as unexplained whoever committed it.
+local_committers = [
+  "t@t",                    # the keyboard's git identity in this clone
+  "plink@debian.srv",       # Admin, same box
+  "plinkplink@gmail.com",   # plink, same box
+  "broker@disjorn.local",   # disjorn-broker, for stamps made before seq 2067
+  "build@disjorn.local",    # disjorn-build, the build user's local commits
+]
 
 # The read-only mirror, same one `refresh-mirror` maintains and board.py reads.
 # Commit history, the override count, and the committed sha of
@@ -352,9 +392,8 @@ unit_state_command = ["systemctl", "show", "--property=ActiveState", "--value"]
 # "$@" forwards to claude. Drop either and the pin stops reaching claude.
 session_argv = ["bash", "-lc", "exec claude -p --output-format json \"$@\"", "build-session"]
 # WP-L5 MODEL PIN — no fallback. A blank/absent pin is config drift and the
-# verb refuses (never rides the account default). ONE-PIN UPGRADE PATH: flip
-# this one value when Fable API access returns on plink's credits.
-model = "claude-opus-4-8"
+# verb refuses (never rides the account default).
+model = "claude-opus-5-5"
 # The authoritative committed specs the confirm gate reads: the read-only repo
 # mirror's SPECS/ (refreshed by refresh-mirror). A spec must resolve DIRECTLY
 # inside this dir — no `..`, no symlink escape — and be status `confirmed` with
@@ -453,6 +492,52 @@ daily_build_cap = 10
 # /config/budget.json the summon seat does (harness/cc/config-template), which
 # is the spec's "same per-session action cap" and needs no second knob.
 
+[server]
+# THE SERVER PRINCIPAL (SPECS/2026-09-20-build-lane-v2-stage1-2b.md). The
+# Disjorn server shares plink's uid, so SO_PEERCRED alone cannot tell the two
+# apart. A caller is resolved to `server` only when its uid maps to "plink" in
+# [uids] AND /proc/<peer pid>/cgroup names this unit; anything else is whatever
+# [uids] says. An empty value is a refusal to start: it would match every
+# cgroup and hand the server principal to every process plink runs.
+unit = "disjorn.service"
+
+[build]
+# `/build <what to do>` from chat. With this block ABSENT the verb still exists
+# and answers "chat builds are not configured on this broker"; with it present
+# every key below is validated at boot and a bad one is a refusal to start.
+#
+# The accounts whose `/build` the broker will act on. Usernames on this server,
+# never a `res-*` seat — only a person may start a build, and a seat named here
+# is a refusal to start. An EMPTY list is legal and means the verb refuses
+# everything, which is how you disarm `/build` without editing verbs.toml.
+humans = ["plink"]
+# The resident the build RUNS as, without the `res-` prefix. It must be a
+# resident of this house ([uids] / [residents]).
+seat = "gable"
+# Chat builds per UTC day, spent under the `server` principal. A chat build does
+# NOT touch the build seat's [start_build] allowance: one entrance may not eat
+# the other's day.
+daily_build_cap = 4
+# One JSON line per accepted `/build`: ts, seq, channel_id, author,
+# text_sha256, slug, session_id. `/merge` appends here too, with kind = "merge"
+# (ts, seq, channel_id, author, slug, tier, sha, pass_seq), and the Tier 0
+# auto-merge budget is counted from those lines. Keep it somewhere no resident
+# can write.
+ledger = "/var/lib/disjorn-broker/build-ledger.jsonl"
+# THE GATES, AND WHOSE HANDS THEY RUN IN. The broker launches the suite itself
+# through the same sudo helper a build uses (`disjorn-build-launch gate`), reads
+# the verdict off the launcher's stdout, and merges nothing without a green run
+# it started. A caller-supplied gate result has no slot to arrive in. The gate
+# unit's own RuntimeMaxSec (1200s) is the kill that works, so the broker must
+# outwait it: a value of 1200 or less is refused at boot.
+gate_timeout_sec = 1320
+# The full stdout+stderr of each gate run, 0600. Never a resident-writable dir.
+gate_log_dir = "/var/lib/disjorn-broker/gate-logs"
+# Where `/merge` clones, merges and pushes from. A throwaway tree per merge, so
+# a half-done merge is a directory nobody reads rather than a gatehouse nobody
+# can build from.
+merge_work_dir = "/var/lib/disjorn-broker/merge-work"
+
 [write_verbs]
 # THE FAILS-CLOSED TIER-1 WALL (SPECS/2026-08-26-approval-object-and-resident-
 # write-verbs.md, confirmed seq 2022). A seat writes its OWN Tier-0/1 surface by
@@ -521,3 +606,73 @@ url = "http://127.0.0.1:8399"
 api_key_path = "/etc/disjorn-broker/broker-api-key"
 # Channel id of #custodian (look it up in the server DB / channel list).
 custodian_channel_id = 4
+
+[apps]
+# APPS v1 stage 2 — the apps-builder seat and the `apps-build` handoff verb
+# (SPECS/2026-09-06-apps-builder-seat.md §B/§E).
+#
+# COMMENTED OUT = no apps-builder behind this broker. The verb still exists and
+# answers "apps-build is not configured on this broker" — the same fail-closed
+# shape as an unflipped kill switch, and never a boot failure: every other
+# resident's hands are unrelated to this one wire.
+#
+# WHAT A TURN IS. A resident writes a build prompt into its own
+# ~/apps-prompts/<session>-<turn>.md, calls `apps-build`, and the broker spawns
+# ONE transient unit through the sudoers helper below. The turn runs as
+# res-appsbuilding — not as the resident, not as plink — with the app repo as
+# its only writable path and no house credential of any kind. Everything the
+# broker learns about it comes back as /srv/apps-turns/<session>/<turn>/
+# result.json, written atomically by that seat's harvest. The 0600 spools
+# beside it are the seat's; this daemon never opens them.
+#
+# runner = "claude-code"          # selects the image and the usage parser
+# SEAT -> BUILDER BOT. Plink's file, and the reason §E check 2 is more than a
+# formality: a bot id is NEVER a verb argument, so the only thing that says
+# which resident owns which build session is this map plus SO_PEERCRED. It is
+# CHECKED AT BOOT against the server's bots table (name must match the seat's
+# suffix); a mismatch disables the verb with one audit line rather than handing
+# one resident's session to the other.
+# seat_bots = { res-gable = 2, res-claudette = 1 }
+# model = "claude-opus-5-5"       # INFORMATIONAL: what the `scoped` event and
+#                                 # the ledger say when nothing better is known.
+#                                 # The truth for a finished turn is the model
+#                                 # result.json reports. The seat's actual pin
+#                                 # lives in /etc/disjorn-apps/launch.toml
+#                                 # [runner].model — 10-appsbuilding.sh's drift
+#                                 # check compares the two.
+# THE HIDDEN CEILING (parent Round 6). Summed across a session's turns and
+# checked BEFORE a turn, because usage lands when the runner finishes: a trip
+# blocks the NEXT handoff and one turn can overshoot. That is a runaway kill,
+# not a budget. The user CAN stop a turn from the modal (slice (iv)); that ends
+# the turn within the unit's stop timeout and is not a budget either.
+# build_token_ceiling = 10000000
+# THE USER'S STOP (SPECS/2026-09-08-apps-stop-turn.md). The reaper reads
+# harness-view every stop_poll_sec while a turn runs and, on a request, runs
+# the launcher's `stop` mode once — same helper, same sudoers file, the unit
+# name derived from the turn. Defaults are right for a keyboard install.
+# stop_command = ["sudo", "-n", "/usr/local/lib/disjorn/disjorn-apps-launch", "stop"]
+# stop_poll_sec = 5
+# prompt_max_bytes = 65536        # the broker's courtesy check; the launcher
+#                                 # enforces its own bound on the same file
+# turn_max_sec = 1800             # mirrors launch.toml [apps].turn_max_sec —
+#                                 # used only to date the sidecar's deadline
+# turns_root = "/srv/apps-turns"  # READ-ONLY to this daemon, always
+# THE PRIVILEGED HATCH (harness/keyboard/92-disjorn-apps.sudoers). Fixed argv,
+# shell never involved: [*launch_command, principal, session, turn, app-id,
+# prompt-path]. The helper validates every one of those before it spends any
+# privilege and exits 64 if it does not like them.
+# launch_command = ["sudo", "-n", "/usr/local/lib/disjorn/disjorn-apps-launch", "run"]
+# unit_state_command = ["systemctl", "show", "--property=ActiveState", "--value"]
+# THE LEDGER (§E): one line per turn, append-only, naming the column the
+# ceiling summed. It is the record even when a stage post fails.
+# ledger_path = "/var/log/disjorn-broker/apps-ledger.jsonl"
+# log_dir = "/var/log/disjorn-broker/apps-logs"   # 0700: the launcher's own
+#                                 # stdout/stderr and the in-flight sidecars
+# poll_sec = 2                    # how often a reaper looks at the turn dir
+# result_grace_sec = 30           # how long after the unit ends the broker
+#                                 # waits for result.json before calling the
+#                                 # absence a halt (§E, Claudette #2329)
+# CHAT MARKERS. A prompt carrying one is refused with a DISTINGUISHABLE
+# sentence, so a resident that faithfully quoted a user who typed the marker
+# can say what happened instead of "something went wrong".
+# chat_markers = ["[[CHAT]]", "[[/CHAT]]"]

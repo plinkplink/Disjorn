@@ -83,11 +83,11 @@ and the write path. Governing plan: BUILD-LOOP.md.
   in that resident's queue.
 
 ## Builder (USER PREFERENCE)
-- **Builder**: Gable's lane (proposed; plink's call at confirm).
+- **Builder**: Gable's lane — plink, seq 2023.
 
 ## Cross-lane split
 - **Applies**: yes — surfaces as in Lane above.
-- **Split agreed in #custodian**: fill at confirm.
+- **Split agreed in #custodian**: slice A = server+broker, slice B = client (seq 2023).
 
 ## Expected diff tier
 Tier 2 — broker allowlist and an approval surface fail the tiers spec's own
@@ -119,8 +119,9 @@ Medium per slice; two build slots total.
 built@loop/2026-08-26-approval-object-and-resident-write-verbs
 <!-- SLICE A ONLY (object + broker verbs); slice B, the client modal, is a
      separate press and is not on this branch. -->
-<!-- This file was transcribed onto the build branch by the build session:
-     no spec file existed in the repo when the build ran, so the broker had
-     nothing to stamp and none of the words below `## Status` are its. The
-     body above is the confirmed spec as fed to the session, verbatim. A
-     human reviewing this branch owns the Status word. -->
+<!-- The build was killed at its timeout and the work rescued by hand onto
+     loop/2026-08-26-approval-object-and-resident-write-verbs (f2c4bd7);
+     main was then merged into that tip at the keyboard (port/approval-object).
+     A human reviewing this branch owns the Status word. -->
+<!-- set by the broker on 2026-08-26 18:23Z (start-build, 2026-08-26-approval-object-and-resident-write-verbs): build failed: timed out after 3600s — killed. To allow another build, set this back to `confirmed` (the confirm record above still stands). -->
+<!-- set by the broker on 2026-08-26 17:23Z (start-build, 2026-08-26-approval-object-and-resident-write-verbs): build running as disjorn-build-2026-08-26-approval-object-and-resident-write-verbs.service -> loop/2026-08-26-approval-object-and-resident-write-verbs, launched by gable (confirmed by plink, #custodian seq 2022). Not buildable again until this line moves. -->

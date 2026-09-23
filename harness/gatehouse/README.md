@@ -84,9 +84,18 @@ PUSH 2026-08-20T11:12:40Z <old>..<new> NONE failed-open
 It is **append-only and not rebuildable**. Push boundaries and fail-open
 firings exist nowhere in git and cannot be derived after the fact, so this is a
 primary record — the same class as the broker audit log, not a cache. Two
-things in the digest have no other source: the fail-open count, and *uncovered*
-commits (anything that entered `main` above the floor with no covering log
-line, which means it arrived while the hook was absent or disarmed).
+things in the digest have no other source: the fail-open count, and *coverage*
+— which commits above the floor a logged push range actually holds.
+
+What a missing log line means is narrower than it looks, and the digest used to
+overstate it. It means the commit never met this hook, and nothing more. A
+commit made locally in the canonical repo — a keyboard commit, one of the
+broker's `## Status` stamps — was never pushed, so it could not have a line
+here however healthy the hook is. Those are read from the sibling
+`hooks/disjorn-local-log` (`LOCAL <ts> <sha> local-stamp`, written by the actor
+that made the commit) and from `[gate].local_committers`; only a commit that
+neither reaches is reported, as **unexplained**. See
+`SPECS/2026-08-27-push-log-coverage-classes.md`.
 
 Do not edit it, rotate it, or recreate it. The digest arms three tamper tells:
 a second genesis line means the log was deleted and recreated; a first line

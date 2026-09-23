@@ -16,6 +16,11 @@ EXPECTED_TABLES = {
     "schema_migrations",
     "card_meta",
     "card_comments",
+    "apps",
+    "app_shares",
+    "user_apps",
+    "app_sessions",
+    "app_stage_events",
 }
 
 

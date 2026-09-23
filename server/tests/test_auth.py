@@ -58,10 +58,14 @@ async def test_login_success_sets_cookie_and_returns_profile(client):
     assert body["display_name"] == "Alice"
     assert "password_hash" not in body
     set_cookie = r.headers["set-cookie"]
-    assert "disjorn_session=" in set_cookie
+    assert "__Host-disjorn_session=" in set_cookie
     assert "HttpOnly" in set_cookie
     assert "samesite=lax" in set_cookie.lower()
-    assert "Secure" not in set_cookie  # COOKIE_SECURE off in dev
+    # The __Host- prefix is only honoured on a Secure, Path=/, Domain-less
+    # cookie; a browser drops the cookie outright if any of the three is off.
+    assert "Secure" in set_cookie
+    assert "Path=/" in set_cookie
+    assert "Domain" not in set_cookie
     # Session row exists
     row = await db.fetch_one("SELECT * FROM sessions WHERE user_id = ?", (body["id"],))
     assert row is not None
@@ -105,7 +109,7 @@ async def test_logout_invalidates_session(client):
     assert r.status_code == 200
     # Session row gone, cookie cleared, /me now 401
     assert await db.fetch_one("SELECT * FROM sessions WHERE user_id = ?", (uid,)) is None
-    assert 'disjorn_session=""' in r.headers["set-cookie"]
+    assert '__Host-disjorn_session=""' in r.headers["set-cookie"]
     assert (await client.get("/me")).status_code == 401
 
 
@@ -117,7 +121,7 @@ async def test_expired_session_rejected_and_deleted(client):
         "INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
         (token, uid, past, past),
     )
-    client.cookies.set("disjorn_session", token)
+    client.cookies.set("__Host-disjorn_session", token)
     r = await client.get("/me")
     assert r.status_code == 401
     assert await db.fetch_one("SELECT * FROM sessions WHERE token = ?", (token,)) is None

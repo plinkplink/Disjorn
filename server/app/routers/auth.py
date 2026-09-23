@@ -1,7 +1,7 @@
 """Auth module (WP2): login/logout, /me, profile update, and auth dependencies.
 
 Exported dependencies for other WPs:
-    get_current_user — `disjorn_session` cookie -> sessions join users -> User.
+    get_current_user — `__Host-disjorn_session` cookie -> sessions join users -> User.
                        Sliding 30-day expiry: expires_at refreshed on every use.
     get_current_bot  — `X-Api-Key` header -> SHA-256 hashed lookup in bots -> Bot.
     get_actor        — either of the above -> Actor (type: "user"|"bot", id, user|bot).
@@ -42,7 +42,12 @@ from ..models import Bot, MemberType, User, UserStatus
 
 router = APIRouter()
 
-COOKIE_NAME = "disjorn_session"
+# The __Host- prefix is enforced by the browser, not by us: it accepts the
+# cookie only when it is Secure, Path=/ and has no Domain, and a write must
+# target that identical slot. Untrusted app JS at :8443 shares this host's
+# cookie jar, so without the prefix it could plant a longer-Path shadow cookie;
+# with it, the only slot it can aim at is the HttpOnly one it cannot touch.
+COOKIE_NAME = "__Host-disjorn_session"
 SESSION_TTL = datetime.timedelta(days=30)
 
 # Password rules, boring on purpose: a floor on length and nothing else. No
@@ -404,6 +409,40 @@ async def change_password(
             commit=False,
         )
     return {"ok": True}
+
+
+class AdminUserRow(BaseModel):
+    """What an admin needs in order to pick an account to reset: identity plus
+    whether it already owes a rotation. No hash, no sessions, nothing else."""
+
+    id: int
+    username: str
+    display_name: str
+    is_admin: bool
+    must_change_password: bool
+
+
+@router.get("/auth/users")
+async def admin_list_users(
+    admin: Annotated[User, Depends(get_admin_user)],
+) -> list[AdminUserRow]:
+    """ADMIN: every human account, in id order. Exists so the Settings reset
+    form can name a user without the admin having to know their numeric id.
+    Bots live in their own table and are not accounts anyone logs in to."""
+    rows = await db.fetch_all(
+        "SELECT id, username, display_name, is_admin, must_change_password "
+        "FROM users ORDER BY id"
+    )
+    return [
+        AdminUserRow(
+            id=r["id"],
+            username=r["username"],
+            display_name=r["display_name"],
+            is_admin=bool(r["is_admin"]),
+            must_change_password=bool(r["must_change_password"]),
+        )
+        for r in rows
+    ]
 
 
 class AdminPasswordReset(BaseModel):

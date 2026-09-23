@@ -1,4 +1,4 @@
--- 011_approval.sql — the approval object: ONE record per proposal, answered
+-- 016_approval.sql — the approval object: ONE record per proposal, answered
 -- from the keyboard and from chat alike.
 --
 -- SPECS/2026-08-26-approval-object-and-resident-write-verbs.md (confirmed by

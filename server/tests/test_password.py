@@ -62,10 +62,12 @@ async def login(client, username: str = "alice", password: str = PASSWORD):
 
 
 @pytest.fixture
-async def second_client(app):
+async def second_client(app, house_origin):
     """A second, independent cookie jar against the same app — a second device."""
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+    async with httpx.AsyncClient(
+        transport=transport, base_url=house_origin, headers={"Origin": house_origin}
+    ) as c:
         yield c
 
 
@@ -139,8 +141,8 @@ async def test_change_password_ends_every_other_session(client, second_client):
     await login(client)
     await login(second_client)
 
-    caller_token = client.cookies["disjorn_session"]
-    other_token = second_client.cookies["disjorn_session"]
+    caller_token = client.cookies["__Host-disjorn_session"]
+    other_token = second_client.cookies["__Host-disjorn_session"]
     assert caller_token != other_token
     assert await session_tokens(uid) == {caller_token, other_token}
     assert (await second_client.get("/me")).status_code == 200
@@ -381,6 +383,31 @@ async def test_admin_reset_minimum_length(client):
     assert await password_hash_of(bob_id) == before
 
 
+async def test_admin_user_list_is_admin_only_and_carries_no_secrets(client):
+    root_id = await make_user("root", is_admin=True)
+    bob_id = await make_user("bob", must_change_password=True)
+
+    assert (await client.get("/auth/users")).status_code == 401
+    await login(client, username="bob", password=PASSWORD)
+    assert (await client.get("/auth/users")).status_code == 403  # rotation gate first
+    await client.post("/auth/logout")
+
+    await login(client, username="root")
+    r = await client.get("/auth/users")
+    assert r.status_code == 200, r.text
+    rows = r.json()
+    assert [u["id"] for u in rows] == [root_id, bob_id]
+    assert rows[0] == {
+        "id": root_id,
+        "username": "root",
+        "display_name": "Root",
+        "is_admin": True,
+        "must_change_password": False,
+    }
+    assert rows[1]["must_change_password"] is True
+    assert all("password_hash" not in u for u in rows)
+
+
 # ---------------------------------------------------------------------------
 # Migration + CLI
 # ---------------------------------------------------------------------------
@@ -442,3 +469,45 @@ def test_cli_created_accounts_owe_a_rotation(tmp_path):
     row = conn.execute("SELECT * FROM users WHERE username = 'carol'").fetchone()
     conn.close()
     assert row["must_change_password"] == 1
+
+
+def test_cli_reset_password_marks_rotation_and_ends_sessions(tmp_path):
+    dbfile = tmp_path / "cli.db"
+    env = os.environ | {"DB_PATH": str(dbfile), "DATA_DIR": str(tmp_path)}
+
+    def cli(*argv: str, stdin: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, "cli.py", *argv],
+            cwd=SERVER_DIR,
+            env=env,
+            input=stdin,
+            capture_output=True,
+            text=True,
+        )
+
+    assert cli("create-user", "dave", "--password-stdin", stdin="first-handover-pw\n").returncode == 0
+
+    conn = sqlite3.connect(dbfile)
+    conn.row_factory = sqlite3.Row
+    with conn:
+        conn.execute("UPDATE users SET must_change_password = 0 WHERE username = 'dave'")
+        conn.execute(
+            "INSERT INTO sessions (token, user_id, expires_at) "
+            "SELECT 'tok-dave', id, '2999-01-01T00:00:00Z' FROM users WHERE username = 'dave'"
+        )
+    before = conn.execute("SELECT password_hash FROM users WHERE username = 'dave'").fetchone()[0]
+
+    r = cli("reset-password", "dave", "--password-stdin", stdin="second-handover-pw\n")
+    assert r.returncode == 0, r.stderr
+    assert "ended 1 session(s)" in r.stdout
+
+    row = conn.execute("SELECT * FROM users WHERE username = 'dave'").fetchone()
+    assert row["must_change_password"] == 1
+    assert row["password_hash"] != before
+    assert auth.verify_password(row["password_hash"], "second-handover-pw")
+    assert conn.execute("SELECT count(*) FROM sessions").fetchone()[0] == 0
+
+    r = cli("reset-password", "nobody", "--password-stdin", stdin="whatever-long-pw\n")
+    assert r.returncode != 0
+    assert "no user 'nobody'" in r.stderr
+    conn.close()

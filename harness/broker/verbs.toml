@@ -26,8 +26,10 @@
 #   2. run  python3 harness/broker/gen_verb_surface.py write  to rewrite the
 #      shell seat's CLI table, and
 #      python3 harness/broker/gen_verb_surface.py emit-tools \
+#          --verbs /etc/disjorn-broker/verbs.toml --seat res-<name> \
 #          --out <bot repo>/broker_tools.py
-#      for a bot seat's tool schemas.
+#      for a bot seat's tool schemas: the verbs that seat's live section
+#      lists, on or off. Removing a key removes the tool; false only denies.
 # harness/broker/tests/test_verb_surface.py fails if the two disagree, in
 # EITHER direction — a verb with no surface is a capability nobody can reach,
 # and a surface with no verb is a button wired to nothing. Both have happened;
@@ -44,6 +46,7 @@
 "refresh-mirror" = false
 "start-build" = false
 "classify-diff" = false
+"changed-files" = false
 "read-prod-logs" = false
 "read-own-log" = false
 "read-metrics" = false
@@ -55,6 +58,7 @@
 "board-flag" = false
 "board-comment" = false
 "summon-hop" = false
+"apps-build" = false
 "approval-list" = false
 "approval-show" = false
 "approval-act" = false
@@ -71,6 +75,7 @@
 "refresh-mirror" = false
 "start-build" = false
 "classify-diff" = false
+"changed-files" = false
 "read-prod-logs" = false
 "read-own-log" = false
 "read-metrics" = false
@@ -82,6 +87,7 @@
 "board-flag" = false
 "board-comment" = false
 "summon-hop" = false
+"apps-build" = false
 "approval-list" = false
 "approval-show" = false
 "approval-act" = false
@@ -104,3 +110,21 @@
 # seat may call must also be a verb no seat can see.
 [plink]
 "wake" = false
+
+# THE SERVER (SPECS/2026-09-20-build-lane-v2-stage1-2b.md). Not a seat and not a
+# human: the Disjorn server itself, authenticated at the socket by plink's uid
+# PLUS the peer cgroup naming [server].unit in broker.toml. It carries the one
+# verb behind the `/build` slash command.
+#
+# This section ships ON, and that is not an exception to the rule above: `build`
+# is not a power any resident gains. The broker re-reads the message itself,
+# refuses a bot author, refuses a privacy-flagged message and refuses an author
+# who is not on [build].humans. Turning this off turns `/build` off for
+# everyone, which is the switch plink wants it to be.
+#
+# `merge` carries the same two walls plus its own: the broker runs the gates and
+# the classifier itself, a Tier 2 branch needs a reviewer's PASS seq, and a
+# resident's word merges nothing — chat is data.
+[server]
+"build" = true
+"merge" = true

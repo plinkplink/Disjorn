@@ -118,14 +118,17 @@ def test_filter_event_for_bot():
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def wsc(tmp_db_path):
+def wsc(tmp_db_path, house_origin):
     """Sync TestClient with lifespan running (portal loop shared by REST + WS)."""
     events.clear_subscribers()
     asyncio.run(db.close())  # drop any leaked connection to another tmp DB
 
     from app.main import create_app
 
-    with TestClient(create_app()) as client:
+    # Default house Origin: these tests carry the session cookie as an explicit
+    # header, and the Origin wall 403s a cookie-bearing handshake or write that
+    # arrives without one. Cookie Secure never matters here for the same reason.
+    with TestClient(create_app(), headers={"Origin": house_origin}) as client:
         yield client
     events.clear_subscribers()
 
@@ -568,7 +571,11 @@ def test_context_injection_on_mention_only_for_that_bot(wsc):
             {"id": a, "name": "Alice", "status": "online"},
             {"id": b, "name": "Bob", "status": "online"},
         ]
-        assert ctx["channel_state"] == {"name": "main"}
+        # `type` joined `name` when app_build channels arrived: a resident's
+        # behaviour legitimately differs by room, and it should not have to
+        # infer the room from the shape of the traffic. No `app` key outside an
+        # app_build channel.
+        assert ctx["channel_state"] == {"name": "main", "type": "main_feed"}
         assert ctx["privacy_flags_on_current_message"] == {}
 
         ot_frame = wot.receive_json()

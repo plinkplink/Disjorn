@@ -63,6 +63,22 @@
   border-color: var(--accent);
 }
 
+/* <select> gets the same skin as <input> — the reset-password account picker
+   is the first one in a .field. */
+.field select {
+  background: var(--bg-0);
+  color: inherit;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-m);
+  padding: var(--space-2) var(--space-3);
+  outline: none;
+  font: inherit;
+}
+
+.field select:focus {
+  border-color: var(--accent);
+}
+
 .btn {
   border: none;
   border-radius: var(--radius-m);
@@ -106,6 +122,24 @@
   margin: 0;
   color: var(--danger);
   font-size: var(--text-sm);
+}
+
+/* A button that reads as a link — the login page's "Forgot your password?"
+   disclosure. A button, not an <a>, because it toggles text, not a route. */
+.link-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.login-help-toggle {
+  align-self: flex-start;
 }
 
 /* Quiet guidance under a field — the password rule, and what changing it
@@ -181,7 +215,10 @@
   justify-content: space-between;
 }
 
-.add-channel-btn {
+/* Compound selector on purpose: `.icon-btn` is declared later in this file at
+   equal specificity, so a bare `.add-channel-btn` lost its padding to it and
+   the hover background sat off the glyph. */
+.icon-btn.add-channel-btn {
   width: 18px;
   height: 18px;
   padding: 0;
@@ -2403,6 +2440,18 @@
   color: var(--text-on-accent);
 }
 
+.settings-reset-btn {
+  align-self: flex-start;
+}
+
+.settings-reset-done code {
+  user-select: all;
+  padding: 0 var(--space-1);
+  background: var(--bg-0);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-s);
+}
+
 /* ================= per-channel membership (private channels) ================= */
 
 /* The private-channel glyph: the "#" slot, with the shackle on. Sized and
@@ -3174,5 +3223,835 @@
   }
   .plan-search {
     max-width: 40vw;
+  }
+}
+
+/* ---- apps (SPECS/2026-08-30-apps-tab-v1.md, stage 1) ----
+
+   House tokens only, no new palette. The build modal is the one wide panel in
+   the app — it holds a full chat column next to the build's own state — so it
+   gets its own width rather than borrowing the 440px dialog width. */
+
+/* sidebar rows */
+
+.app-row {
+  gap: var(--space-2);
+}
+
+.app-row .avatar {
+  flex-shrink: 0;
+}
+
+.app-building {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  font-size: var(--text-xs);
+  color: var(--text-2);
+}
+
+.app-building-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-round);
+  background: var(--accent);
+  animation: app-building-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes app-building-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.app-status-chip {
+  flex-shrink: 0;
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-round);
+  background: var(--bg-3);
+  color: var(--text-2);
+  font-size: var(--text-xs);
+  text-transform: lowercase;
+}
+
+.app-status-chip.live {
+  background: var(--accent-muted);
+  color: var(--text-0);
+}
+
+/* quota meter — build sessions per UTC day, never tokens or percent-done */
+
+.app-quota {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 132px;
+  margin-left: auto;
+}
+
+.app-quota-label {
+  font-size: var(--text-xs);
+  color: var(--text-1);
+}
+
+.app-quota-track {
+  display: block;
+  height: 4px;
+  border-radius: var(--radius-round);
+  background: var(--bg-3);
+  overflow: hidden;
+}
+
+.app-quota-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 160ms linear;
+}
+
+.app-quota-fill.spent {
+  background: var(--danger);
+}
+
+/* chooser */
+
+.apps-chooser-modal {
+  width: min(94vw, 560px);
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-l);
+  box-shadow: var(--shadow-raised);
+  padding: var(--space-4);
+}
+
+.app-path-grid {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.app-path {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-4);
+  text-align: left;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-m);
+  background: var(--bg-2);
+  color: var(--text-1);
+  cursor: pointer;
+}
+
+.app-path:hover:not(:disabled) {
+  background: var(--bg-3);
+  border-color: var(--accent);
+}
+
+.app-path:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.app-path-title {
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: var(--text-0);
+}
+
+.app-path-note {
+  font-size: var(--text-xs);
+  color: var(--text-2);
+  line-height: 1.45;
+}
+
+.builder-card {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  padding: var(--space-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-m);
+  background: transparent;
+  color: var(--text-1);
+  text-align: left;
+  cursor: pointer;
+}
+
+.builder-card:hover:not(:disabled) {
+  background: var(--bg-3);
+  border-color: var(--border-subtle);
+}
+
+.builder-card:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.builder-card-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.builder-name {
+  font-weight: 600;
+  color: var(--text-0);
+}
+
+.builder-model {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A seat that declares no model says so in prose, not in monospace: it is not
+   a model name, and it must not look like one. */
+.builder-model.undeclared {
+  font-family: var(--font-body);
+  font-style: italic;
+}
+
+.builder-stat {
+  flex-shrink: 0;
+  font-size: var(--text-xs);
+  color: var(--text-2);
+}
+
+.app-discover-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2);
+  border-radius: var(--radius-m);
+}
+
+.app-discover-row:hover {
+  background: var(--bg-3);
+}
+
+.app-discover-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.app-discover-name {
+  font-weight: 600;
+  color: var(--text-0);
+}
+
+.app-discover-desc {
+  font-size: var(--text-xs);
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* read-only app card */
+
+.app-card-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--text-1);
+}
+
+/* build modal */
+
+.app-build-modal {
+  width: min(96vw, 1100px);
+  height: min(88vh, 780px);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-l);
+  box-shadow: var(--shadow-raised);
+  padding: var(--space-4);
+  overflow: hidden;
+}
+
+.app-build-head {
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.app-build-builder {
+  font-weight: 600;
+  color: var(--text-0);
+}
+
+/* A repo build's heading. Same weight as an app's name, without the affordance
+   — there is nothing here to rename. */
+.app-build-title {
+  padding: var(--space-1) var(--space-2);
+  color: var(--text-0);
+  font-size: var(--text-lg);
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-build-landed {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-m);
+  background: var(--bg-2);
+}
+
+.app-build-landed-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.app-build-landed-row code {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-0);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.app-name-button {
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-m);
+  background: transparent;
+  color: var(--text-0);
+  font-size: var(--text-lg);
+  font-weight: 600;
+  cursor: text;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-name-button:hover {
+  border-color: var(--border-subtle);
+  background: var(--bg-2);
+}
+
+.app-name-input {
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-m);
+  background: var(--bg-0);
+  color: var(--text-0);
+  font-size: var(--text-lg);
+  font-weight: 600;
+  outline: none;
+  min-width: 0;
+  flex: 0 1 240px;
+}
+
+/* The mobile chat/preview switch. Only under 768px is there one column to
+   switch; above it both are on screen and the button would be a lie. */
+.app-build-toggle {
+  display: none;
+}
+
+.app-build-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.app-build-chat {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-m);
+  overflow: hidden;
+}
+
+.app-intro-card {
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-1);
+  color: var(--text-1);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.app-build-ended {
+  padding: var(--space-3);
+  border-top: 1px solid var(--border-subtle);
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  text-align: center;
+}
+
+.app-build-preview {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+/* stage bar — five fixed stages, current highlighted, no percent */
+
+.stage-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.stage-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-xs);
+  color: var(--text-2);
+}
+
+.stage-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-round);
+  background: var(--bg-4);
+}
+
+.stage-step.done {
+  color: var(--text-1);
+}
+
+.stage-step.done .stage-dot {
+  background: var(--accent-muted);
+}
+
+.stage-step.current {
+  color: var(--text-0);
+  font-weight: 600;
+}
+
+.stage-step.current .stage-dot {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-muted);
+}
+
+.app-elapsed {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.app-elapsed-label {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-2);
+}
+
+.app-elapsed-clock {
+  font-family: var(--font-mono);
+  font-size: var(--text-md);
+  color: var(--text-0);
+}
+
+/* The halted chip. One line under the bar, in the palette's only alarming
+   colour, and it says WHICH halt — "hit its ceiling" and "closed: credential"
+   are different things to have happened. It stays until the next turn's
+   `scoped` clears it, which is the store's job, not this rule's. */
+
+.app-build-chip {
+  align-self: flex-start;
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-round);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+}
+
+/* The stop confirm (slice (iv)) borrows the delete-channel dialog's frame —
+   same shape of question, same weight — and only needs to sit above the
+   build modal it was opened from. */
+/* ABOVE the build modal's own backdrop, which is also a .modal-backdrop at
+   40 and a LATER sibling in the DOM — equal z-index, later paints on top, so
+   until 2026-09-14 this dialog opened underneath the modal it was confirming
+   for, and Stop / End session looked like dead buttons. The z-index on the
+   dialog box below cannot fix that: a child's stacking is decided by its
+   backdrop's, not its own. */
+.app-build-confirm-backdrop {
+  z-index: 41;
+}
+.app-build-confirm {
+  z-index: 1;
+}
+
+.app-build-chip--halted {
+  color: var(--danger);
+  background: rgba(240, 84, 108, 0.14);
+  border: 1px solid var(--danger);
+}
+
+.stage-step.halted {
+  color: var(--danger);
+}
+
+.stage-step.halted .stage-dot {
+  background: var(--danger);
+  box-shadow: 0 0 0 3px rgba(240, 84, 108, 0.2);
+}
+
+/* The filenames, as they land. A scroll rather than a growing panel: the list
+   is the turn's whole diff and a forty-name build must not push the preview
+   off the modal. Monospace because these are paths. */
+
+.app-file-scroll {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-m);
+  background: var(--bg-2);
+  overflow: hidden;
+}
+
+.app-file-scroll-head {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-1);
+  color: var(--text-1);
+  font-size: var(--text-xs);
+}
+
+.app-file-list {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  list-style: none;
+  max-height: 11em;          /* ~8 lines, then it scrolls */
+  overflow-y: auto;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  color: var(--text-1);
+}
+
+.app-file-list li {
+  white-space: pre;
+}
+
+/* The preview panel. It holds a REAL iframe of the app's preview root once
+   the serving gate is configured (stage 3 D10); with no gate it keeps stage
+   1's hatched placeholder, because a framed blank reads as a broken app
+   rather than an absent one. */
+
+.app-preview-frozen {
+  flex: 1 1 auto;
+  min-height: 160px;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-m);
+  background: var(--bg-2);
+  overflow: hidden;
+}
+
+.app-preview-banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-1);
+  color: var(--text-1);
+  font-size: var(--text-xs);
+}
+
+/* The hand-crank out of a send-freeze the builder never answered. It appears
+   in the banner after a minute of silence and does nothing until pressed —
+   the freeze has no timer, and this is not one (Claudette #2555). */
+.app-unfreeze {
+  margin-left: auto;
+  padding: 2px var(--space-2);
+  font-size: var(--text-xs);
+}
+
+/* The minted URL, when the browser refused us a tab for it. A link, because a
+   click on a link is a user gesture no popup blocker argues with. */
+.app-open-blocked {
+  margin: var(--space-1) 0 0;
+  font-size: var(--text-xs);
+  color: var(--text-2);
+}
+
+.app-open-blocked a {
+  color: var(--accent);
+}
+
+.app-preview-empty {
+  flex: 1;
+  background: repeating-linear-gradient(
+    135deg,
+    var(--bg-2),
+    var(--bg-2) 10px,
+    var(--bg-3) 10px,
+    var(--bg-3) 20px
+  );
+  opacity: 0.5;
+}
+
+.app-preview-actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+/* The frame itself. `position: relative` so the freeze overlay can sit on top
+   of it: the overlay is what makes "no pointer events" true for the page
+   INSIDE the frame, where a CSS rule of ours cannot reach. */
+
+.app-preview-frame {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+.app-preview-iframe {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;              /* an app draws its own ground; this is paper */
+}
+
+.app-preview-frozen.frozen .app-preview-iframe {
+  pointer-events: none;
+}
+
+/* Frosted, not opaque: the user watches the app change while it is frozen —
+   that is the point of the panel — but cannot touch it. */
+.app-preview-overlay {
+  position: absolute;
+  inset: 0;
+  background: var(--bg-0);
+  opacity: 0.35;
+  cursor: progress;
+}
+
+.app-build-chip--ok {
+  color: var(--text-0);
+  background: var(--accent-muted);
+  border: 1px solid var(--accent);
+}
+
+/* share dialog — one channel, one visibility */
+
+.app-share-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.app-share-label {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-2);
+}
+
+.app-share-select {
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  background: var(--bg-0);
+  color: var(--text-0);
+  font-size: var(--text-md);
+}
+
+.app-share-check {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--text-1);
+}
+
+/* Why the Public box is checked and will not clear: sharing widens and never
+   narrows, so an app that is already public has nothing this dialog can undo
+   (Claudette #2555). */
+.app-share-locked {
+  margin: 0;
+  padding-left: calc(var(--space-2) + 1.1em);
+  font-size: var(--text-xs);
+  color: var(--text-2);
+}
+
+/* The app card in a channel (D8). Same footprint as an unfurl card — it sits
+   in the same place, under the same message — with the app's own tile where
+   an unfurl puts its thumbnail. */
+
+.app-link-card {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+  padding: var(--space-3);
+  max-width: 520px;
+  border: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-m);
+  background: var(--bg-2);
+}
+
+/* No screenshot exists yet (D9 deferred), so the tile IS the picture: the
+   app's initial on a colour hashed from its id, which makes it the same tile
+   in every room it is shared into. */
+.app-link-tile,
+.app-link-shot {
+  flex: 0 0 auto;
+  width: 56px;
+  height: 56px;
+  border-radius: var(--radius-m);
+  object-fit: cover;
+}
+
+.app-link-tile {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 26px;
+  font-weight: 700;
+}
+
+.app-link-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.app-link-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.app-link-name {
+  font-weight: 600;
+  color: var(--text-0);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-link-desc {
+  margin: 0;
+  color: var(--text-1);
+  font-size: var(--text-sm);
+  line-height: 1.4;
+}
+
+.app-link-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-2);
+  font-size: var(--text-xs);
+}
+
+.app-link-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+@media (max-width: 520px) {
+  .app-link-card {
+    flex-wrap: wrap;
+  }
+  .app-link-actions {
+    flex-direction: row;
+  }
+}
+
+@media (min-width: 1024px) {
+  .app-build-body {
+    flex-direction: row;
+  }
+  .app-build-chat {
+    flex: 1 1 58%;
+  }
+  .app-build-preview {
+    flex: 1 1 42%;
+    min-width: 320px;
+  }
+  /* Two columns: the frame gets room to be an app rather than a strip. */
+  .app-preview-frozen {
+    min-height: 280px;
+  }
+}
+
+@media (max-width: 767.98px) {
+  /* Full-screen: the backdrop's padding goes too, or it is a window, not a
+     screen. Chat first; the preview lives behind the Progress toggle. */
+  .app-build-backdrop {
+    padding: 0;
+  }
+  .app-build-modal {
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
+    max-height: none;
+    border: none;
+    border-radius: 0;
+  }
+  .app-build-toggle {
+    display: inline-block;
+  }
+  .app-build-preview {
+    display: none;
+  }
+  .app-build-body.show-preview .app-build-chat {
+    display: none;
+  }
+  .app-build-body.show-preview .app-build-preview {
+    display: flex;
+    flex: 1 1 auto;
+  }
+  .app-quota {
+    min-width: 108px;
   }
 }

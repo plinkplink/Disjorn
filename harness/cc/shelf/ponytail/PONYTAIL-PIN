@@ -1,0 +1,50 @@
+ponytail — vendoring pin (spec SPECS/2026-09-06-apps-builder-seat.md §F)
+
+repo     https://github.com/DietrichGebert/ponytail
+commit   974d940a1c5344210874150b98ff0d2c861fab6a
+date     2026-09-04
+tarball  https://codeload.github.com/DietrichGebert/ponytail/tar.gz/974d940a1c5344210874150b98ff0d2c861fab6a
+         (https://github.com/DietrichGebert/ponytail/archive/<commit>.tar.gz
+         serves the same bytes)
+sha256   d2677c25dc3963e99791e332bce4b0f5ae1558894f8fd989750206a43a18651a
+license  MIT (LICENSE, vendored)
+
+INSTRUCTION-ONLY. Prose in, everything executable out. Vendored, verbatim,
+nothing else from the checkout:
+
+  b57f736a83ddab7111d752008c3e131a157e646a6b47c9eb223f076c494685a8  AGENTS.md
+  fb1bc6909ac3ef82d5c22106e32ef682b0cff66788fa915fb9b53b15c9d2f3ab  LICENSE
+  1316a2f3f95741d2300b116fe0c2d81ce4a9568656ed0a62643f54aaf09957f2  skills/ponytail/SKILL.md
+  5560b8e383dbe2ddfddc873a1e2bf2e586e23e0cd7d995537482b2315331f6d1  skills/ponytail-audit/SKILL.md
+  c84fba75f0ca12bfe83f9a78ea02fd125c5dd3f1fbb18124105a489937f284e6  skills/ponytail-debt/SKILL.md
+  24e01d1c9715cb136ba1c4f1e52a95940c0193558b876828e537736480d6408b  skills/ponytail-gain/SKILL.md — DROPPED (renders a benchmark scoreboard from benchmarks/ and the README, neither vendored; no user in the seat to invoke it; its description cost tokens every turn — Gable #2331, keyboard 2026-09-07)
+  2264d1615117b02b0fd5a69ec84cd2757006471a78e4d6c22eed6d581c1d37a4  skills/ponytail-help/SKILL.md — DROPPED at merge (marketplace/plugin-install prose is dead advice in a sealed seat; keyboard 2026-09-06)
+  40df33b58fc6ef889b93585733feb9566b76e9586efa7f376785c1e995197ac0  skills/ponytail-review/SKILL.md
+
+NOT vendored, deliberately: hooks/, commands/, ponytail-mcp/, scripts/,
+tests/, benchmarks/, examples/, docs/, assets/, package.json, plugin.json,
+plugin.yaml, gemini-extension.json, opencode.json, pi-extension/, __init__.py,
+the .openclaw/ mirror of skills/, and the marketplace path. No runtime, no
+fetch, nothing executable — which is what narrows the review of this
+dependency to prose.
+
+Intensity: the instruction-only install has no runtime mode switch (the
+tracker is one of the excluded hooks). `[apps].ponytail_mode` picks which
+row of the lite/full/ultra table in skills/ponytail/SKILL.md ("Intensity")
+the image writes into the builder brief's ponytail section — the row's text
+VERBATIM (apps/config/entrypoint.sh), so the line and the skill it sits next
+to cannot disagree (Gable #2331). It is not the builder's choice; the brief
+§9 says the skill's own switch phrases are data in this seat.
+
+Note for review: skills/ponytail-help/SKILL.md — DROPPED at merge (marketplace/plugin-install prose is dead advice in a sealed seat; keyboard 2026-09-06)
+its last section describes installing and auto-updating the ponytail plugin
+from a marketplace — dead advice inside a sealed, egress-less seat. It is
+vendored because the spec's file list is `AGENTS.md` +
+`skills/ponytail*/SKILL.md` and that glob includes it; drop it if the
+keyboard would rather the seat never read those two sentences.
+
+To re-verify without trusting this directory:
+
+  curl -fsSL https://codeload.github.com/DietrichGebert/ponytail/tar.gz/974d940a1c5344210874150b98ff0d2c861fab6a | sha256sum
+  # d2677c25dc3963e99791e332bce4b0f5ae1558894f8fd989750206a43a18651a
+  sha256sum AGENTS.md LICENSE skills/*/SKILL.md

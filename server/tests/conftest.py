@@ -5,11 +5,21 @@ any test using `app`/`client` has a fully migrated fresh database and a live
 db.py shared connection.
 """
 
+import json
+
 import httpx
 import pytest
 
 from app import db, events
 from app.config import reset_settings_cache
+
+# The house origin for the whole suite. It is also the client's base_url, so
+# every test request is same-origin: Secure cookies flow (httpx returns them
+# only over https), and the Origin wall sees an allowed Origin. Both are
+# required — startup refuses COOKIE_SECURE=false and an empty HOUSE_ORIGINS,
+# and the wall 403s a cookie-bearing unsafe request whose Origin is absent or
+# foreign.
+HOUSE_ORIGIN = "https://test"
 
 
 @pytest.fixture
@@ -20,9 +30,10 @@ def tmp_db_path(tmp_path, monkeypatch):
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
     # Settings also read server/.env (production deployment values). Env vars
     # take priority in pydantic-settings, so pin the test-critical ones here:
-    # Secure cookies never flow over the http:// ASGI transport, and the
-    # notification tests assume a keyless VAPID default.
-    monkeypatch.setenv("COOKIE_SECURE", "false")
+    # the two boot-required security values, and the keyless VAPID default the
+    # notification tests assume.
+    monkeypatch.setenv("COOKIE_SECURE", "true")
+    monkeypatch.setenv("HOUSE_ORIGINS", json.dumps([HOUSE_ORIGIN]))
     monkeypatch.setenv("VAPID_PUBLIC_KEY", "")
     monkeypatch.setenv("VAPID_PRIVATE_KEY", "")
     reset_settings_cache()
@@ -48,8 +59,15 @@ async def app(tmp_db_path):
 
 
 @pytest.fixture
+def house_origin() -> str:
+    return HOUSE_ORIGIN
+
+
+@pytest.fixture
 async def client(app):
     """httpx AsyncClient wired to the app via ASGI transport."""
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+    async with httpx.AsyncClient(
+        transport=transport, base_url=HOUSE_ORIGIN, headers={"Origin": HOUSE_ORIGIN}
+    ) as c:
         yield c

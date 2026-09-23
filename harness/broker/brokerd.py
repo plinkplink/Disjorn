@@ -1,68 +1,17 @@
 #!/usr/bin/env python3
-"""disjorn-broker — the privileged verb gateway for residents (WP-H3).
-
-Residents (res-claudette, res-gable) live in rootless containers with no sudo
-and a walled network. The ONLY way anything privileged happens on their behalf
-is through this daemon: a unix-socket server whose caller identity comes from
-SO_PEERCRED (kernel-asserted uid), never from anything the caller says.
-
-Governance rules encoded here (AGENTHOOD.md / HARNESS-PLAN.md WP-H3):
-
-* Kill switches: every verb is per-resident toggleable in verbs.toml, which is
-  plink-owned and lives OUTSIDE both containers. Toggles default to OFF and
-  verbs.toml is re-read on every request, so flipping a switch needs no broker
-  restart.
-* Chat is data, never authorization: nothing in a request body can widen what
-  a caller may do. Identity = uid via SO_PEERCRED; permission = verbs.toml.
-* One caller is not a resident: `wake` (2026-08-25 agentic residents) is
-  called by plink's own uid from the keyboard and by nothing else. A seat may
-  never call it and a wake caller may call nothing else — both in code
-  (_check_wake_identity), on top of the kill switch. That is what makes a
-  wake's origin connection data rather than something a message could say.
-* No self-restart: there is deliberately NO `restart-self` verb, and no verb
-  whose argv a caller can redirect at the broker or a resident's own process.
-* No free-form shell, ever: every subprocess runs a fixed argv list
-  (config-supplied list + individually validated scalar args appended by the
-  handler). The shell-enabled subprocess mode is never used in this file.
-* Total audit: every call — allowed, denied, or malformed — appends exactly
-  one JSON line {ts, resident, verb, args, allowed, result_summary} to the
-  audit log (a verb may add extra FACT fields; it can never overwrite those).
-  One deliberate exception: `apply-posted-write` marks the seq it is about to
-  spend on its own line BEFORE it writes, because that log is its consumed-set
-  and a mark written afterwards is a mark a crash can skip.
-* Unsafe config = refuse to start: invariants that a verb's authorization
-  rests on are asserted at CONSTRUCTION and raise ConfigError, which main()
-  reports loudly and exits non-zero on. Three today, all the same shape — a
-  presence check on text or a file is only worth anything while the resident
-  cannot write it: start-build's specs_dir (BL-D1), the wake spool, and each
-  seat's write_verbs root. There is no degraded mode: a gateway that quietly
-  drops one guarantee is worse than one that is down.
-
-Config: /etc/disjorn-broker/broker.toml + verbs.toml (templates alongside this
-file). Paths overridable for tests via DISJORN_BROKER_CONFIG /
-DISJORN_BROKER_VERBS or --config/--verbs.
-
-Runs as plink (not root) under systemd. There are exactly TWO privileged escape
-hatches, both narrow sudoers rules and both listed here so a third is a visible
-act rather than a habit:
-  * harness/keyboard/90-disjorn-broker.sudoers — `sudo -n systemctl restart
-    disjorn`, nothing else (WP-H3, restart-disjorn).
-  * harness/keyboard/91-disjorn-build.sudoers — `sudo -n disjorn-build-launch
-    run|stop <resident> <slug>`, nothing else (WP-L4, start-build). That helper
-    (harness/broker/disjorn-build-launch) is the only thing that runs as root;
-    what it starts runs as the RESIDENT, in a transient systemd unit. It ships
-    UNINSTALLED, like the verb it serves.
-"""
+"""disjorn-broker — the privileged verb gateway for residents (WP-H3)."""
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as _dt
 import hashlib
 import json
 import os
 import pwd
 import re
+import shutil
 import signal
 import socket
 import sqlite3
@@ -76,14 +25,21 @@ import time
 import tomllib
 from typing import Any, Callable, Optional
 
+# The gate runner is a sibling file, and brokerd runs as a script.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
+import gates  # noqa: E402
+
 DEFAULT_CONFIG_PATH = "/etc/disjorn-broker/broker.toml"
 DEFAULT_VERBS_PATH = "/etc/disjorn-broker/verbs.toml"
 ENV_CONFIG = "DISJORN_BROKER_CONFIG"
 ENV_VERBS = "DISJORN_BROKER_VERBS"
 
 DEFAULT_SOCKET_PATH = "/run/disjorn-broker.sock"  # per HARNESS-PLAN; the
-# shipped broker.toml template uses /run/disjorn-broker/broker.sock instead so
-# the daemon can run unprivileged under systemd RuntimeDirectory=.
+# shipped broker.toml template uses /run/disjorn-broker/broker.sock instead so the
+# daemon can run unprivileged under systemd RuntimeDirectory=.
 
 MAX_REQUEST_BYTES = 64 * 1024  # one request line; anything bigger is hostile
 MAX_PROPOSAL_CHARS = 4000
@@ -91,17 +47,15 @@ MAX_LOG_LINES = 500
 MAX_AUDIT_ENTRIES = 500
 MAX_GREP_CHARS = 200
 MAX_GATES_JSON = 8192
-# Plan Room (SPECS/2026-08-20-plan-room.md). Skim is the default and detail is
-# opt-in: `board-list` returns ONE LINE per card and `board-card` returns the
-# whole thing, because the request that started this feature named the context
-# window as the problem — "so that your entire context window isn't swallowed
-# by reading the whole thing all the time".
+# One `changed-files` answer has to fit a reviewer's context, so the file list
+# is capped and the totals keep counting past the cap.
+MAX_CHANGED_FILES = 500
+# Plan Room (SPECS/2026-08-20-plan-room.md).
 MAX_BOARD_CARDS = 200
 MAX_BOARD_COMMENT_CHARS = 4000
 MAX_BOARD_REASON_CHARS = 500
 MAX_BOARD_SEARCH_CHARS = 200
-# A card slug, anchored. The two prefixed forms are the derivation's cards for
-# things with no spec file yet (a backlog row, a keyboard commit).
+# A card slug, anchored.
 BOARD_SLUG_RE = re.compile(r"^(?:\d{4}-\d{2}-\d{2}-[a-z0-9][a-z0-9-]{0,50}"
                            r"|backlog-\d{1,12}|keyboard-[0-9a-f]{7,40})$")
 PLANROOM_HTTP_TIMEOUT = 20
@@ -111,86 +65,206 @@ SUBPROCESS_TIMEOUTS = {  # seconds, per verb
     "restart-disjorn": 60,
     "run-server-tests": 900,
     "classify-diff": 120,
+    "changed-files": 60,
     "read-prod-logs": 30,
     "refresh-mirror": 120,
     "spec-status": 60,
+    "merge": 300,
 }
 
-# start-build (WP-L4): the detached build is NOT a synchronous _run() call, so
-# its wall-clock cap lives in config ([start_build].timeout_sec), not the dict
-# above; this is only the fallback when config omits it. Longer than the 300s
-# summon on purpose — a build is a whole feature, not a chat turn.
 START_BUILD_DEFAULT_TIMEOUT = 3600
-# Ratified default (BUILD-LOOP.md): builds are CAPPED by default (2/day), unlike
-# the WP-H12 action budget which ships OFF. plink tunes at staging time.
+# Ratified default (BUILD-LOOP.md): builds are CAPPED by default (2/day), unlike the
+# WP-H12 action budget which ships OFF. plink tunes at staging time.
 DEFAULT_DAILY_BUILD_CAP = 2
-MAX_SPEC_BYTES = 64 * 1024  # a spec is a short markdown doc; bigger is hostile
+MAX_SPEC_BYTES = 64 * 1024
 # BL-D2: the detached build's stdout/stderr go to temp FILES (bounded on disk),
-# never to a pipe the privileged broker must drain into RAM. Only this much of
-# each is ever read back for the done/failed narration. 64 KiB is generous for
-# a final JSON report and a stack trace, and is a hard ceiling on how much
-# resident-influenced text can enter the broker's address space per build.
+# never to a pipe the privileged broker must drain into RAM.
 MAX_BUILD_LOG_TAIL = 64 * 1024
 
 _RANGE_RE = re.compile(r"^[A-Za-z0-9._~^/{}-]{1,200}$")  # git rev / range; no
-# whitespace, no leading dash (checked separately) — can never be read as a flag
+# whitespace, no leading dash (checked separately) — can never be read as a flag.
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-# A spec slug also names the build branch (loop/<slug>) and the build container
-# (disjorn-build-<slug>, run-build.sh) and rides argv as a positional, so it is
-# held to a strict branch/argv-safe kebab charset — it can never be read as a
-# flag or a path segment.
-#
-# BL-D4: the slug KEEPS the spec's `YYYY-MM-DD-` prefix. It used to be stripped,
-# so `2026-07-21-gif-picker.md` and `2026-09-02-gif-picker.md` both derived
-# `loop/gif-picker` + `disjorn-build-gif-picker` — concurrent runs collided on
-# podman `--name`, sequential runs clobbered each other's branch. The date is a
-# DETERMINISTIC, human-readable disambiguator already present in the filename
-# (chosen over a counter/hash: the branch name now equals the spec's basename
-# 1:1, so any branch traces back to exactly one spec file with no lookup), and
-# it is the same string plink already types. The same-spec-twice case (same
-# date, same name) is closed separately by the in-flight slug guard in
-# _reserve_build.
 _SPEC_STEM_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})-([a-z0-9][a-z0-9-]{0,50})$")
 
-# WP-L4 open fork (KEYBOARD-NEXT 6b): a build is launched as a TRANSIENT SYSTEM
-# SERVICE under the resident's own uid, via `sudo -n disjorn-build-launch run
-# <resident> <slug> …` (harness/broker/disjorn-build-launch). The unit name is a
-# pure function of the slug, and BOTH sides compute it the same way — the helper
-# so it can pin `--unit=`, the broker so it can stop, poll and re-adopt a build
-# it did not launch this process. A test asserts the two agree.
 BUILD_UNIT_PREFIX = "disjorn-build-"
-# Unit states that mean "this build is still going". Anything else (inactive,
-# failed, or the unit having been --collect'ed out of existence) is terminal.
+# Unit states that mean "this build is still going".
 BUILD_ACTIVE_STATES = frozenset(
     {"active", "activating", "deactivating", "reloading", "refreshing"})
-# One JSON sidecar per in-flight build, written next to its output spool BEFORE
-# the launch. It is what makes a build survivable: after a broker restart the
-# reaper thread is gone, but the unit is not (it lives outside the broker's
-# cgroup), so the new process re-reads these and re-adopts.
+# One JSON sidecar per in-flight build, written next to its output spool BEFORE the
+# launch.
 BUILD_SIDECAR_SUFFIX = ".build.json"
 BUILD_SIDECAR_SCHEMA = 1
 
+# ------------------------------------------------------------- the server
+# The Disjorn server runs under plink's own uid, so the peer uid alone cannot
+# tell the two apart: the peer pid's cgroup must name [server].unit as well.
+SERVER_PEER_IDENTITY = "plink"
+SERVER_IDENTITY = "server"
+DEFAULT_SERVER_UNIT = "disjorn.service"
+BUILD_VERB = "build"
+BUILD_REFUSED = "build-refused"
+MAX_BUILD_TEXT_CHARS = 4000
+# A message seq / channel id / session id: any positive 32-bit row key.
+MAX_SEQ = 2 ** 31 - 1
+BUILD_SLUG_WORDS = 5
+# A slug stem must still fit _SPEC_STEM_RE after a uniqueness suffix.
+MAX_BUILD_SLUG_STEM = 45
+MAX_BUILD_SLUG_TRIES = 99
+_SLUG_WORD_RE = re.compile(r"[a-z0-9]+")
+# Mirrors server/app/privacy.py BOT_HIDDEN_FLAGS; the two must not drift.
+BOT_HIDDEN_FLAGS = ("secret", "off_the_record")
+# A chat build spends the SERVER's allowance, not the seat's.
+DEFAULT_CHAT_BUILD_CAP = 4
+
+# ---------------------------------------------------------------- the merge
+# SPECS/2026-09-20-build-lane-v2-stage1-2b.md. `/merge <slug> [pass <seq>]`.
+MERGE_VERB = "merge"
+MERGE_REFUSED = "merge-refused"
+# The closed set of refusal reasons; the wire carries one of these verbatim.
+MERGE_REASONS = frozenset({
+    "human", "branch-missing", "slug-mismatch", "busy", "moved", "gates",
+    "tier", "pass-missing", "pass-invalid", "budget", "conflict", "push"})
+# The gate unit's own RuntimeMaxSec; the broker has to outwait the kill that works.
+GATE_UNIT_RUNTIME_CAP_SEC = 1200
+DEFAULT_GATE_TIMEOUT_SEC = 1320
+DEFAULT_GATE_LOG_DIR = "/var/lib/disjorn-broker/gate-logs"
+DEFAULT_MERGE_WORK_DIR = "/var/lib/disjorn-broker/merge-work"
+# `[limits].daily_auto_apply_budget` in protected-paths.toml, when unreadable.
+DEFAULT_AUTO_APPLY_BUDGET = 12
+MERGE_IDENTITY_NAME = "disjorn-broker"
+MERGE_IDENTITY_EMAIL = "broker@disjorn.local"
+MAX_MERGE_PATHS = 500
+MAX_SLUG_CHARS = 100
+# A PASS cites the slug and says the word; both, or it is not a PASS.
+_PASS_WORD_RE = re.compile(r"\bPASS\b")
+# A verdict that also blocks is not a PASS, whatever else the post says.
+_BLOCK_WORD_RE = re.compile(r"\bBLOCK\b")
+
+# --------------------------------------------------------------- apps-build
+# SPECS/2026-09-06-apps-builder-seat.md §B/§E. An APP BUILD TURN is launched the
+# same way a spec build is — `sudo -n <launcher> run …`, a transient unit under a
+# seat's uid, a 0600 sidecar so a broker restart can re-adopt it — but everything
+# the broker learns about the turn comes back through the FILESYSTEM
+# (`/srv/apps-turns/<session>/<turn>/result.json`, written atomically by the seat's
+# harvest) rather than through the spool.
+APPS_UNIT_PREFIX = "disjorn-apps-"
+APPS_SIDECAR_SUFFIX = ".apps.json"
+APPS_SIDECAR_SCHEMA = 1
+# The launcher's "refused before any privilege" exit (bad charset, prompt outside
+# the mapped dir, symlink, wrong owner, over the byte bound).
+APPS_LAUNCH_REFUSED_EXIT = 64
+APPS_SPAWN_CHECK_SEC = 1.0
+# The stage endpoint's own bound on `detail` (server-side, 2000 chars of JSON).
+APPS_DETAIL_MAX_CHARS = 2000
+APPS_FILES_CAP = 40
+APPS_SUMMARY_MAX = 300
+APPS_TURN_MAX_SEC = 1800          # launch.toml [apps].turn_max_sec, mirrored
+# What `[apps]` means when a key is absent.
+APPS_DEFAULTS: dict = {
+    "runner": "claude-code",
+    "seat_bots": {},
+    "model": "claude-opus-5-5",
+    "build_token_ceiling": 10_000_000,
+    "prompt_max_bytes": 65536,
+    "turns_root": "/srv/apps-turns",
+    "launch_command": ["sudo", "-n",
+                       "/usr/local/lib/disjorn/disjorn-apps-launch", "run"],
+    # Slice (iv): the user's stop.
+    "stop_command": ["sudo", "-n",
+                     "/usr/local/lib/disjorn/disjorn-apps-launch", "stop"],
+    # How often a live turn's reaper asks harness-view whether the owner has pressed
+    # Stop.
+    "stop_poll_sec": 5,
+    "unit_state_command": ["systemctl", "show", "--property=ActiveState",
+                           "--value"],
+    "ledger_path": "/var/log/disjorn-broker/apps-ledger.jsonl",
+    "log_dir": "/var/log/disjorn-broker/apps-logs",
+    "poll_sec": 2,
+    "result_grace_sec": 30,
+    # systemd's own TimeoutStopSec default.
+    "unit_stop_timeout_sec": 90,
+    "chat_markers": ["[[CHAT]]", "[[/CHAT]]"],
+}
+APPS_APP_ID_RE = re.compile(r"^[a-z2-7]{12}$")
+# The launcher's own refusal code (its EXIT_REFUSED): a shape or path it would not
+# act on, before any privilege.
+APPS_LAUNCH_REFUSED = 64
+# How many launcher refusals a stop request survives before the reaper stops asking.
+APPS_STOP_MAX_REFUSALS = 3
+APPS_SEAT_RE = re.compile(r"^res-[a-z]{1,24}$")
+_APPS_MORE_RE = re.compile(r"^\+(\d+) more$")
+# The one sentence a resident that faithfully quoted a user gets to say back (§E).
+APPS_CHAT_MARKER_REFUSAL = (
+    "The prompt file contains a chat marker the harness cannot pass through; "
+    "quote the user's words without it")
+
+
+def apps_unit_name(session: int, turn: int) -> str:
+    """The transient unit one turn runs in."""
+    return f"{APPS_UNIT_PREFIX}{int(session)}-{int(turn)}.service"
+
+
+def apps_tokens(usage: Optional[dict]) -> int:
+    """The ceiling column: input + output + cache_creation (spec §E "Ledger")."""
+    if not isinstance(usage, dict):
+        return 0
+    total = 0
+    for key in ("input_tokens", "output_tokens", "cache_creation_input_tokens"):
+        value = usage.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            total += value
+    return total
+
+
+def apps_clean_line(text: Any, limit: int = APPS_SUMMARY_MAX) -> Optional[str]:
+    """One line of runner-written text, safe to put in a room."""
+    if not isinstance(text, str):
+        return None
+    cleaned = "".join(ch for ch in text if ch == " " or ch.isprintable()).strip()
+    return cleaned[:limit] or None
+
+
+def apps_cap_files(files: Any, cap: int = APPS_FILES_CAP) -> list[str]:
+    """The turn's file list, bounded."""
+    if not isinstance(files, list):
+        return []
+    names = [str(f) for f in files if isinstance(f, str)]
+    if len(names) <= cap:
+        return names
+    return names[:cap] + [f"+{len(names) - cap} more"]
+
+
+def apps_fit_detail(detail: dict) -> dict:
+    """A stage `detail` that will fit the server's 2000-char bound, whatever the
+    turn touched."""
+    fitted = dict(detail)
+    if isinstance(fitted.get("summary"), str):
+        fitted["summary"] = fitted["summary"][:APPS_SUMMARY_MAX]
+
+    def size(d: dict) -> int:
+        return len(json.dumps(d, ensure_ascii=False))
+
+    if size(fitted) <= APPS_DETAIL_MAX_CHARS:
+        return fitted
+    if "summary" in fitted:
+        del fitted["summary"]
+    files = fitted.get("files")
+    if not isinstance(files, list):
+        return fitted
+    named = [f for f in files if not _APPS_MORE_RE.match(str(f))]
+    dropped = sum(int(m.group(1)) for m in
+                  (_APPS_MORE_RE.match(str(f)) for f in files) if m)
+    while size(fitted) > APPS_DETAIL_MAX_CHARS and named:
+        cut = max(1, len(named) // 2)
+        named, dropped = named[:-cut], dropped + cut
+        fitted["files"] = named + [f"+{dropped} more"]
+    return fitted
+
 # ---------------------------------------------------------------- publish lines
-# SPECS/2026-08-13-build-publish-path.md item 3. The build session no longer
-# pushes anything: after the container exits, run-build.sh harvests HOST-side
-# (as res-<name>, where the gatehouse group actually exists) and prints one
-# machine-readable line per entitled repo. Those lines are the ONLY evidence the
-# reaper has, and the only evidence it is allowed to have — the harvest IS the
-# verification, and the reaper measures nothing itself (one mechanism; two can
-# disagree).
-#
-# Shapes, all anchored at line start because they arrive INTERLEAVED with
-# session output in the same spool file and a lookalike mid-sentence must never
-# be read as a measurement:
-#   PUBLISHED <repo>.git <sha>            branch verified by rev-parse IN the
-#                                         gatehouse after a plain (no-force) push
-#   PUBLISH-FAILED <repo>.git <git error> push or verification failed, verbatim
-#   NO-COMMITS <repo>.git                 honest zero-work line
-#   QUARANTINED <repo> <path>             provisioning moved an unharvested
-#                                         previous clone aside (printed BEFORE
-#                                         the session runs)
-# ABSENCE of all of them on a unit that exited 0 is itself the failure signal —
-# a timeout-killed wrapper skips the harvest by design and prints nothing.
+# SPECS/2026-08-13-build-publish-path.md item 3. The build session no longer pushes
+# anything: after the container exits, run-build.sh harvests HOST-side (as
+# res-<name>, where the gatehouse group actually exists) and prints one
+# machine-readable line per entitled repo.
 _PUBLISH_REPO_RE = r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}"
 _PUBLISH_LINE_RES = (
     ("published", re.compile(
@@ -200,54 +274,32 @@ _PUBLISH_LINE_RES = (
         rf"^PUBLISH-FAILED[ \t]+({_PUBLISH_REPO_RE}\.git)[ \t]+(\S.*)$")),
     ("no_commits", re.compile(
         rf"^NO-COMMITS[ \t]+({_PUBLISH_REPO_RE}\.git)[ \t]*$")),
-    # The quarantine line names the repo WITHOUT .git (it is a workspace clone,
-    # not a bare repo) and carries a path we only ever echo, never open.
+    # The quarantine line names the repo WITHOUT .git (it is a workspace clone, not
+    # a bare repo) and carries a path we only ever echo, never open.
     ("quarantined", re.compile(
         rf"^QUARANTINED[ \t]+({_PUBLISH_REPO_RE})[ \t]+(\S.*)$")),
 )
-# Bounds on what reaches the banner. The banner is posted to #custodian through
-# the same un-truncated path file-proposal uses, and every field below is
-# wrapper/git text: cap the COUNT (a stuck loop cannot flood the channel) and
-# the LENGTH of each free-form field. Two entitled repos is the real number; 8
-# leaves headroom without letting a banner become a log dump.
+# Bounds on what reaches the banner.
 MAX_PUBLISH_LINES = 8
 MAX_PUBLISH_ERR_CHARS = 200
 MAX_QUARANTINE_PATH_CHARS = 160
 
 # ---------------------------------------------------------------------- wake
-# SPECS/2026-08-25-agentic-residents.md. A wake starts a headless work session
-# in a resident's seat. It is the ONE verb whose caller is not a resident, and
-# the reason it is a verb at all is authentication: the broker resolves the
-# caller from SO_PEERCRED, so a wake's origin is connection data and no text in
-# any channel can constitute one.
+# SPECS/2026-08-25-agentic-residents.md. A wake starts a headless work session in a
+# resident's seat.
 WAKE_VERB = "wake"
 MAX_WAKE_TASK_CHARS = 4000
-# One record per wake, in the plink-owned spool. The seat's wake runner reads
-# them; it cannot write the directory, which is what makes "nothing self-wakes"
-# a placement property rather than a promise (same wall as start_build's
-# specs_dir — see assert_dir_resident_unwritable).
+# One record per wake, in the plink-owned spool.
 WAKE_SPOOL_SUFFIX = ".wake.json"
 WAKE_SPOOL_SCHEMA = 1
-# Wall-clock cap for a woken session, in seconds. Longer than a summon (600s in
-# the shipped summon.toml) because a wake is a work session, not a chat turn.
-# It lives HERE, in plink-owned broker config, and rides on the wake record —
-# so the seat's runner enforces a cap it cannot widen, and there is one value,
-# not two that can drift.
+# Wall-clock cap for a woken session, in seconds.
 DEFAULT_WAKE_SESSION_CAP_SEC = 5400
-# How long after the cap a wake is still considered in flight. Covers the
-# runner's own harvest + post, and is the margin after which a wake with a
-# start and no end in the action log is an incident.
+# How long after the cap a wake is still considered in flight.
 DEFAULT_WAKE_GRACE_SEC = 600
-# How long a record stays in the spool after its window closes. NOT the window:
-# a record whose window has passed is exactly what lets a runner that was DOWN
-# come back and post "this wake was missed" instead of leaving a human waiting
-# on silence. Pruning on the window would delete that evidence out from under
-# the runner, so the spool holds a week and the runner decides what is stale.
+# How long a record stays in the spool after its window closes.
 WAKE_RETENTION_SEC = 7 * 86400
-# Wakes per seat per UTC day, CAPPED BY DEFAULT — an unset cap is not "no
-# policy", it is an unbounded number of 5400s account-billed sessions behind one
-# button. Same shape as start_build's daily_build_cap, and widened only by a
-# witnessed edit to plink-owned config.
+# Wakes per seat per UTC day, CAPPED BY DEFAULT — an unset cap is not "no policy",
+# it is an unbounded number of 5400s account-billed sessions behind one button.
 DEFAULT_DAILY_WAKE_CAP = 3
 _WAKE_ID_RE = re.compile(r"^wake-\d{8}T\d{6}Z-[0-9a-f]{6}$")
 
@@ -289,19 +341,7 @@ APPROVAL_ACTIONS = ("approve", "deny", "rework")
 
 
 def build_unit_name(slug: str) -> str:
-    """`2026-07-21-gif-picker` -> `disjorn-build-2026-07-21-gif-picker.service`.
-
-    Deterministic on purpose: the unit is greppable from the slug alone
-    (`systemctl status disjorn-build-<slug>`), it maps 1:1 to the branch and the
-    podman container name, and a duplicate launch COLLIDES LOUDLY in systemd
-    ("Unit … was already loaded") instead of racing the branch — a kernel-side
-    backstop under the broker's own in-flight slug claim (BL-D4).
-
-    Validates the slug exactly as slug_from_spec_filename does — shape AND a
-    real calendar date — because this is also the function that vets a slug
-    arriving from a sidecar written by a PREVIOUS broker process, and because
-    the privileged helper applies the same test at the sudo boundary. Two
-    validators guarding one name must agree, or one of them is decoration."""
+    """`2026-07-21-gif-picker` -> `disjorn-build-2026-07-21-gif-picker.service`."""
     m = _SPEC_STEM_RE.match(slug) if isinstance(slug, str) else None
     if not m:
         raise _bad(f"slug is not a valid spec stem: {slug!r}")
@@ -312,13 +352,34 @@ def build_unit_name(slug: str) -> str:
     return f"{BUILD_UNIT_PREFIX}{slug}.service"
 
 
+def read_peer_cgroup(pid: int) -> str:
+    """`/proc/<pid>/cgroup` for a socket peer; empty when the peer is already gone."""
+    try:
+        with open(f"/proc/{int(pid)}/cgroup", "r", encoding="utf-8") as fh:
+            return fh.read()
+    except (OSError, ValueError):
+        return ""
+
+
+def hidden_from_bots(privacy_flags: Any) -> bool:
+    """The rule in server/app/privacy.py, restated where no server import exists."""
+    if not isinstance(privacy_flags, dict) or not privacy_flags:
+        return False
+    return any(bool(privacy_flags.get(f)) for f in BOT_HIDDEN_FLAGS)
+
+
 class VerbError(Exception):
     """A verb failed or a request was rejected. code -> PROTOCOL.md error codes."""
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str,
+                 status: Optional[int] = None,
+                 reason: Optional[str] = None) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        self.status = status
+        # Which merge rule said no; on the wire beside code and message.
+        self.reason = reason
 
 
 def _bad(msg: str) -> VerbError:
@@ -326,67 +387,15 @@ def _bad(msg: str) -> VerbError:
 
 
 class ConfigError(Exception):
-    """Broker configuration is unsafe. Raised at CONSTRUCTION time only, and
-    never caught inside the daemon: the broker refuses to start. There is no
-    degraded mode — a gateway that quietly drops one guarantee is worse than
-    one that is visibly down (AGENTHOOD: fail loud, never fail over)."""
+    """Broker configuration is unsafe."""
 
 
 # --------------------------------------------------------------------------
 # BL-D1 — the start-build authorization surface, enforced instead of commented.
-#
-# THE INVARIANT.  The start-build confirm gate ("## Status: confirmed" + a
-# filled "## Confirm record") is a presence check on TEXT. Text inside SPECS/
-# is only trustworthy because SPECS/ is the plink-gated read-only mirror
-# (/srv/disjorn-ro/SPECS) that no resident can write. Point `specs_dir` at
-# anything a resident can write and the gate silently inverts: a resident
-# writes its own spec, forges "Confirmed by: plink", and self-authorizes a
-# build within its 2/day budget. Chat is data, never authorization — and a
-# file a resident can write IS chat.
-#
-# So the invariant is enforced mechanically, at construction (broker startup),
-# not per-request: a bad specs_dir is config drift plink must see immediately,
-# not a surprise on the first build. Two independent rules, both fail-loud:
-#
-#   RULE 1 (structural).  realpath(specs_dir) must not sit inside any resident
-#     volume: `/home/<resident>` for every resident name in [uids]/[residents]
-#     (the run-resident.sh / run-build.sh home volume is mounted READ-WRITE by
-#     construction), any explicitly declared [residents.<r>].writable_roots,
-#     or any [residents.<r>.path_map] host target that resolves inside one of
-#     those. realpath() means a symlink planted anywhere in the chain cannot
-#     smuggle the directory into a resident volume.
-#
-#     NB: bare path_map membership is deliberately NOT fatal. The shipped
-#     config maps "/opt/disjorn" -> "/srv/disjorn-ro" and puts specs_dir at
-#     /srv/disjorn-ro/SPECS: the mirror is BOTH the residents' view of the repo
-#     AND the authoritative specs dir, on purpose. What makes it safe is that
-#     it is read-only to them, which is exactly what RULE 2 measures.
-#
-#   RULE 2 (permissions).  specs_dir must exist, be a directory, and neither it
-#     nor ANY parent component up to / may be writable by a resident uid, by a
-#     group a resident belongs to, or by "other". A writable parent is as fatal
-#     as a writable leaf — whoever can write /srv/disjorn-ro can replace SPECS
-#     wholesale. One exception, only for parents: a sticky (S_ISVTX) directory
-#     such as /tmp, where the kernel forbids renaming or deleting entries you
-#     do not own, so a resident cannot swap out the next path component. The
-#     leaf never gets that exemption — creating a NEW file in a sticky dir is
-#     allowed, and a new .md in SPECS/ is the whole attack.
-#
-# CARVE-OUT (deliberate, and the only one): a resident uid equal to the
-# broker's own euid is skipped when computing "writable by a resident". Such a
-# caller is not contained by anything — it already runs as the broker, can read
-# broker.toml, rewrite verbs.toml's target, and kill the daemon. Treating its
-# write access as an escalation would be theatre, and it is what lets the test
-# harness map the running uid to a resident (SO_PEERCRED needs a real uid)
-# without disabling this guard for the paths that matter.
 # --------------------------------------------------------------------------
 
 def _resident_gids(uid: int) -> set[int]:
-    """Every gid a uid belongs to (primary + supplementary). Empty if the uid
-    has no passwd entry — the uid check still applies; only the group check
-    degrades. That is a known, documented gap rather than a refusal, because
-    residents always exist on the host (01-users.sh) while test/staging uid
-    maps legitimately name uids that do not."""
+    """Every gid a uid belongs to (primary + supplementary)."""
     try:
         pw = pwd.getpwuid(uid)
     except KeyError:
@@ -400,17 +409,15 @@ def _resident_gids(uid: int) -> set[int]:
 
 
 def _is_within(path: str, root: str) -> bool:
-    """True if `path` IS `root` or sits underneath it. Both must already be
-    realpath()ed; the trailing-separator form stops /home/res-gable-evil from
-    matching /home/res-gable."""
+    """True if `path` IS `root` or sits underneath it."""
     if path == root:
         return True
     return path.startswith(root.rstrip("/") + "/")
 
 
 def _path_components(path: str) -> list[str]:
-    """`/a/b/c` -> ['/a/b/c', '/a/b', '/a', '/'] — the leaf first, then every
-    parent up to the root, so a caller can stat the whole chain."""
+    """`/a/b/c` -> ['/a/b/c', '/a/b', '/a', '/'] — the leaf first, then every parent
+    up to the root, so a caller can stat the whole chain."""
     out = [path]
     while True:
         parent = os.path.dirname(path)
@@ -430,9 +437,7 @@ def assert_specs_dir_resident_unwritable(
     gids_for_uid: Callable[[int], set[int]] = _resident_gids,
 ) -> str:
     """Enforce the BL-D1 invariant (see the block comment above) or raise
-    ConfigError naming the offending path. Returns realpath(specs_dir), which
-    the caller should use from then on — the checked path and the used path
-    must be the same string."""
+    ConfigError naming the offending path."""
     return assert_dir_resident_unwritable(
         specs_dir,
         label="start_build.specs_dir",
@@ -457,25 +462,12 @@ def assert_dir_resident_unwritable(
     gids_for_uid: Callable[[int], set[int]] = _resident_gids,
 ) -> str:
     """Prove a directory is unwritable by every resident, or raise ConfigError
-    naming the offending path. Returns realpath(directory), which the caller
-    should use from then on — the checked path and the used path must be the
-    same string.
-
-    Two authorization surfaces rest on this: start_build's SPECS/ (BL-D1, the
-    confirm record) and the wake spool (2026-08-25, "nothing self-wakes"). Both
-    are presence checks on text that only mean anything because the resident
-    cannot write the text; `label`, `remedy` and `stake` are what each caller
-    tells the reader about its own.
-
-    Pure with respect to broker state: it takes the uid map, the residents
-    table and (injectably) the uid->gids resolver, so every adversarial case
-    is testable without creating real users."""
+    naming the offending path."""
     if broker_uid is None:
         broker_uid = os.geteuid()
     real = os.path.realpath(directory)
 
-    # Resident identities. Names come from BOTH tables so a half-configured
-    # deployment still contributes its home root (fail closed on omission).
+    # Resident identities.
     names = {n for n in uid_map.values() if isinstance(n, str)}
     names |= {n for n in residents if isinstance(n, str)}
     # Uids that are genuinely someone else (see CARVE-OUT above).
@@ -494,9 +486,9 @@ def assert_dir_resident_unwritable(
                 if isinstance(root, str) and root:
                     home_roots[os.path.realpath(root)] = (
                         f"declared writable root of {name} ({root})")
-    # path_map host targets count only when they land inside one of the roots
-    # above (see the NB in the block comment: /srv/disjorn-ro is a path_map
-    # target AND the intended specs dir).
+    # path_map host targets count only when they land inside one of the roots above
+    # (see the NB in the block comment: /srv/disjorn-ro is a path_map target AND the
+    # intended specs dir).
     for name in sorted(names):
         pmap = residents.get(name, {}).get("path_map") or {}
         if not isinstance(pmap, dict):
@@ -550,8 +542,8 @@ def assert_dir_resident_unwritable(
 
 
 # --------------------------------------------------------------------------
-# Argument validation.  Every verb has an explicit schema; unknown keys are
-# rejected; every value is type- and range-checked before a handler sees it.
+# Argument validation. Every verb has an explicit schema; unknown keys are rejected;
+# every value is type- and range-checked before a handler sees it.
 # --------------------------------------------------------------------------
 
 def _check_int(args: dict, key: str, default: int, lo: int, hi: int) -> int:
@@ -581,6 +573,64 @@ def _reject_unknown(args: dict, allowed: set[str]) -> None:
     unknown = set(args) - allowed
     if unknown:
         raise _bad(f"unknown args: {sorted(unknown)}")
+
+
+def _split_diff_range(rng: str) -> tuple[str, str]:
+    """Both sides of `A..B` / `A...B`; a bare rev names no pair and is refused."""
+    sep = "..." if "..." in rng else ".."
+    sides = rng.split(sep)
+    if len(sides) != 2 or not all(sides):
+        raise _bad("range must be A..B or A...B")
+    return sides[0], sides[1]
+
+
+def _safe_path(path: str) -> str:
+    """A control character in a filename could forge a line in a reviewer's
+    context, so such a path is handed back quoted rather than raw."""
+    if any(ch < " " or ch == "\x7f" for ch in path):
+        return repr(path)
+    return path
+
+
+def _parse_numstat(out: str) -> dict[str, tuple[Optional[int], Optional[int]]]:
+    """`git diff --numstat -z`: a rename's record ends in an empty path field
+    and the old and new names follow as two more NUL-separated fields; a binary
+    file counts `-` on both sides."""
+    fields = out.split("\0")
+    counts: dict[str, tuple[Optional[int], Optional[int]]] = {}
+    i = 0
+    while i < len(fields):
+        record = fields[i]
+        i += 1
+        if not record:
+            continue
+        added, removed, path = record.split("\t", 2)
+        if not path:
+            path = fields[i + 1]
+            i += 2
+        counts[path] = (None if added == "-" else int(added),
+                        None if removed == "-" else int(removed))
+    return counts
+
+
+def _parse_name_status(out: str) -> list[tuple[str, str, Optional[str]]]:
+    """`git diff --name-status -z` as (status letter, path, old path or None);
+    R and C carry a similarity score after the letter and two path fields."""
+    fields = out.split("\0")
+    rows: list[tuple[str, str, Optional[str]]] = []
+    i = 0
+    while i < len(fields):
+        code = fields[i]
+        i += 1
+        if not code:
+            continue
+        if code[0] in ("R", "C"):
+            rows.append((code[0], fields[i + 1], fields[i]))
+            i += 2
+        else:
+            rows.append((code[0], fields[i], None))
+            i += 1
+    return rows
 
 
 def _check_date(args: dict, key: str) -> str:
@@ -752,12 +802,12 @@ def format_approval_line(proposal: dict) -> str:
 
 
 # --------------------------------------------------------------------------
-# Default file-proposal transport: post to #custodian via the Disjorn SDK as
-# the broker's own bot identity.  Kept behind a callable so tests stub it.
+# Default file-proposal transport: post to #custodian via the Disjorn SDK as the
+# broker's own bot identity. Kept behind a callable so tests stub it.
 # --------------------------------------------------------------------------
 
 def _sdk_transport(disjorn_cfg: dict, body: str) -> dict:
-    """POST body to the configured custodian channel. Returns {seq, message_id}."""
+    """POST body to the configured custodian channel."""
     import asyncio
 
     from disjorn_sdk import DisjornClient  # deferred import: not needed in tests
@@ -778,39 +828,47 @@ def _sdk_transport(disjorn_cfg: dict, body: str) -> dict:
     return asyncio.run(_post())
 
 
+def _sdk_channel_transport(disjorn_cfg: dict, channel_id: int,
+                           body: str) -> dict:
+    """POST body to ONE named channel, rather than to #custodian."""
+    import asyncio
+
+    from disjorn_sdk import DisjornClient  # deferred import: not needed in tests
+
+    url = disjorn_cfg["url"]
+    with open(disjorn_cfg["api_key_path"], "r", encoding="utf-8") as fh:
+        api_key = fh.read().strip()
+
+    async def _post() -> dict:
+        client = DisjornClient(url, api_key=api_key)
+        try:
+            msg = await client.send(int(channel_id), body)
+        finally:
+            await client.aclose()
+        return {"seq": msg.get("seq"), "message_id": msg.get("id")}
+
+    return asyncio.run(_post())
+
+
 # --------------------------------------------------------------------------
-# Plan Room API transport (SPECS/2026-08-20-plan-room.md). Kept behind a
-# callable so tests stub it, exactly like _sdk_transport above.
+# Plan Room API transport (SPECS/2026-08-20-plan-room.md). Kept behind a callable so
+# tests stub it, exactly like _sdk_transport above.
 # --------------------------------------------------------------------------
+
+def _api_label(path: str) -> str:
+    """What to CALL the surface in a refusal."""
+    if path.startswith("/apps"):
+        return "apps API"
+    if path.startswith("/approval"):
+        return "approval API"
+    return "plan room API"
+
 
 def _planroom_http(disjorn_cfg: dict, method: str, path: str,
                    payload: Optional[dict] = None) -> dict:
-    """One JSON call to the Disjorn server's /planroom surface, as the broker's
-    own bot identity.
-
-    WHY THE BOARD VERBS GO THROUGH THE SERVER RATHER THAN READING TWO FILES.
-    A card is derived state plus board-native state — the derived half is in
-    the broker-written index, the native half (comments, order, blocked,
-    archived) is authoritative and lives in the server's own tables. Composing
-    them is exactly one job, and the server already does it for the tab. A
-    second composer here would be a second answer to "is this card blocked",
-    which is the forked-truth failure this whole spec is built to avoid. So the
-    broker asks the server the same question the tab asks.
-
-    The WRITES have a second reason: those tables are the server's, and the
-    resident-facing wall on them is the server's `admin or bot` check. Writing
-    them from here would be the broker granting itself an exemption from the
-    rule it exists to enforce.
-
-    SINCE 2026-08-26 it carries a second surface, /approval, for the same two
-    reasons: the approval object is answered from a client modal as well as
-    from here, and one record answered in two places must be composed once. The
-    surface names itself in the fallback text below, from the path, so a
-    resident is never told the plan room is unreachable when it was approval."""
+    """One JSON call to the Disjorn server, as the broker's own bot identity."""
     import urllib.error
     import urllib.request
-
-    surface = "/" + (path.lstrip("/").split("/", 1)[0] or "")
 
     base = str(disjorn_cfg.get("url") or "").rstrip("/")
     if not base:
@@ -836,17 +894,13 @@ def _planroom_http(disjorn_cfg: dict, method: str, path: str,
             detail = str(json.loads(exc.read().decode("utf-8")).get("detail", ""))
         except Exception:  # noqa: BLE001 — a non-JSON error body is still a refusal
             pass
-        # The server's refusal is carried through verbatim. A resident who is
-        # told "the Plan Room index is unavailable" can act; one told "HTTP
-        # 503" has to go find someone.
-        raise VerbError(
-            "exec-failure",
-            detail or f"the server's {surface} surface returned {exc.code}"
-        ) from None
+        # The server's refusal is carried through verbatim.
+        raise VerbError("exec-failure",
+                        detail or f"{_api_label(path)} returned {exc.code}",
+                        status=exc.code) from None
     except Exception as exc:  # noqa: BLE001 — network, DNS, timeout, bad JSON
         raise VerbError("exec-failure",
-                        f"the server's {surface} surface is unreachable: "
-                        f"{exc}") from None
+                        f"{_api_label(path)} unreachable: {exc}") from None
 
 
 def _urlq(value: str) -> str:
@@ -858,27 +912,12 @@ _PLANROOM_MODULE = None
 
 
 def _load_planroom_module():
-    """`harness/planroom/planroom.py` — the derivation service.
-
-    Imported LAZILY, and only when a rebuild actually runs. Two reasons, both
-    load-bearing:
-
-      * It imports this module back (for `parse_spec_status` and
-        `parse_confirm_record` — the gate's own parsers, always, per seq 1428
-        P3). A top-level import here would be a cycle. Lazily, it finds this
-        module already in `sys.modules` and reuses it, which is also how there
-        stays exactly one copy of the parsers in the process.
-      * It reaches for host paths (the gatehouse, the message store) at import
-        time, and none of that belongs in the daemon's import graph or in test
-        collection."""
+    """`harness/planroom/planroom.py` — the derivation service."""
     global _PLANROOM_MODULE
     if _PLANROOM_MODULE is not None:
         return _PLANROOM_MODULE
     import importlib.util
-    # Hand the derivation service THIS module as `brokerd`. Run as a daemon
-    # this file is `__main__`, so without this line planroom's parser lookup
-    # would miss it and load a second copy of the broker — two parsers of one
-    # Status line again, by the one route the P3 rule did not name.
+    # Hand the derivation service THIS module as `brokerd`.
     sys.modules.setdefault("brokerd", sys.modules[__name__])
     here = os.path.dirname(os.path.abspath(__file__))
     path = os.path.join(os.path.dirname(here), "planroom", "planroom.py")
@@ -892,9 +931,9 @@ def _load_planroom_module():
 
 
 def format_board_line(card: dict) -> str:
-    """One card, one line. brief's rule, inherited: NEVER PRINT A BARE
-    IDENTIFIER — every row says what the thing is and where it lives, because
-    an item you have to go look up is an item that gets deferred."""
+    """One card, one line. brief's rule, inherited: NEVER PRINT A BARE IDENTIFIER —
+    every row says what the thing is and where it lives, because an item you have to
+    go look up is an item that gets deferred."""
     bits = [f"[{card.get('column', '?')}]", str(card.get("slug", "?"))]
     title = card.get("title")
     if title and title != card.get("slug"):
@@ -921,11 +960,7 @@ def format_board_line(card: dict) -> str:
 
 
 def format_board_face(face: dict) -> str:
-    """The board's own staleness, said out loud.
-
-    The board cannot go stale relative to the mirror — it is not a copy of it —
-    but the MIRROR can lag, so every renderer says which mirror head it derived
-    from and when. Staleness in this house is declared, never denied."""
+    """The board's own staleness, said out loud."""
     if face.get("available") is False:
         return f"UNAVAILABLE — {face.get('unavailable_reason', 'no reason given')}"
     head = str(face.get("mirror_head") or "?")[:12]
@@ -939,16 +974,78 @@ def format_board_face(face: dict) -> str:
 
 # --------------------------------------------------------------------------
 # start-build (WP-L4): spec parsing, slug/branch derivation, the build-session
-# prompt, and #custodian narration. Pure functions — no I/O, no broker state —
-# so the confirm gate, the slug rules, and every narration shape are unit-
-# testable in isolation, exactly like the argv validators above.
+# prompt, and #custodian narration. Pure functions — no I/O, no broker state — so
+# the confirm gate, the slug rules, and every narration shape are unit-testable in
+# isolation, exactly like the argv validators above.
 # --------------------------------------------------------------------------
+
+def _as_utc(value: Any) -> Optional[_dt.datetime]:
+    """An ISO timestamp from the message DB or from git, as an aware UTC time."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        stamp = _dt.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=_dt.timezone.utc)
+
+
+def merge_commit_message(*, slug: str, author: str, tier: int, channel_id: int,
+                         seq: int, pass_seq: Optional[int] = None,
+                         self_merge: bool = False) -> str:
+    """The merge commit's text. `review-seq` goes AFTER `merge-seq` because the
+    hook's last-trailer-wins rule is what records the review."""
+    command = "/build" if self_merge else "/merge"
+    lines = [f"merge: {slug} ({command} by {author}, tier {tier})", "",
+             f"merge-seq: {channel_id}:{seq}"]
+    if pass_seq is not None:
+        lines.append(f"review-seq: {pass_seq}")
+    return "\n".join(lines) + "\n"
+
+
+def message_names_slug(content: str, slug: str) -> bool:
+    """A `/merge` may only merge what its own message asks for: the slug, whole,
+    after the command word."""
+    text = (content or "").strip()
+    parts = text.split(None, 1)
+    if parts and parts[0].startswith("/"):
+        text = parts[1] if len(parts) > 1 else ""
+    return re.search(rf"(?<![0-9A-Za-z-]){re.escape(slug)}(?![0-9A-Za-z-])",
+                     text) is not None
+
+
+def format_merge_done(*, slug: str, sha: str, tier: int,
+                      folded: bool = False) -> str:
+    """The two lines a finished `/merge` posts to the room it was typed in."""
+    return (f"merge: merged {slug} as {sha}"
+            f"{' after folding main' if folded else ''} (tier {tier})\n"
+            "next: deploy at the keyboard")
+
+
+def format_merge_refused(*, slug: str, reason_text: str, next_line: str) -> str:
+    """The same two lines for a merge that did not happen."""
+    return (f"merge: refused {slug} — {' '.join(reason_text.split())[:400]}\n"
+            f"next: {next_line}")
+
+
+def merge_next_step(reason: str, *, slug: str, owner: Optional[str] = None,
+                    gates_red: bool = False) -> str:
+    """What the human does about a refusal, in their own hands."""
+    if gates_red:
+        return "fix the red gate, then /build again"
+    if reason in ("moved", "conflict"):
+        return "fold main into the branch, then /merge again"
+    if reason in ("pass-missing", "pass-invalid") and owner:
+        return f"PASS from {owner} in #custodian, then /merge {slug} pass <seq>"
+    return "merge it at the keyboard"
+
 
 def _clean_field(value: str) -> Optional[str]:
     """A spec field value, or None if it is blank or still the TEMPLATE.md
-    placeholder (angle-bracketed `<...>`). This is how "the confirm record is
-    unfilled" is detected mechanically — a spec left with `<username>` in the
-    box has no confirm record, whatever it looks like at a glance."""
+    placeholder (angle-bracketed `<...>`)."""
     v = value.strip()
     if not v or v in {"-", "_"}:
         return None
@@ -958,9 +1055,8 @@ def _clean_field(value: str) -> Optional[str]:
 
 
 def parse_spec_status(text: str) -> Optional[str]:
-    """The status token under `## Status` (e.g. 'confirmed'), lowercased, or
-    None if the section is absent. Backticks and HTML comments are ignored —
-    TEMPLATE.md writes the token as `` `confirmed` `` trailed by a comment."""
+    """The status token under `## Status` (e.g. 'confirmed'), lowercased, or None if
+    the section is absent."""
     lines = text.splitlines()
     for i, line in enumerate(lines):
         if line.strip().lower() == "## status":
@@ -975,19 +1071,9 @@ def parse_spec_status(text: str) -> Optional[str]:
     return None
 
 
-
 def replace_spec_status(text: str, new_status: str, comment: str) -> Optional[str]:
-    """Rewrite the `## Status` token in a spec to `new_status`, followed by ONE
-    HTML comment line saying who moved it and why. Returns the new text, or
-    None if the file has no parseable Status line (the caller then leaves the
-    file alone — a spec the gate cannot read is not one this should invent a
-    section in).
-
-    Only the FIRST non-blank, non-comment line under the heading is replaced —
-    the same line parse_spec_status reads — and everything else in the file
-    (the confirm record above all) is byte-for-byte untouched. The board's
-    `--mark-merged` and the broker's build stamps both go through here, so a
-    Status line always has one shape and one parser."""
+    """Rewrite the `## Status` token in a spec to `new_status`, followed by ONE HTML
+    comment line saying who moved it and why."""
     lines = text.splitlines(keepends=True)
     for i, ln in enumerate(lines):
         if ln.strip().lower() != "## status":
@@ -1005,11 +1091,7 @@ def replace_spec_status(text: str, new_status: str, comment: str) -> Optional[st
 
 
 def _status_comment_text(text: str, cap: int = 300) -> str:
-    """Make resident-influenced text safe INSIDE an HTML comment. A build's
-    failure reason comes from the build's own output, so it could carry `-->`
-    (closing the comment early and putting a line of its choosing where the
-    parser reads the status) or a newline. Collapse whitespace, break every
-    `--` run, cap the length. Never write build output into SPECS/ unfiltered."""
+    """Make resident-influenced text safe INSIDE an HTML comment."""
     flat = " ".join(str(text).split())
     flat = re.sub(r"-{2,}", "-", flat).replace(">", "&gt;")
     return flat[:cap]
@@ -1034,18 +1116,7 @@ def build_outcome_class(publish: dict, unit_reason: "str | None") -> str:
 
 def spec_status_after_build(*, branch: str, publish: dict,
                             unit_reason: "str | None") -> tuple[str, str]:
-    """(status token, comment) the spec should carry once its build is
-    terminal. TEMPLATE.md's vocabulary, no new words:
-      * published                 -> `built@<branch>`  (work is on the branch,
-                                     waiting for review; NOT buildable again)
-      * failed (any way)          -> `failed`          (a human is told to look;
-                                     set it back to `confirmed` to allow
-                                     another attempt — the confirm record still
-                                     stands, nothing here touches it)
-      * only NO-COMMITS lines     -> `confirmed`       (the build ran and
-                                     produced nothing: no branch, nothing to
-                                     review, so it is honestly buildable again)
-    The comment records what happened, sanitized (_status_comment_text)."""
+    """(status token, comment) the spec should carry once its build is terminal."""
     published = publish.get("published", [])
     verdict = build_outcome_class(publish, unit_reason)
     if verdict == "failed":
@@ -1074,11 +1145,7 @@ def spec_status_after_build(*, branch: str, publish: dict,
 
 
 def parse_confirm_record(text: str) -> dict:
-    """`{confirmed_by, seq}` from the `## Confirm record` section. A field that
-    is blank or still the `<...>` placeholder comes back None — mechanically,
-    that IS "no confirm record". `seq` is the witnessing #custodian sequence as
-    an int (or None). Chat is data: the broker verifies this record, it never
-    trusts a caller's word that a build was confirmed."""
+    """`{confirmed_by, seq}` from the `## Confirm record` section."""
     lines = text.splitlines()
     start = None
     for i, line in enumerate(lines):
@@ -1091,14 +1158,7 @@ def parse_confirm_record(text: str) -> dict:
     for line in lines[start:]:
         if line.strip().startswith("## "):
             break  # next section
-        # MATCH THE WORDS, NOT THE ASTERISKS. Twice now a spec every seat had
-        # signed was invisible to this gate because of markdown placement:
-        # `**Confirmed** by:` (bold closing one word early, 2026-08-17) parses
-        # as no record at all, and so would `Confirmed by:` with no bold, or
-        # `**Confirmed by:**` with the colon inside. The gate's job is to
-        # verify WHO and WHICH SEQ — never to grade a human's markdown. So
-        # strip emphasis from the line first, then match the plain phrase.
-        # (Still `- ` bullets, still first match wins, still `<…>` = unset.)
+        # MATCH THE WORDS, NOT THE ASTERISKS.
         plain = re.sub(r"[*_`]", "", line)
         m = re.match(r"\s*-\s*Confirmed by\s*:\s*(.*)$", plain, re.I)
         if m:
@@ -1112,30 +1172,12 @@ def parse_confirm_record(text: str) -> dict:
     return out
 
 
-# BR-1 (2026-08-14). The identity a build RUNS AS is derived from the identity
-# that ASKED — the SO_PEERCRED-resolved caller — never from configuration.
-#
-# Until today `[start_build].resident` was a single global name, so every build
-# ran as res-gable whoever pressed: Claudette's 08-14 password build was called
-# by res-claudette (audit), ran in res-gable's home on res-gable's credential
-# (process), and its commit says disjorn-build (git). Three records, no two
-# agreeing, and no way to tell from any of them whose judgement produced the
-# diff. Worse, the misattribution CONCEALED a second defect for a week: her
-# build seat had no account credential, and the wrapper's refusal never fired
-# because her builds were never actually hers.
-#
-# The caller arrives as the uid_map name ("res-claudette"); the launch helper
-# takes the short name ("claudette") and re-derives everything — uid, home,
-# config dir — from it. The regex is deliberately the helper's own RESIDENT_RE
-# so the two programs can never disagree about what a resident is called.
 _BUILD_CALLER_RE = re.compile(r"^res-([a-z][a-z0-9]{0,30})$")
 
 
 def build_identity_from_caller(caller: str) -> str:
     """Short build identity ("claudette") from a uid_map caller name
-    ("res-claudette"). Raises VerbError on anything else — an unparseable
-    caller must refuse loudly, never fall back to some configured default,
-    because a fallback identity is exactly the bug this function removes."""
+    ("res-claudette")."""
     m = _BUILD_CALLER_RE.match(caller or "")
     if not m:
         raise VerbError("internal",
@@ -1145,12 +1187,7 @@ def build_identity_from_caller(caller: str) -> str:
 
 
 def slug_from_spec_filename(filename: str) -> str:
-    """`SPECS/YYYY-MM-DD-<name>.md` -> `YYYY-MM-DD-<name>` (branch =
-    loop/<slug>). The date prefix is REQUIRED and KEPT (BL-D4: it is the
-    collision disambiguator — see _SPEC_STEM_RE), the date must be a real
-    calendar date, and the remainder must be a strict kebab name. Anything else
-    is bad-args, because this string ends up as a git branch, a podman
-    container name, and an argv positional."""
+    """`SPECS/YYYY-MM-DD-<name>.md` -> `YYYY-MM-DD-<name>` (branch = loop/<slug>)."""
     base = os.path.basename(filename)
     if base.endswith(".md"):
         base = base[:-3]
@@ -1166,23 +1203,8 @@ def slug_from_spec_filename(filename: str) -> str:
 
 
 def build_session_prompt(spec_text: str, *, slug: str, branch: str) -> str:
-    """The committed spec plus a one-paragraph preamble, fed to the build
-    session on STDIN. ALL of it is data on stdin — argv stays config-only
-    (launcher doctrine): only the mechanically-validated slug/branch and fixed
-    broker text vary here.
-
-    2026-08-06 (branch B): this used to restate the rules — no merge, no push,
-    no prod, the report format — which meant they lived in TWO places and could
-    drift apart. They now live only in the build seat's CLAUDE.md
-    (harness/cc/build-kernel.md), which the wrapper copies into the build home
-    before launch. This function states the TASK; the kernel states the
-    CONTRACT. Do not re-add rules here: a rule in two places is a rule that
-    will eventually say two things.
-
-    The old text also told the session to narrate state transitions to
-    #custodian. It no longer can and no longer should — the build seat has no
-    broker socket (see run-build.sh) and its report IS its stdout, which the
-    reaper reads and posts."""
+    """The committed spec plus a one-paragraph preamble, fed to the build session on
+    STDIN."""
     return (
         f"Build exactly what the spec below describes.\n"
         f"Your branch `{branch}` is already created and checked out in every "
@@ -1194,28 +1216,42 @@ def build_session_prompt(spec_text: str, *, slug: str, branch: str) -> str:
     )
 
 
+def strip_build_command(content: str) -> str:
+    """`/build <what to do>` -> `<what to do>`; the word is stripped only when it
+    leads."""
+    text = (content or "").strip()
+    parts = text.split(None, 1)
+    if parts and parts[0].lower() == f"/{BUILD_VERB}":
+        text = parts[1] if len(parts) > 1 else ""
+    return text.strip()
+
+
+def slug_from_build_text(text: str, today: str) -> str:
+    """`YYYY-MM-DD-<up to five words>`, kebab, ASCII, bounded."""
+    stem = "-".join(_SLUG_WORD_RE.findall(text.lower())[:BUILD_SLUG_WORDS])
+    stem = stem[:MAX_BUILD_SLUG_STEM].strip("-")
+    return f"{today}-{stem}" if stem else ""
+
+
+def build_chat_prompt(text: str, *, slug: str, branch: str) -> str:
+    """The chat request under the same preamble a spec build gets."""
+    return (
+        f"Build exactly what the request below describes.\n"
+        f"Your branch `{branch}` is already created and checked out in every "
+        f"clone under `~/work`. Your worktree and the rules you work under are "
+        f"in your CLAUDE.md; this message is the whole request and there is NO "
+        f"SPEC FILE to read.\n"
+        f"When you are finished OR you have stopped, print the final JSON "
+        f"object your CLAUDE.md describes as the last thing on stdout.\n\n"
+        f"--- REQUEST ({slug}) ---\n{text}"
+    )
+
+
 _FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.S)
 
 
 def _json_object_from_text(text: str) -> "dict | None":
-    """Pull a JSON object out of a chunk of model prose.
-
-    THE BUG THIS FIXES (2026-08-06). The first successful resident build posted
-    `files: n/a | tests: n/a | diff: n/a` to #custodian while its branch carried
-    246 changed lines and 111 passing tests. The build was fine; the REPORT of
-    it was empty, which is this house's worst failure shape — a record that says
-    nothing happened when something did.
-
-    Why: the session runs under `claude -p --output-format json`, so stdout is
-    ONE envelope object whose `result` is the assistant's final text. That text
-    is prose with the report in a ```json fence, exactly as any model writes it.
-    The old code called `json.loads` on that string, got a JSONDecodeError, and
-    fell through to the n/a defaults — so the nicer the session's write-up, the
-    more certainly its report was discarded.
-
-    Three attempts, cheapest first: the whole string, a fenced block, then the
-    last balanced {...} span. Returns None rather than guessing.
-    """
+    """Pull a JSON object out of a chunk of model prose."""
     text = (text or "").strip()
     if not text:
         return None
@@ -1225,8 +1261,8 @@ def _json_object_from_text(text: str) -> "dict | None":
             return data
     except json.JSONDecodeError:
         pass
-    # Fenced blocks: take the LAST one — the report is the closing artifact,
-    # and a spec quoted earlier in the reply may itself contain a fence.
+    # Fenced blocks: take the LAST one — the report is the closing artifact, and a
+    # spec quoted earlier in the reply may itself contain a fence.
     fences = _FENCED_JSON_RE.findall(text)
     for block in reversed(fences):
         try:
@@ -1257,22 +1293,8 @@ def _json_object_from_text(text: str) -> "dict | None":
 
 
 def _parse_build_report(stdout: str) -> dict:
-    """Best-effort structured report from the build session's stdout for the
-    'done' line. The session is asked to end with a JSON object
-    {files, tests, diff, branch}; we surface those and degrade to 'n/a' (or a
-    text tail) if it didn't. Tier is intentionally NOT computed here — see
-    format_build_done: classify-diff is a separate verb, not coupled in.
-
-    BL-D2: the input is now the bounded TAIL of the build's stdout file, not
-    the whole stream, so it may begin mid-line. Hence the second attempt on the
-    last non-blank line — the report is the last thing printed, and a truncated
-    head must not cost us the report.
-
-    2026-08-13: the report is no longer the last thing on stdout — the wrapper's
-    harvest prints after the container exits. Callers pass the tail through
-    _strip_publish_lines first, so "the last non-blank line" still means the
-    SESSION's last line. This report is enrichment now; the publish lines decide
-    whether a build is done."""
+    """Best-effort structured report from the build session's stdout for the 'done'
+    line."""
     text = stdout.strip()
     files = tests = diff = "n/a"
     data: Any = None
@@ -1319,9 +1341,7 @@ def _parse_build_report(stdout: str) -> dict:
 
 def _match_publish_line(line: str) -> "tuple[str, tuple[str, ...]] | None":
     """One line of wrapper stdout -> (kind, fields), or None if it is not a
-    publish-protocol line. Anchored at the line START and strict about shape, so
-    a session that WRITES about `PUBLISHED foo.git deadbeef` in its prose (or a
-    log line that embeds one) can never be read as a measurement."""
+    publish-protocol line."""
     for kind, rx in _PUBLISH_LINE_RES:
         m = rx.match(line)
         if m:
@@ -1330,22 +1350,7 @@ def _match_publish_line(line: str) -> "tuple[str, tuple[str, ...]] | None":
 
 
 def _parse_publish_lines(out: str) -> dict:
-    """The wrapper's harvest report, extracted from a build's stdout.
-
-    Returns {published: [(repo, sha)], failed: [(repo, error)],
-             no_commits: [repo], quarantined: [(repo, path)]} — measurements
-    only, in the order printed. THE REAPER MEASURES NOTHING ITSELF: everything
-    the banner says about what left the container is one of these lines, because
-    the harvest is the verification and a second verification path could only
-    ever disagree with it (SPECS/2026-08-13-build-publish-path.md item 3).
-
-    Deliberately total and quiet: unparseable input yields empty lists, which
-    the caller must read as FAILED (absent lines = failure), never as success.
-    Duplicates collapse — the reaper feeds this the log's HEAD and TAIL, which
-    can overlap on a small file, and one repo published twice is a wrapper bug
-    not two publications. Every list is capped (MAX_PUBLISH_LINES) and every
-    free-form field truncated: this text goes to #custodian unbounded otherwise.
-    """
+    """The wrapper's harvest report, extracted from a build's stdout."""
     found: dict = {"published": [], "failed": [], "no_commits": [],
                    "quarantined": []}
     for raw in (out or "").splitlines():
@@ -1369,28 +1374,19 @@ def _parse_publish_lines(out: str) -> dict:
 
 
 def _strip_publish_lines(out: str) -> str:
-    """The same stdout with the wrapper's protocol lines removed — what the
-    SESSION printed, which is what _parse_build_report must see. The harvest
-    prints after the container exits, so its lines land AFTER the session's
-    final JSON report; feeding them to the report parser (which reads the last
-    non-blank line) would throw the report away on every successful build."""
+    """The same stdout with the wrapper's protocol lines removed — what the SESSION
+    printed, which is what _parse_build_report must see."""
     return "\n".join(ln for ln in (out or "").splitlines()
                      if _match_publish_line(ln.rstrip("\r")) is None)
 
 
 def _publish_reported(publish: dict) -> bool:
-    """Did the harvest report a VERDICT for any repo? Quarantine lines
-    deliberately do not count: provisioning prints them before the session even
-    starts, so a quarantine line plus silence still means the harvest never
-    ran."""
+    """Did the harvest report a VERDICT for any repo?"""
     return any(publish.get(k) for k in ("published", "failed", "no_commits"))
 
 
 def _quarantine_suffix(quarantined) -> str:
-    """Quarantine notices, one line each, appended to WHATEVER banner results.
-    A quarantined clone is work that was preserved instead of deleted (the
-    08-13 rescue that only happened because a human posted a warning); it is
-    never allowed to be the silent part of a message."""
+    """Quarantine notices, one line each, appended to WHATEVER banner results."""
     return "".join(
         f"\nquarantined: {repo} -> {path} — unharvested work from an earlier "
         f"run, preserved not deleted" for repo, path in quarantined)
@@ -1398,10 +1394,7 @@ def _quarantine_suffix(quarantined) -> str:
 
 def format_build_started(*, slug: str, branch: str, confirmed_by: str,
                          seq: int, eta_sec: int) -> str:
-    """The 'started' state-transition line. Names the spec, the branch, who
-    confirmed it + the witnessing seq, and an ETA GUESS (the wall-clock cap, a
-    ceiling not a promise). Plain text, greppable, no emoji — same house idiom
-    as the summon summaries."""
+    """The 'started' state-transition line."""
     eta_min = max(1, eta_sec // 60)
     return (f"build started | {slug} -> {branch} | "
             f"confirmed by {confirmed_by} (#custodian seq {seq}) | "
@@ -1411,17 +1404,7 @@ def format_build_started(*, slug: str, branch: str, confirmed_by: str,
 def format_build_done(*, slug: str, branch: str, files: str, tests: str,
                       diff: str, tier: str = "pending", published=(),
                       no_commits=(), quarantined=(), mirror: str = "") -> str:
-    """The 'done' state-transition line. Its LOAD-BEARING field is now what the
-    wrapper measured — `published: <repo>.git <sha>` per entitled repo, or the
-    honest 'no commits' line when the build produced none. files/tests/diff are
-    the session's own report and stay as ENRICHMENT: publish lines decide truth,
-    the report decorates. Tier is 'pending' by default — the reaper does not
-    invoke classify-diff (a separate verb, ships OFF) and, per the 08-13 spec,
-    runs no verification of its own at all. Nothing merged, ever.
-
-    'on the branch for review' without a measured sha is deliberately
-    unprintable from here: with no PUBLISHED line the caller never reaches this
-    formatter (see format_build_outcome)."""
+    """The 'done' state-transition line."""
     if published:
         outcome = "published: " + ", ".join(f"{repo} {sha}"
                                             for repo, sha in published)
@@ -1438,21 +1421,32 @@ def format_build_done(*, slug: str, branch: str, files: str, tests: str,
             + _quarantine_suffix(quarantined) + mirror)
 
 
+def format_seq_build_banner(*, tests: str, tier: str, diffstat: str,
+                            next_line: str) -> str:
+    """The four lines that close a build started from chat."""
+    return (f"tests: {tests}\n"
+            f"tier: {tier}\n"
+            f"diffstat: {diffstat}\n"
+            f"next: {next_line}")
+
+
+def format_gate_tests_line(result: Any) -> str:
+    """The gate run's own verdict: the launcher's exit code, never a self-report."""
+    return ("pass" if result.exit_code == 0 else "fail") + f" — {result.summary}"
+
+
+def format_tier_line(tier: Any, reasons: Any) -> str:
+    said = [" ".join(str(r).split()) for r in list(reasons or [])[:2]]
+    return (f"{tier} — " + "; ".join(said)) if said else str(tier)
+
+
 # The wrapper's exit code for "this seat cannot run a test; nothing started".
-# Shared constant rather than a literal 78 in two files — the wrapper and this
-# reader must always mean the same thing by it, and a silent disagreement would
-# turn a refund into a burned slot.
 PREFLIGHT_REFUSED_EXIT = 78
 
 
 def format_build_refused(*, slug: str, branch: str, reason: str) -> str:
-    """A build that never started, because its seat could not have run the
-    tests the spec asks for.
-
-    Deliberately NOT worded as a failure. Nothing was built and nothing was
-    lost; the honest reading is that the house caught its own unfitness before
-    spending anything, which is the outcome the preflight exists to produce.
-    The banner says the slot was refunded so nobody has to go and check."""
+    """A build that never started, because its seat could not have run the tests the
+    spec asks for."""
     detail = " ".join(reason.split())[:400]
     return (f"build refused | {slug} -> {branch} | nothing ran, no slot spent | "
             f"{detail or 'the build seat failed its dependency preflight'}")
@@ -1460,13 +1454,7 @@ def format_build_refused(*, slug: str, branch: str, reason: str) -> str:
 
 def format_build_failed(*, slug: str, branch: str, reason: str, published=(),
                         no_commits=(), quarantined=(), mirror: str = "") -> str:
-    """The 'failed' state-transition line — LOUD. A stalled build goes quiet
-    then lands here (never a heartbeat) and a human is told to look.
-
-    It also states WHERE THE WORK IS, from the harvest lines and nothing else: a
-    failed build that published something must say so, and one that published
-    nothing must not imply a branch that does not exist (the phantom-branch
-    claim the 08-13 spec exists to retire)."""
+    """The 'failed' state-transition line — LOUD."""
     if published:
         where = ("published anyway: "
                  + ", ".join(f"{repo} {sha}" for repo, sha in published))
@@ -1478,10 +1466,7 @@ def format_build_failed(*, slug: str, branch: str, reason: str, published=(),
             f"a human should look" + _quarantine_suffix(quarantined) + mirror)
 
 
-# The fail-closed clause. A wrapper that is killed at the cap skips its harvest
-# BY DESIGN and prints nothing, and a wrapper that predates the publish contract
-# also prints nothing: silence is indistinguishable between them and must never
-# be read as success. This is the one banner the reaper prints from an ABSENCE.
+# The fail-closed clause.
 NO_HARVEST_REASON = (
     "the wrapper printed no publish lines — the harvest never reported "
     "(killed at the cap, or a wrapper predating the publish contract): "
@@ -1489,18 +1474,7 @@ NO_HARVEST_REASON = (
 
 
 def format_mirror_note(branch: str, published, error: "str | None") -> str:
-    """The one line that makes a PUBLISHED banner openable (spec item 5).
-
-    A banner names a sha. Until the mirror has been re-fetched, that sha exists
-    only in the gatehouse — which no resident can read — so the line names
-    something its audience cannot open, and the reviewer's first move is to ask
-    for a refresh. Refreshing FIRST and then saying where to look costs one
-    fetch and removes the round trip.
-
-    On success it prints the exact ref to rev-parse, because "it's in the
-    mirror somewhere" is not an instruction. On failure it says so plainly
-    rather than staying silent: the sha in the banner above is then real but
-    unreadable, and a reader must be told which of the two they are holding."""
+    """The one line that makes a PUBLISHED banner openable (spec item 5)."""
     if not published:
         return ""
     if error:
@@ -1514,10 +1488,7 @@ def format_mirror_note(branch: str, published, error: "str | None") -> str:
 
 def format_spec_status_note(stamp: dict) -> str:
     """One trailing line for a build banner saying what happened to the spec's
-    Status line — moved (to what, in which commit) or NOT moved (and why). The
-    file is the state of record (SPECS/README.md: 'state lives in the file'),
-    so a stamp that failed has to be said out loud where the humans are, or the
-    next resident reads a stale word and rebuilds."""
+    Status line — moved (to what, in which commit) or NOT moved (and why)."""
     if not stamp:
         return ""
     if stamp.get("ok"):
@@ -1532,20 +1503,7 @@ def format_build_outcome(*, slug: str, branch: str, publish: dict,
                          report: "dict | None" = None,
                          unit_reason: "str | None" = None,
                          mirror: str = "") -> str:
-    """THE decision: done or failed, from the wrapper's harvest lines. One
-    implementation, called by both reapers (the live one and the adopted one) —
-    two copies of this ladder would eventually narrate two different truths
-    about the same build.
-
-    In order, and the order is the contract:
-      1. the unit itself failed (`unit_reason`) -> FAILED, carrying whatever the
-         harvest still managed to report (a container can die clean and the
-         push still be rejected);
-      2. ANY PUBLISH-FAILED line -> FAILED with the verbatim git error(s);
-      3. at least one PUBLISHED line -> done, naming repo + sha;
-      4. only NO-COMMITS lines -> done, honestly: no commits, no branch;
-      5. nothing at all -> FAILED (NO_HARVEST_REASON). Never assume success
-         from silence."""
+    """THE decision: done or failed, from the wrapper's harvest lines."""
     report = report or {"files": "n/a", "tests": "n/a", "diff": "n/a"}
     published = publish.get("published", [])
     quarantined = publish.get("quarantined", [])
@@ -1570,22 +1528,12 @@ def format_build_outcome(*, slug: str, branch: str, publish: dict,
 
 # --------------------------------------------------------------------------
 # Wake (SPECS/2026-08-25-agentic-residents.md).
-#
-# plink wakes a seat with a task; the seat's runner works it in one headless
-# session and posts the result. Everything the broker contributes is here: an
-# id, the record the runner reads, and the two parsers behind the no-self-review
-# rule a woken session inherits.
 # --------------------------------------------------------------------------
 
 
 def new_wake_id(now: Optional[_dt.datetime] = None,
                 entropy: Optional[str] = None) -> str:
-    """`wake-20260825T142310Z-9f3a1c` — sortable, greppable, collision-safe.
-
-    The timestamp is what a human reads in #custodian and in the action log;
-    the suffix is what keeps two wakes in the same second apart. Both halves
-    are needed: the id is the only string that ties a broker audit line, an
-    action-log start/end pair and a #custodian post to one another."""
+    """`wake-20260825T142310Z-9f3a1c` — sortable, greppable, collision-safe."""
     now = now or _dt.datetime.now(_dt.timezone.utc)
     stamp = now.astimezone(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return f"wake-{stamp}-{entropy or os.urandom(3).hex()}"
@@ -1600,12 +1548,7 @@ def format_session_time(seconds: float) -> str:
 
 def format_wake_refusal(*, seat: str, count: int, cap: int,
                         spent_sec: float) -> str:
-    """The wall a wake past the daily cap hits.
-
-    The wall clock rides next to the count because the minutes are the cost and
-    the count is only the speed bump: three wakes at a 5400s cap is most of an
-    afternoon of billed session, and a reader who sees `3/3` alone learns the
-    smaller of the two numbers."""
+    """The wall a wake past the daily cap hits."""
     return (f"daily wake cap reached for {seat}: {count}/{cap} wakes, "
             f"{format_session_time(spent_sec)} of session time today. Next "
             f"wake is tomorrow (UTC), or a witnessed edit to "
@@ -1613,14 +1556,8 @@ def format_wake_refusal(*, seat: str, count: int, cap: int,
 
 
 def parse_review_owner(text: str) -> Optional[str]:
-    """The `- **Review owner**: …` bullet's value, or None if the spec has no
-    such bullet.
-
-    Emphasis is stripped before matching, for the reason parse_confirm_record
-    strips it: the gate's job is to read a field, never to grade markdown.
-    None means the spec does not state a review owner — which is NOT the same
-    as stating one that is nobody, and the woken-build check treats the two
-    differently."""
+    """The `- **Review owner**: …` bullet's value, or None if the spec has no such
+    bullet."""
     for line in text.splitlines():
         plain = re.sub(r"[*_`]", "", line)
         m = re.match(r"\s*-\s*Review owner\s*:\s*(.*)$", plain, re.I)
@@ -1631,14 +1568,8 @@ def parse_review_owner(text: str) -> Optional[str]:
 
 def review_owner_seat(raw: Optional[str],
                       known_seats: "set[str] | frozenset[str]") -> Optional[str]:
-    """The SEAT a review-owner line names (`Claudette` -> `res-claudette`), or
-    None when it names nobody this house runs as.
-
-    Only the first name-shaped token is considered: the line is prose after the
-    name in every spec that has one ("Claudette. The builder cannot
-    self-review, and…"). A line naming a human (`plink`) resolves to no seat,
-    and correctly so — a human review owner is the case the no-self-review rule
-    exists to protect, not a case it should refuse."""
+    """The SEAT a review-owner line names (`Claudette` -> `res-claudette`), or None
+    when it names nobody this house runs as."""
     if not raw:
         return None
     m = re.match(r"[\s*_`]*([A-Za-z][A-Za-z0-9_-]{0,30})", raw)
@@ -1650,31 +1581,6 @@ def review_owner_seat(raw: Optional[str],
 
 # --------------------------------------------------------------------------
 # Bot-to-bot summon hops (SPECS/2026-08-24-custodian-mention-summons.md).
-#
-# The wall a work loop runs against. Guard 1 is the default and lives in the
-# adapters: a bot-triggered summon's reply does not re-trigger any bot. Guard 2
-# is the exception, and it lives HERE because it needs one arbiter — plink's
-# #1625 third-party option. Both residents' adapters spend against this one
-# counter, so a review -> revision -> fix loop cannot buy itself twice the
-# rounds by alternating who asks.
-#
-# Two ceilings, and they are NOT the same ceiling twice:
-#
-#   hop_cap (8)        ~4 review/fix round-trips, the 08-21 churn ceiling. At
-#                      the cap the work item PARKS FOR A HUMAN: every further
-#                      bot-to-bot hop on it is refused until a human posts in
-#                      #custodian about it, which resets this counter to 0.
-#   daily_hop_cap (24) hops on one work item in one UTC day, RESETS INCLUDED.
-#                      The unpark is a report from an adapter — nothing else
-#                      watches the channel — so this is what bounds that trust:
-#                      repeated nudges, real or invented, cannot compound into
-#                      an all-day burn.
-#
-# THE CLOCK NEVER UNPARKS ANYTHING (Claudette #1811). Midnight rolls the DAY
-# counter and only the day counter; a chain parked at 23:59 is still parked at
-# 00:01 and stays parked until a human has looked. A ledger that reset both at
-# midnight would turn "parked for a human" into "parked until tomorrow", which
-# is the same sentence with the human removed.
 # --------------------------------------------------------------------------
 
 DEFAULT_HOP_CAP = 8
@@ -1683,13 +1589,7 @@ DEFAULT_DAILY_HOP_CAP = 24
 
 def format_hop_refusal(*, work_item: str, count: int, cap: int,
                        daily: bool = False) -> str:
-    """The refusal line, fixed format (Claudette #1811).
-
-    Broker-attributed, in-channel, and it names all three things the summoner
-    needs: WHICH work item, HOW far it has gone, and WHAT would let it resume.
-    A refusal missing the last one is a wall with no door, and the summoner
-    retries against it.
-    """
+    """The refusal line, fixed format."""
     if daily:
         return (f"summon refused: {work_item} at {count}/{cap} bot hops today "
                 f"— the daily ceiling, which clears at 00:00 UTC")
@@ -1698,16 +1598,7 @@ def format_hop_refusal(*, work_item: str, count: int, cap: int,
 
 
 class HopLedger:
-    """The per-work-item hop counter, persisted and restart-proof.
-
-    State file shape::
-
-        {"<work item>": {"hops": 8, "day": "2026-08-24", "day_hops": 11,
-                         "unpark_seq": 1811}}
-
-    ``hops`` is the parkable counter and survives every rollover; ``day_hops``
-    is the daily ceiling and is the ONLY field the date touches.
-    """
+    """The per-work-item hop counter, persisted and restart-proof."""
 
     def __init__(self, path: str, *, hop_cap: int = DEFAULT_HOP_CAP,
                  daily_hop_cap: int = DEFAULT_DAILY_HOP_CAP,
@@ -1757,7 +1648,7 @@ class HopLedger:
     # -------------------------------------------------------------- public
 
     def spend(self, work_item: str) -> dict:
-        """Charge one hop. Returns the decision; never raises."""
+        """Charge one hop."""
         with self._lock:
             state = self._load()
             rec = self._record(state, work_item)
@@ -1781,12 +1672,7 @@ class HopLedger:
                     "day_cap": self.daily_hop_cap}
 
     def unpark(self, work_item: str, seq: Optional[int] = None) -> dict:
-        """A human posted on this work item: the chain resumes at 0/cap.
-
-        Idempotent per seq, because BOTH adapters see the same post and both
-        report it; without this the second report would be a second reset and
-        the day ceiling would be the only counter left doing any work.
-        """
+        """A human posted on this work item: the chain resumes at 0/cap."""
         with self._lock:
             state = self._load()
             rec = self._record(state, work_item)
@@ -1810,10 +1696,7 @@ class Broker:
     """Unix-socket verb broker. Construct with parsed broker.toml + a path to
     verbs.toml (re-read per request — that's the kill-switch property)."""
 
-    # How often an ADOPTED build's unit is polled for its terminal state. Only
-    # reached after a broker restart with a build in flight (a rare event on a
-    # rare verb), so it is deliberately lazy — the cost of noticing a minute
-    # late is one late #custodian line. Tests turn it down.
+    # How often an ADOPTED build's unit is polled for its terminal state.
     BUILD_POLL_SEC = 5.0
 
     def __init__(
@@ -1822,18 +1705,24 @@ class Broker:
         verbs_path: str,
         *,
         transport: Optional[Callable[[dict, str], dict]] = None,
+        channel_transport: Optional[Callable[[dict, int, str], dict]] = None,
         build_spawn: Optional[Callable[[list[str]], Any]] = None,
         planroom_api: Optional[Callable[..., dict]] = None,
+        apps_spawn: Optional[Callable[..., Any]] = None,
     ) -> None:
         self.config = config
         self.verbs_path = verbs_path
         self.transport = transport or _sdk_transport
+        # How a banner reaches the channel a `/build` was typed in.
+        self.channel_transport = channel_transport or _sdk_channel_transport
+        # How the server principal is told apart from plink at the keyboard.
+        self._read_peer_cgroup: Callable[[int], str] = read_peer_cgroup
         # How the board verbs reach the Disjorn server's /planroom surface.
-        # Injected in tests, exactly like `transport`.
         self.planroom_api = planroom_api or _planroom_http
-        # How a detached build session is launched. Injected in tests (mock the
-        # exec); prod uses _default_build_spawn (a detached, un-waited Popen).
+        # How a detached build session is launched.
         self._build_spawn = build_spawn or self._default_build_spawn
+        # How one apps-build TURN is launched.
+        self._apps_spawn = apps_spawn or self._default_apps_spawn
         broker_cfg = config.get("broker", {})
         self.socket_path: str = broker_cfg.get("socket_path", DEFAULT_SOCKET_PATH)
         self.audit_path: str = broker_cfg["audit_log"]
@@ -1845,30 +1734,32 @@ class Broker:
         self.commands: dict[str, Any] = config.get("commands", {})
         self.paths: dict[str, str] = config.get("paths", {})
         self.disjorn: dict[str, Any] = config.get("disjorn", {})
-        # Plan Room. `index` is the derived card cache this daemon WRITES and
-        # the server reads; everything else here is about when to rebuild it.
-        # Absent config means the board is simply not wired up on this host:
-        # the verbs still work (they ask the server, which will say the index
-        # is unavailable — an honest answer), and nothing rebuilds.
+        # APPS v1 stage 2 (SPECS/2026-09-06-apps-builder-seat.md §B).
+        apps_cfg = config.get("apps")
+        self.apps_configured: bool = isinstance(apps_cfg, dict) and bool(apps_cfg)
+        self.apps: dict[str, Any] = {
+            **APPS_DEFAULTS, **(apps_cfg if isinstance(apps_cfg, dict) else {})}
+        # Session -> turn currently in flight, and the lock that makes claiming one
+        # atomic.
+        self._apps_lock = threading.Lock()
+        # app_id -> (session, turn): one turn at a time PER APP, not per session
+        # (BLOCK).
+        self._active_apps: dict[str, tuple[int, int]] = {}
+        self._apps_threads: list[threading.Thread] = []
+        # Why the verb is off, in one flat sentence, or None.
+        self._apps_disabled_reason: Optional[str] = None
         self.planroom: dict[str, Any] = (
             config.get("planroom", {})
             if isinstance(config.get("planroom"), dict) else {})
         self._planroom_lock = threading.Lock()
         self._planroom_thread: Optional[threading.Thread] = None
-        # Daily per-resident action budget (WP-H12). Loaded at construction;
-        # a cap change needs a broker restart (unlike verbs.toml kill switches,
-        # which are re-read live). Default: no cap == OFF. Instrument first.
+        # Daily per-resident action budget (WP-H12).
         self.budgets: dict[str, Any] = config.get("budgets", {})
         # start-build (WP-L4) config: the detached build-session launch contract
         # (command + session_argv + model pin), the SPECS/ dir the confirm gate
         # reads, the wall-clock cap, and the per-day build budget.
         self.start_build: dict[str, Any] = config.get("start_build", {})
-        # The bot-to-bot hop wall (2026-08-24). Absent section = no wall = the
-        # summon-hop verb answers "no bucket" to everything, which is rule 1
-        # and is exactly today's behaviour. Present section without a
-        # state_path is config drift and fatal: a counter that cannot persist
-        # would unpark every parked chain on every broker restart, which is the
-        # one thing the human gate exists to prevent.
+        # The bot-to-bot hop wall.
         self.summon_hops: dict[str, Any] = config.get("summon_hops", {}) or {}
         self.hops: Optional[HopLedger] = None
         if self.summon_hops:
@@ -1883,25 +1774,15 @@ class Broker:
                 hop_cap=int(self.summon_hops.get("hop_cap", DEFAULT_HOP_CAP)),
                 daily_hop_cap=int(self.summon_hops.get(
                     "daily_hop_cap", DEFAULT_DAILY_HOP_CAP)))
-        # BR-1 (2026-08-14): the build identity is derived from the CALLER —
-        # build_identity_from_caller — and [start_build].resident is dead. Warn
-        # rather than ignore silently: a config line that still parses but no
-        # longer does anything is how "the ratified default 2" happened, and the
-        # next reader deserves to learn it is dead from the log, not from an
-        # afternoon of tracing why edits to it change nothing.
+        # BR-1: the build identity is derived from the CALLER —
+        # build_identity_from_caller — and [start_build].resident is dead.
         if "resident" in self.start_build:
             print("disjorn-broker: WARNING [start_build].resident is IGNORED "
                   "since BR-1 (2026-08-14): builds run as the resident that "
                   "CALLS start-build (SO_PEERCRED), never as a configured "
                   "name. Delete the line from broker.toml.", file=sys.stderr)
         # BL-D1: the confirm gate's REAL authorization is that specs_dir is
-        # resident-unwritable. Verified HERE, once, at startup — a violation
-        # raises ConfigError and main() exits non-zero, so the broker never
-        # comes up with a forgeable confirm gate. A config with no [start_build]
-        # section at all is not checked: start-build then fails closed at
-        # request time (_specs_dir raises internal), so there is nothing to
-        # forge. Presence of the section means someone intends to run builds,
-        # and then specs_dir is mandatory and audited.
+        # resident-unwritable.
         self.specs_dir_real: Optional[str] = None
         if self.start_build and self._spec_repo() is None:
             print("disjorn-broker: WARNING [start_build].spec_repo is not set: "
@@ -1920,10 +1801,6 @@ class Broker:
                     "trustworthy source)")
             self.specs_dir_real = assert_specs_dir_resident_unwritable(
                 specs_dir, uid_map=self.uid_map, residents=self.residents)
-        # Wake (2026-08-25). Absent section = no wake surface at all: the verb
-        # exists, every caller is refused as not-a-waker, and the refusal is
-        # audited. Present section = plink means to wake seats, and then every
-        # field below is mandatory and checked here, once, loudly.
         self.wake: dict[str, Any] = config.get("wake", {}) or {}
         self.wake_callers: frozenset[str] = frozenset()
         self.wake_seats: frozenset[str] = frozenset()
@@ -1950,6 +1827,40 @@ class Broker:
                 stake=("A resident that can write the spool can write itself a "
                        "wake, and nothing self-wakes."),
                 uid_map=self.uid_map, residents=self.residents)
+        # The server principal (spec 2026-09-20-build-lane-v2-stage1-2b).
+        server_cfg = config.get("server")
+        unit = ((server_cfg or {}).get("unit", DEFAULT_SERVER_UNIT)
+                if isinstance(server_cfg, dict) else DEFAULT_SERVER_UNIT)
+        if not isinstance(unit, str) or not unit.strip():
+            raise ConfigError(
+                "[server].unit must be a non-empty systemd unit name; refusing "
+                "to start (an empty unit matches every cgroup, which would "
+                "hand the server principal to anything running as plink)")
+        self.server_unit: str = unit.strip()
+        self.build_cfg: dict[str, Any] = config.get("build", {}) or {}
+        self.build_humans: frozenset[str] = frozenset()
+        self.build_seat: str = ""
+        self.build_ledger: str = ""
+        self.chat_build_cap: int = DEFAULT_CHAT_BUILD_CAP
+        self.gate_timeout: int = DEFAULT_GATE_TIMEOUT_SEC
+        self.gate_log_dir: str = DEFAULT_GATE_LOG_DIR
+        self.merge_work_dir: str = DEFAULT_MERGE_WORK_DIR
+        if self.build_cfg:
+            self.build_humans = self._parse_build_humans()
+            self.build_seat = self._parse_build_seat()
+            self.build_ledger = self._parse_build_ledger()
+            self.chat_build_cap = self._parse_build_int(
+                "daily_build_cap", DEFAULT_CHAT_BUILD_CAP)
+            self.gate_timeout = self._parse_build_int(
+                "gate_timeout_sec", DEFAULT_GATE_TIMEOUT_SEC,
+                minimum=GATE_UNIT_RUNTIME_CAP_SEC + 1,
+                stake=f"the gate unit's own runtime cap is "
+                      f"{GATE_UNIT_RUNTIME_CAP_SEC} seconds; the broker must "
+                      f"outwait it")
+            self.gate_log_dir = self._parse_build_dir(
+                "gate_log_dir", DEFAULT_GATE_LOG_DIR)
+            self.merge_work_dir = self._parse_build_dir(
+                "merge_work_dir", DEFAULT_MERGE_WORK_DIR)
         # The fails-closed Tier-1 wall (2026-08-26). Absent section = no write
         # surface: the verb exists, every caller is refused, and the refusal is
         # audited — the same shape as an unflipped kill switch. Present section
@@ -1965,30 +1876,33 @@ class Broker:
         # and appending to it — the same count-with-reservation discipline every
         # other budget in this file runs under.
         self._write_lock = threading.Lock()
-        # Build-budget lock (H13-D4): count-with-reservation is held under this,
-        # so two concurrent start-builds can NEVER both slip past the cap — the
+        # Build-budget lock (H13-D4): count-with-reservation is held under this, so
+        # two concurrent start-builds can NEVER both slip past the cap — the
         # check-then-act race the red-team flagged is closed here.
         self._build_lock = threading.Lock()
+        # Merge lock: the Tier 0 budget is read and spent, and main is written,
+        # under this one lock — two merges may never race onto main.
+        self._merge_lock = threading.Lock()
+        # One gate run per slug at a time, whether a `/merge` or a build's end
+        # started it: a second run would gate a branch the first is merging.
+        self._gate_lock = threading.Lock()
+        self._gate_runs: set[str] = set()
+        # Background merge threads, kept ONLY so tests can join them; production
+        # never waits — the room hears the outcome as a post.
+        self._merge_threads: list[threading.Thread] = []
         # Wake-budget lock: the day's count is read from the spool and the new
-        # record is written under this one lock, so two wakes pressed at once
-        # cannot both read the same pre-cap count. The spool IS the ledger here
-        # — there is no in-memory reservation to drift from it.
+        # record is written under this one lock, so two wakes pressed at once cannot
+        # both read the same pre-cap count.
         self._wake_lock = threading.Lock()
         # Action-budget lock (H13-D4, extended to EVERY numeric budget): same
-        # count-with-reservation discipline as builds. The daily action cap used
-        # to be a check-then-act against the audit file, so N concurrent
-        # dispatches all read the same pre-cap count and all ran.
+        # count-with-reservation discipline as builds.
         self._action_lock = threading.Lock()
         # Per-resident build reservations for the day: resident -> (utc_date,
-        # count). Seeded lazily from the audit log per day, then authoritative
-        # in memory (never re-read, so in-flight builds are never double-counted).
+        # count).
         self._builds: dict[str, tuple[Optional[str], int]] = {}
         # Same shape for the action budget: resident -> (utc_date, count).
         self._actions: dict[str, tuple[Optional[str], int]] = {}
-        # BL-D4: slugs of builds currently in flight. Two builds of the SAME
-        # spec would collide on podman `--name disjorn-build-<slug>` and on the
-        # loop/<slug> branch; the dated slug separates different specs, this
-        # separates the same spec launched twice. Guarded by _build_lock.
+        # BL-D4: slugs of builds currently in flight.
         self._active_builds: set[str] = set()
         # Detached build reaper threads, kept ONLY so tests can join them;
         # production never waits on a build — detachment is the whole point.
@@ -1996,31 +1910,28 @@ class Broker:
         self._listener: Optional[socket.socket] = None
         self._closed = False
 
-        # The verb table.  Adding a verb here is a deliberate act; there is no
-        # dynamic registration and — enforced by test — no "restart-self".
-        # Handlers return (result, audit_summary) or (result, audit_summary,
-        # audit_extra) — see dispatch().
+        # The verb table.
         self.verbs: dict[str, Callable[[str, dict], tuple]] = {
             "restart-disjorn": self._verb_restart_disjorn,
             "run-server-tests": self._verb_run_server_tests,
             "refresh-mirror": self._verb_refresh_mirror,
             "start-build": self._verb_start_build,
+            # The one verb whose caller is the server, not a seat.
+            BUILD_VERB: self._verb_build,
+            MERGE_VERB: self._verb_merge,
             "classify-diff": self._verb_classify_diff,
+            "changed-files": self._verb_changed_files,
             "read-prod-logs": self._verb_read_prod_logs,
             "read-own-log": self._verb_read_own_log,
             "read-metrics": self._verb_read_metrics,
             "file-proposal": self._verb_file_proposal,
             "query-own-audit": self._verb_query_own_audit,
             "summon-hop": self._verb_summon_hop,
-            # The one verb no seat may call: dispatch refuses it to every
-            # resident identity before verbs.toml is even read, and refuses
-            # every other verb to a wake caller. See _check_wake_identity.
+            # The one verb no seat may call: dispatch refuses it to every resident
+            # identity before verbs.toml is even read, and refuses every other verb
+            # to a wake caller.
             WAKE_VERB: self._verb_wake,
-            # Plan Room (SPECS/2026-08-20-plan-room.md). Three read, two write.
-            # The two writes touch BOARD-NATIVE STATE ONLY — comments and the
-            # blocked flag — and they are structurally unable to touch anything
-            # derived, because derived state has no write path anywhere in this
-            # house (seq 1428 P1). Not a check here: an absence there.
+            # Plan Room (SPECS/2026-08-20-plan-room.md).
             "board-list": self._verb_board_list,
             "board-card": self._verb_board_card,
             "board-search": self._verb_board_search,
@@ -2037,21 +1948,22 @@ class Broker:
             # this table that writes a file outside the resident's own volume,
             # and it does so ONLY on a #custodian record the broker read itself.
             WRITE_VERB: self._verb_apply_posted_write,
+            # APPS v1 stage 2.
+            "apps-build": self._verb_apps_build,
         }
+
+        # The seat map is checked against the server's `bots` table ONCE, here,
+        # while there is still a human watching the boot.
+        if self.apps_configured:
+            self._apps_disabled_reason = self._apps_seat_map_failure()
+            if self._apps_disabled_reason:
+                self._audit("broker", "apps-build", {}, False,
+                            self._apps_disabled_reason)
 
     # -------------------------------------------------------- wake config
 
     def _parse_wake_callers(self) -> frozenset[str]:
-        """`[wake].callers` — the identities that may wake a seat.
-
-        Two refusals, both at startup and both fatal, because a wake surface
-        that looks armed and is not is worse than one that is down:
-
-        * a caller with no `[uids]` line can never be authenticated, so listing
-          it grants nothing while reading as a grant;
-        * a caller that is a SEAT is a self-wake with extra steps. The spec's
-          wall is that origin arrives as connection data from a human's uid;
-          a res-* name here would delete it in one config line."""
+        """`[wake].callers` — the identities that may wake a seat."""
         callers = self.wake.get("callers")
         if not isinstance(callers, list) or not callers or not all(
                 isinstance(c, str) and c for c in callers):
@@ -2074,9 +1986,7 @@ class Broker:
         return frozenset(callers)
 
     def _parse_wake_seats(self) -> frozenset[str]:
-        """`[wake].residents` — the seats that may BE woken. Config, never
-        caller input: the verb's `resident` argument is checked against this,
-        so a wake can only ever reach a seat plink has named here."""
+        """`[wake].residents` — the seats that may BE woken."""
         seats = self.wake.get("residents")
         if not isinstance(seats, list) or not seats or not all(
                 isinstance(s, str) and s for s in seats):
@@ -2089,6 +1999,74 @@ class Broker:
                     f"wake.residents names {seat!r}, which is not a resident "
                     "of this house ([uids] / [residents]); refusing to start")
         return frozenset(seats)
+
+    # ------------------------------------------------------- build config
+
+    def _parse_build_humans(self) -> frozenset[str]:
+        """`[build].humans` — the accounts whose `/build` the broker will act on.
+
+        An EMPTY list is legal and means the verb refuses everything; a missing
+        or malformed list is not, because a human list nobody can read is a
+        surface that reads as armed while refusing every call."""
+        humans = self.build_cfg.get("humans")
+        if not isinstance(humans, list) or not all(
+                isinstance(h, str) and h.strip() for h in humans):
+            raise ConfigError(
+                "[build] is configured but build.humans is missing or is not a "
+                "list of usernames; refusing to start")
+        for human in humans:
+            if _BUILD_CALLER_RE.match(human.strip()):
+                raise ConfigError(
+                    f"build.humans names {human!r}, which is a resident seat: "
+                    "only a person may start a build. Refusing to start.")
+        return frozenset(h.strip() for h in humans)
+
+    def _parse_build_seat(self) -> str:
+        """`[build].seat` — the build identity, a resident name WITHOUT `res-`."""
+        seat = self.build_cfg.get("seat")
+        if not isinstance(seat, str) or not seat.strip():
+            raise ConfigError(
+                "[build] is configured but build.seat is missing; refusing to "
+                "start (a build with no seat has nowhere to run)")
+        seat = seat.strip()
+        if _BUILD_CALLER_RE.match(seat):
+            raise ConfigError(
+                f"build.seat is {seat!r}: name the resident WITHOUT the `res-` "
+                "prefix (e.g. `gable`); refusing to start")
+        if f"res-{seat}" not in self.seat_names:
+            raise ConfigError(
+                f"build.seat names {seat!r}, and res-{seat} is not a resident "
+                "of this house ([uids] / [residents]); refusing to start")
+        return seat
+
+    def _parse_build_ledger(self) -> str:
+        """`[build].ledger` — where every accepted `/build` is snapshotted."""
+        path = self.build_cfg.get("ledger")
+        if not isinstance(path, str) or not path.strip():
+            raise ConfigError(
+                "[build] is configured but build.ledger is missing; refusing "
+                "to start (the ledger is the record that a human asked)")
+        return path.strip()
+
+    def _parse_build_int(self, key: str, default: int, *, minimum: int = 1,
+                         stake: str = "") -> int:
+        """A positive-integer `[build]` knob, at or above its floor."""
+        value = self.build_cfg.get(key, default)
+        if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
+            floor = ("a positive integer" if minimum == 1
+                     else f"an integer above {minimum - 1}")
+            raise ConfigError(
+                f"build.{key} must be {floor}; refusing to start"
+                + (f" ({stake})" if stake else ""))
+        return value
+
+    def _parse_build_dir(self, key: str, default: str) -> str:
+        """A `[build]` directory the broker writes into, never a resident."""
+        value = self.build_cfg.get(key, default)
+        if not isinstance(value, str) or not value.strip().startswith("/"):
+            raise ConfigError(
+                f"build.{key} must be an absolute path; refusing to start")
+        return value.strip()
 
     def _wake_session_cap(self) -> int:
         cap = self.wake.get("session_cap_sec", DEFAULT_WAKE_SESSION_CAP_SEC)
@@ -2215,10 +2193,7 @@ class Broker:
 
     def _audit(self, resident: str, verb: str, args: Any, allowed: bool,
                result_summary: str, extra: Optional[dict] = None) -> None:
-        """One JSON line per call. `extra` adds verb-specific FACTS that later
-        readers must be able to trust (BL-D3: `build_started`), and can never
-        overwrite the six core keys — a verb cannot rewrite its own identity,
-        caller, or allowed-ness in the trail."""
+        """One JSON line per call."""
         rec = {
             "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),
             "resident": resident,
@@ -2237,9 +2212,7 @@ class Broker:
     # -------------------------------------------------------------- budget
 
     def _daily_action_cap(self, resident: str) -> Optional[int]:
-        """Per-resident daily action cap from `[budgets]`, or None (off).
-        `[budgets.<resident>].daily_action_cap` wins; else
-        `[budgets].default_daily_action_cap`; else None."""
+        """Per-resident daily action cap from `[budgets]`, or None (off)."""
         per = self.budgets.get(resident)
         if isinstance(per, dict) and isinstance(per.get("daily_action_cap"), int):
             return per["daily_action_cap"]
@@ -2247,9 +2220,9 @@ class Broker:
         return default if isinstance(default, int) else None
 
     def _count_today_allowed(self, resident: str) -> int:
-        """How many ALLOWED actions this resident has today (UTC), read from
-        the audit log — the same source the metrics producer aggregates, so
-        the count is authoritative and restart-proof. Denials never count."""
+        """How many ALLOWED actions this resident has today (UTC), read from the
+        audit log — the same source the metrics producer aggregates, so the count is
+        authoritative and restart-proof."""
         today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
         n = 0
         try:
@@ -2269,11 +2242,7 @@ class Broker:
         return n
 
     def _reserve_action(self, resident: str, cap: int) -> None:
-        """Race-safe action-budget check + reservation (H13-D4). Identical
-        discipline to _reserve_build: seed the day's count from the audit log
-        once, then hold count AND reserve under ONE lock, so N concurrent
-        dispatches can never all read the same pre-cap count and all proceed.
-        Raises over-budget at/over the cap (a denial: the verb never runs)."""
+        """Race-safe action-budget check + reservation (H13-D4)."""
         with self._action_lock:
             today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
             date, count = self._actions.get(resident, (None, 0))
@@ -2288,8 +2257,8 @@ class Broker:
     def _release_action(self, resident: str) -> None:
         """Refund an action reservation when the call turned out to be a DENIAL
         (bad-args / over-budget): denials are audited allowed=False and must not
-        consume budget — a resident cannot exhaust its own cap by being refused
-        (the WP-H12 contract, preserved verbatim under reservation)."""
+        consume budget — a resident cannot exhaust its own cap by being refused (the
+        WP-H12 contract, preserved verbatim under reservation)."""
         with self._action_lock:
             date, count = self._actions.get(resident, (None, 0))
             if count > 0:
@@ -2298,11 +2267,13 @@ class Broker:
     # -------------------------------------------------------- build budget
 
     def _daily_build_cap(self, resident: str) -> Optional[int]:
-        """Per-day build cap for a resident.
-        `[start_build.per_resident.<r>].daily_build_cap` wins; else
-        `[start_build].daily_build_cap`; else the ratified default of 2. Builds
-        are capped by DEFAULT (BUILD-LOOP.md), unlike the WP-H12 action budget:
-        the blast radius of an autonomous build is a whole branch of tokens."""
+        """Per-day build cap for a resident, or for the server principal.
+
+        A chat build spends `[build].daily_build_cap` under `server` and NEVER
+        the build seat's `[start_build]` allowance: one entrance may not eat the
+        other's day."""
+        if resident == SERVER_IDENTITY:
+            return self.chat_build_cap
         per = self.start_build.get("per_resident")
         if isinstance(per, dict):
             r = per.get(resident)
@@ -2312,34 +2283,20 @@ class Broker:
         return cap if isinstance(cap, int) else DEFAULT_DAILY_BUILD_CAP
 
     def _count_builds_today(self, resident: str, today: str) -> int:
-        """Builds this resident GENUINELY STARTED today (UTC). Used ONLY to
-        seed the in-memory reservation counter once per day; after seeding the
-        counter is authoritative, so a build launched this process (already
-        reserved in memory, not yet reflected here until dispatch writes its
-        line) is never counted twice.
-
-        BL-D3: the marker is the audit record's `build_started: true` flag, not
-        `allowed: true`. A spawn OSError is an authorized-but-failed call — it
-        audits allowed=True (correctly: the verb ran) and refunds its in-memory
-        slot, so counting allowed=True lines made a build that NEVER STARTED
-        consume a slot after a broker restart, with memory and disk disagreeing.
-        Only _verb_start_build's success path emits the marker, so
-        never-started and ran-then-failed are now distinguishable on disk.
-        (Consequence, deliberate: audit lines written before this field existed
-        do not reseed. start-build has never run outside tests — it ships OFF —
-        so there are none, and undercounting a soft budget fails safe anyway.)"""
+        """Builds this principal GENUINELY STARTED today (UTC) — a seat's spec
+        builds, or the server's chat builds."""
         n = 0
         try:
             with open(self.audit_path, "r", encoding="utf-8") as fh:
                 for raw in fh:
-                    if "start-build" not in raw or resident not in raw:
+                    if "build" not in raw or resident not in raw:
                         continue
                     try:
                         rec = json.loads(raw)
                     except json.JSONDecodeError:
                         continue
                     if (rec.get("resident") == resident
-                            and rec.get("verb") == "start-build"
+                            and rec.get("verb") in ("start-build", BUILD_VERB)
                             and rec.get("allowed") is True
                             and rec.get("build_started") is True
                             and str(rec.get("ts", ""))[:10] == today):
@@ -2349,21 +2306,15 @@ class Broker:
         return n
 
     def _reserve_build(self, resident: str, slug: str) -> tuple[int, Optional[int]]:
-        """Race-safe build-budget check + reservation (H13-D4: count-with-
-        reservation under a lock, NEVER check-then-act on the audit file), plus
-        the BL-D4 in-flight uniqueness claim on the slug.
-        Under one lock: refuse a slug already building, seed the day's count
-        from the audit log if unseen, refuse at/over the cap, else reserve a
-        slot + claim the slug and return (used_after, cap). Because the lock
-        spans count AND reserve, concurrent start-builds can never both pass a
-        cap of N, and two builds can never share a branch or container name."""
+        """Race-safe build-budget check + reservation (H13-D4:
+        count-with-reservation under a lock, NEVER check-then-act on the audit
+        file), plus the BL-D4 in-flight uniqueness claim on the slug."""
         cap = self._daily_build_cap(resident)
         with self._build_lock:
             if slug in self._active_builds:
                 # bad-args (a denial, so it burns no budget and audits
-                # allowed=False): the caller can fix it by waiting or by
-                # writing a distinct spec. Loud rather than silently racing
-                # podman --name / the loop/<slug> branch.
+                # allowed=False): the caller can fix it by waiting or by writing a
+                # distinct spec.
                 raise _bad(f"a build for {slug} is already running "
                            f"(branch loop/{slug}); wait for it to finish")
             today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
@@ -2372,6 +2323,10 @@ class Broker:
                 count = self._count_builds_today(resident, today)
             if cap is not None and count >= cap:
                 self._builds[resident] = (today, count)
+                if resident == SERVER_IDENTITY:
+                    raise VerbError(
+                        BUILD_REFUSED,
+                        f"today's chat build budget ({cap}) is spent")
                 raise VerbError("over-budget",
                                 f"daily build budget of {cap} reached for {resident}")
             self._builds[resident] = (today, count + 1)
@@ -2379,9 +2334,9 @@ class Broker:
             return count + 1, cap
 
     def _release_build(self, resident: str, slug: str) -> None:
-        """Refund a reservation AND drop the slug claim when the launch itself
-        never started (a build that ran and then failed keeps its slot — it
-        burned the attempt; see _finish_build)."""
+        """Refund a reservation AND drop the slug claim when the launch itself never
+        started (a build that ran and then failed keeps its slot — it burned the
+        attempt; see _finish_build)."""
         with self._build_lock:
             date, count = self._builds.get(resident, (None, 0))
             if count > 0:
@@ -2390,21 +2345,36 @@ class Broker:
 
     def _finish_build(self, slug: str) -> None:
         """Release the BL-D4 slug claim when a started build reaches a terminal
-        state. The BUDGET slot is deliberately NOT refunded — the build ran."""
+        state."""
         with self._build_lock:
             self._active_builds.discard(slug)
 
     def join_builds(self, timeout: float = 5.0) -> None:
-        """Join detached build reaper threads — TEST convenience only.
-        Production never waits on a build (detachment is the whole point)."""
+        """Join detached build reaper threads — TEST convenience only."""
         for t in list(self._build_threads):
             t.join(timeout)
 
     # --------------------------------------------------------------- core
 
-    def dispatch(self, uid: int, verb: Any, args: Any) -> dict:
-        """Authorize + execute one request. Always writes exactly one audit line."""
-        resident = self.uid_map.get(uid)
+    def _caller_identity(self, uid: int, pid: Optional[int]) -> Optional[str]:
+        """The principal behind one connection.
+
+        [uids] answers by peer uid; the server is the one caller that shares a
+        uid with a human, so its cgroup has to name [server].unit as well."""
+        name = self.uid_map.get(uid)
+        if name != SERVER_PEER_IDENTITY or pid is None:
+            return name
+        unit = self.server_unit
+        want = unit if "/" in unit else f"/system.slice/{unit}"
+        if any(line.rstrip().rpartition(":")[2] == want
+               for line in self._read_peer_cgroup(pid).splitlines()):
+            return SERVER_IDENTITY
+        return name
+
+    def dispatch(self, uid: int, verb: Any, args: Any, *,
+                 pid: Optional[int] = None) -> dict:
+        """Authorize + execute one request."""
+        resident = self._caller_identity(uid, pid)
         caller = resident if resident is not None else f"uid:{uid}"
 
         if not isinstance(verb, str) or not isinstance(args, dict):
@@ -2419,11 +2389,9 @@ class Broker:
             self._audit(caller, verb, args, False, "denied: unknown verb")
             return self._err("unknown-verb", f"no such verb: {verb}")
 
-        # Wake identity, BEFORE the kill switch and before any handler: the
-        # wake verb is the one verb whose caller is not a seat, and the two
-        # halves of that are enforced here rather than left to verbs.toml.
-        # A misedit there can widen a verb; it can never hand a resident the
-        # wake, and it can never hand a waker anything else.
+        # Wake identity, BEFORE the kill switch and before any handler: the wake
+        # verb is the one verb whose caller is not a seat, and the two halves of
+        # that are enforced here rather than left to verbs.toml.
         refusal = self._check_wake_identity(resident, verb)
         if refusal is not None:
             self._audit(caller, verb, args, False, f"denied: {refusal}")
@@ -2441,15 +2409,7 @@ class Broker:
             self._audit(caller, verb, args, False, "denied: verb disabled for resident")
             return self._err("verb-disabled", f"{verb} is not enabled for {resident}")
 
-        # Daily per-resident action budget (WP-H12). Default OFF: with no cap
-        # configured this never denies. The day's count is seeded from the audit
-        # log (so it survives a broker restart) and then reserved in memory
-        # under a lock — H13-D4: reading the count and acting on it must be one
-        # atomic step, or N concurrent dispatches all see the same pre-cap count
-        # and all run. The (cap+1)-th action is denied and audited like any
-        # other denial. Additive and permissive by default — instrument first,
-        # tune from observed data (AGENTHOOD budget rule), never from imagined
-        # abuse.
+        # Daily per-resident action budget (WP-H12).
         cap = self._daily_action_cap(resident)
         reserved = False
         if cap is not None:
@@ -2463,25 +2423,20 @@ class Broker:
 
         try:
             out = self.verbs[verb](resident, args)
-            # Verbs return (result, summary) or (result, summary, audit_extra);
-            # only start-build uses the third slot today (BL-D3's `build_started`
+            # Verbs return (result, summary) or (result, summary, audit_extra); only
+            # start-build uses the third slot today (BL-D3's `build_started`
             # marker), so no other handler had to change.
             result, summary, extra = out if len(out) == 3 else (*out, None)
         except VerbError as exc:
-            # A denial (the verb never ran) audits allowed=False; an authorized
-            # run that failed audits allowed=True. bad-args is a denial; so is a
-            # handler-raised over-budget (e.g. the WP-L4 build budget, refused
-            # before any launch) and a handler-raised verb-disabled (a surface
-            # the caller's seat has no config for, 2026-08-26) — none of them
-            # reached execution, and a refusal that audits as allowed reads as a
-            # capability the seat has. A denial also REFUNDS the action
-            # reservation: denials must not consume budget.
-            allowed = exc.code not in ("bad-args", "over-budget", "verb-disabled")
+            allowed = exc.code not in ("bad-args", "over-budget", "verb-disabled",
+                                       "apps-refused", BUILD_REFUSED,
+                                       MERGE_REFUSED)
             if reserved and not allowed:
                 self._release_action(resident)
+            reason = f" ({exc.reason})" if exc.reason else ""
             self._audit(caller, verb, args, allowed,
-                        f"{'error' if allowed else 'denied'}: {exc.message}")
-            return self._err(exc.code, exc.message)
+                        f"{'error' if allowed else 'denied'}: {exc.message}{reason}")
+            return self._err(exc.code, exc.message, reason=exc.reason)
         except Exception as exc:  # noqa: BLE001 — never crash the daemon on a verb
             self._audit(caller, verb, args, True, f"error: internal: {exc!r}")
             return self._err("internal", "internal broker error")
@@ -2490,8 +2445,11 @@ class Broker:
         return {"ok": True, "verb": verb, "result": result}
 
     @staticmethod
-    def _err(code: str, message: str) -> dict:
-        return {"ok": False, "error": {"code": code, "message": message}}
+    def _err(code: str, message: str, reason: Optional[str] = None) -> dict:
+        err = {"code": code, "message": message}
+        if reason:
+            err["reason"] = reason
+        return {"ok": False, "error": err}
 
     # ---------------------------------------------------------- subprocess
 
@@ -2502,11 +2460,15 @@ class Broker:
         return list(argv)
 
     def _run(self, argv: list[str], timeout: int,
-             cwd: Optional[str] = None) -> subprocess.CompletedProcess:
+             cwd: Optional[str] = None,
+             errors: Optional[str] = None) -> subprocess.CompletedProcess:
         # Fixed argv list, shell NEVER involved.
+        # `errors` pins the decode for output that carries filenames: a name is
+        # arbitrary bytes and must not raise under the daemon's locale.
         try:
             return subprocess.run(  # noqa: S603 — argv list, no shell
                 argv, capture_output=True, text=True, timeout=timeout, cwd=cwd,
+                encoding="utf-8" if errors else None, errors=errors,
             )
         except subprocess.TimeoutExpired:
             raise VerbError("exec-failure", f"command timed out after {timeout}s") from None
@@ -2518,8 +2480,8 @@ class Broker:
 
     def _verb_restart_disjorn(self, resident: str, args: dict) -> tuple[dict, str]:
         _reject_unknown(args, set())
-        # `sudo -n`: never prompts; works only because of the single sudoers
-        # line installed by harness/keyboard/04-broker.sh.
+        # `sudo -n`: never prompts; works only because of the single sudoers line
+        # installed by harness/keyboard/04-broker.sh.
         argv = self._argv("restart_disjorn",
                           ["sudo", "-n", "systemctl", "restart", "disjorn"])
         cp = self._run(argv, SUBPROCESS_TIMEOUTS["restart-disjorn"])
@@ -2542,37 +2504,14 @@ class Broker:
                 f"exit={cp.returncode}: {summary}"[:300])
 
     # ------------------------------------------------- the gatehouse fetch
-    # SPECS/2026-08-14-file-vision.md item 1. `refresh-mirror` used to move
-    # `main` and nothing else, so the mirror could tell a resident what
-    # production runs and could not show them a single branch anyone was being
-    # asked to review. Every branch now lands under refs/gatehouse/<repo>/*.
-    #
-    # WHY TWO SOURCES AND NOT ONE (decision point, RESOLVED two-source by plink
-    # 2026-08-15, and Claudette's second reason is the sharper one): `main` in
-    # the mirror must equal the main production ACTUALLY RUNS, which is plink's
-    # working clone — push-back to the gatehouse can lag a merge. Pointing
-    # everything at the gatehouse would make mirror-main LEAD prod: the
-    # merged-is-not-deployed gap inverted, in the direction nobody watches.
-    #
-    # NAMESPACES ARE DISJOINT AND THAT IS THE POINT. refs/remotes/origin/* is
-    # incidental — the default refspec drags it along. refs/gatehouse/* is
-    # deliberate, pruned, and named after the thing it mirrors.
-    #
-    # ON BRANCH-HIDING, STATED PLAINLY: nothing is being surrendered here. The
-    # mirror ALREADY leaked a partial, stale, unpruned branch view (origin/loop/*
-    # and even origin/worktree-agent-* ride the default fetch refspec). This
-    # replaces accidental partial vision with deliberate complete vision.
+    # SPECS/2026-08-14-file-vision.md item 1. `refresh-mirror` used to move `main`
+    # and nothing else, so the mirror could tell a resident what production runs and
+    # could not show them a single branch anyone was being asked to review. Every
+    # branch now lands under refs/gatehouse/<repo>/*.
     _GATEHOUSE_REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
     def _gatehouse_fetch_argvs(self) -> list[tuple[str, list[str]]]:
-        """One fixed argv per entitled gatehouse repo. Zero caller input reaches
-        any of it: the repo list and the gatehouse directory are config, and the
-        refspec is a constant. A resident can refresh, and can never aim git.
-
-        The repo NAME is re-validated even though it is plink's config, on the
-        same reasoning disjorn-build-launch gives for re-validating its slug:
-        the cost is one regex and the failure it prevents is a config typo
-        becoming a git flag."""
+        """One fixed argv per entitled gatehouse repo."""
         base_dir = self.commands.get("refresh_mirror_gatehouse_dir")
         repos = self.commands.get("refresh_mirror_gatehouse_repos")
         if not base_dir or not repos:
@@ -2593,16 +2532,30 @@ class Broker:
                                f"+refs/heads/*:refs/gatehouse/{repo}/*"]))
         return out
 
+    def _gatehouse_count_argv(self, repo: str) -> list[str]:
+        """Fixed argv listing the refs the mirror HOLDS for `repo`."""
+        if not isinstance(repo, str) or not self._GATEHOUSE_REPO_RE.match(repo):
+            raise VerbError("internal",
+                            f"gatehouse repo {repo!r} is not a plain repo name")
+        base = self._argv("refresh_mirror_gatehouse_count",
+                          ["git", "-C", "/srv/disjorn-ro", "for-each-ref",
+                           "--format=%(refname)"])
+        return [*base, f"refs/gatehouse/{repo}/"]
+
+    def _gatehouse_present(self, repo: str, timeout: int) -> Optional[int]:
+        """How many refs the mirror holds for `repo` — an INVENTORY, next to
+        `arrived`'s DELTA."""
+        try:
+            cp = self._run(self._gatehouse_count_argv(repo), timeout)
+        except VerbError:
+            return None
+        if cp.returncode != 0:
+            return None
+        return sum(1 for line in cp.stdout.splitlines() if line.strip())
+
     @staticmethod
     def _parse_fetch_refs(output: str) -> tuple[list[str], list[str]]:
-        """(arrived, vanished) ref names out of `git fetch --prune` chatter.
-
-        A VANISHED ref is the interesting one and it is deliberately NOT
-        interpreted: the branch was either harvested into main and deleted, or
-        deleted without being harvested, and the mirror cannot tell those apart
-        from here. The banner says "harvested or deleted" and names the ref, so
-        a reader knows exactly what to go and check rather than being told a
-        guess."""
+        """(arrived, vanished) ref names out of `git fetch --prune` chatter."""
         arrived, vanished = [], []
         for line in output.splitlines():
             ref = line.strip().rsplit(" ", 1)[-1].strip()
@@ -2615,9 +2568,7 @@ class Broker:
         return arrived, vanished
 
     def _fetch_gatehouse_into_mirror(self, timeout: int) -> list[dict]:
-        """Run every gatehouse fetch; return one record per repo. Raises
-        exec-failure on the first failure — a mirror that is half-refreshed and
-        says it succeeded is worse than one that says it did not."""
+        """Run every gatehouse fetch; return one record per repo."""
         records = []
         for repo, argv in self._gatehouse_fetch_argvs():
             cp = self._run(argv, timeout)
@@ -2628,20 +2579,14 @@ class Broker:
                     f"{(cp.stderr or cp.stdout).strip()[:500]}")
             arrived, vanished = self._parse_fetch_refs(cp.stderr + cp.stdout)
             records.append({"repo": repo, "arrived": arrived,
-                            "vanished": vanished})
+                            "vanished": vanished,
+                            "present": self._gatehouse_present(repo, timeout)})
         return records
 
     def _verb_refresh_mirror(self, resident: str, args: dict) -> tuple[dict, str]:
-        """Fast-forward the shared read-only repo mirror to the canonical
-        repo's main, THEN re-fetch every entitled gatehouse repo's branches
-        into refs/gatehouse/<repo>/*. The mirror is the ONLY view of the repo
-        residents have (bind-mounted RO into each container), and nothing else
-        ever fetches into it — host commits don't cross the wall until this
-        runs. Zero caller args; every argv is fixed config, so a resident can
-        refresh the mirror but can never aim git anywhere else. `--ff-only` on
-        the main update: a diverged mirror fails loudly and stays plink's to
-        resolve. `--prune` on the gatehouse fetches: a branch that vanished
-        from the gatehouse vanishes here too, and the summary names it."""
+        """Fast-forward the shared read-only repo mirror to the canonical repo's
+        main, THEN re-fetch every entitled gatehouse repo's branches into
+        refs/gatehouse/<repo>/*."""
         _reject_unknown(args, set())
         timeout = SUBPROCESS_TIMEOUTS["refresh-mirror"]
         head_argv = self._argv("refresh_mirror_head", [
@@ -2658,18 +2603,19 @@ class Broker:
         before = _head()
         self._ff_mirror_main(timeout)
         gatehouse = self._fetch_gatehouse_into_mirror(timeout)
-        # The mirror has just moved, so every card derived from it may have
-        # moved with it. Rebuilding HERE is the first of the Plan Room's three
-        # triggers (seq 1428 P4). Best-effort by construction: a refresh that
-        # fetched everything correctly and then failed to rewrite a cache has
-        # still refreshed the mirror, and saying otherwise would teach
-        # residents that a red refresh-mirror means nothing.
+        # The mirror has just moved, so every card derived from it may have moved
+        # with it.
         planroom = ({"rebuilt": False, "reason": "disabled by config"}
                     if not self.planroom.get("rebuild_on_refresh", True)
                     else self._planroom_rebuild("refresh-mirror"))
         head = _head()
         summary = f"mirror at {head}" + ("" if head == before
                                          else f" (was {before})")
+        # No news stays no line.
+        empty = ", ".join(rec["repo"] for rec in gatehouse
+                          if rec["present"] == 0)
+        if empty:
+            summary = f"{summary}; gatehouse EMPTY for {empty}"
         moved = "; ".join(
             f"{rec['repo']}: +{len(rec['arrived'])} new, "
             f"-{len(rec['vanished'])} harvested or deleted"
@@ -2685,10 +2631,10 @@ class Broker:
                  "gatehouse": gatehouse, "planroom": planroom}, summary[:300])
 
     def _ff_mirror_main(self, timeout: int) -> None:
-        """Fetch origin into the read-only mirror and fast-forward it to
-        origin/main — the two fixed argvs `refresh-mirror` has always run,
-        factored so the spec-status stamp can use the SAME refresh (never a
-        second implementation of "the mirror is fresh"). Raises VerbError."""
+        """Fetch origin into the read-only mirror and fast-forward it to origin/main
+        — the two fixed argvs `refresh-mirror` has always run, factored so the
+        spec-status stamp can use the SAME refresh (never a second implementation of
+        "the mirror is fresh")."""
         for key, default in (
             ("refresh_mirror_fetch",
              ["git", "-C", "/srv/disjorn-ro", "fetch", "origin"]),
@@ -2704,10 +2650,9 @@ class Broker:
     # ------------------------------------------------- spec Status stamping
 
     def _spec_repo(self) -> Optional[tuple[str, str, str]]:
-        """(repo path, branch, SPECS subdir) of the CANONICAL repo whose SPECS/
-        the mirror follows, from `[start_build].spec_repo` (+ `spec_repo_branch`,
-        default main; `spec_repo_subdir`, default SPECS). None when unset —
-        stamping is then off and every banner says so."""
+        """(repo path, branch, SPECS subdir) of the CANONICAL repo whose SPECS/ the
+        mirror follows, from `[start_build].spec_repo` (+ `spec_repo_branch`,
+        default main; `spec_repo_subdir`, default SPECS)."""
         repo = self.start_build.get("spec_repo")
         if not isinstance(repo, str) or not repo:
             return None
@@ -2720,8 +2665,7 @@ class Broker:
 
     def _git(self, repo: str, *args: str, stdin: Optional[str] = None,
              env: Optional[dict] = None) -> subprocess.CompletedProcess:
-        """One git command against the canonical repo, fixed argv, no shell.
-        `commands.spec_repo_git` may replace the git binary (tests)."""
+        """One git command against the canonical repo, fixed argv, no shell."""
         argv = [*self._argv("spec_repo_git", ["git"]), "-C", repo, *args]
         full_env = None
         if env:
@@ -2744,49 +2688,54 @@ class Broker:
                             f"{(cp.stderr or cp.stdout).strip()[:300]}")
         return cp.stdout
 
+    # -- the local coverage record ------------------------------------------
+    # THE PUSH LOG'S SIBLING (spec, confirmed). A stamp commit is made with git
+    # plumbing straight onto the canonical repo's branch: no push, so it never meets
+    # the pre-receive hook, so it can never have a push-log line.
+
+    LOCAL_LOG_NAME = "disjorn-local-log"
+    LOCAL_STAMP = "local-stamp"
+
+    def _local_coverage_log(self) -> Optional[str]:
+        """Where the record goes: beside the push log, `[gate].local_log`,
+        defaulting to <[gate].canonical_repo>/hooks/disjorn-local-log."""
+        gate = self.config.get("gate")
+        if not isinstance(gate, dict):
+            return None
+        path = gate.get("local_log")
+        if isinstance(path, str) and path:
+            return path
+        canonical = gate.get("canonical_repo")
+        if isinstance(canonical, str) and canonical:
+            return os.path.join(canonical, "hooks", self.LOCAL_LOG_NAME)
+        return None
+
+    def _record_local_commit(self, sha: str,
+                             outcome: str = LOCAL_STAMP) -> str:
+        """Append `LOCAL <ts> <sha> <outcome>`."""
+        path = self._local_coverage_log()
+        if not path:
+            return ("no [gate].local_log or [gate].canonical_repo is "
+                    f"configured, so no coverage record names {sha[:7]}; the "
+                    "digest will have to guess what put it on the branch")
+        ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+            try:
+                os.write(fd, f"LOCAL {ts} {sha} {outcome}\n".encode("utf-8"))
+            finally:
+                os.close(fd)
+        except OSError as exc:
+            return (f"coverage record NOT written to {path}: {exc}; the next "
+                    f"digest will report {sha[:7]} as unexplained")
+        return ""
+
     def _stamp_spec_status(self, slug: str, new_status: str, comment: str, *,
                            expect: tuple[str, ...]) -> dict:
-        """Move a spec's `## Status` line in the CANONICAL repo and commit it,
-        then fast-forward the read-only mirror so residents (and this broker's
-        own confirm gate) read the new word at once. Never raises: returns
-        {ok, status, commit, why} and the caller narrates it.
-
-        WHY THE BROKER WRITES SPECS/ AT ALL. "State lives in the file"
-        (SPECS/README.md): a spec moves draft -> confirmed -> building ->
-        built@<branch> -> merged, and the next resident reads the FILE, never
-        chat scrollback. Nothing ever wrote the middle words. So a spec under
-        construction still said `confirmed`, the board listed it as buildable,
-        and on 2026-08-17 a resident set out to build one that another build
-        had already claimed. The broker is the one process that KNOWS the
-        transition the instant it happens — it launched the build — so it
-        stamps the word; `board --mark-merged` stamps the last one when the
-        merge lands. Same shape as the board's own reasoning: the thing that
-        computes the truth writes it, and nobody has to remember.
-
-        WHY A COMMIT ON THE CANONICAL REPO, NOT AN EDIT OF THE MIRROR FILE.
-        The mirror is a fast-forward follower of the canonical repo's main; a
-        dirty file in it makes the very next refresh refuse to merge the commit
-        that touches that spec (mark-merged does, every cycle), and a
-        broker-owned overlay that survives refreshes needs a second mechanism
-        to re-derive it. Committing to the source and letting the existing
-        refresh carry it keeps ONE truth with ONE reader.
-
-        HOW, without touching the keyboard's working tree: plumbing against
-        refs/heads/<branch> — read the blob at <branch>:SPECS/<slug>.md, rewrite
-        the Status line, hash-object, build a tree in a THROWAWAY index
-        (GIT_INDEX_FILE), commit-tree, then update-ref with the old sha as a
-        compare-and-swap. The keyboard may be on any branch, mid-anything: its
-        index and worktree are never read or written — EXCEPT one courtesy:
-        when HEAD is that branch and the file is clean, `checkout HEAD -- path`
-        syncs the worktree so `git status` stays quiet. A dirty file is left
-        alone and named in the result.
-
-        WHAT A RESIDENT CONTROLS: nothing here. The slug is the gate-validated
-        filename; the words written are this function's own; the one
-        resident-influenced string (a failure reason) goes through
-        _status_comment_text. `expect` guards the transition: the file must
-        currently carry one of those words, else the stamp is refused — a
-        keyboard that already advanced the spec is never overwritten."""
+        """Move a spec's `## Status` line in the CANONICAL repo and commit it, then
+        fast-forward the read-only mirror so residents (and this broker's own
+        confirm gate) read the new word at once."""
         cfg = self._spec_repo()
         if cfg is None:
             return {"ok": False, "status": new_status, "commit": None,
@@ -2845,45 +2794,44 @@ class Broker:
                     "why": repr(exc)}
         result = {"ok": True, "status": new_status, "commit": commit[:7],
                   "why": ""}
-        # Courtesy sync of the keyboard's worktree, only when it is provably
-        # safe: HEAD is this branch and the file has no local edits.
+        notes: list[str] = []
+        note = self._record_local_commit(commit)
+        if note:
+            notes.append(note)
+        # Courtesy sync of the keyboard's worktree, only when it is provably safe:
+        # HEAD is this branch and the file has no local edits.
         try:
             head = self._git(repo, "symbolic-ref", "--quiet", "HEAD").stdout.strip()
             if head == ref:
-                # "Clean" = worktree AND index still equal the commit we just
-                # moved past (old_sha), not HEAD — HEAD is already the new
-                # commit, against which an untouched checkout looks modified.
+                # "Clean" = worktree AND index still equal the commit we just moved
+                # past (old_sha), not HEAD — HEAD is already the new commit, against
+                # which an untouched checkout looks modified.
                 dirty = (self._git(repo, "diff", "--quiet", old_sha, "--",
                                    relpath).returncode != 0
                          or self._git(repo, "diff", "--quiet", "--cached",
                                       old_sha, "--", relpath).returncode != 0)
                 if dirty:
-                    result["why"] = (f"{relpath} has local edits in the working "
-                                     "tree; the commit landed on the branch but "
-                                     "the worktree was not touched")
+                    notes.append(f"{relpath} has local edits in the working "
+                                 "tree; the commit landed on the branch but "
+                                 "the worktree was not touched")
                 else:
                     self._git_ok(repo, "checkout", "HEAD", "--", relpath)
         except Exception as exc:  # noqa: BLE001 — courtesy only
-            result["why"] = f"worktree not synced: {exc!r}"
+            notes.append(f"worktree not synced: {exc!r}")
         # Carry the word to the mirror the gate and the residents read.
         try:
             self._ff_mirror_main(SUBPROCESS_TIMEOUTS["refresh-mirror"])
         except VerbError as exc:
-            result["why"] = (result["why"] + "; " if result["why"] else "") + \
-                f"mirror NOT refreshed: {exc.message}"
+            notes.append(f"mirror NOT refreshed: {exc.message}")
         except Exception as exc:  # noqa: BLE001
-            result["why"] = (result["why"] + "; " if result["why"] else "") + \
-                f"mirror NOT refreshed: {exc!r}"
+            notes.append(f"mirror NOT refreshed: {exc!r}")
+        result["why"] = "; ".join(notes)
         return result
 
     # ------------------------------------------------------------ start-build
 
     def _specs_dir(self) -> str:
-        """The SPECS/ dir the confirm gate reads. Prefers the realpath VERIFIED
-        at construction (BL-D1) over the raw config string, so the directory the
-        gate reads is byte-for-byte the one proven resident-unwritable — a
-        later mutation of self.start_build (tests, a future reload path) can
-        never move the gate to an unchecked path."""
+        """The SPECS/ dir the confirm gate reads."""
         if self.specs_dir_real:
             return self.specs_dir_real
         d = self.start_build.get("specs_dir")
@@ -2892,13 +2840,10 @@ class Broker:
         return d
 
     def _resolve_spec_path(self, spec: str) -> str:
-        """Map caller input to a real spec file, CONFINED to the configured
-        SPECS/ dir. realpath() resolves BOTH `..` traversal and symlink escape,
-        then we require the resolved file to sit DIRECTLY in SPECS/ (the flat
-        one-file-per-spec layout) and end in .md. A caller can never point the
-        builder outside SPECS/ — not with `..`, not through a planted symlink,
-        not with an absolute path. The path is caller input; the confinement is
-        the broker's, verified mechanically."""
+        """Map caller input to a real spec file, CONFINED to the configured SPECS/
+        dir. realpath() resolves BOTH `..` traversal and symlink escape, then we
+        require the resolved file to sit DIRECTLY in SPECS/ (the flat
+        one-file-per-spec layout) and end in .md."""
         if spec.startswith("-") or "\x00" in spec:
             raise _bad("spec must not start with '-' or contain NUL")
         specs_dir = self._specs_dir()
@@ -2912,12 +2857,8 @@ class Broker:
         return real
 
     def _read_confirmed_spec(self, path: str) -> dict:
-        """Read + validate the spec at `path`: status must be 'confirmed' and
-        the confirm record must be filled (Confirmed by + #custodian seq).
-        No confirm record -> refuse, fail-loud. Returns the fields the launch
-        and narration need. The verbs.toml toggle authorizes the CLASS (this
-        resident may build); THIS record selects the instance and the broker
-        verifies it — chat is data, never authorization."""
+        """Read + validate the spec at `path`: status must be 'confirmed' and the
+        confirm record must be filled (Confirmed by + #custodian seq)."""
         try:
             if os.path.getsize(path) > MAX_SPEC_BYTES:
                 raise _bad(f"spec exceeds {MAX_SPEC_BYTES} bytes")
@@ -2940,16 +2881,8 @@ class Broker:
                 "confirmed_by": confirm["confirmed_by"], "seq": confirm["seq"]}
 
     def _build_argv(self, slug: str, build_resident: str) -> list[str]:
-        """The detached build command — a PURE function of config + the
-        validated slug. Mirrors the summon launcher's contract
-        (launcher.build_argv):
-            [*command, resident, slug, *session_argv, "--model", model]
-        Only fixed config and the mechanically-validated kebab slug (branch/
-        argv-safe) reach argv; the spec — the chat-derived design — rides on
-        STDIN. The model pin is WP-L5's idiom: appended as `--model <id>`,
-        forwarded by run-build.sh through the bash wrapper's "$@", with NO
-        fallback (a blank pin is config drift and fails loud here, never
-        silently rides the account default)."""
+        """The detached build command — a PURE function of config + the validated
+        slug."""
         command = self.start_build.get("command", [])
         if (not isinstance(command, list) or not command
                 or not all(isinstance(a, str) for a in command)):
@@ -2973,19 +2906,7 @@ class Broker:
 
     def _default_build_spawn(self, argv: list[str], *, stdout: Any,
                              stderr: Any) -> subprocess.Popen:
-        """Launch the build DETACHED so it outlives this request.
-        `start_new_session=True` puts it in its OWN session/process group — a
-        broker signal to its own foreground group never reaches it — and the
-        broker does NOT wait: a daemon reaper feeds the spec on stdin, holds the
-        wall-clock cap, and narrates the terminal transition. Fixed argv, shell
-        NEVER involved (same discipline as _run).
-
-        BL-D2: stdout/stderr are FILES supplied by the caller, not pipes. A
-        build session is resident-influenced and runs up to timeout_sec (3600s
-        default); piping it meant the privileged broker buffered the whole
-        stream in RAM (measured: 180MB of stdout -> 540MB broker RSS), so one
-        chatty build could OOM the verb gateway for EVERY resident. Only stdin
-        stays a pipe — that is how the spec is delivered."""
+        """Launch the build DETACHED so it outlives this request."""
         return subprocess.Popen(  # noqa: S603 — argv list, no shell
             argv,
             stdin=subprocess.PIPE,
@@ -2997,17 +2918,7 @@ class Broker:
     # -------------------------------------------------- build output (BL-D2)
 
     def _build_log_dir(self) -> str:
-        """Where the detached build's stdout/stderr files live.
-
-        Order: `[broker].build_log_dir`, else a `build-logs/` subdirectory of
-        the audit log's directory (the unit's LogsDirectory=, plink-owned 0750
-        and DISK-backed), else the process temp dir as a last resort.
-
-        NOT the temp dir by default, deliberately: /tmp is tmpfs on this host,
-        so spooling a flooding build there would put the bytes back in RAM —
-        the very thing BL-D2 removes — just under a different accounting line.
-        Wherever it lands it is resident-unreachable (the daemon also runs with
-        PrivateTmp=true) and the files themselves are 0600."""
+        """Where the detached build's stdout/stderr files live."""
         d = self.config.get("broker", {}).get("build_log_dir")
         if isinstance(d, str) and d:
             return d
@@ -3022,12 +2933,10 @@ class Broker:
         return tempfile.gettempdir()
 
     def _open_build_logs(self, slug: str) -> tuple[str, str, Any, Any]:
-        """Create the two 0600 output files for one build and return
-        (out_path, err_path, out_fh, err_fh). mkstemp() creates them with mode
-        0600 and O_EXCL, so no other local user can read a build's output and
-        nothing can be pre-planted at the path. Separate files (not a single
-        interleaved one) because _parse_build_report needs an uncorrupted
-        stdout to find the session's final JSON report."""
+        """Create the two 0600 output files for one build and return (out_path,
+        err_path, out_fh, err_fh). mkstemp() creates them with mode 0600 and O_EXCL,
+        so no other local user can read a build's output and nothing can be
+        pre-planted at the path."""
         d = self._build_log_dir()
         try:
             out_fd, out_path = tempfile.mkstemp(
@@ -3062,10 +2971,7 @@ class Broker:
 
     @staticmethod
     def _read_build_tail(path: str, limit: int = MAX_BUILD_LOG_TAIL) -> str:
-        """The last `limit` bytes of a build output file, decoded leniently.
-        BOUNDED BY CONSTRUCTION: seek to the end and read backwards, so the
-        broker's memory cost is capped at `limit` no matter how much the build
-        wrote. Never log or echo resident-influenced content unbounded."""
+        """The last `limit` bytes of a build output file, decoded leniently."""
         try:
             with open(path, "rb") as fh:
                 fh.seek(0, os.SEEK_END)
@@ -3078,16 +2984,7 @@ class Broker:
 
     @staticmethod
     def _read_build_head(path: str, limit: int = MAX_BUILD_LOG_TAIL) -> str:
-        """The FIRST `limit` bytes, truncated at the last complete line.
-
-        Only the quarantine notices need this: provisioning prints QUARANTINED
-        before the session runs, so on a chatty build those lines are tens of
-        megabytes above the tail the reaper reads — and a quarantined clone that
-        nobody is told about is the exact failure the quarantine clause exists to
-        prevent. Bounded the same way as the tail (one `limit` per file, so the
-        reaper's ceiling is 2x MAX_BUILD_LOG_TAIL per build), and the trailing
-        partial line is dropped so a half-written sha can never be quoted as a
-        measurement."""
+        """The FIRST `limit` bytes, truncated at the last complete line."""
         try:
             with open(path, "rb") as fh:
                 data = fh.read(limit + 1)
@@ -3099,8 +2996,8 @@ class Broker:
         return text[:text.rfind("\n") + 1]
 
     def _harvest_report(self, out_path: str, out_tail: str) -> dict:
-        """The wrapper's publish lines for one build: parsed from the log's head
-        AND tail, because the two ends carry different halves of the protocol
+        """The wrapper's publish lines for one build: parsed from the log's head AND
+        tail, because the two ends carry different halves of the protocol
         (quarantine at provisioning time, verdicts after the container exits)."""
         return _parse_publish_lines(self._read_build_head(out_path) + "\n"
                                     + out_tail)
@@ -3108,9 +3005,8 @@ class Broker:
     # ------------------------------------------- transient-unit lifecycle (L4)
 
     def _start_build_argv(self, key: str, default: list[str]) -> list[str]:
-        """A fixed argv list out of `[start_build]`, validated like
-        `_argv` validates `[commands]`. Same doctrine: config-supplied list,
-        scalar args appended by the caller, shell never involved."""
+        """A fixed argv list out of `[start_build]`, validated like `_argv`
+        validates `[commands]`."""
         argv = self.start_build.get(key, default)
         if not isinstance(argv, list) or not argv or not all(
                 isinstance(a, str) for a in argv):
@@ -3119,12 +3015,8 @@ class Broker:
         return list(argv)
 
     def _build_unit_state(self, slug: str) -> str:
-        """systemd's word for what the build's unit is doing — `active`,
-        `failed`, `inactive`, or `unknown` if we cannot ask. An UNPRIVILEGED
-        read (`systemctl show`), unlike stopping it. A `--collect`ed unit that
-        has finished no longer exists, and systemd answers `inactive` for
-        anything it has never heard of: both are terminal, which is exactly the
-        distinction the reaper needs."""
+        """systemd's word for what the build's unit is doing — `active`, `failed`,
+        `inactive`, or `unknown` if we cannot ask."""
         try:
             argv = self._start_build_argv(
                 "unit_state_command",
@@ -3137,13 +3029,7 @@ class Broker:
         return (cp.stdout or "").strip().lower() or "unknown"
 
     def _stop_build_unit(self, slug: str, build_resident: str) -> bool:
-        """Ask systemd to stop a build's unit. THE ONLY WAY the cap still bites:
-        the unit lives outside the broker's cgroup, so killing our local
-        `sudo`/`systemd-run` process no longer kills the build. Routed through
-        the same validating helper as the launch (`… stop <resident> <slug>`),
-        so the sudoers rule stays two fixed shapes and nothing else.
-        Best-effort by design: a build we cannot stop still dies at the helper's
-        own RuntimeMaxSec backstop, and the failure is narrated either way."""
+        """Ask systemd to stop a build's unit."""
         try:
             argv = self._start_build_argv(
                 "stop_command",
@@ -3158,11 +3044,9 @@ class Broker:
 
     def _write_build_sidecar(self, meta: dict, *, out_path: str, err_path: str,
                              timeout: int) -> str:
-        """Persist everything a FUTURE broker process needs to finish this
-        build's story: which unit, which branch, which spool files, and when the
-        cap expires. Written BEFORE the launch (0600), so a broker that dies
-        mid-spawn still leaves a trail rather than an orphaned unit nobody owns;
-        removed on every terminal path alongside the spool files."""
+        """Persist everything a FUTURE broker process needs to finish this build's
+        story: which unit, which branch, which spool files, and when the cap
+        expires."""
         path = self._sidecar_path(meta["slug"])
         record = {
             "schema": BUILD_SIDECAR_SCHEMA,
@@ -3171,18 +3055,16 @@ class Broker:
             "unit": build_unit_name(meta["slug"]),
             # Since BR-1 these two agree by construction — `build_resident` is
             # DERIVED from `caller` (strip res-, launch helper re-derives uid/
-            # home/config from it). Both are still recorded: their equality is
-            # now an invariant a reader can CHECK, and the day they differ the
-            # sidecar is the evidence of what broke.
+            # home/config from it).
             "caller": meta.get("resident"),
             "build_resident": meta.get("build_resident", ""),
             "confirmed_by": meta.get("confirmed_by"),
             "seq": meta.get("seq"),
+            # Present only for a build started from chat.
+            "origin": meta.get("origin"),
             "out_path": out_path,
             "err_path": err_path,
-            # NO pid, deliberately. The only pid we have is the LOCAL
-            # sudo/systemd-run process — precisely the thing that does not
-            # survive a broker restart. The unit name is the durable handle.
+            # NO pid, deliberately.
             "timeout_sec": timeout,
             "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
             "deadline": time.time() + timeout,
@@ -3199,47 +3081,22 @@ class Broker:
             pass
 
     def _narrate(self, body: str) -> None:
-        """Post a build state-transition line to #custodian via the broker's
-        OWN bot identity — the same transport file-proposal uses. Best-effort:
-        a posting failure never crashes a build (the audit line still lands).
-        STATE TRANSITIONS ONLY — this is never called on a timer."""
+        """Post a build state-transition line to #custodian via the broker's OWN bot
+        identity — the same transport file-proposal uses."""
         try:
             self.transport(self.disjorn, body)
         except Exception:  # noqa: BLE001 — narration is legibility, not control
             pass
 
     def _refresh_mirror_for_banner(self, branch: str, published) -> str:
-        """SPEC ITEM 5 — refresh the mirror BEFORE the banner that names a sha.
-
-        WHERE THIS LIVES, AND WHY IT IS NOT THE WRAPPER. The spec's wording is
-        "the wrapper runs the same mirror fetch host-side before the reaper
-        banners". It cannot: run-build.sh runs under `systemd-run --uid=res-<r>`
-        and the res-* uid CANNOT WRITE /srv/disjorn-ro — that is one of the
-        resident->host walls this house has actually verified (AUTHORITY-PLAN.md
-        "verified this session that res-* cannot write /srv/disjorn-ro"), the
-        wrapper holds no sudo, and it mounts the mirror :ro. So the fetch runs
-        in the one process that already owns the mirror argvs and already runs
-        as plink: this reaper, on the last line before the banner. The spec's
-        INVARIANT — "a banner may never name a sha the audience cannot open" —
-        is met exactly; only the hand that does it moved. FLAGGED FOR REVIEW as
-        the single deviation in this build.
-
-        THE SAME FETCH, not a second implementation: it calls the identical
-        argv builder `refresh-mirror` uses, so the two can never drift into
-        disagreeing about what "the mirror is fresh" means.
-
-        Best-effort by construction. A fetch failure must not swallow a build's
-        banner — the banner is the only thing anyone hears — so the error is
-        carried INTO the banner text instead of raised."""
+        """SPEC ITEM 5 — refresh the mirror BEFORE the banner that names a sha."""
         if not published:
             return ""
         error = None
         try:
             if not self._gatehouse_fetch_argvs():
-                # No gatehouse configured: there is no mirror claim to make, so
-                # the banner makes none. An unmigrated broker.toml gets the
-                # 08-13 banner unchanged rather than a line about a refresh
-                # that never happened.
+                # No gatehouse configured: there is no mirror claim to make, so the
+                # banner makes none.
                 return ""
             self._fetch_gatehouse_into_mirror(
                 SUBPROCESS_TIMEOUTS["refresh-mirror"])
@@ -3250,16 +3107,17 @@ class Broker:
         return format_mirror_note(branch, published, error)
 
     def _narrate_build_outcome(self, **kwargs) -> None:
-        """Every terminal build banner goes through here, so the mirror fetch
-        cannot be forgotten on one of the five paths that post one."""
+        """Every terminal build banner goes through here, so the mirror fetch cannot
+        be forgotten on one of the five paths that post one."""
+        origin = kwargs.pop("origin", None)
+        if origin:
+            # A build nobody wrote a spec for: no Status line to stamp, no
+            # #custodian outcome post, and the banner goes where it was asked for.
+            self._seq_build_outcome(origin=origin, **kwargs)
+            return
         publish = kwargs.get("publish") or {}
         kwargs["mirror"] = self._refresh_mirror_for_banner(
             kwargs.get("branch", ""), publish.get("published", []))
-        # The spec's Status line moves with the banner — `built@<branch>`,
-        # `failed`, or back to `confirmed` — from the SAME ladder the banner is
-        # narrated from (build_outcome_class), so file and banner cannot tell
-        # two stories. Only from `building`: a keyboard that already moved the
-        # word (merged it by hand, superseded it) is never overwritten.
         status, comment = spec_status_after_build(
             branch=kwargs.get("branch", ""), publish=publish,
             unit_reason=kwargs.get("unit_reason"))
@@ -3267,53 +3125,15 @@ class Broker:
                                         expect=("building",))
         self._narrate(format_build_outcome(**kwargs)
                       + format_spec_status_note(stamp))
-        # A build's terminal banner is the loudest column transition the house
-        # has — `building` -> Review, or `building` -> back to Ready on a
-        # failure — and the mirror was just refreshed two lines above. This is
-        # the Plan Room's second rebuild trigger (seq 1428 P4): the board moves
-        # WITH the build rather than a quarter-hour behind it. It posts its own
-        # transition lines only if the columns actually changed, so a build
-        # never costs #custodian two banners about the same event unless two
-        # things really happened.
+        # A build's terminal banner is the loudest column transition the house has —
+        # `building` -> Review, or `building` -> back to Ready on a failure — and
+        # the mirror was just refreshed two lines above.
         self._planroom_rebuild("build-outcome")
 
     def _reap_build(self, proc: Any, spec_bytes: bytes, meta: dict,
                     timeout: int, out_path: str, err_path: str) -> None:
         """Detached-build lifecycle END (runs in a daemon thread; the request
-        returned long ago). Feed the spec on stdin, wait up to the wall-clock
-        cap, then narrate the terminal state transition — done or failed. No
-        intermediate posts: a build that stalls goes quiet and fails loud at the
-        cap (BUILD-LOOP: never timer-driven).
-
-        BL-D2: `communicate()` is still how the spec is written and the cap is
-        held — that part of the I/O contract is unchanged — but stdout/stderr
-        are now FILES (see _default_build_spawn), so communicate() returns
-        (None, None) and buffers nothing. The narration reads a BOUNDED TAIL
-        (MAX_BUILD_LOG_TAIL) of each file instead. Both files are removed on
-        EVERY exit path (done, failed, timed out, crashed) by the finally
-        below, and the slug claim is released with them (BL-D4).
-
-        WP-L4 open fork: `proc` is now the local `sudo systemd-run --pipe`
-        process, not the build. It still carries the build's stdin, stdout,
-        stderr and exit status (that is what --pipe means), so everything below
-        reads the same — but killing it no longer kills the BUILD, which lives
-        in a transient unit outside this broker's cgroup. So the timeout path
-        stops the UNIT first and only then reaps the local process.
-
-        2026-08-13 (publish path): the terminal banner is derived from the
-        wrapper's PUBLISHED / PUBLISH-FAILED / NO-COMMITS / QUARANTINED lines in
-        that spool, through format_build_outcome. The reaper runs NO
-        verification of its own — no rev-parse, no second look at the gatehouse.
-        The harvest is the verification; a second mechanism could only ever
-        disagree with it.
-
-        2026-08-14 (file vision, item 5): it does now run ONE git command, and
-        the distinction matters. `_narrate_build_outcome` fetches the gatehouse
-        into the read-only mirror before posting. That is a PUBLICATION step,
-        not a verification step: it measures nothing, decides nothing, and
-        cannot change the banner's verdict — it only makes the sha the banner
-        names openable by the people being asked to review it. The one-mechanism
-        rule above is intact."""
+        returned long ago)."""
         slug, branch = meta["slug"], meta["branch"]
         try:
             try:
@@ -3326,13 +3146,8 @@ class Broker:
                     proc.communicate()
                 except Exception:  # noqa: BLE001 — already reaping
                     pass
-                # A killed wrapper never harvests (by design), so there are no
-                # verdict lines to find — but provisioning's QUARANTINE notices
-                # are already in the log, and this is exactly the run whose work
-                # is sitting in a quarantine directory. Route through the same
-                # decision so they are appended here too.
                 self._narrate_build_outcome(
-                    slug=slug, branch=branch,
+                    slug=slug, branch=branch, origin=meta.get("origin"),
                     publish=self._harvest_report(
                         out_path, self._read_build_tail(out_path)),
                     unit_reason=f"timed out after {timeout}s — killed"
@@ -3342,7 +3157,7 @@ class Broker:
                 return
             except Exception as exc:  # noqa: BLE001 — broken pipe etc. = a failure
                 self._narrate_build_outcome(
-                    slug=slug, branch=branch,
+                    slug=slug, branch=branch, origin=meta.get("origin"),
                     publish=self._harvest_report(
                         out_path, self._read_build_tail(out_path)),
                     unit_reason=f"build error: {exc!r}")
@@ -3351,30 +3166,25 @@ class Broker:
             out_s = self._read_build_tail(out_path)
             err_s = self._read_build_tail(err_path)
             # The wrapper's harvest lines are the evidence; the session's JSON
-            # report is stripped out of their way and demoted to enrichment
-            # (08-13 spec item 3). A nonzero exit is still a failure, but it no
-            # longer decides ALONE: the harvest may have published before the
-            # wrapper exited nonzero, and that must be named too.
+            # report is stripped out of their way and demoted to enrichment (08-13
+            # spec item 3).
             publish = self._harvest_report(out_path, out_s)
             session_out = _strip_publish_lines(out_s)
             report = _parse_build_report(session_out)
             rc = getattr(proc, "returncode", None)
 
-            # PREFLIGHT REFUSAL (exit 78, EX_CONFIG). The wrapper checked the
-            # image before starting anything and found it unable to import a
-            # stack the repo's tests need. Nothing ran: no container, no clone
-            # touched by a session, no commits, no harvest.
-            #
-            # So refund the slot. BL-D3's rule is that a build which never
-            # started must not cost an attempt, and this is the purest case of
-            # it — the seat was unfit before the session existed. A build that
-            # ran and then failed still burns its slot; that distinction is the
-            # whole reason this is keyed to one specific exit code rather than
-            # to "nonzero".
+            # PREFLIGHT REFUSAL (exit 78, EX_CONFIG).
             if rc == PREFLIGHT_REFUSED_EXIT:
                 resident = meta.get("resident")
                 if resident:
                     self._release_build(resident, slug)
+                if meta.get("origin"):
+                    self._narrate_build_outcome(
+                        slug=slug, branch=branch, publish=publish,
+                        origin=meta["origin"],
+                        unit_reason=(err_s or session_out).strip()[:400]
+                        or "the build seat failed its dependency preflight")
+                    return
                 # Nothing ran, the slot came back — the word comes back too.
                 stamp = self._stamp_spec_status(
                     slug, "confirmed",
@@ -3392,7 +3202,7 @@ class Broker:
                 unit_reason = f"exit {rc}: {(err_s or session_out).strip()[:400]}"
             self._narrate_build_outcome(
                 slug=slug, branch=branch, publish=publish, report=report,
-                unit_reason=unit_reason)
+                unit_reason=unit_reason, origin=meta.get("origin"))
         finally:
             self._unlink_build_logs(out_path, err_path)
             self._remove_build_sidecar(slug)
@@ -3401,30 +3211,8 @@ class Broker:
     # ------------------------------------------- reattachment after a restart
 
     def adopt_inflight_builds(self) -> list[str]:
-        """Re-adopt builds that outlived the previous broker process, and sweep
-        what did not survive. Called ONCE at startup, before serving.
-
-        This is the other half of moving the build into a transient unit. The
-        unit lives outside the broker's cgroup, so `systemctl restart
-        disjorn-broker` no longer kills a build in flight — but the reaper
-        thread still dies, and without this the build would finish into a spool
-        file nobody reads, its done/failed line never posted and its slug never
-        released. Each sidecar is one build's claim ticket:
-
-          * unit still running  -> re-claim the slug (so a duplicate start-build
-            is still refused) and start a polling reaper that narrates the
-            terminal transition when it lands, exactly as the original would
-            have. The original wall-clock deadline is carried in the sidecar, so
-            a restart does not hand a build a fresh hour.
-          * unit already gone   -> it finished while we were down: narrate from
-            the spool tail (a parseable report means done; anything else is a
-            loud, honest 'outcome unknown') and clean up.
-
-        Returns the slugs adopted (running ones), for tests and the boot log.
-        NEVER launches anything: adoption observes, narrates and tidies. It is
-        also wrapped by main() so a surprise here can never stop the broker
-        coming up — losing one narration must not cost every resident its
-        hands."""
+        """Re-adopt builds that outlived the previous broker process, and sweep what
+        did not survive."""
         adopted: list[str] = []
         keep: set[str] = set()
         try:
@@ -3441,9 +3229,9 @@ class Broker:
                     rec = json.load(fh)
                 slug = rec["slug"]
                 build_unit_name(slug)          # re-validate: hostile until proven
-                # The ticket must be named after the build it claims, or the
-                # slug inside decides which files get deleted while the
-                # filename decides nothing — a mismatch is not a build record.
+                # The ticket must be named after the build it claims, or the slug
+                # inside decides which files get deleted while the filename decides
+                # nothing — a mismatch is not a build record.
                 if name != f"{slug}{BUILD_SIDECAR_SUFFIX}":
                     raise ValueError("sidecar name does not match its slug")
             except Exception:  # noqa: BLE001 — an unreadable ticket is garbage
@@ -3457,9 +3245,8 @@ class Broker:
             with self._build_lock:
                 ours = slug in self._active_builds
             if ours:
-                # A build THIS process already owns: its own reaper will finish
-                # the story. Keeping it out of the sweep makes adoption safe to
-                # call at any moment, not only before the socket is open.
+                # A build THIS process already owns: its own reaper will finish the
+                # story.
                 keep.update({os.path.basename(p) for p in (out_path, err_path) if p})
                 keep.add(name)
                 continue
@@ -3478,10 +3265,8 @@ class Broker:
                 self._narrate_adopted_outcome(rec, state)
                 self._unlink_build_logs(out_path, err_path)
                 self._remove_build_sidecar(slug)
-        # Janitor: spool files with no live ticket are orphans from a broker
-        # that died mid-build. Nothing will ever read them and nothing else ever
-        # deletes them, so they are the one way build-logs grows without bound
-        # across restarts. Sweep them here, where we know which files are live.
+        # Janitor: spool files with no live ticket are orphans from a broker that
+        # died mid-build.
         for name in entries:
             if name in keep or not name.startswith(BUILD_UNIT_PREFIX):
                 continue
@@ -3490,18 +3275,7 @@ class Broker:
         return adopted
 
     def _reap_adopted_build(self, rec: dict) -> None:
-        """Watch an adopted build to its terminal state, then narrate + tidy.
-        Polls systemd rather than waiting on a pipe — we are not this process's
-        child any more. The deadline is the ORIGINAL one from the sidecar; past
-        it we stop the unit, exactly as the first reaper would have.
-
-        The ticket is torn up ONLY on a terminal state. If this broker is itself
-        shutting down (or the poll blows up) the build is still out there, so the
-        sidecar and the spool files stay exactly where the NEXT process will look
-        for them — losing the ticket while the build runs is the one way to
-        strand it for good. Narration is therefore at-least-once, never
-        at-most-once: a duplicated done line is noise, a missing one is a build
-        nobody hears about."""
+        """Watch an adopted build to its terminal state, then narrate + tidy."""
         slug = rec["slug"]
         try:
             deadline = float(rec.get("deadline") or 0.0)
@@ -3516,6 +3290,7 @@ class Broker:
                     out_path = str(rec.get("out_path") or "")
                     self._narrate_build_outcome(
                         slug=slug, branch=rec.get("branch", f"loop/{slug}"),
+                        origin=rec.get("origin"),
                         publish=self._harvest_report(
                             out_path, self._read_build_tail(out_path)),
                         unit_reason=f"timed out after {rec.get('timeout_sec')}s "
@@ -3533,20 +3308,7 @@ class Broker:
         self._finish_build(slug)
 
     def _narrate_adopted_outcome(self, rec: dict, state: str) -> None:
-        """The done/failed line for a build this process did not launch.
-
-        There is no exit status to read: `--collect` unloads the unit when it
-        ends, and systemd cannot tell us about a unit it has forgotten. The
-        EVIDENCE is therefore the same evidence the live reaper uses — the
-        wrapper's publish lines in the spool (08-13 spec item 3). It used to be
-        the session's JSON report, which said what the session BELIEVED it had
-        done; the harvest lines say what actually reached the gatehouse, and
-        both reapers must derive the same banner from them or this process's
-        restart would change a build's story.
-
-        A build that left no publish lines is still narrated loudly rather than
-        guessed at: vanished mid-flight and failed are the same thing to a
-        reviewer, and neither one published anything."""
+        """The done/failed line for a build this process did not launch."""
         slug = rec["slug"]
         branch = rec.get("branch", f"loop/{slug}")
         out_path = str(rec.get("out_path") or "")
@@ -3568,72 +3330,36 @@ class Broker:
                            "was published" + (f": {note}" if note else ""))
         self._narrate_build_outcome(
             slug=slug, branch=branch, publish=publish, report=report,
-            unit_reason=unit_reason)
+            unit_reason=unit_reason, origin=rec.get("origin"))
 
-    def _verb_start_build(self, resident: str, args: dict) -> tuple[dict, str]:
-        """Launch a DETACHED build of a CONFIRMED spec to `loop/<slug>` (WP-L4).
+    def _launch_build(self, resident: str, meta: dict, prompt: str, *,
+                      announce: Callable[[int], None],
+                      launch_failed: Callable[[Exception], None],
+                      ) -> tuple[Any, int, Optional[int], int]:
+        """Reserve, spool, spawn and reap ONE build.
 
-        The gate, in order and all mechanical (chat is data, never
-        authorization — the verbs.toml toggle authorizes the CLASS, this
-        resident may run builds; the confirm record in the file selects the
-        INSTANCE and the broker verifies it, never trusts it):
-          0. SPECS/ itself is resident-unwritable — asserted at broker STARTUP
-             (BL-D1, assert_specs_dir_resident_unwritable); without it every
-             check below is self-attestation;
-          1. the spec path resolves inside SPECS/ (no `..`, no symlink escape);
-          2. the spec's status is 'confirmed' with a real confirm record
-             (Confirmed by + #custodian seq) — else refuse, fail-loud;
-          2b. if a wake is in flight for this seat, the woken session's
-             no-self-review rule (_assert_woken_build_allowed);
-          3. no build of this slug is already in flight (BL-D4) and the per-day
-             build budget has a free slot — both claimed under one lock.
-        On accept it posts a 'started' line to #custodian, spawns the build
-        detached (own session; outlives this request), and returns immediately.
-        A daemon reaper feeds the spec on stdin, holds the wall-clock cap, and
-        narrates done/failed. The build lands on the branch; NOTHING merges,
-        pushes, or touches production."""
-        _reject_unknown(args, {"spec"})
-        spec_arg = _check_str(args, "spec", required=True, max_len=300)
-        assert spec_arg is not None
-        spec_path = self._resolve_spec_path(spec_arg)
-        meta = self._read_confirmed_spec(spec_path)
-
-        # 2b. If this seat is awake on a wake right now, the woken session's
-        #    extra rule applies: no build whose review owner is this seat (or
-        #    the seat that woke it). The confirm gate above is what makes the
-        #    inherited verb safe at all; this is what keeps waking from being a
-        #    route around the review owner.
-        wake = self._active_wake(resident)
-        if wake is not None:
-            self._assert_woken_build_allowed(resident, wake, meta["text"])
-
+        Both entrances — a confirmed spec file and a human's `/build` message —
+        land here, so a build started from chat is the same build in every
+        respect but what it narrates. Returns (proc, used, cap, timeout)."""
         # Build the argv (pure config + validated slug) BEFORE reserving, so a
         # misconfiguration refuses without burning a budget slot.
-        build_resident = build_identity_from_caller(resident)
-        meta["build_resident"] = build_resident
-        argv = self._build_argv(meta["slug"], build_resident)
+        argv = self._build_argv(meta["slug"], meta["build_resident"])
         timeout = int(self.start_build.get("timeout_sec", START_BUILD_DEFAULT_TIMEOUT))
-        prompt = build_session_prompt(
-            meta["text"], slug=meta["slug"], branch=meta["branch"])
 
-        # Reserve the budget slot + claim the slug under the lock (H13-D4,
-        # BL-D4). A refusal here is audited (over-budget / bad-args) like any
-        # other denial and burns nothing.
+        # Reserve the budget slot + claim the slug under the lock (H13-D4, BL-D4).
         used, cap = self._reserve_build(resident, meta["slug"])
 
-        # BL-D2: the build's stdout/stderr land in 0600 temp FILES, never in
-        # pipes this privileged process must drain. Opened after the budget
-        # claim so a refused build creates no files; removed on every exit path
-        # below and in the reaper's finally.
+        # BL-D2: the build's stdout/stderr land in 0600 temp FILES, never in pipes
+        # this privileged process must drain.
         try:
             out_path, err_path, out_fh, err_fh = self._open_build_logs(meta["slug"])
         except BaseException:
             self._release_build(resident, meta["slug"])
             raise
 
-        # The claim ticket for the transient unit, written BEFORE the launch so
-        # a broker that dies mid-spawn still leaves a trail for the next process
-        # to adopt (adopt_inflight_builds). Removed on every terminal path.
+        # The claim ticket for the transient unit, written BEFORE the launch so a
+        # broker that dies mid-spawn still leaves a trail for the next process to
+        # adopt (adopt_inflight_builds).
         meta["resident"] = resident
         try:
             self._write_build_sidecar(meta, out_path=out_path, err_path=err_path,
@@ -3645,47 +3371,18 @@ class Broker:
             raise VerbError("exec-failure",
                             f"cannot record the build: {exc}") from None
 
-        # The spec's Status line moves to `building` NOW — before the started
-        # line and before the spawn — so the file (the state of record) never
-        # says `confirmed` about a build that is under way, and so the reaper
-        # thread, which may finish in milliseconds under test, always finds
-        # `building` when it comes to stamp the terminal word. Best-effort:
-        # the result rides on the started line, and a failed stamp is said
-        # there out loud, never swallowed.
-        stamp = self._stamp_spec_status(
-            meta["slug"], "building",
-            f"build running as {build_unit_name(meta['slug'])} -> {meta['branch']}, "
-            f"launched by {build_resident} (confirmed by {meta['confirmed_by']}, "
-            f"#custodian seq {meta['seq']}). Not buildable again until this "
-            "line moves.",
-            expect=("confirmed",))
-
-        # 'started' — a state transition; best-effort (a failed post must never
-        # sink a launched build, and is never a heartbeat).
-        self._narrate(format_build_started(
-            slug=meta["slug"], branch=meta["branch"],
-            confirmed_by=meta["confirmed_by"], seq=meta["seq"], eta_sec=timeout)
-            + format_spec_status_note(stamp))
+        announce(timeout)
 
         try:
             proc = self._build_spawn(argv, stdout=out_fh, stderr=err_fh)
         except OSError as exc:
             # Never spawned: refund the slot, drop the slug claim, delete the
-            # (empty) output files. BL-D3: this path audits allowed=True
-            # (exec-failure, not a denial) but emits NO `build_started` marker,
-            # so a restart's reseed does not count it.
+            # (empty) output files.
             self._release_build(resident, meta["slug"])
             self._close_build_logs(out_fh, err_fh)
             self._unlink_build_logs(out_path, err_path)
             self._remove_build_sidecar(meta["slug"])
-            unstamp = self._stamp_spec_status(
-                meta["slug"], "confirmed",
-                f"the launch failed before anything ran ({_status_comment_text(exc)}); "
-                "no build happened, buildable again.",
-                expect=("building",)) if stamp.get("ok") else {}
-            self._narrate(format_build_failed(
-                slug=meta["slug"], branch=meta["branch"],
-                reason=f"launch failed: {exc}") + format_spec_status_note(unstamp))
+            launch_failed(exc)
             raise VerbError("exec-failure",
                             f"build failed to launch: {exc}") from None
         finally:
@@ -3698,48 +3395,1816 @@ class Broker:
             daemon=True)
         self._build_threads.append(t)
         t.start()
+        return proc, used, cap, timeout
+
+    def _verb_start_build(self, resident: str, args: dict) -> tuple[dict, str]:
+        """Launch a DETACHED build of a CONFIRMED spec to `loop/<slug>` (WP-L4)."""
+        _reject_unknown(args, {"spec"})
+        spec_arg = _check_str(args, "spec", required=True, max_len=300)
+        assert spec_arg is not None
+        spec_path = self._resolve_spec_path(spec_arg)
+        meta = self._read_confirmed_spec(spec_path)
+
+        wake = self._active_wake(resident)
+        if wake is not None:
+            self._assert_woken_build_allowed(resident, wake, meta["text"])
+
+        build_resident = build_identity_from_caller(resident)
+        meta["build_resident"] = build_resident
+        prompt = build_session_prompt(
+            meta["text"], slug=meta["slug"], branch=meta["branch"])
+        stamp: dict = {}
+
+        def announce(timeout: int) -> None:
+            stamp.update(self._stamp_spec_status(
+                meta["slug"], "building",
+                f"build running as {build_unit_name(meta['slug'])} -> "
+                f"{meta['branch']}, launched by {build_resident} (confirmed by "
+                f"{meta['confirmed_by']}, #custodian seq {meta['seq']}). Not "
+                "buildable again until this line moves.",
+                expect=("confirmed",)))
+            # 'started' — a state transition; best-effort (a failed post must never
+            # sink a launched build, and is never a heartbeat).
+            self._narrate(format_build_started(
+                slug=meta["slug"], branch=meta["branch"],
+                confirmed_by=meta["confirmed_by"], seq=meta["seq"],
+                eta_sec=timeout) + format_spec_status_note(stamp))
+
+        def launch_failed(exc: Exception) -> None:
+            unstamp = self._stamp_spec_status(
+                meta["slug"], "confirmed",
+                f"the launch failed before anything ran ({_status_comment_text(exc)}); "
+                "no build happened, buildable again.",
+                expect=("building",)) if stamp.get("ok") else {}
+            self._narrate(format_build_failed(
+                slug=meta["slug"], branch=meta["branch"],
+                reason=f"launch failed: {exc}") + format_spec_status_note(unstamp))
+
+        proc, used, cap, _timeout = self._launch_build(
+            resident, meta, prompt, announce=announce,
+            launch_failed=launch_failed)
 
         result = {"started": True, "branch": meta["branch"], "slug": meta["slug"],
                   "pid": getattr(proc, "pid", None),
-                  # The transient unit the build runs in. Derivable from the
-                  # slug, surfaced anyway: it is the one string that makes a
-                  # running build inspectable (`systemctl status <unit>`), and
-                  # `pid` alone is now the LOCAL sudo/systemd-run process, not
-                  # the build.
+                  # The transient unit the build runs in.
                   "unit": build_unit_name(meta["slug"]),
                   "confirmed_by": meta["confirmed_by"], "seq": meta["seq"],
                   # What happened to the spec's Status line (-> `building`).
-                  # ok=False is NOT a refusal — the build runs regardless —
-                  # but the caller should say so where a human will read it.
+                  # ok=False is NOT a refusal — the build runs regardless — but the
+                  # caller should say so where a human will read it.
                   "spec_status": stamp}
         budget_str = f"{used}/{cap}" if cap is not None else str(used)
-        # Third element = audit extras. `build_started` is the BL-D3 marker:
-        # the ONLY place it is emitted is here, after a successful spawn, so
-        # the audit log distinguishes "this build ran" from "this call was
-        # authorized but never launched a thing".
+        # Third element = audit extras.
         return (result,
                 f"build {meta['slug']} -> {meta['branch']} launched "
                 f"(budget {budget_str})",
                 {"build_started": True})
 
+    # ---------------------------------------------------------- build (chat)
+    # THE SECOND ENTRANCE to the same build. `start-build` reads a confirmed spec
+    # file from a resident's hands; `build` reads a human's own message out of the
+    # server DB and trusts nothing the caller says about it.
+
+    def _message_row(self, channel_id: int, seq: int, columns: str,
+                     join: str) -> Optional[tuple]:
+        """One message row, read-only, or None. The DB is the only witness of
+        what was asked for; nothing a caller says about it is used."""
+        db_path = self._apps_message_db()
+        if not db_path or not os.path.exists(db_path):
+            raise VerbError(BUILD_REFUSED,
+                            "the broker cannot read the message database, so "
+                            "it cannot see what was asked for",
+                            reason="human")
+        try:
+            db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            try:
+                return db.execute(
+                    f"select {columns} from messages m {join} "
+                    "where m.channel_id = ? and m.seq = ?",
+                    (channel_id, seq)).fetchone()
+            finally:
+                db.close()
+        except sqlite3.Error as exc:
+            raise VerbError(BUILD_REFUSED,
+                            f"the message database could not be read ({exc})",
+                            reason="human") from None
+
+    def _build_message(self, channel_id: int, seq: int, *,
+                       code: str = BUILD_REFUSED,
+                       reason: Optional[str] = None,
+                       act: str = "start a build") -> dict:
+        """The human's own `/build` or `/merge` message, read from the server DB."""
+        try:
+            row = self._message_row(
+                channel_id, seq,
+                "m.author_type, m.content, m.privacy_flags, m.deleted_at, "
+                "u.username",
+                "left join users u on u.id = m.author_id")
+        except VerbError as exc:
+            raise VerbError(code, exc.message, reason=reason) from None
+        if row is None:
+            raise VerbError(code,
+                            f"there is no message {seq} in channel {channel_id}",
+                            reason=reason)
+        author_type, content, flags_json, deleted_at, username = row
+        if deleted_at:
+            raise VerbError(code, f"message {seq} was deleted", reason=reason)
+        if author_type != "user":
+            raise VerbError(code, f"only a person can {act}", reason=reason)
+        try:
+            flags = json.loads(flags_json or "{}")
+        except ValueError:
+            flags = {}
+        if hidden_from_bots(flags):
+            raise VerbError(code,
+                            "that message is private, so no bot may act on it",
+                            reason=reason)
+        if not username:
+            raise VerbError(code,
+                            f"message {seq} names no account this server knows",
+                            reason=reason)
+        return {"author": str(username), "content": str(content or "")}
+
+    def _assert_repo_session(self, session_id: int, author: str) -> None:
+        """The caller names the session; the SERVER says whose it is.
+
+        `session_id` arrives on the wire, so an open repo session belonging to
+        the message's author is the only one a build may post its stages into."""
+        try:
+            view = self._apps_harness_view(session_id)
+        except VerbError as exc:
+            raise VerbError(BUILD_REFUSED,
+                            f"build session {session_id} cannot be read "
+                            f"({exc.message})") from None
+        if not view.get("open"):
+            raise VerbError(BUILD_REFUSED,
+                            f"build session {session_id} has ended")
+        if view.get("mode") != "repo":
+            raise VerbError(BUILD_REFUSED,
+                            f"session {session_id} is not a repo build")
+        if view.get("owner_username") != author:
+            raise VerbError(BUILD_REFUSED,
+                            f"session {session_id} does not belong to {author}")
+
+    def _unique_build_slug(self, slug: str) -> str:
+        """The first `<slug>`, `<slug>-2`, … whose `loop/` branch the gatehouse does
+        not already hold."""
+        repo = self._gatehouse_repo()
+        if repo is None:
+            return slug
+        candidate, n = slug, 1
+        while self._git(repo, "rev-parse", "--verify", "--quiet",
+                        f"refs/heads/loop/{candidate}").returncode == 0:
+            n += 1
+            if n > MAX_BUILD_SLUG_TRIES:
+                raise VerbError(BUILD_REFUSED,
+                                f"loop/{slug} and every suffix up to "
+                                f"{MAX_BUILD_SLUG_TRIES} already exist")
+            candidate = f"{slug}-{n}"
+        return candidate
+
+    def _gatehouse_repo(self) -> Optional[str]:
+        """`[gate].canonical_repo`, or None when this broker has no gatehouse."""
+        gate = self.config.get("gate")
+        repo = gate.get("canonical_repo") if isinstance(gate, dict) else None
+        if not isinstance(repo, str) or not repo or not os.path.isdir(repo):
+            return None
+        return repo
+
+    def _gatehouse_diffstat(self, branch: str) -> str:
+        """`git diff --shortstat main..<branch>` in the gatehouse."""
+        repo = self._gatehouse_repo()
+        if repo is None:
+            return "no commits"
+        try:
+            cp = self._git(repo, "diff", "--shortstat", f"main..{branch}")
+        except VerbError:
+            return "no commits"
+        if cp.returncode != 0:
+            return "no commits"
+        return " ".join((cp.stdout or "").split()) or "no commits"
+
+    def _build_ledger_line(self, record: dict) -> None:
+        """One JSON line per accepted `/build`, append-only."""
+        try:
+            parent = os.path.dirname(self.build_ledger)
+            if parent:
+                os.makedirs(parent, mode=0o700, exist_ok=True)
+            with open(self.build_ledger, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except OSError as exc:
+            self._audit("broker", BUILD_VERB, {"seq": record.get("seq")}, True,
+                        f"build ledger unwritable: {exc}")
+
+    def _post_to_channel(self, channel_id: int, body: str) -> None:
+        """One post to a named channel, as the broker's own bot."""
+        try:
+            self.channel_transport(self.disjorn, int(channel_id), body)
+        except Exception:  # noqa: BLE001 — a banner is legibility, not control
+            pass
+
+    def _seq_build_outcome(self, *, slug: str, branch: str, publish: dict,
+                           origin: dict, report: Optional[dict] = None,
+                           unit_reason: Optional[str] = None) -> None:
+        """The end of a build started from chat: stage events into its session,
+        then ONE banner in the channel the request came from."""
+        session = int(origin.get("session_id") or 0)
+        report = report or {"files": "n/a", "tests": "n/a", "diff": "n/a"}
+        published = publish.get("published", [])
+        # READ BEFORE THE MERGE: once loop/<slug> is in main, main..loop/<slug>
+        # is empty and the diffstat would read "no commits".
+        diffstat = self._gatehouse_diffstat(branch)
+        # THE BANNER IS THE ONLY THING THE ROOM SEES for a repo build: no turn
+        # line follows it, so a build that published nothing still says why here.
+        banner = {"tests": "n/a — nothing was gated",
+                  "tier": "n/a — nothing to classify",
+                  "next": "no commits — /build again with more detail"}
+        if build_outcome_class(publish, unit_reason) != "done":
+            halted = " ".join((unit_reason or NO_HARVEST_REASON).split())[:300]
+            banner["next"] = f"build halted — {halted}; /build again"
+            self._apps_post_stage(session, "scoped",
+                                  {"turn": 1, "halted": "error",
+                                   "reason": unit_reason or NO_HARVEST_REASON})
+        elif published:
+            # The branch the room is watching is the platform repo's, whatever
+            # else this seat was entitled to publish.
+            sha = next((s for repo, s in published if repo.startswith("disjorn")),
+                       published[0][1])
+            banner = self._build_end_gates(slug=slug, origin=origin)
+            if banner.get("folded"):
+                # The diffstat above was read against the main the fold has
+                # since put in the branch.
+                diffstat += " (main folded in)"
+            self._apps_post_stage(session, "files_written",
+                                  {"turn": 1, "summary": report["files"]})
+            detail = {"turn": 1, "branch": branch, "sha": sha}
+            if banner.get("merged_sha"):
+                detail["tier"] = banner["merged_tier"]
+                detail["merged_sha"] = banner["merged_sha"]
+            self._apps_post_stage(session, "deployed", detail)
+        else:
+            self._apps_post_stage(session, "files_written",
+                                  {"turn": 1, "no_changes": True})
+        self._post_to_channel(int(origin.get("channel_id") or 0),
+                              format_seq_build_banner(
+                                  tests=banner["tests"], tier=banner["tier"],
+                                  diffstat=diffstat, next_line=banner["next"]))
+
+    def _verb_build(self, caller: str, args: dict) -> tuple[dict, str, dict]:
+        """Start a build from a human's `/build` message, named by its seq."""
+        _reject_unknown(args, {"seq", "channel_id", "session_id"})
+        for key in ("seq", "channel_id", "session_id"):
+            if key not in args:
+                raise _bad(f"missing required arg: {key}")
+        seq = _check_int(args, "seq", 0, 1, MAX_SEQ)
+        channel_id = _check_int(args, "channel_id", 0, 1, MAX_SEQ)
+        session_id = _check_int(args, "session_id", 0, 1, MAX_SEQ)
+        if not self.build_cfg:
+            raise VerbError(BUILD_REFUSED,
+                            "chat builds are not configured on this broker")
+
+        message = self._build_message(channel_id, seq)
+        author = message["author"]
+        if author not in self.build_humans:
+            raise VerbError(BUILD_REFUSED,
+                            f"{author} is not on the broker's human list")
+        text = strip_build_command(message["content"])
+        if not text:
+            raise VerbError(BUILD_REFUSED, "a build needs something to build")
+        if len(text) > MAX_BUILD_TEXT_CHARS:
+            raise VerbError(BUILD_REFUSED,
+                            f"a build request must be at most "
+                            f"{MAX_BUILD_TEXT_CHARS} characters")
+
+        self._assert_repo_session(session_id, author)
+
+        today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
+        slug = slug_from_build_text(text, today)
+        if not slug:
+            raise VerbError(BUILD_REFUSED,
+                            "a build request needs at least one word a branch "
+                            "name can carry")
+        slug = self._unique_build_slug(slug)
+        branch = f"loop/{slug}"
+        self._build_ledger_line({
+            "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            "seq": seq, "channel_id": channel_id, "author": author,
+            "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "slug": slug, "session_id": session_id})
+
+        meta = {"slug": slug, "branch": branch, "build_resident": self.build_seat,
+                "confirmed_by": author, "seq": seq,
+                # Carried into the sidecar so a re-adopted build still knows
+                # which room to answer in, and whose seq a self-merge cites.
+                "origin": {"channel_id": channel_id, "session_id": session_id,
+                           "seq": seq, "author": author}}
+        prompt = build_chat_prompt(text, slug=slug, branch=branch)
+
+        def announce(_timeout: int) -> None:
+            self._apps_post_stage(session_id, "scoped",
+                                  {"turn": 1,
+                                   "model": self.start_build.get("model")})
+
+        def launch_failed(exc: Exception) -> None:
+            self._apps_post_stage(session_id, "scoped",
+                                  {"turn": 1, "halted": "error",
+                                   "reason": f"launch failed: {exc}"})
+
+        proc, used, cap, _timeout = self._launch_build(
+            SERVER_IDENTITY, meta, prompt, announce=announce,
+            launch_failed=launch_failed)
+
+        result = {"started": True, "slug": slug, "branch": branch,
+                  "session_id": session_id, "pid": getattr(proc, "pid", None)}
+        budget_str = f"{used}/{cap}" if cap is not None else str(used)
+        return (result,
+                f"build {slug} -> {branch} launched for {author} "
+                f"(#{channel_id} seq {seq}, budget {budget_str})",
+                {"build_started": True, "build_seat": f"res-{self.build_seat}"})
+
+    # ------------------------------------------------------------------ merge
+    # SPECS/2026-09-20-build-lane-v2-stage1-2b.md; the design is
+    # harness/cc/MERGE-CONTRACT.md. The broker never merges anything without a
+    # green gate run IT launched: a caller-supplied gate result has no schema
+    # slot to arrive in.
+
+    @staticmethod
+    def _merge_refused(message: str, reason: str) -> VerbError:
+        # The reason is on the wire, so it is a closed set or it is noise.
+        assert reason in MERGE_REASONS, reason
+        return VerbError(MERGE_REFUSED, message, reason=reason)
+
+    def _gatehouse_or_refuse(self) -> str:
+        repo = self._gatehouse_repo()
+        if repo is None:
+            raise self._merge_refused(
+                "this broker has no gatehouse, so there is nothing to merge into",
+                "branch-missing")
+        return repo
+
+    def _gate_argv_prefix(self) -> list[str]:
+        """`[start_build].command` aimed at `gate` instead of `run`."""
+        command = self.start_build.get("command", [])
+        if (not isinstance(command, list) or not command
+                or not all(isinstance(a, str) for a in command)):
+            raise VerbError("internal",
+                            "start_build.command must be a non-empty list of strings")
+        return ["gate" if a == "run" else a for a in command]
+
+    def _gate_branch(self, slug: str) -> Any:
+        """One synchronous gate run over `loop/<slug>`."""
+        try:
+            return gates.run_gates(self._gate_argv_prefix(), self.build_seat,
+                                   slug, timeout=self.gate_timeout,
+                                   log_dir=self.gate_log_dir)
+        except OSError as exc:
+            raise self._merge_refused(
+                f"the gate run could not start ({exc})", "gates") from None
+
+    def _gate_and_classify(self, slug: str) -> tuple[Any, dict]:
+        """The gates, then the classifier over the same range with their result.
+
+        A red gate is NOT special-cased here: the classifier answers Tier 2 on
+        a failed gate, and that fail-closed answer is the only one used."""
+        repo = self._gatehouse_or_refuse()
+        result = self._gate_branch(slug)
+        classification = self._classify(repo, f"main...loop/{slug}",
+                                        gates.gates_json(result))
+        return result, classification
+
+    def _claim_gate_run(self, slug: str) -> bool:
+        """False when this slug is already being gated somewhere else."""
+        with self._gate_lock:
+            if slug in self._gate_runs:
+                return False
+            self._gate_runs.add(slug)
+            return True
+
+    def _release_gate_run(self, slug: str) -> None:
+        with self._gate_lock:
+            self._gate_runs.discard(slug)
+
+    def _main_is_ancestor(self, slug: str) -> str:
+        """Main's sha, returned only once loop/<slug> already contains main —
+        a merge of a branch that does not is a merge of a tree nobody gated."""
+        repo = self._gatehouse_or_refuse()
+        cp = self._git(repo, "rev-parse", "--verify", "--quiet",
+                       "refs/heads/main")
+        sha = (cp.stdout or "").strip()
+        if cp.returncode != 0 or not sha:
+            raise self._merge_refused(
+                "the gatehouse has no main to merge into", "branch-missing")
+        if self._git(repo, "merge-base", "--is-ancestor", "refs/heads/main",
+                     f"refs/heads/loop/{slug}").returncode != 0:
+            raise self._merge_refused(
+                f"loop/{slug} is behind main; fold main into the branch first",
+                "moved")
+        return sha
+
+    def _fold_main_into(self, slug: str) -> Optional[str]:
+        """Main merged into loop/<slug> in the gatehouse: the branch's new
+        tip, or None when the merge moved nothing. Called only from the check
+        that runs BEFORE the gates."""
+        repo = self._gatehouse_or_refuse()
+        git = self._argv("spec_repo_git", ["git"])
+        timeout = SUBPROCESS_TIMEOUTS["merge"]
+        branch = f"loop/{slug}"
+        # NOT under the merge lock: this writes the branch, never main. The
+        # per-slug gate claim its callers hold is what serialises it.
+        with self._merge_workspace(slug) as clone:
+            def head() -> str:
+                return (self._run([*git, "-C", clone, "rev-parse", "HEAD"],
+                                  timeout).stdout or "").strip()
+
+            cp = self._run([*git, "clone", "--quiet", "--no-tags", "--branch",
+                            branch, repo, clone], timeout)
+            if cp.returncode != 0:
+                raise self._merge_refused(
+                    f"{branch} is not in the gatehouse", "branch-missing")
+            before = head()
+            cp = self._run([*git, "-C", clone, "fetch", "--quiet", "origin",
+                            "refs/heads/main"], timeout)
+            if cp.returncode != 0:
+                raise self._merge_refused(
+                    "the gatehouse has no main to merge into",
+                    "branch-missing")
+            main_sha = (self._run(
+                [*git, "-C", clone, "rev-parse", "FETCH_HEAD"],
+                timeout).stdout or "").strip()
+            cp = self._run(
+                [*git, "-C", clone,
+                 "-c", f"user.name={MERGE_IDENTITY_NAME}",
+                 "-c", f"user.email={MERGE_IDENTITY_EMAIL}",
+                 "merge", "--no-edit", "-m",
+                 f"fold main into {branch} (broker, before the gates)",
+                 "FETCH_HEAD"], timeout)
+            if cp.returncode != 0:
+                self._run([*git, "-C", clone, "merge", "--abort"], timeout)
+                raise self._merge_refused(
+                    f"{branch} conflicts with main; fold it at the keyboard",
+                    "moved")
+            tip = head()
+            if tip == before:
+                return None
+            cp = self._run([*git, "-C", clone, "push", "--quiet", "origin",
+                            f"HEAD:refs/heads/{branch}"], timeout)
+            if cp.returncode != 0:
+                raise self._merge_refused(
+                    "the gatehouse refused the fold "
+                    f"({(cp.stderr or cp.stdout).strip()[:300]})", "push")
+        self._build_ledger_line({
+            "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            "kind": "fold", "slug": slug, "from": before, "to": tip,
+            "main": main_sha})
+        return tip
+
+    def _main_before_gates(self, slug: str) -> tuple[str, str, Optional[str]]:
+        """The first check: main's sha, the branch tip everything after this
+        point is pinned to, and the tip a fold left behind when the branch did
+        not already contain main. Runs under the caller's gate claim.
+
+        THE SHA THAT IS GATED IS THE SHA THAT IS MERGED — the fold happens
+        here, before the gates, the classifier and any PASS check, so all three
+        see the folded tip and a PASS posted before the fold stops holding."""
+        try:
+            main_sha, folded = self._main_is_ancestor(slug), None
+        except VerbError as exc:
+            if exc.reason != "moved":
+                raise
+            folded = self._fold_main_into(slug)
+            main_sha = self._main_is_ancestor(slug)
+        repo = self._gatehouse_or_refuse()
+        tip = self._branch_tip(slug)
+        if (self._git(repo, "rev-list", "--count",
+                      f"main..{tip}").stdout or "").strip() == "0":
+            raise self._merge_refused(
+                f"loop/{slug} has no commits of its own to merge",
+                "branch-missing")
+        return main_sha, tip, folded
+
+    def _branch_tip(self, slug: str) -> str:
+        repo = self._gatehouse_or_refuse()
+        return (self._git(repo, "rev-parse", "--verify", "--quiet",
+                          f"refs/heads/loop/{slug}").stdout or "").strip()
+
+    def _assert_main_unmoved(self, slug: str, before: str) -> None:
+        """Main where the gates saw it, or this push would land a tree that was
+        never gated."""
+        try:
+            now = self._main_is_ancestor(slug)
+        except VerbError as exc:
+            if exc.reason != "moved":
+                raise
+            now = ""
+        if now != before:
+            raise self._merge_refused(
+                "main moved while the gates ran; /merge again", "moved")
+
+    def _assert_tip_unmoved(self, slug: str, tip: str) -> None:
+        """The branch where the gates saw it: a commit pushed while they ran is
+        a tree nobody gated, and merging it would say otherwise."""
+        if self._branch_tip(slug) != tip:
+            raise self._merge_refused(
+                f"loop/{slug} moved while the gates ran; /merge again",
+                "moved")
+
+    @staticmethod
+    def _tier_of(classification: dict) -> int:
+        tier = classification.get("tier")
+        if not isinstance(tier, int) or tier not in (0, 1, 2):
+            raise Broker._merge_refused(
+                "the classifier did not answer with a tier", "tier")
+        return tier
+
+    def _changed_paths(self, repo: str, slug: str) -> list[str]:
+        cp = self._git(repo, "diff", "--name-only", f"main...loop/{slug}")
+        if cp.returncode != 0:
+            raise self._merge_refused(
+                f"loop/{slug} cannot be compared with main", "branch-missing")
+        return [ln.strip() for ln in (cp.stdout or "").splitlines()
+                if ln.strip()][:MAX_MERGE_PATHS]
+
+    def _branch_tip_time(self, repo: str, slug: str) -> Optional[_dt.datetime]:
+        cp = self._git(repo, "log", "-1", "--format=%cI",
+                       f"refs/heads/loop/{slug}")
+        return _as_utc(cp.stdout) if cp.returncode == 0 else None
+
+    def _lane_owner(self, path: str) -> Optional[str]:
+        """`[planroom].lane_owners`, prefix map, first match wins. There is no
+        default map in code: an unmapped path has no reviewer, which is true."""
+        owners = self.planroom.get("lane_owners")
+        if not isinstance(owners, dict):
+            return None
+        low = path.lower()
+        for prefix, owner in owners.items():
+            if low.startswith(str(prefix).lower()):
+                return str(owner)
+        return None
+
+    def _pass_message(self, pass_seq: int) -> dict:
+        """The reviewer's post, which is only ever a bot's, only ever in
+        #custodian."""
+        channel = self.disjorn.get("custodian_channel_id")
+        if not isinstance(channel, int) or channel < 1:
+            raise self._merge_refused(
+                "this broker has no #custodian to read a PASS from", "pass-invalid")
+        try:
+            row = self._message_row(
+                channel, pass_seq,
+                "m.author_type, m.content, m.deleted_at, m.created_at, b.name",
+                "left join bots b on b.id = m.author_id")
+        except VerbError as exc:
+            raise self._merge_refused(exc.message, "pass-invalid") from None
+        if row is None or row[2]:
+            raise self._merge_refused(
+                f"there is no message {pass_seq} in #custodian", "pass-invalid")
+        author_type, content, _deleted, created_at, bot_name = row
+        if author_type != "bot" or not bot_name:
+            raise self._merge_refused(
+                f"message {pass_seq} in #custodian is not a reviewer's post",
+                "pass-invalid")
+        return {"author": str(bot_name), "content": str(content or ""),
+                "created_at": created_at}
+
+    def _check_pass(self, *, pass_seq: int, slug: str, paths: list[str],
+                    tip_at: Optional[_dt.datetime],
+                    folded: Optional[str] = None) -> str:
+        """The four things that make a PASS hold: the right reviewer, after the
+        tip, in #custodian, saying PASS for this slug."""
+        if not paths:
+            raise self._merge_refused(
+                f"loop/{slug} changes no files", "pass-invalid")
+        owners: list[str] = []
+        for path in paths:
+            owner = self._lane_owner(path)
+            if owner is None:
+                raise self._merge_refused(
+                    f"no lane owner for {path}; keyboard merge", "pass-invalid")
+            if owner not in owners:
+                owners.append(owner)
+        message = self._pass_message(pass_seq)
+        author = message["author"]
+        if author.lower() not in {o.lower() for o in owners}:
+            raise self._merge_refused(
+                f"seq {pass_seq} is {author}'s, and this lane's reviewer is "
+                f"{' or '.join(owners)}", "pass-invalid")
+        posted = _as_utc(message["created_at"])
+        if tip_at is not None and (posted is None or posted <= tip_at):
+            if folded:
+                raise self._merge_refused(
+                    f"loop/{slug} was folded onto main as {folded[:7]}, so "
+                    f"PASS {pass_seq} no longer names the gated tree; ask for "
+                    "a fresh PASS", "pass-invalid")
+            raise self._merge_refused(
+                f"seq {pass_seq} was posted before the tip of loop/{slug}",
+                "pass-invalid")
+        text = message["content"]
+        if not _PASS_WORD_RE.search(text) or slug not in text:
+            raise self._merge_refused(
+                f"seq {pass_seq} does not say PASS for {slug}", "pass-invalid")
+        if _BLOCK_WORD_RE.search(text):
+            raise self._merge_refused(
+                f"seq {pass_seq} says BLOCK as well as PASS, so it is not a PASS",
+                "pass-invalid")
+        return author
+
+    def _auto_apply_budget(self) -> int:
+        """`[limits].daily_auto_apply_budget` from the classifier's own config."""
+        try:
+            with open(self._protected_paths(), "rb") as fh:
+                cfg = tomllib.load(fh)
+        except (OSError, tomllib.TOMLDecodeError):
+            return DEFAULT_AUTO_APPLY_BUDGET
+        limits = cfg.get("limits")
+        budget = limits.get("daily_auto_apply_budget") if isinstance(limits, dict) else None
+        return (budget if isinstance(budget, int) and not isinstance(budget, bool)
+                and budget >= 0 else DEFAULT_AUTO_APPLY_BUDGET)
+
+    def _auto_merges_today(self) -> int:
+        """Self-merges on the ledger today (UTC). A human `/merge` is not
+        budgeted, so only the `self_merge` flag counts — never the tier."""
+        today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
+        n = 0
+        try:
+            with open(self.build_ledger, "r", encoding="utf-8") as fh:
+                for raw in fh:
+                    try:
+                        rec = json.loads(raw)
+                    except ValueError:
+                        continue
+                    if (rec.get("kind") == MERGE_VERB
+                            and rec.get("self_merge") is True
+                            and str(rec.get("ts", ""))[:10] == today):
+                        n += 1
+        except OSError:
+            return 0
+        return n
+
+    @contextlib.contextmanager
+    def _merge_workspace(self, slug: str):
+        """A throwaway clone tree, gone on every exit path, so a half-done
+        merge is a directory nobody reads rather than a gatehouse nobody can
+        build from."""
+        try:
+            os.makedirs(self.merge_work_dir, mode=0o700, exist_ok=True)
+            work = tempfile.mkdtemp(prefix=f"{slug}-", dir=self.merge_work_dir)
+        except OSError as exc:
+            raise VerbError("exec-failure",
+                            f"no merge workspace ({exc})") from None
+        try:
+            yield os.path.join(work, "repo")
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    def _merge_branch(self, *, slug: str, author: str, tier: int,
+                      channel_id: int, seq: int, pass_seq: Optional[int],
+                      main_sha: str, tip_sha: str,
+                      self_merge: bool = False) -> str:
+        """Clone, merge, push. What is merged is `tip_sha` and nothing else:
+        an unpinned FETCH_HEAD would merge whatever was pushed last."""
+        repo = self._gatehouse_or_refuse()
+        git = self._argv("spec_repo_git", ["git"])
+        timeout = SUBPROCESS_TIMEOUTS["merge"]
+        with self._merge_workspace(slug) as clone:
+            cp = self._run([*git, "clone", "--quiet", "--no-tags", "--branch",
+                            "main", repo, clone], timeout)
+            if cp.returncode != 0:
+                raise self._merge_refused(
+                    "the gatehouse would not clone "
+                    f"({(cp.stderr or cp.stdout).strip()[:200]})", "push")
+            cp = self._run([*git, "-C", clone, "fetch", "--quiet", "origin",
+                            f"refs/heads/loop/{slug}"], timeout)
+            if cp.returncode != 0:
+                raise self._merge_refused(
+                    f"loop/{slug} is not in the gatehouse", "branch-missing")
+            fetched = (self._run(
+                [*git, "-C", clone, "rev-parse", "FETCH_HEAD"],
+                timeout).stdout or "").strip()
+            if fetched != tip_sha:
+                raise self._merge_refused(
+                    f"loop/{slug} moved while the gates ran; /merge again",
+                    "moved")
+            cp = self._run(
+                [*git, "-C", clone,
+                 "-c", f"user.name={MERGE_IDENTITY_NAME}",
+                 "-c", f"user.email={MERGE_IDENTITY_EMAIL}",
+                 "merge", "--no-ff", "--no-edit", "-m",
+                 merge_commit_message(slug=slug, author=author, tier=tier,
+                                      channel_id=channel_id, seq=seq,
+                                      pass_seq=pass_seq,
+                                      self_merge=self_merge),
+                 tip_sha], timeout)
+            if cp.returncode != 0:
+                self._run([*git, "-C", clone, "merge", "--abort"], timeout)
+                raise self._merge_refused(
+                    f"loop/{slug} does not merge cleanly into main; nothing "
+                    "moved", "conflict")
+            cp = self._run([*git, "-C", clone, "rev-parse", "HEAD"], timeout)
+            sha = (cp.stdout or "").strip()
+            self._assert_main_unmoved(slug, main_sha)
+            self._assert_tip_unmoved(slug, tip_sha)
+            cp = self._run([*git, "-C", clone, "push", "--quiet", "origin",
+                            "HEAD:refs/heads/main"], timeout)
+            if cp.returncode != 0:
+                raise self._merge_refused(
+                    "the gatehouse refused the push "
+                    f"({(cp.stderr or cp.stdout).strip()[:300]})", "push")
+            return sha
+
+    def _refresh_after_merge(self) -> str:
+        """main moved, so the mirror and the board follow it."""
+        timeout = SUBPROCESS_TIMEOUTS["refresh-mirror"]
+        try:
+            self._ff_mirror_main(timeout)
+            self._fetch_gatehouse_into_mirror(timeout)
+        except VerbError as exc:
+            return f"; mirror NOT refreshed ({exc.message})"
+        except Exception as exc:  # noqa: BLE001 — the merge already landed
+            return f"; mirror NOT refreshed ({exc!r})"
+        self._planroom_rebuild(MERGE_VERB)
+        return ""
+
+    def _merge_now(self, *, slug: str, author: str, tier: int, channel_id: int,
+                   seq: int, pass_seq: Optional[int], self_merge: bool,
+                   main_sha: str, tip_sha: str) -> tuple[str, str]:
+        """Budget, merge, ledger, refresh — under one lock, so two merges can
+        never both read the same pre-cap count or race each other onto main.
+        Only a self-merge is budgeted, and the ledger says which kind this was."""
+        with self._merge_lock:
+            if self_merge:
+                budget = self._auto_apply_budget()
+                if self._auto_merges_today() >= budget:
+                    raise self._merge_refused(
+                        f"today's Tier 0 auto-merge budget ({budget}) is spent",
+                        "budget")
+            sha = self._merge_branch(slug=slug, author=author, tier=tier,
+                                     channel_id=channel_id, seq=seq,
+                                     pass_seq=pass_seq, main_sha=main_sha,
+                                     tip_sha=tip_sha, self_merge=self_merge)
+            self._build_ledger_line({
+                "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                "kind": MERGE_VERB, "seq": seq, "channel_id": channel_id,
+                "author": author, "slug": slug, "tier": tier, "sha": sha,
+                "pass_seq": pass_seq, "self_merge": self_merge})
+        return sha, self._refresh_after_merge()
+
+    def _verb_merge(self, caller: str, args: dict) -> tuple[dict, str, dict]:
+        """Take a human's `/merge`: everything the message itself decides is
+        settled here; the gates and the merge run in a thread, like `/build`.
+
+        NOTHING THAT TOUCHES THE BRANCH RUNS ON THE SOCKET THREAD: the caller
+        is acknowledged first, and the claim is taken before the thread so a
+        second `/merge` is `busy` before any git runs for this slug."""
+        _reject_unknown(args, {"seq", "channel_id", "slug", "pass_seq"})
+        for key in ("seq", "channel_id", "slug"):
+            if key not in args:
+                raise _bad(f"missing required arg: {key}")
+        seq = _check_int(args, "seq", 0, 1, MAX_SEQ)
+        channel_id = _check_int(args, "channel_id", 0, 1, MAX_SEQ)
+        slug = _check_str(args, "slug", required=True, max_len=MAX_SLUG_CHARS)
+        assert slug is not None
+        pass_seq = None
+        if args.get("pass_seq") is not None:
+            pass_seq = _check_int(args, "pass_seq", 0, 1, MAX_SEQ)
+        if not self.build_cfg:
+            raise self._merge_refused(
+                "chat merges are not configured on this broker", "human")
+
+        message = self._build_message(channel_id, seq, code=MERGE_REFUSED,
+                                      reason="human", act="merge a branch")
+        author = message["author"]
+        if author not in self.build_humans:
+            raise self._merge_refused(
+                f"{author} is not on the broker's human list", "human")
+
+        repo = self._gatehouse_or_refuse()
+        if not _SPEC_STEM_RE.match(slug):
+            raise self._merge_refused(f"{slug} is not a build slug",
+                                      "branch-missing")
+        if self._git(repo, "rev-parse", "--verify", "--quiet",
+                     f"refs/heads/loop/{slug}").returncode != 0:
+            raise self._merge_refused(
+                f"there is no loop/{slug} in the gatehouse", "branch-missing")
+        if not message_names_slug(message["content"], slug):
+            raise self._merge_refused(
+                f"message {seq} does not ask to merge {slug}", "slug-mismatch")
+        if not self._claim_gate_run(slug):
+            raise self._merge_refused(
+                f"a gate run for {slug} is already in flight", "busy")
+
+        thread = threading.Thread(
+            target=self._merge_in_background, args=(dict(args),),
+            kwargs={"slug": slug, "author": author, "channel_id": channel_id,
+                    "seq": seq, "pass_seq": pass_seq},
+            daemon=True)
+        self._merge_threads.append(thread)
+        try:
+            thread.start()
+        except RuntimeError:
+            self._release_gate_run(slug)
+            raise
+        return ({"started": True, "slug": slug, "branch": f"loop/{slug}"},
+                f"merge {slug} started for {author} "
+                f"(#{channel_id} seq {seq}); the gates are running",
+                {"merge_started": True})
+
+    def _merge_in_background(self, args: dict, *, slug: str, author: str,
+                             channel_id: int, seq: int,
+                             pass_seq: Optional[int]) -> None:
+        """The merge, off the socket thread. Nothing above it would catch, so
+        it must never raise and must always give the slug back."""
+        try:
+            self._merge_and_post(args, slug=slug, author=author,
+                                 channel_id=channel_id, seq=seq,
+                                 pass_seq=pass_seq)
+        except Exception:  # noqa: BLE001 — even an unwritable audit log
+            pass
+        finally:
+            self._release_gate_run(slug)
+
+    def _merge_and_post(self, args: dict, *, slug: str, author: str,
+                        channel_id: int, seq: int,
+                        pass_seq: Optional[int]) -> None:
+        """The fold, the gates, the tier, the PASS and the merge, then the one
+        post the room is left with."""
+        note: dict = {"owner": None, "gates_red": False, "folded": None}
+        try:
+            body = self._merge_gated(
+                args, slug=slug, author=author, channel_id=channel_id,
+                seq=seq, pass_seq=pass_seq, note=note)
+        except VerbError as exc:
+            reason = exc.reason if exc.reason in MERGE_REASONS else "gates"
+            self._audit(SERVER_IDENTITY, MERGE_VERB, args, False,
+                        f"denied: {exc.message} ({reason})",
+                        extra=({"folded": note["folded"]}
+                               if note["folded"] else None))
+            body = format_merge_refused(
+                slug=slug, reason_text=exc.message,
+                next_line=merge_next_step(reason, slug=slug,
+                                          owner=note["owner"],
+                                          gates_red=note["gates_red"]))
+        except Exception as exc:  # noqa: BLE001 — the room is owed an answer
+            self._audit(SERVER_IDENTITY, MERGE_VERB, args, True,
+                        f"error: internal: {exc!r}")
+            body = format_merge_refused(
+                slug=slug, reason_text=f"the merge broke ({exc!r})",
+                next_line=merge_next_step("internal", slug=slug))
+        self._post_to_channel(channel_id, body)
+
+    def _merge_gated(self, args: dict, *, slug: str, author: str,
+                     channel_id: int, seq: int, pass_seq: Optional[int],
+                     note: dict) -> str:
+        """Steps 3–7 of the merge; `note` carries what a refusal line needs."""
+        main_sha, tip, folded = self._main_before_gates(slug)
+        note["folded"] = folded
+        result, classification = self._gate_and_classify(slug)
+        note["gates_red"] = result.exit_code != 0
+        tier = self._tier_of(classification)
+        reviewer = None
+        if tier == 2:
+            note["owner"] = self._first_lane_owner(slug)
+            if pass_seq is None:
+                raise self._merge_refused(
+                    f"loop/{slug} is Tier 2: it needs a reviewer's PASS in "
+                    f"#custodian, then `/merge {slug} pass <seq>`",
+                    "pass-missing")
+            reviewer = self._check_pass(
+                pass_seq=pass_seq, slug=slug,
+                paths=self._changed_paths(self._gatehouse_or_refuse(), slug),
+                tip_at=self._branch_tip_time(self._gatehouse_or_refuse(), slug),
+                folded=folded)
+        stamped = pass_seq if tier == 2 else None
+        sha, mirror = self._merge_now(slug=slug, author=author, tier=tier,
+                                      channel_id=channel_id, seq=seq,
+                                      pass_seq=stamped, self_merge=False,
+                                      main_sha=main_sha, tip_sha=tip)
+        cited = f", PASS from {reviewer} (seq {pass_seq})" if reviewer else ""
+        extra = {"merge_tier": tier, "merged_sha": sha}
+        if folded is not None:
+            extra["folded"] = folded
+        self._audit(SERVER_IDENTITY, MERGE_VERB, args, True,
+                    f"merged loop/{slug} into main as {sha} for {author} "
+                    f"(tier {tier}{cited})" + mirror, extra=extra)
+        return format_merge_done(slug=slug, sha=sha, tier=tier,
+                                 folded=folded is not None)
+
+    def _first_lane_owner(self, slug: str) -> Optional[str]:
+        """Who the banner names on a Tier 2 build."""
+        try:
+            paths = self._changed_paths(self._gatehouse_or_refuse(), slug)
+        except VerbError:
+            return None
+        for path in paths:
+            owner = self._lane_owner(path)
+            if owner is not None:
+                return owner
+        return None
+
+    def _build_end_gates(self, *, slug: str, origin: dict) -> dict:
+        """The build's own gate run, one per slug at a time: a `/merge` typed
+        while it runs is refused rather than gating the branch twice."""
+        if not self._claim_gate_run(slug):
+            return {"tests": f"n/a — a gate run for {slug} is already in flight",
+                    "tier": "n/a — nothing to classify",
+                    "next": f"/merge {slug}"}
+        try:
+            return self._build_end_banner(slug=slug, origin=origin)
+        finally:
+            self._release_gate_run(slug)
+
+    def _build_end_banner(self, *, slug: str, origin: dict) -> dict:
+        """The gates, the tier and — for a green Tier 0 in budget — the merge
+        this build's own `/build` seq authorizes. Never raises: it runs in the
+        reaper, where an exception would eat the banner."""
+        try:
+            main_sha, tip, folded = self._main_before_gates(slug)
+            result, classification = self._gate_and_classify(slug)
+            tier = self._tier_of(classification)
+        except VerbError as exc:
+            if exc.reason == "moved":
+                return {"tests": "n/a — nothing was gated",
+                        "tier": "n/a — nothing to classify",
+                        "next": f"{exc.message}, then /merge {slug}"}
+            return {"tests": f"fail — {exc.message}",
+                    "tier": "unknown — the gates did not run",
+                    "next": "fix the red gate, then /build again"}
+        except Exception as exc:  # noqa: BLE001 — a banner is legibility
+            return {"tests": f"fail — {exc!r}",
+                    "tier": "unknown — the gates did not run",
+                    "next": "fix the red gate, then /build again"}
+        out = {"tests": format_gate_tests_line(result),
+               "tier": format_tier_line(tier, classification.get("reasons"))}
+        if folded is not None:
+            out["folded"] = folded
+        if result.exit_code != 0:
+            out["next"] = "fix the red gate, then /build again"
+        elif tier == 0 and origin.get("seq"):
+            # The self-merge's message named no slug: the broker minted it from
+            # that message, so there is nothing to compare it against.
+            try:
+                sha, _note = self._merge_now(
+                    slug=slug, author=str(origin.get("author") or "the broker"),
+                    tier=0, channel_id=int(origin.get("channel_id") or 0),
+                    seq=int(origin.get("seq") or 0), pass_seq=None,
+                    self_merge=True, main_sha=main_sha, tip_sha=tip)
+            except VerbError as exc:
+                out["next"] = (f"Tier 0 budget spent today; /merge {slug}"
+                               if exc.reason == "budget" else f"/merge {slug}")
+            except Exception:  # noqa: BLE001 — a banner is legibility
+                out["next"] = f"/merge {slug}"
+            else:
+                out["next"] = f"merged {sha}"
+                out["merged_tier"] = 0
+                out["merged_sha"] = sha
+        elif tier == 2:
+            owner = self._first_lane_owner(slug) or "a reviewer"
+            out["next"] = (f"PASS from {owner} in #custodian, then "
+                           f"/merge {slug} pass <seq>")
+        else:
+            out["next"] = f"/merge {slug}"
+        return out
+
+    # ------------------------------------------------------- apps-build (§E)
+    # THE SHAPE OF THIS VERB, and why it is not start-build with different strings.
+    # A spec build is one long-running child whose stdout IS the evidence; an app
+    # build turn is a unit run by ANOTHER seat, whose evidence the broker can only
+    # read off the filesystem.
+
+    def _apps_message_db(self) -> Optional[str]:
+        """The server DB the seat-map boot check reads, resolved the way
+        metrics.py's `gate_paths` resolves it: `[gate].message_db`, else
+        <[gate].deploy_tree>/server/data/disjorn.db."""
+        gate = self.config.get("gate")
+        if not isinstance(gate, dict):
+            return None
+        path = gate.get("message_db")
+        if isinstance(path, str) and path:
+            return path
+        deploy_tree = gate.get("deploy_tree")
+        if isinstance(deploy_tree, str) and deploy_tree:
+            return os.path.join(deploy_tree, "server", "data", "disjorn.db")
+        return None
+
+    def _apps_seat_map_failure(self) -> Optional[str]:
+        """None if `[apps].seat_bots` agrees with the server's `bots` table, else
+        one flat sentence saying how it does not (§B)."""
+        seat_bots = self.apps.get("seat_bots")
+        if not isinstance(seat_bots, dict) or not seat_bots:
+            return ("[apps].seat_bots is empty, so no seat maps to a builder "
+                    "bot and no handoff could ever be attributed")
+        for seat, bot_id in seat_bots.items():
+            if not isinstance(seat, str) or not APPS_SEAT_RE.match(seat):
+                return (f"[apps].seat_bots names {seat!r}, which is not a "
+                        "res-<name> resident seat")
+            if not isinstance(bot_id, int) or isinstance(bot_id, bool):
+                return (f"[apps].seat_bots maps {seat} to {bot_id!r}, which is "
+                        "not a bot id")
+        db_path = self._apps_message_db()
+        if not db_path or not os.path.exists(db_path):
+            return ("the server database named by [gate].message_db / "
+                    "[gate].deploy_tree is not readable, so the seat map "
+                    "cannot be checked against the bots that exist")
+        try:
+            db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        except sqlite3.Error as exc:
+            return (f"the server database at {db_path} could not be opened "
+                    f"read-only ({exc}), so the seat map cannot be checked")
+        try:
+            for seat, bot_id in seat_bots.items():
+                row = db.execute("select name from bots where id = ?",
+                                 (int(bot_id),)).fetchone()
+                if row is None:
+                    return (f"[apps].seat_bots maps {seat} to bot {bot_id}, "
+                            "which does not exist on this server")
+                expected = seat[len("res-"):].lower()
+                if str(row[0] or "").lower() != expected:
+                    return (f"[apps].seat_bots maps {seat} to bot {bot_id}, "
+                            f"whose name is {row[0]!r} and not {expected!r}")
+        except sqlite3.Error as exc:
+            return (f"the server's bots table could not be read ({exc}), so "
+                    "the seat map cannot be checked")
+        finally:
+            db.close()
+        return None
+
+    def _apps_unavailable(self) -> None:
+        """Raise the one refusal that means "this broker cannot run turns"."""
+        if not self.apps_configured:
+            raise VerbError("apps-refused",
+                            "apps-build is not configured on this broker")
+        if self._apps_disabled_reason:
+            raise VerbError("apps-refused",
+                            "apps-build is disabled: the seat map failed its "
+                            f"boot check — {self._apps_disabled_reason}")
+
+    # -- config readers ---------------------------------------------------
+
+    def _apps_int(self, key: str) -> int:
+        value = self.apps.get(key, APPS_DEFAULTS.get(key))
+        if not isinstance(value, int) or isinstance(value, bool):
+            return int(APPS_DEFAULTS.get(key, 0))
+        return value
+
+    def _apps_num(self, key: str) -> float:
+        """A duration knob."""
+        value = self.apps.get(key, APPS_DEFAULTS.get(key))
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return float(APPS_DEFAULTS.get(key, 0))
+        return float(value)
+
+    def _apps_argv(self, key: str) -> list[str]:
+        """A fixed argv list out of `[apps]`, validated like `[commands]` is."""
+        argv = self.apps.get(key, APPS_DEFAULTS[key])
+        if not isinstance(argv, list) or not argv or not all(
+                isinstance(a, str) for a in argv):
+            raise VerbError("internal",
+                            f"apps.{key} must be a non-empty list of strings")
+        return list(argv)
+
+    def _apps_log_dir(self) -> str:
+        """Where a turn's launcher spool and its sidecar live: plink-owned, 0700,
+        resident-unreachable."""
+        d = self.apps.get("log_dir") or APPS_DEFAULTS["log_dir"]
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        return str(d)
+
+    def _apps_turn_dir(self, session: int, turn: int) -> str:
+        return os.path.join(str(self.apps.get("turns_root")
+                                or APPS_DEFAULTS["turns_root"]),
+                            str(session), str(turn))
+
+    def _apps_sidecar_path(self, session: int, turn: int) -> str:
+        return os.path.join(self._apps_log_dir(),
+                            f"{session}-{turn}{APPS_SIDECAR_SUFFIX}")
+
+    # -- launch -----------------------------------------------------------
+
+    def _default_apps_spawn(self, argv: list[str], *, stdout: Any,
+                            stderr: Any) -> subprocess.Popen:
+        """Launch one turn DETACHED."""
+        return subprocess.Popen(  # noqa: S603 — argv list, no shell
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=stdout,
+            stderr=stderr,
+            start_new_session=True,
+        )
+
+    def _apps_unit_state(self, unit: str) -> str:
+        """systemd's word for an adopted turn's unit — `active`, `failed`,
+        `inactive`, or `unknown` if we cannot ask."""
+        try:
+            cp = self._run([*self._apps_argv("unit_state_command"), unit], 30)
+        except Exception:  # noqa: BLE001 — a state probe never breaks a reaper
+            return "unknown"
+        if cp.returncode != 0:
+            return "unknown"
+        return (cp.stdout or "").strip().lower() or "unknown"
+
+    def _apps_stop_requested(self, session: int) -> bool:
+        """Has the owner asked for the running turn to stop? Read off the server's
+        harness-view, best-effort: a read that fails answers "not yet" and the next
+        poll asks again, because a reaper must not die over a question it can
+        repeat."""
+        try:
+            view = self._apps_harness_view(session)
+        except Exception:  # noqa: BLE001 — see docstring
+            return False
+        return bool(view.get("stop_requested_at"))
+
+    def _apps_send_stop(self, rec: dict) -> bool:
+        """`disjorn-apps-launch stop <caller> <session> <turn>` through sudo."""
+        session, turn = int(rec["session"]), int(rec["turn"])
+        caller = str(rec.get("caller") or "")
+        if not APPS_SEAT_RE.match(caller):
+            self._audit("broker", "apps-build",
+                        {"session": session, "turn": turn}, True,
+                        f"stop not sent: ticket names no seat ({caller!r})")
+            return False
+        argv = [*self._apps_argv("stop_command"), caller, str(session), str(turn)]
+        try:
+            cp = self._run(argv, 30)
+        except VerbError as exc:
+            self._audit("broker", "apps-build",
+                        {"session": session, "turn": turn}, True,
+                        f"stop failed to run: {exc.message}")
+            return False
+        sent = cp.returncode != APPS_LAUNCH_REFUSED
+        tail = (cp.stderr or cp.stdout or "").strip()[-300:]
+        self._audit("broker", "apps-build",
+                    {"session": session, "turn": turn}, True,
+                    (f"stop sent to {rec.get('unit')}: exit {cp.returncode}"
+                     if sent else
+                     f"stop refused by the launcher for {rec.get('unit')}: "
+                     f"exit {cp.returncode}, will ask again")
+                    + (f" — {tail}" if tail and cp.returncode != 0 else ""))
+        return sent
+
+    # -- the claim --------------------------------------------------------
+
+    def _apps_claim(self, app_id: str, session: int, turn: int) -> None:
+        """§E check 4: one turn at a time per APP."""
+        with self._apps_lock:
+            if app_id in self._active_apps:
+                raise VerbError("apps-refused",
+                                "a turn is already running for this app")
+            self._active_apps[app_id] = (session, turn)
+
+    def _apps_release(self, app_id: str) -> None:
+        with self._apps_lock:
+            self._active_apps.pop(app_id, None)
+
+    # -- talking to the server --------------------------------------------
+
+    def _apps_harness_view(self, session: int) -> dict:
+        """The session as the SERVER knows it (§1.1)."""
+        try:
+            view = self.planroom_api(
+                self.disjorn, "GET", f"/apps/sessions/{session}/harness-view")
+        except VerbError as exc:
+            if exc.status == 404:
+                raise VerbError("apps-refused", "no such build session") from None
+            raise
+        if not isinstance(view, dict):
+            raise VerbError("exec-failure",
+                            "the apps harness view returned no session")
+        return view
+
+    def _apps_post_stage(self, session: int, stage: str, detail: dict) -> bool:
+        """Publish one stage event."""
+        payload = {"stage": stage, "detail": apps_fit_detail(detail)}
+        path = f"/apps/sessions/{session}/stage"
+        for attempt in (1, 2):
+            try:
+                self.planroom_api(self.disjorn, "POST", path, payload)
+                return True
+            except VerbError as exc:
+                self._audit("broker", "apps-build",
+                            {"session": session, "stage": stage}, True,
+                            f"stage post failed: {exc.message}")
+                if exc.status == 410 or attempt == 2:
+                    return False
+                time.sleep(self._apps_num("poll_sec"))
+            except Exception as exc:  # noqa: BLE001 — never crash a reaper
+                self._audit("broker", "apps-build",
+                            {"session": session, "stage": stage}, True,
+                            f"stage post failed: {exc!r}")
+                return False
+        return False
+
+    # -- the ledger (§E) ---------------------------------------------------
+
+    def _apps_ledger(self, record: dict) -> None:
+        """One JSON line per turn, append-only."""
+        path = str(self.apps.get("ledger_path") or APPS_DEFAULTS["ledger_path"])
+        try:
+            parent = os.path.dirname(path)
+            if parent:
+                os.makedirs(parent, mode=0o700, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, default=str, ensure_ascii=False) + "\n")
+        except OSError as exc:
+            self._audit("broker", "apps-build",
+                        {"session": record.get("session")}, True,
+                        f"apps ledger unwritable: {exc}")
+
+    def _apps_ledger_tokens_after(self, session: int) -> int:
+        """The highest `tokens_after` this house has LOGGED for a session."""
+        path = str(self.apps.get("ledger_path") or APPS_DEFAULTS["ledger_path"])
+        best = 0
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue
+                    if rec.get("session") != session:
+                        continue
+                    after = rec.get("tokens_after")
+                    if isinstance(after, int) and not isinstance(after, bool):
+                        best = max(best, after)
+        except OSError:
+            return 0
+        return best
+
+    def _apps_ledger_record(self, rec: dict, *, result: Optional[dict],
+                            exit_code: Optional[int], halted: Optional[str],
+                            tokens: int, synthesized: bool,
+                            spawned: bool = True, late: bool = False) -> dict:
+        """One ledger line's fields, from the sidecar and result.json together."""
+        result = result or {}
+        usage = result.get("usage") if isinstance(result.get("usage"), dict) else None
+        # HOW LONG THE TURN TOOK, from the turn's OWN clock where it has one.
+        # result.json's started_at/ended_at are the unit's; the sidecar's started_at
+        # is the broker's spawn.
+        seconds = None
+        started = result.get("started_at") or rec.get("started_at")
+        ended = result.get("ended_at")
+        if started and ended:
+            try:
+                seconds = round((_dt.datetime.fromisoformat(str(ended))
+                                 - _dt.datetime.fromisoformat(str(started))
+                                 ).total_seconds(), 1)
+            except (TypeError, ValueError):
+                seconds = None
+        if seconds is None and isinstance(rec.get("started_mono"), float):
+            seconds = round(time.monotonic() - rec["started_mono"], 1)
+        tokens_before = int(rec.get("tokens_before") or 0)
+        return {
+            "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            "session": rec.get("session"),
+            "app": rec.get("app_id"),
+            "turn": rec.get("turn"),
+            "caller": rec.get("caller"),
+            "unit": rec.get("unit"),
+            "exit": exit_code,
+            "seconds": seconds,
+            "halted": halted,
+            "no_changes": bool(result.get("no_changes")),
+            "commit": result.get("commit"),
+            "files": len(result.get("files") or []),
+            "model": result.get("model") or rec.get("model"),
+            "runner": result.get("runner") or self.apps.get("runner"),
+            "usage": {
+                "input": (usage or {}).get("input_tokens"),
+                "output": (usage or {}).get("output_tokens"),
+                "cache_read": (usage or {}).get("cache_read_input_tokens"),
+                "cache_creation": (usage or {}).get("cache_creation_input_tokens"),
+                "cost_usd": (usage or {}).get("total_cost_usd"),
+            } if usage else None,
+            "tokens": tokens,
+            # Parent Round 6: the trip log record names the column it summed.
+            "ceiling_column": "input+output+cache_creation",
+            "tokens_after": tokens_before + tokens,
+            "ceiling": self._apps_int("build_token_ceiling"),
+            "synthesized": synthesized,
+            # A ceiling refusal spawns nothing, so it is not a turn: git will never
+            # write `turn N`, and the NEXT real handoff reuses N. The server keys
+            # the turn counter off this too.
+            "spawned": spawned,
+            # True only on a record found AFTER its turn's halt was synthesized: the
+            # turn finished, the room was already told it had not, and this line is
+            # the contradiction on the record.
+            "late": late,
+        }
+
+    # -- the sidecar -------------------------------------------------------
+
+    def _apps_write_sidecar(self, rec: dict) -> None:
+        """Persist what a FUTURE broker process needs to finish this turn's story."""
+        path = self._apps_sidecar_path(rec["session"], rec["turn"])
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({k: v for k, v in rec.items() if k != "started_mono"}, fh)
+
+    def _apps_remove_sidecar(self, session: int, turn: int) -> None:
+        try:
+            os.unlink(self._apps_sidecar_path(session, turn))
+        except OSError:
+            pass
+
+    # -- the verb ----------------------------------------------------------
+
+    def _verb_apps_build(self, resident: str, args: dict) -> tuple[dict, str, dict]:
+        """Hand one build prompt to the apps-builder seat for an open session."""
+        self._apps_unavailable()
+        _reject_unknown(args, {"session_id", "prompt_file"})
+        if "session_id" not in args:
+            raise _bad("session_id is required")
+        session = _check_int(args, "session_id", 0, 1, 999_999_999)
+        prompt_file = _check_str(args, "prompt_file", required=True, max_len=4000)
+        assert prompt_file is not None
+
+        # 1. the session, as the server knows it.
+        view = self._apps_harness_view(session)
+        if not view.get("open", False):
+            raise VerbError("apps-refused", "this build session has ended")
+        app_id = str(view.get("app_id") or "")
+        if not APPS_APP_ID_RE.match(app_id):
+            raise VerbError("exec-failure",
+                            "the session's app id is not a valid app id")
+
+        # 2. the seat -> bot map.
+        seat_bots = self.apps.get("seat_bots") or {}
+        mapped = seat_bots.get(resident)
+        if not isinstance(mapped, int) or isinstance(mapped, bool):
+            raise VerbError("apps-refused",
+                            "this seat is not mapped to a builder bot")
+        if mapped != view.get("builder_bot_id"):
+            raise VerbError("apps-refused",
+                            "this session belongs to another builder")
+
+        self._apps_sweep_synthesized(app_id)
+
+        # 3. the ceiling.
+        ceiling = self._apps_int("build_token_ceiling")
+        # The larger of what the SERVER was told and what this house LOGGED: a stage
+        # post that never landed would otherwise buy a free turn against the
+        # ceiling.
+        tokens_used = max(int(view.get("tokens_used") or 0),
+                          self._apps_ledger_tokens_after(session))
+        turns = int(view.get("turns") or 0)
+        turn = turns + 1
+        if tokens_used >= ceiling:
+            # Nothing spawns.
+            detail = {"turn": turn, "halted": "ceiling", "spawned": False}
+            self._apps_post_stage(session, "scoped", detail)
+            self._apps_ledger(self._apps_ledger_record(
+                {"session": session, "turn": turn, "app_id": app_id,
+                 "caller": resident, "unit": apps_unit_name(session, turn),
+                 "model": self.apps.get("model"), "tokens_before": tokens_used},
+                result=None, exit_code=None, halted="ceiling", tokens=0,
+                synthesized=False, spawned=False))
+            raise VerbError("apps-refused",
+                            f"this build has hit its token ceiling "
+                            f"({tokens_used} of {ceiling})")
+
+        # 4. one turn at a time per app.
+        self._apps_claim(app_id, session, turn)
+        try:
+            prompt_path = self._map_resident_path(
+                resident, prompt_file, label="prompt_file")
+            self._apps_check_prompt(prompt_path)
+            unit = apps_unit_name(session, turn)
+            out_path = os.path.join(self._apps_log_dir(), f"{session}-{turn}.out")
+            err_path = os.path.join(self._apps_log_dir(), f"{session}-{turn}.err")
+            out_fh = self._apps_open_log(out_path)
+            err_fh = self._apps_open_log(err_path)
+            rec = {
+                "schema": APPS_SIDECAR_SCHEMA,
+                "session": session, "turn": turn, "app_id": app_id,
+                "unit": unit, "caller": resident,
+                "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                "deadline": time.time() + self.apps.get(
+                    "turn_max_sec", APPS_TURN_MAX_SEC)
+                + self._apps_num("result_grace_sec"),
+                "out_path": out_path, "err_path": err_path,
+                "tokens_before": tokens_used,
+                "model": self.apps.get("model"),
+                "started_mono": time.monotonic(),
+            }
+            try:
+                self._apps_write_sidecar(rec)
+                argv = [*self._apps_argv("launch_command"), resident,
+                        str(session), str(turn), app_id, prompt_path]
+                try:
+                    proc = self._apps_spawn(argv, stdout=out_fh, stderr=err_fh)
+                except OSError as exc:
+                    # Never spawned — no unit, no turn, nothing to reap.
+                    raise VerbError("exec-failure",
+                                    f"the turn failed to launch: {exc}") from None
+            finally:
+                # The child holds its own dups; this process must not.
+                self._close_build_logs(out_fh, err_fh)
+        except BaseException:
+            self._apps_release(app_id)
+            self._apps_remove_sidecar(session, turn)
+            raise
+
+        # The launcher refuses before any privilege in milliseconds (exit 64: bad
+        # charset, a path outside the caller's prompt dir, a symlink, the wrong
+        # owner, an empty or oversized file).
+        refusal = self._apps_early_refusal(proc, err_path)
+        if refusal is not None:
+            self._apps_release(app_id)
+            self._apps_remove_sidecar(session, turn)
+            self._unlink_build_logs(out_path, err_path)
+            raise VerbError("apps-refused", refusal)
+
+        self._apps_post_stage(session, "scoped",
+                              {"turn": turn, "model": self.apps.get("model")})
+        t = threading.Thread(target=self._reap_apps, args=(rec, proc), daemon=True)
+        self._apps_threads.append(t)
+        t.start()
+        return ({"turn": turn, "unit": unit, "app_id": app_id},
+                f"apps-build turn {turn} for session {session} launched as {unit}",
+                {"session": session, "turn": turn, "unit": unit,
+                 "app_id": app_id})
+
+    def _apps_open_log(self, path: str) -> Any:
+        """The launcher's own stdout/stderr, 0600."""
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        except OSError as exc:
+            raise VerbError("exec-failure",
+                            f"cannot create the turn's output file: {exc}") from None
+        return os.fdopen(fd, "wb")
+
+    def _apps_check_prompt(self, path: str) -> None:
+        """The prompt, read as bytes and bounded — a COURTESY CHECK, not the wall."""
+        bound = self._apps_int("prompt_max_bytes")
+        try:
+            with open(path, "rb") as fh:
+                blob = fh.read(bound + 1)
+        except OSError:
+            raise VerbError("apps-refused",
+                            "the prompt file cannot be read") from None
+        if not blob.strip():
+            raise VerbError("apps-refused", "the prompt file is empty")
+        if len(blob) > bound:
+            raise VerbError("apps-refused",
+                            f"the prompt file is larger than {bound} bytes")
+        markers = self.apps.get("chat_markers") or APPS_DEFAULTS["chat_markers"]
+        for marker in markers:
+            if isinstance(marker, str) and marker and marker.encode() in blob:
+                raise VerbError("apps-refused", APPS_CHAT_MARKER_REFUSAL)
+
+    def _apps_early_refusal(self, proc: Any, err_path: str) -> Optional[str]:
+        """The launcher's pre-privilege refusal, or None if the turn is under way."""
+        try:
+            rc = proc.wait(timeout=APPS_SPAWN_CHECK_SEC)
+        except subprocess.TimeoutExpired:
+            return None            # still running: the turn is under way
+        except Exception:  # noqa: BLE001 — a probe never sinks a launched turn
+            return None
+        if rc == 0 or rc is None:
+            return None
+        tail = self._read_build_tail(err_path).strip().splitlines()
+        last = tail[-1].strip()[:200] if tail else ""
+        if rc == APPS_LAUNCH_REFUSED_EXIT:
+            return f"the launcher refused the turn: {last}" if last else \
+                "the launcher refused the turn (exit 64)"
+        return (f"the turn could not be launched (exit {rc})"
+                + (f": {last}" if last else ""))
+
+    # -- the reaper --------------------------------------------------------
+
+    def _reap_apps(self, rec: dict, proc: Any = None) -> None:
+        """Watch one turn to its terminal record, publish it, log it, let go."""
+        session, turn = int(rec["session"]), int(rec["turn"])
+        turn_dir = self._apps_turn_dir(session, turn)
+        result_path = os.path.join(turn_dir, "result.json")
+        grace = self._apps_num("result_grace_sec")
+        poll = max(0.01, self._apps_num("poll_sec"))
+        scaffolded = False
+        ended_at: Optional[float] = None      # when the process/unit went away
+        unparseable_since: Optional[float] = None
+        # Slice (iv): one harness-view read per `stop_poll_sec` while the unit is
+        # alive and no stop has been sent yet.
+        view_every = max(poll, self._apps_num("stop_poll_sec"))
+        last_view = time.monotonic() - view_every
+        stale_seen = False
+        try:
+            while not self._closed:
+                if not scaffolded and os.path.exists(
+                        os.path.join(turn_dir, "scaffolded")):
+                    self._apps_post_stage(session, "scaffolded", {"turn": turn})
+                    scaffolded = True
+                result, bad = self._apps_read_result(result_path)
+                if result is not None and not self._apps_result_is_ours(rec, result):
+                    if not stale_seen:
+                        stale_seen = True
+                        self._audit("broker", "apps-build",
+                                    {"session": session, "turn": turn}, True,
+                                    f"ignoring a result.json that is not this "
+                                    f"turn's (app {result.get('app_id')!r}, "
+                                    f"session {result.get('session')!r}, turn "
+                                    f"{result.get('turn')!r}); waiting for the "
+                                    f"real harvest")
+                    result = None
+                if result is not None:
+                    self._apps_finish(rec, result, proc, scaffolded)
+                    return
+                if bad:
+                    # A half-written file the harvest is still renaming into place:
+                    # re-read.
+                    now = time.monotonic()
+                    unparseable_since = unparseable_since or now
+                    if now - unparseable_since <= grace:
+                        time.sleep(poll)
+                        continue
+                if proc is not None:
+                    alive = proc.poll() is None
+                else:
+                    alive = self._apps_unit_state(
+                        str(rec.get("unit"))) in BUILD_ACTIVE_STATES
+                # THE USER'S STOP (slice (iv)).
+                if alive and not (rec.get("stop_sent") or rec.get("stop_abandoned")):
+                    now = time.monotonic()
+                    if now - last_view >= view_every:
+                        last_view = now
+                        if self._apps_stop_requested(session):
+                            if self._apps_send_stop(rec):
+                                rec["stop_sent"] = True
+                            else:
+                                tries = int(rec.get("stop_refusals") or 0) + 1
+                                rec["stop_refusals"] = tries
+                                if tries >= APPS_STOP_MAX_REFUSALS:
+                                    rec["stop_abandoned"] = True
+                                    self._audit(
+                                        "broker", "apps-build",
+                                        {"session": session, "turn": turn},
+                                        True,
+                                        f"stop abandoned for {rec.get('unit')}: "
+                                        f"the launcher refused {tries} times, "
+                                        f"which is permanent; the turn runs to "
+                                        f"its own clock")
+                            self._apps_write_sidecar(rec)
+                if not alive:
+                    now = time.monotonic()
+                    ended_at = ended_at if ended_at is not None else now
+                    if now - ended_at >= grace:
+                        self._apps_synthesize(
+                            rec, proc, scaffolded,
+                            "the turn ended without a result")
+                        return
+                if time.time() > float(rec.get("deadline") or 0):
+                    # THE DEADLINE MUST NOT FIRE OVER A LIVE UNIT.
+                    hard = (float(rec.get("deadline") or 0)
+                            + self._apps_num("unit_stop_timeout_sec"))
+                    if not alive:
+                        self._apps_synthesize(rec, proc, scaffolded,
+                                              "the turn passed its deadline")
+                        return
+                    if time.time() > hard:
+                        self._apps_synthesize(
+                            rec, proc, scaffolded,
+                            "the turn passed its deadline and its unit did "
+                            "not stop")
+                        return
+                time.sleep(poll)
+        except Exception as exc:  # noqa: BLE001 — never die silently
+            self._audit("broker", "apps-build",
+                        {"session": session, "turn": turn}, True,
+                        f"the apps reaper failed: {exc!r}")
+            self._apps_release(str(rec.get("app_id") or ""))
+            self._apps_remove_sidecar(session, turn)
+            return
+        # Shutting down: leave the sidecar exactly where the NEXT process looks for
+        # it.
+
+    @staticmethod
+    def _apps_result_is_ours(rec: dict, result: dict) -> bool:
+        """Does this result.json describe the turn on this ticket?"""
+        try:
+            if str(result.get("app_id") or "") != str(rec.get("app_id") or ""):
+                return False
+            if int(result.get("session", -1)) != int(rec["session"]):
+                return False
+            if int(result.get("turn", -1)) != int(rec["turn"]):
+                return False
+        except (TypeError, ValueError):
+            return False
+        return True
+
+    @staticmethod
+    def _apps_read_result(path: str) -> tuple[Optional[dict], bool]:
+        """(record, unparseable)."""
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except FileNotFoundError:
+            return None, False
+        except (OSError, json.JSONDecodeError):
+            return None, True
+        return (data, False) if isinstance(data, dict) else (None, True)
+
+    def _apps_last_stage(self, rec: dict, scaffolded: bool) -> str:
+        """Where the bar is standing when a turn halts."""
+        if scaffolded or os.path.exists(
+                os.path.join(self._apps_turn_dir(int(rec["session"]),
+                                                 int(rec["turn"])), "scaffolded")):
+            return "scaffolded"
+        return "scoped"
+
+    def _apps_finish(self, rec: dict, result: dict, proc: Any,
+                     scaffolded: bool) -> None:
+        """The terminal record exists: publish it, flag what needs a human, log it,
+        release."""
+        session, turn = int(rec["session"]), int(rec["turn"])
+        halted = result.get("halted")
+        error = apps_clean_line(result.get("error"))
+        tokens = apps_tokens(result.get("usage"))
+        files = apps_cap_files(result.get("files"))
+        model = result.get("model") or rec.get("model")
+        summary = apps_clean_line(result.get("summary"))
+        exit_code = result.get("exit")
+        exit_code = exit_code if isinstance(exit_code, int) else None
+        if halted or error:
+            halted = str(halted) if halted else "error"
+            detail = {"turn": turn, "halted": halted, "files": files,
+                      "tokens": tokens, "model": model}
+            if error:
+                detail["reason"] = error
+            # A turn that wrote a report and THEN failed still has a report worth
+            # reading; forward it so the room's halt line can quote it.
+            if summary:
+                detail["summary"] = summary
+            self._apps_post_stage(session, self._apps_last_stage(rec, scaffolded),
+                                  detail)
+            if halted == "secret":
+                # §E: a turn that tried to publish a credential has earned a human
+                # before the next one.
+                self._narrate(
+                    f"FLAG apps-build: session {session} turn {turn} "
+                    f"(app {rec.get('app_id')}, caller {rec.get('caller')}) "
+                    "tried to write a credential — quarantined at "
+                    f"{result.get('quarantine')}; the session was closed by the "
+                    "server.")
+        else:
+            halted = None
+            detail = {"turn": turn, "files": files, "tokens": tokens,
+                      "model": model, "no_changes": bool(result.get("no_changes"))}
+            if summary:
+                detail["summary"] = summary
+            self._apps_post_stage(session, "files_written", detail)
+            if result.get("commit") and not result.get("no_changes"):
+                self._apps_post_stage(session, "deployed", {"turn": turn})
+        flag = apps_clean_line(result.get("flag"))
+        if flag:
+            # The builder never talks to the user: a flag goes to the admin in one
+            # line and the build continues (parent "Flagging").
+            self._narrate(f"FLAG apps-build: session {session} turn {turn} "
+                          f"(app {rec.get('app_id')}): {flag}")
+        self._apps_ledger(self._apps_ledger_record(
+            rec, result=result, exit_code=exit_code, halted=halted,
+            tokens=tokens, synthesized=False))
+        self._apps_release(str(rec.get("app_id") or ""))
+        self._apps_remove_sidecar(session, turn)
+
+    def _apps_synthesize(self, rec: dict, proc: Any, scaffolded: bool,
+                         reason: str) -> None:
+        """The absence branch (§E): a unit that ended with no result.json is a HALT."""
+        session, turn = int(rec["session"]), int(rec["turn"])
+        exit_code = getattr(proc, "returncode", None) if proc is not None else None
+        self._apps_post_stage(
+            session, self._apps_last_stage(rec, scaffolded),
+            {"turn": turn, "halted": "error", "reason": reason})
+        self._apps_ledger(self._apps_ledger_record(
+            rec, result=None,
+            exit_code=exit_code if isinstance(exit_code, int) else None,
+            halted="error", tokens=0, synthesized=True))
+        self._apps_release(str(rec.get("app_id") or ""))
+        rec = {**rec, "synthesized": True,
+               "synthesized_at": _dt.datetime.now(_dt.timezone.utc).isoformat()}
+        try:
+            self._apps_write_sidecar(rec)
+        except OSError as exc:
+            self._audit("broker", "apps-build",
+                        {"session": session, "turn": turn}, True,
+                        f"could not mark the synthesized ticket: {exc}")
+            self._apps_remove_sidecar(session, turn)
+
+    def _apps_sweep_synthesized(self, app_id: str) -> None:
+        """Resolve this app's marked tickets before its next turn starts."""
+        try:
+            entries = sorted(os.listdir(self._apps_log_dir()))
+        except OSError:
+            return
+        for name in entries:
+            if not name.endswith(APPS_SIDECAR_SUFFIX):
+                continue
+            path = os.path.join(self._apps_log_dir(), name)
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    rec = json.load(fh)
+                if not rec.get("synthesized"):
+                    continue
+                if str(rec.get("app_id") or "") != app_id:
+                    continue
+                self._apps_resolve_synthesized(rec)
+            except Exception as exc:  # noqa: BLE001 — never refuse over a sweep
+                self._audit("broker", "apps-build", {"app_id": app_id}, True,
+                            f"could not sweep a synthesized ticket: {exc!r}")
+
+    def _apps_resolve_synthesized(self, rec: dict) -> None:
+        """Close out a turn whose halt this house SYNTHESIZED."""
+        session, turn = int(rec["session"]), int(rec["turn"])
+        result, bad = self._apps_read_result(
+            os.path.join(self._apps_turn_dir(session, turn), "result.json"))
+        if result is not None and not self._apps_result_is_ours(rec, result):
+            self._audit(
+                "broker", "apps-build", {"session": session, "turn": turn},
+                True,
+                "a result.json in this turn's dir is not this turn's (app "
+                f"{result.get('app_id')!r}, session {result.get('session')!r}, "
+                f"turn {result.get('turn')!r}) — nothing ledgered, ticket "
+                "dropped")
+            result = None
+        if bad:
+            # A late record that will not parse is still a fact about this turn, and
+            # dropping it with its ticket would leave no line anywhere.
+            self._audit(
+                "broker", "apps-build", {"session": session, "turn": turn},
+                True,
+                "a result landed after this turn's halt was synthesized but "
+                "would not parse — nothing ledgered, ticket dropped")
+        if result is not None:
+            exit_code = result.get("exit")
+            self._apps_ledger(self._apps_ledger_record(
+                rec, result=result,
+                exit_code=exit_code if isinstance(exit_code, int) else None,
+                halted=(str(result.get("halted")) if result.get("halted")
+                        else None),
+                tokens=apps_tokens(result.get("usage")),
+                synthesized=False, late=True))
+            self._audit(
+                "broker", "apps-build", {"session": session, "turn": turn},
+                True,
+                "a result landed after this turn's halt was synthesized — "
+                f"ledgered late (commit {result.get('commit')})")
+        self._apps_remove_sidecar(session, turn)
+
+    # -- reattachment after a restart --------------------------------------
+
+    def adopt_inflight_apps(self) -> list[str]:
+        """Re-adopt app build turns that outlived the previous broker process."""
+        adopted: list[str] = []
+        if not self.apps_configured:
+            return adopted
+        try:
+            entries = sorted(os.listdir(self._apps_log_dir()))
+        except OSError:
+            return adopted
+        for name in entries:
+            if not name.endswith(APPS_SIDECAR_SUFFIX):
+                continue
+            path = os.path.join(self._apps_log_dir(), name)
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    rec = json.load(fh)
+                session, turn = int(rec["session"]), int(rec["turn"])
+                # The ticket must be named after the turn it claims, or the ids
+                # inside decide what gets published while the filename decides what
+                # gets deleted.
+                if name != f"{session}-{turn}{APPS_SIDECAR_SUFFIX}":
+                    raise ValueError("sidecar name does not match its turn")
+                rec["unit"] = rec.get("unit") or apps_unit_name(session, turn)
+            except Exception:  # noqa: BLE001 — an unreadable ticket is garbage
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+                continue
+            if rec.get("synthesized"):
+                # This turn already got its synthesized halt in the room.
+                self._apps_resolve_synthesized(rec)
+                continue
+            app_id = str(rec.get("app_id") or "")
+            with self._apps_lock:
+                if app_id in self._active_apps:
+                    continue        # this process already owns a turn on this app
+                self._active_apps[app_id] = (session, turn)
+            adopted.append(str(rec["unit"]))
+            t = threading.Thread(target=self._reap_apps, args=(rec, None),
+                                 daemon=True)
+            self._apps_threads.append(t)
+            t.start()
+        return adopted
+
+    def join_apps(self, timeout: float = 10.0) -> None:
+        """Join the apps reaper threads — TEST convenience only."""
+        for t in list(self._apps_threads):
+            t.join(timeout)
+
     # ---------------------------------------------------------------- wake
 
     def _check_wake_identity(self, resident: str, verb: str) -> Optional[str]:
-        """None if this identity may attempt this verb, else the refusal text.
-
-        Two rules, symmetric, both in code rather than in verbs.toml:
-
-        * only a configured wake caller may call `wake`, so a wake from any
-          resident, build or adapter uid is refused and audit-logged. The
-          caller arrives as an SO_PEERCRED uid, so this is the sentence that
-          makes "no text in any channel can constitute a wake" true;
-        * a wake caller may call nothing ELSE. The identity exists to press one
-          button; plink has better routes to every other verb than a socket
-          that answers as the broker.
-
-        With no `[wake]` section there are no callers, so the first rule
-        refuses everyone: the verb is present and inert, which is the same
-        fail-closed shape as an unflipped kill switch."""
+        """None if this identity may attempt this verb, else the refusal text."""
         is_waker = resident in self.wake_callers
         if verb == WAKE_VERB and not is_waker:
             return (f"{resident} may not wake anyone — the wake caller is "
@@ -3750,20 +5215,15 @@ class Broker:
         return None
 
     def _wake_spool_dir(self) -> str:
-        """The spool realpath VERIFIED resident-unwritable at construction —
-        never the raw config string, for the reason _specs_dir prefers its
-        verified path: the directory written must be the directory proven."""
+        """The spool realpath VERIFIED resident-unwritable at construction — never
+        the raw config string, for the reason _specs_dir prefers its verified path:
+        the directory written must be the directory proven."""
         if not self.wake_spool_real:
             raise VerbError("internal", "wake.spool_dir is not configured")
         return self.wake_spool_real
 
     def _write_wake_record(self, record: dict) -> str:
-        """One 0644 JSON record per wake, written atomically.
-
-        Atomic because the seat's runner POLLS this directory: a reader that
-        catches a half-written file would see a wake with no task, and the
-        rename means it either sees the whole record or no file at all. 0644
-        because the runner must read it and must not write it."""
+        """One 0644 JSON record per wake, written atomically."""
         path = os.path.join(self._wake_spool_dir(),
                             record["wake_id"] + WAKE_SPOOL_SUFFIX)
         fd, tmp = tempfile.mkstemp(dir=self._wake_spool_dir(),
@@ -3783,10 +5243,7 @@ class Broker:
         return path
 
     def _read_wake_records(self) -> list[dict]:
-        """Every parseable record in the spool. A record the broker cannot
-        parse is skipped rather than fatal: the spool is plink-owned, so a bad
-        file is an operator's mistake, and refusing every future wake over it
-        would be the wrong blast radius."""
+        """Every parseable record in the spool."""
         try:
             names = sorted(os.listdir(self._wake_spool_dir()))
         except (OSError, VerbError):
@@ -3807,9 +5264,7 @@ class Broker:
 
     @staticmethod
     def _wake_requested_epoch(record: dict) -> Optional[float]:
-        """When the wake was asked for. None when the record carries no
-        readable time — such a record is treated as neither in flight nor
-        worth keeping, never as forever-live."""
+        """When the wake was asked for."""
         try:
             started = _dt.datetime.fromisoformat(str(record.get("requested_at")))
         except (TypeError, ValueError):
@@ -3820,8 +5275,8 @@ class Broker:
 
     @classmethod
     def _wake_window_ends(cls, record: dict) -> Optional[float]:
-        """When this wake stops being in flight: requested_at + the session cap
-        + the grace margin."""
+        """When this wake stops being in flight: requested_at + the session cap +
+        the grace margin."""
         started = cls._wake_requested_epoch(record)
         if started is None:
             return None
@@ -3832,10 +5287,7 @@ class Broker:
         return started + cap + grace
 
     def _prune_wake_spool(self, now: Optional[float] = None) -> int:
-        """Delete records past the RETENTION horizon (not past their window).
-        Runs on each wake, so the spool cannot grow without bound, while a
-        recently-expired record survives long enough for a runner that was down
-        to find it and post that the wake was missed."""
+        """Delete records past the RETENTION horizon (not past their window)."""
         now = now if now is not None else time.time()
         removed = 0
         for rec in self._read_wake_records():
@@ -3851,29 +5303,14 @@ class Broker:
         return removed
 
     def _daily_wake_cap(self) -> int:
-        """`[wake].daily_wake_cap`, else DEFAULT_DAILY_WAKE_CAP.
-
-        A non-int reads as the default rather than as no cap: config drift must
-        never be the thing that removes a wall."""
+        """`[wake].daily_wake_cap`, else DEFAULT_DAILY_WAKE_CAP."""
         cap = self.wake.get("daily_wake_cap", DEFAULT_DAILY_WAKE_CAP)
         if isinstance(cap, bool) or not isinstance(cap, int):
             return DEFAULT_DAILY_WAKE_CAP
         return cap
 
     def _wake_spend_today(self, seat: str, now: float) -> tuple[int, float]:
-        """(wakes, session seconds) recorded for this seat so far today (UTC).
-
-        Counted from the spool rather than the audit log, because the record is
-        written under the same lock as this count — the two cannot disagree the
-        way a build's audit-log seeding can, and the spool's week of retention
-        covers any day this asks about.
-
-        THE SECONDS ARE A CEILING, not a measurement. From here the broker knows
-        when a wake started and what wall clock it granted the runner; it never
-        learns when the session actually stopped (the runner posts that). So a
-        wake counts for what it was granted, bounded by how much of that has
-        elapsed — an in-flight wake grows toward its cap instead of claiming it
-        up front."""
+        """(wakes, session seconds) recorded for this seat so far today (UTC)."""
         count = 0
         spent = 0.0
         today = _dt.datetime.fromtimestamp(
@@ -3895,18 +5332,7 @@ class Broker:
         return count, spent
 
     def _active_wake(self, resident: str) -> Optional[dict]:
-        """The most recent wake still in flight for this seat, if any.
-
-        Read from the spool per request, not from memory, so a broker restart
-        mid-wake does not lose the fact that a seat is awake.
-
-        NOTE what this can and cannot tell apart. From the socket, a call by a
-        woken session and a call by a summoned one are the same uid; the window
-        is the only signal there is. So while a wake is in flight for a seat,
-        EVERY build that seat starts is held to the woken session's rules. That
-        is the safe direction of the imprecision — it can refuse a build a
-        summon could have run, and it can never let a woken session past a rule
-        by mistaking it for a summon."""
+        """The most recent wake still in flight for this seat, if any."""
         if not self.wake:
             return None
         now = time.time()
@@ -3919,19 +5345,7 @@ class Broker:
 
     def _assert_woken_build_allowed(self, resident: str, wake: dict,
                                     text: str) -> None:
-        """The no-self-review rule, one level down (2026-08-25 spec).
-
-        A woken session inherits `start-build` from the summon seat, and that
-        is only safe while the confirm gate stays upstream of every build. This
-        is the other half: waking must not become a route to a build the seat
-        would then review itself.
-
-        A spec that states NO review owner is refused, not waved through: the
-        rule is a comparison, and a comparison with nothing to compare cannot
-        be satisfied. A spec that names a human refuses nothing — that is the
-        case the rule protects. The second clause (the waker's own seat) is
-        inert while only humans wake, and is written now so that it is already
-        true on the day a non-human wake lands."""
+        """The no-self-review rule, one level down (spec)."""
         raw = parse_review_owner(text)
         if raw is None:
             raise _bad(
@@ -3955,22 +5369,7 @@ class Broker:
                 "review would land in the waker's queue")
 
     def _verb_wake(self, caller: str, args: dict) -> tuple[dict, str, dict]:
-        """Wake a seat with a task (SPECS/2026-08-25-agentic-residents.md).
-
-        The broker's whole part is authentication and a record: it resolves the
-        caller from SO_PEERCRED (dispatch has already refused every identity
-        but a configured waker), checks the named seat against config, and
-        drops one record in the plink-owned spool. It launches nothing — the
-        session runs in the seat's own container under the seat's own uid, and
-        the seat's runner is what launches, caps, harvests and posts it.
-
-        The caps ride ON the record rather than living in the runner's config,
-        so the wall-clock a woken session runs against is plink-owned and
-        singular. Widening it is a witnessed edit to broker.toml.
-
-        The DAILY cap is enforced here and nowhere else: the seat's runner sees
-        one record at a time and cannot count a day, and a wake refused here
-        never becomes a record, so nothing downstream has to know about it."""
+        """Wake a seat with a task (SPECS/2026-08-25-agentic-residents.md)."""
         _reject_unknown(args, {"resident", "task"})
         seat = _check_str(args, "resident", required=True, max_len=64)
         task = _check_str(args, "task", required=True,
@@ -4013,20 +5412,34 @@ class Broker:
              "requested_at": record["requested_at"]},
             f"wake {record['wake_id']} recorded for {seat} by {caller} "
             f"(cap {record['session_cap_sec']}s)",
-            # A FACT field, like start-build's `build_started`: the wake id is
-            # what ties this line to the action log's start/end pair and to the
+            # A FACT field, like start-build's `build_started`: the wake id is what
+            # ties this line to the action log's start/end pair and to the
             # #custodian post the seat's runner makes.
             {"wake_id": record["wake_id"]},
         )
 
-    def _verb_classify_diff(self, resident: str, args: dict) -> tuple[dict, str]:
-        """Contract with harness/classifier/classify_diff.py (WP-H4):
-        argv: <classify_diff.py> --repo <abs path> --range <git range>
-              --config <protected-paths.toml> --gates <json object>;
-        stdout: one JSON object (the classification), exit 0. Anything else
-        is exec-failure. --config comes from broker config, never from the
-        caller — the classifier config is protected by placement."""
-        _reject_unknown(args, {"repo", "range", "gates"})
+    # ------------------------------------------- resident path translation
+
+    def _map_resident_path(self, resident: str, path: str,
+                           label: str = "path") -> str:
+        """One container path, translated to the host path it means — and refused if
+        it means nothing."""
+        path_map = self.residents.get(resident, {}).get("path_map")
+        if not path_map:
+            raise _bad(f"no path_map configured for {resident}; a {label} must "
+                       "resolve through an explicit allowlist")
+        best = max((p for p in path_map
+                    if path == p or path.startswith(p.rstrip("/") + "/")),
+                   key=len, default=None)
+        if best is None:
+            raise _bad(f"{label} is not under a mapped root for {resident}; "
+                       f"available roots: {sorted(path_map)}")
+        return path_map[best].rstrip("/") + path[len(best.rstrip("/")):]
+
+    def _check_diff_args(self, resident: str, args: dict) -> tuple[str, str]:
+        """The repo/range pair every diff verb takes: one mapped host path, and
+        a range each side of which is split off and handed to git as a bare
+        positional, so no side may parse as a flag."""
         repo = _check_str(args, "repo", required=True, max_len=300)
         assert repo is not None
         if not repo.startswith("/") or "/../" in repo or repo.endswith("/.."):
@@ -4036,62 +5449,120 @@ class Broker:
         if rng.startswith("-") or not _RANGE_RE.match(rng):
             raise _bad("range must be a plain git rev/range "
                        "(letters, digits, . _ ~ ^ / { } -, no leading dash)")
-        # WP-H13 F3: the classifier splits A..B (or A...B) and hands each side
-        # to git as a bare positional. A leading '-' on the WHOLE string is
-        # rejected above, but the RIGHT side after the split can still start
-        # with '-' (e.g. "main..--exit-code") and reach git as a flag. Reject
-        # a leading dash on EITHER side of the split — no ref legitimately
-        # starts with one.
-        for _side in rng.replace("...", "..").split(".."):
-            if _side.startswith("-"):
+        for side in rng.replace("...", "..").split(".."):
+            if side.startswith("-"):
                 raise _bad("neither side of the range may start with '-'")
-        # Residents pass THEIR view of the filesystem; the broker runs
-        # host-side where those paths don't exist. [residents.<r>.path_map]
-        # translates container prefixes to host paths (longest prefix wins)
-        # AND is the allowlist: a repo outside every mapped root is rejected,
-        # so a resident can only ever point the classifier at repos
-        # deliberately exposed to them.
-        #
-        # WP-H13 F2: absent map now FAILS CLOSED. It used to pass the caller's
-        # repo through verbatim, so a resident configured without a map could
-        # aim git at any host path the broker uid can read. A resident allowed
-        # to classify must have an explicit map; no map = no classify.
-        path_map = self.residents.get(resident, {}).get("path_map")
-        if not path_map:
-            raise _bad(f"no classify-diff path_map configured for {resident}; "
-                       "classify-diff requires an explicit repo allowlist")
-        best = max((p for p in path_map
-                    if repo == p or repo.startswith(p.rstrip("/") + "/")),
-                   key=len, default=None)
-        if best is None:
-            raise _bad(f"repo not under a mapped root for {resident}; "
-                       f"available roots: {sorted(path_map)}")
-        repo = path_map[best].rstrip("/") + repo[len(best.rstrip("/")):]
+        return self._map_resident_path(resident, repo, label="repo"), rng
+
+    def _verb_classify_diff(self, resident: str, args: dict) -> tuple[dict, str]:
+        """Contract with harness/classifier/classify_diff.py (WP-H4): argv:
+        <classify_diff.py> --repo <abs path> --range <git range> --config
+        <protected-paths.toml> --gates <json object>; stdout: one JSON object (the
+        classification), exit 0."""
+        _reject_unknown(args, {"repo", "range", "gates"})
+        repo, rng = self._check_diff_args(resident, args)
         gates = args.get("gates", {})
         if not isinstance(gates, dict):
             raise _bad("gates must be an object")
-        gates_json = json.dumps(gates, ensure_ascii=False)
-        if len(gates_json) > MAX_GATES_JSON:
+        classification = self._classify(repo, rng, gates)
+        tier = classification.get("tier") if isinstance(classification, dict) else None
+        return ({"classification": classification}, f"classified: tier={tier}")
+
+    def _verb_changed_files(self, resident: str, args: dict) -> tuple[dict, str]:
+        """What a branch DID to the tree. `A..B` and `A...B` both answer for
+        `A...B` — a reviewer means the branch's own changes, never main's."""
+        _reject_unknown(args, {"repo", "range"})
+        repo, rng = self._check_diff_args(resident, args)
+        left, right = _split_diff_range(rng)
+        timeout = SUBPROCESS_TIMEOUTS["changed-files"]
+        git = self._argv("git", ["git"])
+        from_sha = self._rev_sha(git, repo, left, "left", timeout)
+        to_sha = self._rev_sha(git, repo, right, "right", timeout)
+        merge_base = self._run(
+            [*git, "-C", repo, "merge-base", from_sha, to_sha], timeout)
+        if merge_base.returncode != 0:
+            raise _bad(f"the two sides of {rng} share no history")
+        spec = f"{from_sha}...{to_sha}"
+        numstat = self._git_diff(git, repo, ["--numstat", spec], timeout)
+        name_status = self._git_diff(git, repo, ["--name-status", spec], timeout)
+        try:
+            counts = _parse_numstat(numstat)
+            rows = _parse_name_status(name_status)
+        except (IndexError, ValueError):
+            raise VerbError("exec-failure", "git diff output did not parse") from None
+
+        files = []
+        added_total = removed_total = 0
+        for status, path, old_path in sorted(rows, key=lambda row: row[1]):
+            added, removed = counts.get(path, (None, None))
+            added_total += added or 0
+            removed_total += removed or 0
+            entry = {"path": _safe_path(path), "status": status,
+                     "added": added, "removed": removed,
+                     "binary": added is None and removed is None}
+            if old_path is not None:
+                entry["old_path"] = _safe_path(old_path)
+            files.append(entry)
+        truncated = len(files) > MAX_CHANGED_FILES
+        summary = (f"changed-files: {len(files)} files, "
+                   f"+{added_total} -{removed_total}"
+                   + (" (truncated)" if truncated else ""))
+        return ({"base": merge_base.stdout.strip(), "from": from_sha,
+                 "to": to_sha, "files": files[:MAX_CHANGED_FILES],
+                 "totals": {"files": len(files), "added": added_total,
+                            "removed": removed_total},
+                 "truncated": truncated}, summary)
+
+    def _rev_sha(self, git: list[str], repo: str, rev: str, side: str,
+                 timeout: int) -> str:
+        """A rev a reviewer named, resolved to a commit sha — or refused by the
+        side it came from, because `exec-failure` tells them nothing."""
+        cp = self._run([*git, "-C", repo, "rev-parse", "--verify",
+                        "--end-of-options", f"{rev}^{{commit}}"], timeout)
+        if cp.returncode != 0:
+            if "not a git repository" in cp.stderr:
+                raise VerbError("exec-failure", "repo is not a git repository")
+            raise _bad(f"the {side} side of the range does not resolve: {rev}")
+        return cp.stdout.strip()
+
+    def _git_diff(self, git: list[str], repo: str, rest: list[str],
+                  timeout: int) -> str:
+        """One `-z` diff. The trailing `--` closes the revision list, so nothing
+        after it can be read as an option."""
+        cp = self._run([*git, "-C", repo, "diff", "-z", "-M", *rest, "--"],
+                       timeout, errors="replace")
+        if cp.returncode != 0:
+            raise VerbError(
+                "exec-failure",
+                f"git diff exit {cp.returncode}: {cp.stderr.strip()[:300]}")
+        return cp.stdout
+
+    def _protected_paths(self) -> str:
+        return self.paths.get(
+            "protected_paths",
+            "/home/plink/Disjorn/Disjorn/harness/classifier/protected-paths.toml")
+
+    def _classify(self, repo: str, rng: str, gates_obj: dict) -> dict:
+        """One classifier run — the same argv for a resident's `classify-diff` and
+        for the broker's own pre-merge classification."""
+        gates_text = json.dumps(gates_obj, ensure_ascii=False)
+        if len(gates_text) > MAX_GATES_JSON:
             raise _bad(f"gates JSON exceeds {MAX_GATES_JSON} bytes")
         classifier = self.paths.get(
             "classifier",
             "/home/plink/Disjorn/Disjorn/harness/classifier/classify_diff.py")
-        protected = self.paths.get(
-            "protected_paths",
-            "/home/plink/Disjorn/Disjorn/harness/classifier/protected-paths.toml")
         argv = self._argv("classify_diff", [sys.executable, classifier])
         argv += ["--repo", repo, "--range", rng,
-                 "--config", protected, "--gates", gates_json]
+                 "--config", self._protected_paths(), "--gates", gates_text]
         cp = self._run(argv, SUBPROCESS_TIMEOUTS["classify-diff"])
         if cp.returncode != 0:
             raise VerbError("exec-failure",
                             f"classifier exit {cp.returncode}: {cp.stderr.strip()[:500]}")
         try:
-            classification = json.loads(cp.stdout)
+            out = json.loads(cp.stdout)
         except json.JSONDecodeError:
             raise VerbError("exec-failure", "classifier emitted non-JSON output") from None
-        tier = classification.get("tier") if isinstance(classification, dict) else None
-        return ({"classification": classification}, f"classified: tier={tier}")
+        return out if isinstance(out, dict) else {}
 
     def _verb_read_prod_logs(self, resident: str, args: dict) -> tuple[dict, str]:
         _reject_unknown(args, {"lines"})
@@ -4107,9 +5578,7 @@ class Broker:
         return ({"lines": out}, f"{len(out)} lines")
 
     def _verb_read_own_log(self, resident: str, args: dict) -> tuple[dict, str]:
-        """Tail/grep of the CALLING resident's configured log file only. The
-        path comes from broker.toml; a caller-supplied `path` is accepted only
-        if it resolves to exactly that file (so `../` games are dead ends)."""
+        """Tail/grep of the CALLING resident's configured log file only."""
         _reject_unknown(args, {"lines", "grep", "path"})
         lines = _check_int(args, "lines", 100, 1, MAX_LOG_LINES)
         grep = _check_str(args, "grep", max_len=MAX_GREP_CHARS)
@@ -4124,7 +5593,7 @@ class Broker:
                 all_lines = fh.read().splitlines()
         except OSError as exc:
             raise VerbError("exec-failure", f"log not readable: {exc}") from None
-        if grep is not None:  # plain substring match in-process — no shell, no regex
+        if grep is not None:
             all_lines = [ln for ln in all_lines if grep in ln]
         tail = all_lines[-lines:]
         return ({"lines": tail, "path": cfg_path},
@@ -4159,9 +5628,7 @@ class Broker:
                 f"proposal posted ({len(text)} chars)")
 
     def _verb_query_own_audit(self, resident: str, args: dict) -> tuple[dict, str]:
-        """The calling resident's OWN audit lines for a date range. Filtering is
-        by the broker-assigned resident name — never a caller-supplied value —
-        so nobody can read anyone else's trail."""
+        """The calling resident's OWN audit lines for a date range."""
         _reject_unknown(args, {"date_from", "date_to", "limit"})
         date_from = _check_date(args, "date_from")
         date_to = _check_date(args, "date_to")
@@ -4189,15 +5656,7 @@ class Broker:
     # ------------------------------------------------------- summon hops
 
     def _work_item_bucket(self, work_item: Optional[str]) -> Optional[str]:
-        """The work item this chain spends against, or None for no bucket.
-
-        A chain may continue past depth 1 only on a LIVE work item: a card the
-        board knows, sitting in Review. Chat data selects the bucket — a slug
-        in the summoning message — and plink-owned config owns the wall, so
-        naming a slug buys a bucket and nothing else. A slug the board does not
-        know, a card in any other column, or a board that cannot be reached at
-        all: no bucket, and rule 1 applies.
-        """
+        """The work item this chain spends against, or None for no bucket."""
         if not work_item or self.hops is None:
             return None
         if not BOARD_SLUG_RE.match(work_item):
@@ -4209,17 +5668,25 @@ class Broker:
         card = body.get("card") or {}
         return work_item if card.get("column") == "Review" else None
 
-    def _verb_summon_hop(self, resident: str, args: dict) -> tuple[dict, str]:
-        """The bot-to-bot hop wall, for the summon adapters (2026-08-24).
+    def _unpark_refusal(self, work_item: str, seq: int) -> Optional[str]:
+        """Why the cited post cannot unpark `work_item`, or None if it can.
+        The broker reads the post itself: the reporting adapter runs as the
+        same res-* uid as the model it gates, so its word is no evidence."""
+        channel = self.disjorn.get("custodian_channel_id")
+        if not isinstance(channel, int) or channel < 1:
+            return "this broker has no #custodian to read the post from"
+        try:
+            post = self._build_message(channel, seq, act="unpark a hop chain")
+        except VerbError as exc:
+            return exc.message
+        cited = re.search(rf"(?<![\w-]){re.escape(work_item)}(?![\w-])",
+                          post["content"])
+        if cited is None:
+            return f"message {seq} does not cite {work_item}"
+        return None
 
-        `spend` asks whether one bot-to-bot summon may continue the chain past
-        depth 1; `unpark` reports the human post that resumes a parked one.
-        Neither can widen anything: the caps are broker.toml's, the columns are
-        the board's, and the only thing an argument decides is WHICH bucket is
-        charged. The answer `chain: false` is not a refusal — it means "serve
-        this summon, but your reply must not re-trigger anyone", which is the
-        depth-1 default every summon has run under since WP-H9.
-        """
+    def _verb_summon_hop(self, resident: str, args: dict) -> tuple[dict, str]:
+        """The bot-to-bot hop wall, for the summon adapters."""
         _reject_unknown(args, {"action", "work_item", "summoner", "seq"})
         action = _check_str(args, "action", required=True, max_len=10)
         if action not in ("spend", "unpark"):
@@ -4236,6 +5703,13 @@ class Broker:
             if self.hops is None:
                 return ({"reset": False, "reason": "no-wall"},
                         "no hop wall configured")
+            if seq is None:
+                raise _bad("unpark needs the seq of the human post")
+            refused = self._unpark_refusal(work_item, seq)
+            if refused:
+                return ({"work_item": work_item, "reset": False,
+                         "reason": "not-a-human-post", "refusal": refused},
+                        f"unpark of {work_item} refused: {refused}")
             out = self.hops.unpark(work_item, seq)
             verb = ("unparked by" if out["reset"]
                     else "already unparked, reported again by")
@@ -4255,14 +5729,10 @@ class Broker:
         return (result, summary)
 
     # ---------------------------------------------------------- plan room
-    #
-    # Five verbs. Three read, two write, and the two writes touch BOARD-NATIVE
-    # STATE ONLY: comments and the blocked flag + its reason. They are
-    # structurally unable to touch derived state — not because anything here
-    # checks, but because derived state has no write path anywhere in this
-    # house (seq 1428 P1). Nothing a resident can send through this socket can
-    # move a card between columns; a card changes columns only because reality
-    # moved. Phase II's write-through is a separate spec.
+    # Five verbs. Three read, two write, and the two writes touch BOARD-NATIVE STATE
+    # ONLY: comments and the blocked flag + its reason. They are structurally unable
+    # to touch derived state — not because anything here checks, but because derived
+    # state has no write path anywhere in this house (P1).
 
     def _board_slug(self, args: dict) -> str:
         slug = _check_str(args, "slug", required=True, max_len=80)
@@ -4279,12 +5749,7 @@ class Broker:
         return self.planroom_api(self.disjorn, "POST", path, payload)
 
     def _verb_board_list(self, resident: str, args: dict) -> tuple[dict, str]:
-        """The board, ONE LINE PER CARD. Filters by column, lane, owner, blocked.
-
-        Skim is the default and detail is opt-in — the context-budget answer to
-        the tricky part of the request that started this feature: "so that your
-        entire context window isn't swallowed by reading the whole thing all
-        the time". `board-card` is where the whole thing lives."""
+        """The board, ONE LINE PER CARD."""
         _reject_unknown(args, {"column", "lane", "owner", "blocked", "limit"})
         query: list[str] = []
         for key in ("column", "lane", "owner"):
@@ -4334,17 +5799,7 @@ class Broker:
                 f"{len(cards)} hits for {text!r}")
 
     def _verb_board_flag(self, resident: str, args: dict) -> tuple[dict, str]:
-        """Block or unblock a card, with a reason. BOARD-NATIVE STATE ONLY.
-
-        Blocked is a FLAG WITH A REASON, NEVER A COLUMN: the card does not move,
-        so everyone can see where it re-enters. A reason is required to block —
-        a card blocked for no stated reason is one nobody can unblock, because
-        nobody can tell what would have to change.
-
-        The resident's name is stamped HERE, from the broker's own
-        SO_PEERCRED-derived identity, never from the caller's arguments. Same
-        rule `file-proposal` has always run under: the resident supplies data,
-        the broker supplies the authority and the attribution."""
+        """Block or unblock a card, with a reason."""
         _reject_unknown(args, {"slug", "action", "reason"})
         slug = self._board_slug(args)
         action = _check_str(args, "action", required=True, max_len=20)
@@ -4367,10 +5822,7 @@ class Broker:
                 + (f": {reason[:120]}" if blocked and reason else ""))
 
     def _verb_board_comment(self, resident: str, args: dict) -> tuple[dict, str]:
-        """Add a comment to a card. BOARD-NATIVE STATE ONLY.
-
-        This and `board-flag` are what keeps "residents triage" a sentence about
-        something residents can actually do."""
+        """Add a comment to a card."""
         _reject_unknown(args, {"slug", "text"})
         slug = self._board_slug(args)
         text = _check_str(args, "text", required=True,
@@ -4701,23 +6153,7 @@ class Broker:
         return path if isinstance(path, str) and path else None
 
     def _planroom_rebuild(self, why: str) -> dict:
-        """Re-derive the board and rewrite the index. BEST EFFORT, ALWAYS.
-
-        Called from `refresh-mirror`, from a build's terminal banner, and from
-        the daemon's own timer (seq 1428 P4) — a trigger nobody has to
-        remember, so the index refreshes when `main` moves and not only when a
-        resident happens to call a verb.
-
-        It never raises and it never turns its caller's success into a failure.
-        A refresh-mirror that fetched everything correctly and then failed to
-        rebuild a cache has still refreshed the mirror; reporting otherwise
-        would teach residents that a red refresh-mirror means nothing. The
-        outcome is carried in the return value and lands in the audit line
-        instead.
-
-        Serialised under a lock: the timer and a verb can fire at the same
-        moment, and two concurrent rebuilds racing on one temp file is how a
-        cache becomes a corrupt file nobody can explain."""
+        """Re-derive the board and rewrite the index."""
         index_path = self._planroom_index_path()
         if not index_path:
             return {"rebuilt": False, "reason": "no [planroom].index configured"}
@@ -4735,24 +6171,13 @@ class Broker:
         finally:
             self._planroom_lock.release()
         if lines and self.planroom.get("announce", True):
-            # ONE SYSTEM LINE PER COLUMN TRANSITION, NEVER PER EDIT. Residents
-            # are event-driven, so this stream is their trigger; and because it
-            # lands in #custodian it doubles as a witnessable seq trail of the
-            # whole lifecycle, for free. A rebuild that moved nothing says
-            # nothing — a detector that narrates every tick teaches everyone to
-            # stop reading it.
+            # ONE SYSTEM LINE PER COLUMN TRANSITION, NEVER PER EDIT.
             self._narrate("\n".join(lines[:20]))
         return {"rebuilt": True, "cards": len(data["cards"]),
                 "transitions": len(lines), "why": why}
 
     def _planroom_timer(self) -> None:
-        """The daemon's own rebuild tick.
-
-        In the daemon rather than in a systemd unit on purpose: P4 asks for a
-        trigger nobody has to remember, and this week's install record argues
-        hard against trusting a hand step. A `.timer` file is one more thing
-        that can be committed and not installed, and a second process writing
-        the index is one more thing that can race the first."""
+        """The daemon's own rebuild tick."""
         interval = self.planroom.get("timer_sec", DEFAULT_PLANROOM_TIMER_SEC)
         try:
             interval = float(interval)
@@ -4761,9 +6186,9 @@ class Broker:
         if interval <= 0:
             return
         while not self._closed:
-            # Sleep first: startup already rebuilds nothing in particular, and
-            # a daemon that re-derives the whole repo the instant it comes up
-            # makes a restart the most expensive thing on the host.
+            # Sleep first: startup already rebuilds nothing in particular, and a
+            # daemon that re-derives the whole repo the instant it comes up makes a
+            # restart the most expensive thing on the host.
             slept = 0.0
             while slept < interval and not self._closed:
                 time.sleep(min(1.0, interval - slept))
@@ -4773,8 +6198,8 @@ class Broker:
             try:
                 self._planroom_rebuild("timer")
             except Exception:  # noqa: BLE001 — belt and braces; _planroom_rebuild
-                # already swallows, and a dead timer thread is a board that
-                # silently stops moving.
+                # already swallows, and a dead timer thread is a board that silently
+                # stops moving.
                 pass
 
     def _start_planroom_timer(self) -> None:
@@ -4790,7 +6215,8 @@ class Broker:
         sock_dir = os.path.dirname(self.socket_path)
         if sock_dir and not os.path.isdir(sock_dir):
             os.makedirs(sock_dir, exist_ok=True)
-        # Remove a stale socket left by an unclean shutdown (only if it IS a socket).
+        # Remove a stale socket left by an unclean shutdown (only if it IS a
+        # socket).
         try:
             if stat.S_ISSOCK(os.stat(self.socket_path).st_mode):
                 os.unlink(self.socket_path)
@@ -4803,13 +6229,11 @@ class Broker:
         # (and audited) inside dispatch().
         os.chmod(self.socket_path, 0o666)
         listener.listen(16)
-        # A blocked accept() is not interrupted by close() on Linux, so poll
-        # with a short timeout; shutdown() additionally pokes the socket.
+        # A blocked accept() is not interrupted by close() on Linux, so poll with a
+        # short timeout; shutdown() additionally pokes the socket.
         listener.settimeout(1.0)
         self._listener = listener
-        # The Plan Room's third rebuild trigger (seq 1428 P4). Started here
-        # rather than in __init__ so constructing a Broker — which tests and
-        # tooling do — never spawns a thread that re-derives the whole repo.
+        # The Plan Room's third rebuild trigger (P4).
         self._start_planroom_timer()
         while not self._closed:
             try:
@@ -4850,7 +6274,7 @@ class Broker:
             # Kernel-asserted peer credentials: (pid, uid, gid).
             creds = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
                                     struct.calcsize("3i"))
-            _pid, uid, _gid = struct.unpack("3i", creds)
+            peer_pid, uid, _gid = struct.unpack("3i", creds)
             buf = b""
             while b"\n" not in buf:
                 chunk = conn.recv(4096)
@@ -4858,11 +6282,7 @@ class Broker:
                     break
                 buf += chunk
                 if len(buf) > MAX_REQUEST_BYTES:
-                    # WP-H13 F1: audit this rejection like every other. The
-                    # invariant (PROTOCOL.md, brokerd docstring) is that every
-                    # request leaves exactly one line; the oversize path used
-                    # to return silently, letting a resident spam hostile
-                    # requests with no trace.
+                    # WP-H13 F1: audit this rejection like every other.
                     self._audit(f"uid:{uid}" if uid not in self.uid_map
                                 else self.uid_map[uid],
                                 "(oversize)", None, False, "denied: request too large")
@@ -4881,7 +6301,8 @@ class Broker:
                 return
             if not isinstance(req, dict):
                 req = {"verb": None, "args": None}
-            resp = self.dispatch(uid, req.get("verb"), req.get("args", {}))
+            resp = self.dispatch(uid, req.get("verb"), req.get("args", {}),
+                                 pid=peer_pid)
             self._send(conn, resp)
         except Exception:  # noqa: BLE001 — a bad client never kills the daemon
             pass
@@ -4918,11 +6339,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     try:
         broker = Broker(config, ns.verbs)
     except ConfigError as exc:
-        # BL-D1 and friends: an unsafe config is a REFUSAL TO START, printed
-        # loudly and exited non-zero (systemd Restart=on-failure will retry and
-        # the failure stays visible in `systemctl status`). Never degrade to
-        # "start anyway without that verb" — a gateway that quietly drops a
-        # guarantee is the thing this whole file exists to prevent.
+        # BL-D1 and friends: an unsafe config is a REFUSAL TO START, printed loudly
+        # and exited non-zero (systemd Restart=on-failure will retry and the failure
+        # stays visible in `systemctl status`).
         print(f"disjorn-broker: REFUSING TO START — {exc}", file=sys.stderr)
         return 2
 
@@ -4935,9 +6354,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # WP-L4: builds run in transient units OUTSIDE this daemon's cgroup, so a
     # restart no longer kills one in flight — but its reaper died with the old
-    # process. Re-adopt before serving so the narration still lands. Never fatal:
-    # a gateway that refuses to come up because it could not tidy a log file
-    # would take every resident's hands away over a cosmetic failure.
+    # process.
     try:
         adopted = broker.adopt_inflight_builds()
         if adopted:
@@ -4945,6 +6362,14 @@ def main(argv: Optional[list[str]] = None) -> int:
                   f"{', '.join(adopted)}", file=sys.stderr)
     except Exception as exc:  # noqa: BLE001
         print(f"disjorn-broker: WARNING build re-adoption failed: {exc!r}",
+              file=sys.stderr)
+    try:
+        adopted_apps = broker.adopt_inflight_apps()
+        if adopted_apps:
+            print(f"disjorn-broker: re-adopted in-flight app turns: "
+                  f"{', '.join(adopted_apps)}", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 — same rule as builds above
+        print(f"disjorn-broker: WARNING app turn re-adoption failed: {exc!r}",
               file=sys.stderr)
 
     print(f"disjorn-broker: listening on {broker.socket_path} "

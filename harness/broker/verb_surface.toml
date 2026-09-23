@@ -200,6 +200,43 @@ Optional gate results the classifier folds into its verdict, e.g. {"tests": true
 "typecheck": true}. Max 8 KiB serialized.\
 """
 
+# ── changed-files ────────────────────────────────────────────────────────
+[verbs.changed-files]
+tool_name = "changed_files"
+cli_help = "list the files a range changed, with +/- counts"
+announce_preface = false
+description = """\
+List what a range changed, via the house broker: one entry per file with its \
+status (A added, M modified, D deleted, R renamed, C copied, T type-changed), \
+its added and removed line counts, `old_path` for a rename, and `binary` true \
+for a file with no line counts. Also `base`, `from` and `to` (resolved shas) \
+and `totals`. Over 500 files the list is cut and `truncated` is true; `totals` \
+still counts every file.\n\nThe answer is always MERGE-BASE form: 'A..B' and \
+'A...B' both report what B did since it left A, never what A did meanwhile. A \
+bare rev is refused.\n\n`repo` is /opt/disjorn from inside your container — the \
+read-only mirror. A gatehouse branch is named 'gatehouse/<repo>/<branch>', so \
+the usual review call is range 'main...gatehouse/disjorn/loop/<slug>'. Run \
+refresh_mirror first if the branch is new to you, or its name will not resolve. \
+This returns NO file bodies: read those with read_repo_file at the `to` sha.\
+"""
+
+[verbs.changed-files.args.repo]
+type = "string"
+required = true
+absolute_path = true
+no_dotdot = true
+description = "Absolute path to the repo (no '..' segments)."
+
+[verbs.changed-files.args.range]
+type = "string"
+required = true
+no_leading_dash = true
+pattern = "^[A-Za-z0-9._~^/{}-]{1,200}$"
+description = """\
+Git range 'A..B' or 'A...B' (both read as merge-base form), max 200 chars, \
+charset [A-Za-z0-9._~^/{}-], neither side starting with '-'.\
+"""
+
 # ── read-prod-logs ───────────────────────────────────────────────────────
 [verbs.read-prod-logs]
 tool_name = "read_prod_logs"
@@ -273,7 +310,15 @@ re-fetched under `refs/gatehouse/<repo>/*` — so a `loop/<slug>` branch a build
 published is readable here BEFORE anyone is asked to review it. Takes no \
 arguments and can never be aimed anywhere else. Run it before reading a spec, a \
 diff, or a branch somebody just named in channel; a stale mirror is the usual \
-reason a file looks unchanged.\
+reason a file looks unchanged.\n\nREADING THE ANSWER. Per repo you get \
+`arrived` and `vanished`, which are a DELTA — what moved on this fetch — and \
+`present`, which is the INVENTORY: how many refs the mirror holds for that repo \
+right now. `arrived: []` means "nothing new since last time" and is the resting \
+state of a repo nobody has pushed to lately; it is NOT "this repo is empty" and \
+NOT "you are not entitled to it". Only `present: 0` says the mirror is holding \
+nothing, and the banner shouts that case. If a path at a rev will not open, \
+check `present` before concluding you lack access — an absent path and an \
+unreachable repo are different answers, and read_repo_file distinguishes them.\
 """
 
 # ── board-list ───────────────────────────────────────────────────────────
@@ -462,6 +507,9 @@ description = "The comment, 1-4000 chars."
 tool_name = "summon_hop"
 cli_help = "ask the shared bot-to-bot hop wall about a work item"
 announce_preface = false
+# Never a bot seat's tool, even where its section grants the verb: the summon
+# adapters call it, and a model holding it could spend or unpark its own wall.
+tool = false
 description = """\
 The bot-to-bot summon wall, kept by the house broker so both residents' summon \
 adapters spend against ONE counter. The summon adapters call this; a session \
@@ -504,6 +552,47 @@ type = "integer"
 minimum = 0
 description = "The #custodian seq of the human post being reported, so the same post reported by both adapters resets the counter once."
 
+
+
+# ── apps-build ───────────────────────────────────────────────────────────
+[verbs.apps-build]
+tool_name = "apps_build"
+cli_help = "hand a build prompt to the apps-builder seat for the session you are in"
+announce_preface = false
+description = """\
+Hand ONE build prompt to the apps-builder seat, for the app build session you \
+are in. YOU DO NOT BUILD THE APP: another seat does, in its own container, and \
+it never talks to the user. Your job is to elicit what the user wants and write \
+it down well.\n\nThe prompt is a FILE, not an argument: write it to your own \
+~/apps-prompts/ and pass that path — the DIRECTORY is the wall, and a file \
+outside it is refused. Name it `<session_id>-<turn>.md` by convention; the \
+name is a label, and the turn number of record is the one this verb ANSWERS \
+with, never one you counted yourself. One carrying a chat marker is refused with: "The prompt file contains a \
+chat marker the harness cannot pass through; quote the user's words without it" \
+— quote the words plainly and hand off again.\n\nONE TURN AT A TIME per \
+session, and the verb RETURNS AT SPAWN: it answers with the turn number, not \
+the result. What the turn did arrives in the room by itself, as a system line \
+naming the files, the tokens and the model. Say what you handed off, then wait \
+for that line.\
+"""
+
+[verbs.apps-build.args.session_id]
+type = "integer"
+required = true
+minimum = 1
+maximum = 999999999
+description = "The build session you are in — the `session_id` from the app block in your channel context. Never a bot id, never a user id."
+
+[verbs.apps-build.args.prompt_file]
+type = "string"
+required = true
+min_len = 1
+max_len = 4000
+absolute_path = true
+no_dotdot = true
+no_leading_dash = true
+no_nul = true
+description = "Absolute path to the prompt file you just wrote, inside your own ~/apps-prompts/ — a file OUTSIDE that directory is refused. The `<session_id>-<turn>.md` name is a convention that keeps the directory readable, not a rule the harness checks; the turn number of record is the one this verb answers with."
 
 # ── approval-list ────────────────────────────────────────────────────────
 [verbs.approval-list]
@@ -612,7 +701,6 @@ type = "integer"
 required = true
 minimum = 1
 description = "The #custodian seq of your posted record. The broker reads the post; you cannot hand it the content."
-
 
 # ══ ADAPTER TOOLS ═════════════════════════════════════════════════════════
 #

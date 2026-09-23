@@ -5,6 +5,7 @@ verbs.toml + verb_surface.toml. SPECS/2026-08-14-file-vision.md item 3.
     python3 gen_verb_surface.py check                  # exit 1 on drift
     python3 gen_verb_surface.py emit-cli   [--out P]   # shell seat (broker CLI)
     python3 gen_verb_surface.py emit-tools [--out P]   # bot seat   (tool schemas)
+        [--verbs /etc/disjorn-broker/verbs.toml --seat res-<name>]
     python3 gen_verb_surface.py write                  # rewrite in-repo artifacts
 
 WHAT IS GENERATED AND WHAT IS NOT. The DATA is generated: which verbs exist,
@@ -74,7 +75,8 @@ ARG_KEYS = {
     "min_len", "max_len", "pattern", "absolute_path", "no_dotdot",
     "no_leading_dash", "no_nul", "json_arg", "max_json_bytes",
 }
-VERB_KEYS = {"tool_name", "cli_help", "description", "announce_preface", "args"}
+VERB_KEYS = {"tool_name", "cli_help", "description", "announce_preface", "args",
+             "tool"}
 TYPES = {"string", "integer", "object"}
 
 # The adapter-tools table (SPECS/2026-08-19-read-repo-file-rev.md item 3).
@@ -87,8 +89,8 @@ ADAPTER_KEYS = {"seat", "module", "args", "description"}
 SURFACE_TABLES = {"verbs", "adapter_tools"}
 
 # A verbs.toml section that is a SEAT — the sections a generated schema is made
-# from. The kill-switch file also holds the wake caller ([plink]), whose verb no
-# seat may call; see verb_names.
+# from. The kill-switch file also holds non-seat callers ([plink], [server]),
+# whose verbs no seat may call; see verb_names.
 SEAT_SECTION_RE = re.compile(r"^res-[a-z][a-z0-9-]*$")
 
 
@@ -105,12 +107,11 @@ def verb_names(verbs_path: Path = VERBS_TOML) -> list[str]:
     other is a normal state of this house (that is what a per-resident kill
     switch is FOR), and every seat's schema still has to describe it.
 
-    SEAT sections only (`res-<name>`), because since 2026-08-25 verbs.toml also
-    carries a non-seat caller: [plink], holding the wake verb. A seat may not
-    call `wake` and must not be handed a button for it — a tool in a resident's
-    list that the broker refuses by identity is a button wired to a refusal,
-    which is the failure this generator exists to prevent in the other
-    direction."""
+    SEAT sections only (`res-<name>`), because verbs.toml also carries non-seat
+    callers: [plink] (wake) and [server] (build). A seat may not call either
+    and must not be handed a button for one — a tool in a resident's list that
+    the broker refuses by identity is a button wired to a refusal, which is
+    the failure this generator exists to prevent in the other direction."""
     data = tomllib.loads(verbs_path.read_text(encoding="utf-8"))
     seen: list[str] = []
     for name, section in data.items():
@@ -123,15 +124,8 @@ def verb_names(verbs_path: Path = VERBS_TOML) -> list[str]:
 
 
 def load_surface(surface_path: Path = SURFACE_TOML) -> dict:
-    """The [verbs] table — THE ONLY THING ANY GENERATED ARTIFACT IS MADE FROM.
-
-    Note what this does NOT return: the [adapter_tools] table, which lives in
-    the same file and is deliberately invisible from here. Everything
-    downstream — cli_table, tool_schemas, emit_cli_block, emit_tools_module —
-    takes this function's result, so adapter tools cannot reach a generated
-    schema even by accident. That is the inertness the table's own header
-    promises, expressed as the shape of this function rather than as a
-    resolution to be careful."""
+    """The [verbs] table, the only thing any artifact is generated from; it
+    never returns [adapter_tools], so no adapter tool can reach a schema."""
     data = tomllib.loads(surface_path.read_text(encoding="utf-8"))
     unknown_tables = set(data) - SURFACE_TABLES
     if unknown_tables:
@@ -148,6 +142,8 @@ def load_surface(surface_path: Path = SURFACE_TOML) -> dict:
         for key in ("tool_name", "cli_help", "description"):
             if not entry.get(key):
                 raise SurfaceError(f"{verb}: missing {key}")
+        if not isinstance(entry.get("tool", True), bool):
+            raise SurfaceError(f"{verb}: tool must be true or false")
         for arg, spec in (entry.get("args") or {}).items():
             unknown = set(spec) - ARG_KEYS
             if unknown:
@@ -166,6 +162,23 @@ def load_surface(surface_path: Path = SURFACE_TOML) -> dict:
     return verbs
 
 
+def seat_surface(verbs_path: Path, seat: str,
+                 surface_path: Path = SURFACE_TOML) -> dict:
+    """The verbs one seat's section lists, on or off; an unlisted verb is not
+    that seat's button, and a switched-off one still answers verb-disabled."""
+    data = tomllib.loads(verbs_path.read_text(encoding="utf-8"))
+    section = data.get(seat)
+    if not SEAT_SECTION_RE.match(seat) or not isinstance(section, dict):
+        raise SurfaceError(f"{verbs_path} has no seat section [{seat}]")
+    surface = load_surface(surface_path)
+    missing = [verb for verb in section if verb not in surface]
+    if missing:
+        raise SurfaceError(
+            f"[{seat}] lists {missing} and verb_surface.toml does not describe "
+            f"them: that seat could not call them. Add [verbs.<name>] entries.")
+    return {verb: entry for verb, entry in surface.items() if verb in section}
+
+
 def load_adapter_tools(surface_path: Path = SURFACE_TOML) -> dict:
     """The [adapter_tools] table — VALIDATED HERE, GENERATED FROM NOWHERE.
 
@@ -177,9 +190,7 @@ def load_adapter_tools(surface_path: Path = SURFACE_TOML) -> dict:
     anything. Read the call sites before adding one.
     tests/test_verb_surface.py asserts the inertness from outside.
 
-    Validating it here is not the same as generating from it: a malformed
-    entry should fail at a keyboard, loudly, rather than sit in the catalogue
-    describing nothing."""
+    A malformed entry fails here, at a keyboard, not silently in a seat."""
     data = tomllib.loads(surface_path.read_text(encoding="utf-8"))
     tools = data.get("adapter_tools") or {}
     if not isinstance(tools, dict):
@@ -275,10 +286,12 @@ def cli_table(surface: dict) -> dict:
 
 
 def tool_schemas(surface: dict) -> list[dict]:
-    """Anthropic tool schemas, in catalogue order (= registration order = the
-    order they appear in a bot's prompt; see the note in verb_surface.toml)."""
+    """Anthropic tool schemas in catalogue order, which is prompt order; a
+    `tool = false` verb is left out."""
     schemas = []
     for verb, entry in surface.items():
+        if not entry.get("tool", True):
+            continue
         properties: dict = {}
         required: list[str] = []
         for arg, spec in _for_seat(entry, "tool").items():
@@ -342,12 +355,14 @@ def emit_cli_block(surface: dict) -> str:
             f"VERB_SURFACE = {body}\n{CLI_END}\n")
 
 
-def emit_tools_module(surface: dict) -> str:
+def emit_tools_module(surface: dict, seat: str | None = None) -> str:
     schemas = tool_schemas(surface)
     names = [s["verb"] for s in schemas]
+    reach = (f"The broker verbs [{seat}] lists in verbs.toml, on or off"
+             if seat else "The broker verbs this seat can reach")
     return (
         '"""' + GENERATED_HEADER + "\n\n"
-        "The broker verbs this seat can reach, as Anthropic tool schemas.\n\n"
+        f"{reach}, as Anthropic tool schemas.\n\n"
         "BROKER_TOOLS is in registration order, which is prompt order.\n"
         "Each entry carries what a generic handler needs to make the call:\n"
         "`verb` (the broker verb), `cli_args` (tool-input key -> CLI flag) and\n"
@@ -394,7 +409,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--surface", type=Path, default=SURFACE_TOML)
     parser.add_argument("--cli", type=Path, default=CLI_PATH)
     parser.add_argument("--out", type=Path, default=None)
+    parser.add_argument("--seat", default=None)
     ns = parser.parse_args(argv)
+    if ns.seat and ns.mode != "emit-tools":
+        parser.error("--seat applies to emit-tools only")
+
+    if ns.seat:
+        try:
+            surface = seat_surface(ns.verbs, ns.seat, ns.surface)
+        except SurfaceError as exc:
+            print(f"verb-surface drift: {exc}", file=sys.stderr)
+            return 1
+        text = emit_tools_module(surface, ns.seat)
+        if ns.out:
+            ns.out.write_text(text, encoding="utf-8")
+        else:
+            sys.stdout.write(text)
+        return 0
 
     problems = check(ns.verbs, ns.surface)
     if problems:

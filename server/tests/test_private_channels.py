@@ -867,14 +867,15 @@ async def test_push_never_reaches_a_non_member_of_a_private_channel(client, sent
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def wsc(tmp_db_path):
+def wsc(tmp_db_path, house_origin):
     """Sync TestClient with lifespan running (portal loop shared by REST + WS)."""
     events.clear_subscribers()
     asyncio.run(db.close())  # drop any leaked connection to another tmp DB
 
     from app.main import create_app
 
-    with TestClient(create_app()) as client:
+    # Default house Origin — see the same fixture in test_ws.py.
+    with TestClient(create_app(), headers={"Origin": house_origin}) as client:
         yield client
     events.clear_subscribers()
 
