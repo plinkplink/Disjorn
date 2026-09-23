@@ -303,6 +303,37 @@ WAKE_RETENTION_SEC = 7 * 86400
 DEFAULT_DAILY_WAKE_CAP = 3
 _WAKE_ID_RE = re.compile(r"^wake-\d{8}T\d{6}Z-[0-9a-f]{6}$")
 
+# ------------------------------------------------ the fails-closed Tier-1 wall
+# SPECS/2026-08-26-approval-object-and-resident-write-verbs.md item 2, building
+# the tiers spec's "an unposted write fails closed".
+#
+# A seat writes its OWN Tier-0/1 surface by posting the exact content in
+# #custodian and naming that post's seq. The seq is the only argument: the
+# broker reads the post from the ledger, so no caller-supplied copy of the
+# record, or token standing for one, is ever in the path.
+#
+# The guarantee is narrow: nothing reaches the surface without having been
+# SHOWN in #custodian first. It is not an approval; no human sits in this path,
+# and approval by another principal is the approval-* verbs' job.
+WRITE_VERB = "apply-posted-write"
+WRITE_RECORD_HEADER = "disjorn-write-record v1"
+WRITE_RECORD_BEGIN = "--- content ---"
+WRITE_RECORD_END = "--- end ---"
+WRITE_RECORD_KEYS = ("path", "sha256")
+# How long a posted record stays usable ([write_verbs].freshness_sec overrides).
+DEFAULT_WRITE_FRESHNESS_SEC = 24 * 3600
+# The whole file crosses this privileged daemon's address space, so it is
+# bounded here as well as by the server's own message ceiling.
+MAX_WRITE_CONTENT_BYTES = 256 * 1024
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_REPO_PATH_COMPONENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+# The approval object (same spec, item 1). Three verbs over the server's
+# /approval surface, as the broker's own bot identity — the board verbs' idiom,
+# and for the board verbs' reason: one composer, one state of record.
+MAX_APPROVAL_ROWS = 200
+MAX_APPROVAL_REMARKS_CHARS = 4000
+APPROVAL_ACTIONS = ("approve", "deny", "rework")
+
 
 def build_unit_name(slug: str) -> str:
     """`2026-07-21-gif-picker` -> `disjorn-build-2026-07-21-gif-picker.service`."""
@@ -342,7 +373,8 @@ class VerbError(Exception):
         self.code = code
         self.message = message
         self.status = status
-        # Which merge rule said no; on the wire beside code and message.
+        # Which rule said no (merge, apply-posted-write); on the wire beside
+        # code and message.
         self.reason = reason
 
 
@@ -610,6 +642,163 @@ def _check_date(args: dict, key: str) -> str:
 
 
 # --------------------------------------------------------------------------
+# The posted record: parsing, path shape, and the tier map lookup.
+#
+# All three are pure functions of text, so every adversarial record in the test
+# suite is exercised without a socket, a ledger or a filesystem.
+# --------------------------------------------------------------------------
+
+def check_repo_path(raw: Any) -> str:
+    """A repo-relative target path, spelled the way a diff and the tier map
+    spell it: `bots/fable/spine/05-bearings.md`.
+
+    Refused outright: absolute paths, `.`/`..` components, empty components,
+    backslashes, NUL, a leading dash, and any character outside
+    [A-Za-z0-9._-]. The broker joins this onto a plink-owned root, so each of
+    those is either an escape or an ambiguity, and an ambiguity here would be
+    decided by whichever of the reader and the parser was wrong."""
+    if not isinstance(raw, str) or not raw:
+        raise _bad("the record's path is missing or empty")
+    if len(raw) > 300:
+        raise _bad("the record's path is too long (max 300 chars)")
+    if raw.startswith("/") or raw.startswith("-") or "\\" in raw or "\0" in raw:
+        raise _bad(f"the record's path must be repo-relative: {raw!r}")
+    parts = raw.split("/")
+    for part in parts:
+        if not _REPO_PATH_COMPONENT_RE.match(part) or part in (".", ".."):
+            raise _bad(f"the record's path has an unusable component {part!r} "
+                       f"(allowed: letters, digits, '.', '_', '-')")
+    return raw
+
+
+def parse_write_record(text: Any) -> dict:
+    """The posted record, parsed out of the #custodian message the broker read.
+
+    THE POST IS THE RECORD — the whole message, not a block inside a longer
+    one. A record that may be embedded in prose is a record whose boundaries
+    this parser and a human reader can disagree about, and that disagreement
+    would be invisible in the channel where the witnessing happens.
+
+        disjorn-write-record v1
+        path: bots/fable/spine/05-bearings.md
+        sha256: <64 lowercase hex of the content between the fences>
+        --- content ---
+        <the exact bytes to be written>
+        --- end ---
+
+    THE END FENCE IS WHAT MAKES THE TRAILING NEWLINE EXPLICIT. Content is every
+    line between the fences INCLUDING the newline that terminates the last one,
+    so a transport that strips trailing whitespace cannot quietly change the
+    file that gets written: it would change the sha, and the write would refuse.
+
+    Exactly one of each fence, or the record is ambiguous and is refused —
+    which is also what stops a fence line inside the content from truncating
+    it. Returns {path, sha256, content}."""
+    if not isinstance(text, str) or not text.strip():
+        raise _bad("the cited post is empty")
+    lines = text.splitlines(keepends=True)
+    begins = [i for i, ln in enumerate(lines) if ln.strip() == WRITE_RECORD_BEGIN]
+    ends = [i for i, ln in enumerate(lines) if ln.strip() == WRITE_RECORD_END]
+    if len(begins) != 1 or len(ends) != 1 or ends[0] < begins[0]:
+        raise _bad(f"the cited post is not a write record: it must carry "
+                   f"exactly one {WRITE_RECORD_BEGIN!r} line and exactly one "
+                   f"{WRITE_RECORD_END!r} line after it")
+
+    head = [ln.strip() for ln in lines[:begins[0]]]
+    head = [ln for ln in head if ln]
+    if not head or head[0] != WRITE_RECORD_HEADER:
+        raise _bad(f"the cited post does not begin with {WRITE_RECORD_HEADER!r}")
+    fields: dict[str, str] = {}
+    for line in head[1:]:
+        key, sep, value = line.partition(":")
+        key = key.strip().lower()
+        if not sep or key not in WRITE_RECORD_KEYS:
+            raise _bad(f"unusable header line in the record: {line[:80]!r} "
+                       f"(expected {' and '.join(WRITE_RECORD_KEYS)})")
+        if key in fields:
+            raise _bad(f"the record names {key!r} twice")
+        fields[key] = value.strip()
+    missing = [k for k in WRITE_RECORD_KEYS if not fields.get(k)]
+    if missing:
+        raise _bad(f"the record does not name {', '.join(missing)}")
+
+    for line in lines[ends[0] + 1:]:
+        if line.strip():
+            raise _bad("the record has text after its end fence; the post must "
+                       "be the record and nothing else")
+
+    content = "".join(lines[begins[0] + 1:ends[0]])
+    raw = content.encode("utf-8")
+    if len(raw) > MAX_WRITE_CONTENT_BYTES:
+        raise _bad(f"the record's content is {len(raw)} bytes, over the "
+                   f"{MAX_WRITE_CONTENT_BYTES}-byte ceiling")
+    declared = fields["sha256"].lower()
+    if not _SHA256_RE.match(declared):
+        raise _bad("the record's sha256 must be 64 lowercase hex characters")
+    actual = hashlib.sha256(raw).hexdigest()
+    if actual != declared:
+        raise _bad(f"the record's sha256 does not match its own content "
+                   f"(post says {declared}, content is {actual})")
+    return {"path": check_repo_path(fields["path"]), "sha256": actual,
+            "content": content}
+
+
+def tier_for_path(tier_map: Any, seat: str, path: str) -> Optional[int]:
+    """The tier this seat's own surface map gives a repo-relative path, or None.
+
+    None is a refusal, never a default: a path no seat's map names has no tier
+    on this surface, and the write verb applies Tier 0 and Tier 1 only. The
+    `tier0` list is checked first; both apply alike, so the tier only labels the
+    audit line.
+
+    The map is `[tiers.<seat>]` in protected-paths.toml — beside the
+    classifier's surface map, per the tiers spec's architecture note, and
+    deliberately not in code. It is a DIFFERENT question from that file's
+    [protected] list: [protected] tiers a DIFF at the merge gate, this tiers a
+    seat writing its OWN live surface. The tiers spec puts personality and
+    prompt-adjacent files at Tier 1 for exactly this path while they stay Tier
+    2 for a merge, so consulting [protected] here would make the surface
+    unreachable rather than safer. What keeps it narrow is the agreement it
+    needs with [write_verbs.<seat>].repo_prefix in broker.toml: a tier-map row
+    outside the seat's own root resolves to no host path at all."""
+    if not isinstance(tier_map, dict):
+        return None
+    seat_map = tier_map.get(seat)
+    if not isinstance(seat_map, dict):
+        return None
+    for tier, key in ((0, "tier0"), (1, "tier1")):
+        entries = seat_map.get(key)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, str) or not entry:
+                continue
+            entry = entry.rstrip("/")
+            if path == entry or path.startswith(entry + "/"):
+                return tier
+    return None
+
+
+def format_approval_line(proposal: dict) -> str:
+    """One proposal, one line. brief's rule, inherited by the board verbs and
+    kept here: never print a bare identifier — a row you have to go look up is
+    a row that gets deferred."""
+    states = proposal.get("states") or []
+    answers = " ".join(
+        f"{s.get('principal', '?')}={s.get('state', '?')}" for s in states)
+    bits = [f"[{proposal.get('decision', '?')}]",
+            f"#{proposal.get('id', '?')}",
+            str(proposal.get("slug", "?")),
+            str(proposal.get("title", "")).strip()]
+    line = " ".join(b for b in bits if b)
+    if answers:
+        line += f" — {answers}"
+    if proposal.get("closed_at"):
+        line += f" (closed {proposal['closed_at']})"
+    return line
+
+
+# --------------------------------------------------------------------------
 # Default file-proposal transport: post to #custodian via the Disjorn SDK as the
 # broker's own bot identity. Kept behind a callable so tests stub it.
 # --------------------------------------------------------------------------
@@ -665,7 +854,11 @@ def _sdk_channel_transport(disjorn_cfg: dict, channel_id: int,
 
 def _api_label(path: str) -> str:
     """What to CALL the surface in a refusal."""
-    return "apps API" if path.startswith("/apps") else "plan room API"
+    if path.startswith("/apps"):
+        return "apps API"
+    if path.startswith("/approval"):
+        return "approval API"
+    return "plan room API"
 
 
 def _planroom_http(disjorn_cfg: dict, method: str, path: str,
@@ -1665,7 +1858,18 @@ class Broker:
                 "gate_log_dir", DEFAULT_GATE_LOG_DIR)
             self.merge_work_dir = self._parse_build_dir(
                 "merge_work_dir", DEFAULT_MERGE_WORK_DIR)
+        # The fails-closed Tier-1 wall. An empty [write_verbs] is no write
+        # surface (every caller refused and audited, like an unflipped switch);
+        # a populated one is checked here, once, loudly.
+        self.write_verbs: dict[str, Any] = config.get("write_verbs", {}) or {}
+        self.write_seats: dict[str, dict] = (
+            self._parse_write_seats() if self.write_verbs else {})
+        self.write_consumed: str = (
+            self._parse_write_consumed() if self.write_verbs else "")
         self._audit_lock = threading.Lock()
+        # Held across reading the consumed-set and appending to it, so two
+        # concurrent calls can never both spend one record.
+        self._write_lock = threading.Lock()
         # Build-budget lock (H13-D4): count-with-reservation is held under this, so
         # two concurrent start-builds can NEVER both slip past the cap — the
         # check-then-act race the red-team flagged is closed here.
@@ -1727,6 +1931,15 @@ class Broker:
             "board-search": self._verb_board_search,
             "board-flag": self._verb_board_flag,
             "board-comment": self._verb_board_comment,
+            # The approval object, over the server's /approval surface, so a
+            # resident answers the same record plink answers in the modal.
+            "approval-list": self._verb_approval_list,
+            "approval-show": self._verb_approval_show,
+            "approval-act": self._verb_approval_act,
+            # The fails-closed Tier-1 wall: the only verb here that writes
+            # outside the resident's own volume, and only on a #custodian record
+            # the broker read itself.
+            WRITE_VERB: self._verb_apply_posted_write,
             # APPS v1 stage 2.
             "apps-build": self._verb_apps_build,
         }
@@ -1854,6 +2067,140 @@ class Broker:
     def _wake_grace(self) -> int:
         grace = self.wake.get("grace_sec", DEFAULT_WAKE_GRACE_SEC)
         return grace if isinstance(grace, int) and grace >= 0 else DEFAULT_WAKE_GRACE_SEC
+
+    # ------------------------------------------------ write-verb config
+
+    def _parse_write_seats(self) -> dict[str, dict]:
+        """`[write_verbs.<seat>]` — one section per seat that may write its own
+        Tier-0/1 surface. Three keys, all mandatory, all checked here:
+
+          author       the seat's #custodian identity, which check (a) compares
+                       the post's author against. An absent key is fatal rather
+                       than permissive: a seat with no author could never
+                       satisfy that check, so the section would read as a grant
+                       while refusing every call.
+          root         the host directory the seat's surface lives in, asserted
+                       resident-UNWRITABLE for the reason start_build.specs_dir
+                       is. A seat that can already write the target does not
+                       need a record to write it, and the wall would be scenery.
+          repo_prefix  what that root is called in a diff, so the tier map, the
+                       classifier and the posted record all spell one path.
+
+        TWO PLINK-OWNED FILES MUST AGREE before anything is written. The tier
+        map ([tiers.<seat>] in protected-paths.toml) says which paths are Tier
+        0/1 for a seat; this section says where that seat's repo actually lives.
+        A tier-map row naming a path outside the seat's own repo_prefix resolves
+        to no host path, so neither file can widen the surface on its own."""
+        seats: dict[str, dict] = {}
+        for name, section in self.write_verbs.items():
+            if not isinstance(section, dict):
+                continue  # a scalar here is a top-level knob, not a seat
+            if name not in self.seat_names:
+                raise ConfigError(
+                    f"[write_verbs.{name}] is not a resident of this house "
+                    f"([uids] / [residents]); refusing to start")
+            author = section.get("author")
+            if not isinstance(author, str) or not author.strip():
+                raise ConfigError(
+                    f"[write_verbs.{name}].author is missing: the record check "
+                    f"is a comparison against the seat's #custodian identity, "
+                    f"and without one no record can ever authorize a write. "
+                    f"Refusing to start.")
+            prefix = section.get("repo_prefix")
+            if not isinstance(prefix, str) or not prefix.strip():
+                raise ConfigError(
+                    f"[write_verbs.{name}].repo_prefix is missing: without it "
+                    f"the tier map's repo-relative rows cannot be resolved to "
+                    f"a host path. Refusing to start.")
+            prefix = prefix.strip().strip("/")
+            try:
+                check_repo_path(prefix)
+            except VerbError as exc:
+                raise ConfigError(
+                    f"[write_verbs.{name}].repo_prefix is not a repo-relative "
+                    f"path: {exc.message}. Refusing to start.") from None
+            root = section.get("root")
+            if not isinstance(root, str) or not root:
+                raise ConfigError(
+                    f"[write_verbs.{name}].root is missing; refusing to start")
+            real = assert_dir_resident_unwritable(
+                root,
+                label=f"write_verbs.{name}.root",
+                remedy=("Point it at the canonical copy plink owns (the same "
+                        "tree [residents.<seat>].spine_dir reads from), never "
+                        "at the seat's own home volume."),
+                stake=("A seat that can write this directory directly does not "
+                       "need a posted record to change it, so the wall would "
+                       "be a promise again."),
+                uid_map=self.uid_map, residents=self.residents)
+            seats[name] = {"author": author.strip(), "repo_prefix": prefix,
+                           "root": real}
+        if not seats:
+            raise ConfigError(
+                "[write_verbs] is configured but names no seat sections "
+                "([write_verbs.res-<name>]); refusing to start rather than "
+                "come up with a write surface that grants nothing and looks "
+                "armed")
+        if not self.paths.get("protected_paths"):
+            raise ConfigError(
+                "[write_verbs] is configured but [paths].protected_paths is "
+                "not: the tier map lives beside the classifier's surface map, "
+                "and a write verb with no tier map has nothing to authorize "
+                "against. Refusing to start.")
+        if not self._write_message_db():
+            raise ConfigError(
+                "[write_verbs] is configured but no message store is: set "
+                "[write_verbs].message_db (or [gate].message_db / "
+                "[gate].deploy_tree). The broker reads the cited seq from the "
+                "ledger itself; with no ledger there is nothing to read. "
+                "Refusing to start.")
+        return seats
+
+    def _parse_write_consumed(self) -> str:
+        """`[write_verbs].consumed_ledger`: the consumed-set, one JSON line per
+        spent seq. Mandatory, in a resident-unwritable directory, because a seat
+        that could truncate it could spend one record twice."""
+        path = self.write_verbs.get("consumed_ledger")
+        if not isinstance(path, str) or not path.strip().startswith("/"):
+            raise ConfigError(
+                "[write_verbs] is configured but write_verbs.consumed_ledger is "
+                "missing or not an absolute path; refusing to start (without "
+                "it no record can be marked spent)")
+        path = path.strip()
+        parent = assert_dir_resident_unwritable(
+            os.path.dirname(path),
+            label="write_verbs.consumed_ledger",
+            remedy=("Keep it in the broker's own state dir, e.g. "
+                    "/var/lib/disjorn-broker/write-consumed.jsonl."),
+            stake=("A seat that can truncate the consumed-set can spend one "
+                   "record twice."),
+            uid_map=self.uid_map, residents=self.residents)
+        return os.path.join(parent, os.path.basename(path))
+
+    def _write_message_db(self) -> Optional[str]:
+        """Where the #custodian ledger lives. `[write_verbs].message_db` wins,
+        else the gate detector's `[gate].message_db`, else the conventional
+        path under `[gate].deploy_tree` — the same resolution metrics.py does,
+        so the two readers of this ledger can never be aimed at different
+        files."""
+        explicit = self.write_verbs.get("message_db")
+        if isinstance(explicit, str) and explicit:
+            return explicit
+        gate = self.config.get("gate", {})
+        gate = gate if isinstance(gate, dict) else {}
+        configured = gate.get("message_db")
+        if isinstance(configured, str) and configured:
+            return configured
+        deploy_tree = gate.get("deploy_tree")
+        if isinstance(deploy_tree, str) and deploy_tree:
+            return os.path.join(deploy_tree, "server", "data", "disjorn.db")
+        return None
+
+    def _write_freshness(self) -> int:
+        window = self.write_verbs.get("freshness_sec", DEFAULT_WRITE_FRESHNESS_SEC)
+        if isinstance(window, int) and not isinstance(window, bool) and window > 0:
+            return window
+        return DEFAULT_WRITE_FRESHNESS_SEC
 
     # ------------------------------------------------------------- audit
 
@@ -2094,8 +2441,9 @@ class Broker:
             # marker), so no other handler had to change.
             result, summary, extra = out if len(out) == 3 else (*out, None)
         except VerbError as exc:
-            allowed = exc.code not in ("bad-args", "over-budget", "apps-refused",
-                                       BUILD_REFUSED, MERGE_REFUSED)
+            allowed = exc.code not in ("bad-args", "over-budget", "verb-disabled",
+                                       "apps-refused", BUILD_REFUSED,
+                                       MERGE_REFUSED)
             if reserved and not allowed:
                 self._release_action(resident)
             reason = f" ({exc.reason})" if exc.reason else ""
@@ -5498,6 +5846,367 @@ class Broker:
         comment = body.get("comment") or {}
         return ({"slug": slug, "comment": comment},
                 f"comment on {slug} ({len(text)} chars)")
+
+    # ------------------------------------------------- the approval object
+
+    def _verb_approval_list(self, resident: str, args: dict) -> tuple[dict, str]:
+        """Open proposals, ONE LINE EACH. Skim here, detail in approval-show."""
+        _reject_unknown(args, {"state", "limit"})
+        state = _check_str(args, "state", max_len=8)
+        if state is not None and state not in ("open", "closed"):
+            raise _bad("state must be 'open' or 'closed'")
+        limit = _check_int(args, "limit", 50, 1, MAX_APPROVAL_ROWS)
+        query = f"?limit={limit}" + (f"&state={_urlq(state)}" if state else "")
+        body = self._board_get("/approval/proposals" + query)
+        proposals = body.get("proposals") or []
+        return ({"proposals": [format_approval_line(p) for p in proposals],
+                 "count": len(proposals),
+                 "truncated": bool(body.get("truncated"))},
+                f"{len(proposals)} approval proposal(s)")
+
+    def _verb_approval_show(self, resident: str, args: dict) -> tuple[dict, str]:
+        """One proposal in full: text, every principal's state and remarks."""
+        _reject_unknown(args, {"id"})
+        proposal_id = _check_int(args, "id", 0, 1, 2 ** 53)
+        body = self._board_get(f"/approval/proposals/{proposal_id}")
+        proposal = body.get("proposal") or {}
+        return ({"proposal": proposal,
+                 "line": format_approval_line(proposal) if proposal else None},
+                f"proposal #{proposal_id} ({proposal.get('decision', '?')})")
+
+    def _verb_approval_act(self, resident: str, args: dict) -> tuple[dict, str]:
+        """Approve, deny or rework a proposal, with remarks.
+
+        THE PRINCIPAL IS STAMPED HERE, from the caller's SO_PEERCRED-derived
+        seat name, never from `args`. It is the whole reason this is a verb
+        rather than an API key handed to a resident: the server cannot tell
+        which seat is behind the broker's bot identity, and a principal a
+        caller could name is a principal any caller could answer as."""
+        _reject_unknown(args, {"id", "action", "remarks"})
+        proposal_id = _check_int(args, "id", 0, 1, 2 ** 53)
+        action = _check_str(args, "action", required=True, max_len=10)
+        if action not in APPROVAL_ACTIONS:
+            raise _bad(f"action must be one of {', '.join(APPROVAL_ACTIONS)}")
+        remarks = _check_str(args, "remarks", max_len=MAX_APPROVAL_REMARKS_CHARS)
+        body = self._board_post(
+            f"/approval/proposals/{proposal_id}/act",
+            {"principal": resident, "action": action, "remarks": remarks})
+        proposal = body.get("proposal") or {}
+        return ({"proposal": proposal,
+                 "line": format_approval_line(proposal) if proposal else None},
+                f"{resident} {action} on proposal #{proposal_id} "
+                f"-> {proposal.get('decision', '?')}")
+
+    # --------------------------------------- the fails-closed Tier-1 wall
+
+    def _write_seat(self, resident: str) -> dict:
+        """The calling seat's write config, or a refusal. An unconfigured seat
+        is refused with `verb-disabled` rather than `bad-args`: nothing about
+        the request is wrong, the surface simply is not armed for that seat."""
+        seat = self.write_seats.get(resident)
+        if seat is None:
+            raise VerbError(
+                "verb-disabled",
+                f"no write surface is configured for {resident}: "
+                f"[write_verbs.{resident}] is absent from broker.toml")
+        return seat
+
+    def _read_ledger_post(self, seq: int) -> dict:
+        """The cited #custodian post, read from the message store itself.
+
+        The one place this verb's authority comes from. A caller-supplied copy
+        of the record is not a design option, so nothing here reads `args`
+        beyond the integer that selects the row. `seq` is per-channel (server
+        migration 001), so "resolves somewhere else" is a real and different
+        answer from "does not resolve" — and both refuse."""
+        path = self._write_message_db()
+        channel_id = self.disjorn.get("custodian_channel_id")
+        if not path or not os.path.exists(path):
+            raise VerbError("exec-failure",
+                            "the message store is unreadable, so the cited "
+                            "record cannot be verified")
+        if not isinstance(channel_id, int):
+            raise VerbError("internal",
+                            "[disjorn].custodian_channel_id is not configured")
+        try:
+            db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        except sqlite3.Error as exc:
+            raise VerbError("exec-failure",
+                            f"the message store cannot be opened: {exc}") from None
+        try:
+            db.row_factory = sqlite3.Row
+            rows = db.execute(
+                "select channel_id, author_type, author_id, content, created_at, "
+                "edited_at, deleted_at from messages where seq=?",
+                (seq,)).fetchall()
+            hit = next((r for r in rows if r["channel_id"] == channel_id), None)
+            if hit is None:
+                raise _bad(f"seq {seq} resolves, but not in #custodian"
+                           if rows else
+                           f"#custodian seq {seq} does not resolve")
+            # The record is what was SHOWN. An edit can rewrite content and sha
+            # together, so any edited post is refused, as is a deleted one.
+            if hit["deleted_at"]:
+                raise VerbError("bad-args",
+                                f"#custodian seq {seq} was deleted; a deleted "
+                                f"post is not a record", reason="post-deleted")
+            if hit["edited_at"]:
+                raise VerbError("bad-args",
+                                f"#custodian seq {seq} was edited after it was "
+                                f"posted; post the record again, unedited",
+                                reason="post-edited")
+            if hit["author_type"] != "bot":
+                raise VerbError("bad-args",
+                                f"#custodian seq {seq} was posted by a person "
+                                f"account, and only a seat's bot identity can "
+                                f"post its record", reason="not-a-bot-post")
+            author = self._ledger_author(db, hit["author_id"])
+        except sqlite3.Error as exc:
+            raise VerbError("exec-failure",
+                            f"the message store query failed: {exc}") from None
+        finally:
+            db.close()
+        return {"author": author, "content": hit["content"],
+                "created_at": hit["created_at"]}
+
+    @staticmethod
+    def _ledger_author(db: Any, author_id: int) -> str:
+        """`bots.name` for a bot-authored post; never `users.username`."""
+        row = db.execute("select name as n from bots where id=?",
+                         (author_id,)).fetchone()
+        return row["n"] if row and row["n"] else f"bot:{author_id}"
+
+    def _load_tier_map(self) -> dict:
+        """`[tiers]` from protected-paths.toml, re-read on EVERY call.
+
+        Live like verbs.toml and unlike the budgets, because this file is
+        authorization: plink narrowing a seat's surface must bite on the next
+        write, not after a broker restart. Unreadable means refused."""
+        path = self.paths.get("protected_paths")
+        try:
+            with open(path, "rb") as fh:  # type: ignore[arg-type]
+                cfg = tomllib.load(fh)
+        except (TypeError, OSError, tomllib.TOMLDecodeError) as exc:
+            raise VerbError("internal",
+                            f"the tier map is unreadable ({exc}); refusing the "
+                            f"write") from None
+        tiers = cfg.get("tiers")
+        return tiers if isinstance(tiers, dict) else {}
+
+    def _consumed_seqs(self) -> set[int]:
+        """Every seq the consumed-set records as spent. A complete line that
+        does not parse refuses the write, since it could be hiding a spent seq;
+        a torn final line (no newline) is skipped, because its fsync never
+        returned and so nothing was written on it."""
+        seqs: set[int] = set()
+        try:
+            with open(self.write_consumed, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    if not line.endswith("\n"):
+                        break
+                    if not line.strip():
+                        continue
+                    try:
+                        value = json.loads(line).get("seq")
+                    except (ValueError, AttributeError):
+                        value = None
+                    if not isinstance(value, int) or isinstance(value, bool):
+                        raise VerbError(
+                            "internal",
+                            f"the consumed-set {self.write_consumed} has a line "
+                            f"that does not parse; refusing the write")
+                    seqs.add(value)
+        except FileNotFoundError:
+            return seqs
+        except (OSError, UnicodeDecodeError) as exc:
+            raise VerbError("internal",
+                            f"the consumed-set is unreadable ({exc}); refusing "
+                            f"the write") from None
+        return seqs
+
+    def _mark_consumed(self, entry: dict) -> None:
+        """Append one spent seq and fsync it before the target is touched."""
+        line = (json.dumps(entry, ensure_ascii=False) + "\n").encode("utf-8")
+        try:
+            fd = os.open(self.write_consumed,
+                         os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600)
+            try:
+                size = os.fstat(fd).st_size
+                if size:
+                    keep = os.pread(fd, size, 0).rfind(b"\n") + 1
+                    if keep != size:
+                        os.ftruncate(fd, keep)
+                view = memoryview(line)
+                while view:
+                    view = view[os.write(fd, view):]
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            if not size:
+                dfd = os.open(os.path.dirname(self.write_consumed), os.O_RDONLY)
+                try:
+                    os.fsync(dfd)
+                finally:
+                    os.close(dfd)
+        except OSError as exc:
+            raise VerbError("internal",
+                            f"the consumed-set cannot be written ({exc}); "
+                            f"refusing the write") from None
+
+    def _resolve_write_target(self, seat: dict, repo_path: str) -> str:
+        """repo-relative path -> the host file this verb may write, or refuse.
+
+        Containment is checked on the REALPATH of the parent directory, so a
+        symlink planted anywhere in the chain cannot aim the write out of the
+        seat's root. The parent must already exist: a verb that creates
+        directories can scaffold a whole tree from one record, and the record
+        only ever describes one file."""
+        prefix = seat["repo_prefix"]
+        if repo_path != prefix and not repo_path.startswith(prefix + "/"):
+            raise _bad(f"{repo_path} is outside this seat's surface "
+                       f"({prefix}/…)")
+        relative = repo_path[len(prefix):].lstrip("/")
+        if not relative:
+            raise _bad("the record names a directory, not a file")
+        target = os.path.join(seat["root"], relative)
+        parent = os.path.realpath(os.path.dirname(target))
+        if not _is_within(parent, seat["root"]):
+            raise _bad(f"{repo_path} resolves outside this seat's root")
+        if not os.path.isdir(parent):
+            raise _bad(f"the directory for {repo_path} does not exist; this "
+                       f"verb writes one named file and creates no directories")
+        if os.path.islink(target) or (os.path.exists(target)
+                                      and not os.path.isfile(target)):
+            raise _bad(f"{repo_path} is not a regular file on disk")
+        return os.path.join(parent, os.path.basename(target))
+
+    @staticmethod
+    def _apply_write(target: str, content: str) -> int:
+        """Write the exact bytes, atomically. An existing file keeps its mode:
+        this verb changes a file's contents and never its permissions."""
+        raw = content.encode("utf-8")
+        try:
+            mode = stat.S_IMODE(os.stat(target).st_mode)
+        except OSError:
+            mode = 0o644
+        directory = os.path.dirname(target)
+        try:
+            fd, tmp = tempfile.mkstemp(dir=directory, prefix=".write-record-")
+        except OSError as exc:
+            raise VerbError("exec-failure",
+                            f"the write failed: {exc}") from None
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(raw)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.chmod(tmp, mode)
+            os.replace(tmp, target)
+        except OSError as exc:
+            try:
+                os.unlink(tmp)
+            except OSError:  # pragma: no cover — the replace already moved it
+                pass
+            raise VerbError("exec-failure",
+                            f"the write failed: {exc}") from None
+        return len(raw)
+
+    def _verb_apply_posted_write(self, resident: str,
+                                 args: dict) -> tuple[dict, str, dict]:
+        """Apply a write the caller already posted in #custodian. THE WALL.
+
+        The argument is a #custodian seq and nothing more. Everything else —
+        the target path, the content, the hash it must match — is read out of
+        the post by this daemon, so there is no claim a caller can make that
+        the broker takes on trust.
+
+        Applies only if ALL of:
+          (a) the post's author is the requesting seat's own identity;
+          (b) the post names the target path and the sha256 of the exact
+              content about to be written, and that path is Tier 0 or Tier 1 on
+              the seat's own surface map;
+          (c) the post is younger than the freshness window;
+          (d) the seq is unconsumed — one record authorizes exactly one write.
+        Any check failing refuses, and dispatch() audits the refusal like every
+        other denial.
+
+        CONSUME BEFORE WRITE (rev 2). The consumed mark is appended before the
+        target is touched, so a crash in between leaves a spent record and an
+        unapplied write; a retry against that seq is refused like any consumed
+        seq and the caller posts a fresh record. Fail toward the wasted record,
+        never toward a free replay.
+
+        WHAT THIS IS NOT: an approval. Check (a) means a seat authorizes its
+        own Tier-0/1 write by having posted it. Nothing here asks anyone
+        whether the change is a good idea."""
+        _reject_unknown(args, {"seq"})
+        seq = _check_int(args, "seq", 0, 1, 2 ** 53)
+        seat = self._write_seat(resident)
+
+        post = self._read_ledger_post(seq)
+        if post["author"] != seat["author"]:
+            raise _bad(f"#custodian seq {seq} was posted by "
+                       f"{post['author']!r}, not by {seat['author']!r}: a seat "
+                       f"can only apply a record it posted itself")
+        window = self._write_freshness()
+        age = self._post_age_seconds(post["created_at"])
+        if age is None:
+            raise _bad(f"#custodian seq {seq} has an unreadable timestamp "
+                       f"({post['created_at']!r}), so its freshness cannot be "
+                       f"established")
+        if age > window:
+            raise _bad(f"#custodian seq {seq} is {int(age)}s old, past the "
+                       f"{window}s freshness window; post the record again")
+
+        record = parse_write_record(post["content"])
+        tier = tier_for_path(self._load_tier_map(), resident, record["path"])
+        if tier is None:
+            raise _bad(f"{record['path']} is not on {resident}'s Tier-0/1 "
+                       f"surface map; nothing above Tier 1 is written here")
+        target = self._resolve_write_target(seat, record["path"])
+
+        # (d) and the consume mark are ONE step under the lock — a check that
+        # released before marking would let two concurrent calls both spend the
+        # same record.
+        with self._write_lock:
+            if seq in self._consumed_seqs():
+                raise _bad(f"#custodian seq {seq} is already consumed: one "
+                           f"record authorizes exactly one write. Post a fresh "
+                           f"record.")
+            self._mark_consumed({
+                "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                "seq": seq, "seat": resident, "path": record["path"],
+                "sha256": record["sha256"]})
+            self._audit(resident, WRITE_VERB, {"seq": seq}, True,
+                        f"consumed seq {seq} for {record['path']} "
+                        f"(tier {tier}) — writing next",
+                        extra={"consumed_seq": seq})
+        written = self._apply_write(target, record["content"])
+        return ({"applied": True, "seq": seq, "path": record["path"],
+                 "tier": tier, "sha256": record["sha256"], "bytes": written},
+                f"applied seq {seq} to {record['path']} "
+                f"(tier {tier}, {written} bytes)",
+                {"write_applied": True})
+
+    @staticmethod
+    def _post_age_seconds(created_at: Any) -> Optional[float]:
+        """Age of a ledger timestamp in seconds, or None if it cannot be read.
+
+        The server writes `2026-08-26T12:34:56.789Z`; `fromisoformat` refuses a
+        `Z` suffix before 3.11's relaxation, so it is normalised rather than
+        trusted to parse. A naive timestamp is read as UTC, which is what the
+        server writes; None (not 0) is the answer when it cannot be read at
+        all, because an unreadable timestamp must refuse, never pass."""
+        if not isinstance(created_at, str) or not created_at:
+            return None
+        text = created_at.strip().replace("Z", "+00:00")
+        try:
+            when = _dt.datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=_dt.timezone.utc)
+        return (_dt.datetime.now(_dt.timezone.utc) - when).total_seconds()
 
     # ------------------------------------------------- plan room: rebuilds
 

@@ -76,9 +76,17 @@ six core keys. `start-build` and `build` success lines carry
 `"build_started": true`, which is how the build budget distinguishes "a build
 ran" from "the call was authorized but nothing ever launched" (BL-D3); a
 `build` line adds `"build_seat"` as a fact about where the build ran, while its
-budget is the `server` principal's. A `merge` writes two lines: `"merge_started":
-true` when the call is taken, then `"merge_tier"` and `"merged_sha"` when the
-merge itself lands.
+budget is the `server` principal's; `wake` carries `"wake_id"`; and
+`apply-posted-write` carries `"write_applied": true`. A `merge` writes two
+lines: `"merge_started": true` when the call is taken, then `"merge_tier"` and
+`"merged_sha"` when the merge itself lands.
+
+**`apply-posted-write` also writes two lines**: a human-readable line marking
+the #custodian seq it is about to spend (`"consumed_seq": <n>`), then the
+ordinary result line. These lines are for readers only. The verb's consumed-set
+is its own file, `[write_verbs].consumed_ledger`, so rotating or truncating the
+audit log re-arms nothing. A refused write appends only the ordinary denial
+line, and nothing is consumed.
 
 ## Verb table
 
@@ -839,6 +847,137 @@ review owner at all. From the socket a woken caller and a summoned one are the
 same uid, so the wake window is the only signal; the imprecision runs in the
 safe direction, refusing builds a summon could have run rather than letting a
 woken session past the rule.
+
+### The approval verbs — `approval-list`, `approval-show`, `approval-act`
+
+SPECS/2026-08-26-approval-object-and-resident-write-verbs.md item 1 (confirmed
+by plink, #custodian seq 2022), building the tiers spec's "Fast-approval
+surface" paragraph.
+
+**One record per proposal**: proposal text, a remarks box, Approve / Deny /
+Rework, and per-principal state for all three principals. plink answers it in a
+client modal; residents answer the same object through these verbs. One state
+of record, actionable from keyboard and chat seats alike — a second store for
+"what the residents said" would be the forked truth the object exists to end.
+
+All three go through the Disjorn server's `/approval` surface as the broker's
+own bot identity, the board verbs' idiom and for the board verbs' reason: the
+record is composed once, by the process that also composes it for the modal.
+The server's refusal text is carried back verbatim.
+
+- **`approval-list`** — args `{"state": "open"|"closed", "limit": int}`, both
+  optional; `limit` 1..200 default 50. Result `{"proposals": [str, ...],
+  "count": int, "truncated": bool}` — ONE LINE PER PROPOSAL, carrying the
+  derived decision, the id, the slug and where each principal stands.
+- **`approval-show`** — args `{"id": int}` required. Result `{"proposal":
+  {...}, "line": str}` — the whole record, every principal's remarks included.
+- **`approval-act`** — args `{"id": int, "action": "approve"|"deny"|"rework",
+  "remarks": str}`. **The principal is stamped by the broker** from the
+  caller's SO_PEERCRED-derived seat name and is not an argument — the server
+  cannot tell which seat is behind the broker's bot identity, so a principal a
+  caller could name is a principal any caller could answer as. Same attribution
+  rule as `board-flag`. Re-acting replaces that principal's row; `rework` never
+  closes a proposal, a `deny` does. The server takes a named principal only
+  from a bot on its `APPROVAL_RELAY_BOT_NAMES` (default `["broker"]`), and only
+  a `res-*` principal: every other bot key is refused, a relayed answer can
+  never be a person's, and a signed-in admin answers only as their own
+  username.
+
+There is deliberately **no create verb**. Filing a proposal is a server
+endpoint; these three verbs answer proposals, and nothing here can invent one.
+
+The surface **ships OFF on both sides**: the verbs are absent from every
+allowlist, and the server refuses every `/approval` call with a 503 naming
+`APPROVAL_ENABLED` until plink arms it. A disarmed surface and an empty one do
+not read alike.
+
+### `apply-posted-write` — the fails-closed Tier-1 wall
+
+Same spec, item 2. The tiers spec's target state — "an unposted write fails
+closed — the wall lives in tooling, not in a promise" — is this verb.
+
+- args: `{"seq": int}` — a #custodian seq, **and nothing more**. The broker
+  reads that post out of the message store itself; a caller-supplied copy of
+  the record, or a token standing for one, is not a design option. Same shape
+  as the confirm gate, which reads SPECS/ rather than a resident's claim about
+  what SPECS/ says.
+- result: `{"applied": true, "seq": int, "path": str, "tier": int,
+  "sha256": str, "bytes": int}`.
+
+**The record.** The cited post must BE the record — the whole message, not a
+block inside a longer one, because a record that may be embedded is a record
+whose boundaries the parser and a human reader can disagree about, in the
+channel where the witnessing happens:
+
+```
+disjorn-write-record v1
+path: bots/fable/spine/05-bearings.md
+sha256: <64 lowercase hex of the content between the fences>
+--- content ---
+<the exact bytes to be written>
+--- end ---
+```
+
+The end fence makes the trailing newline explicit: content is every line
+between the fences including the newline that ends the last one, so a transport
+that strips trailing whitespace cannot quietly change the file that gets
+written — it would change the sha, and the write would refuse.
+
+**The write happens only if ALL of:**
+
+  (a) the post's author is the requesting seat's own #custodian identity
+      (`[write_verbs.<seat>].author`, compared with `bots.name`). Only a
+      bot-authored post can qualify: a person account refuses with
+      `reason: "not-a-bot-post"` whatever its username;
+  (b) the post names the target path and the sha256 of the exact content about
+      to be written, and that path is Tier 0 or Tier 1 on the seat's own
+      surface map;
+  (c) the post is younger than the freshness window
+      (`[write_verbs].freshness_sec`, default 24h);
+  (d) the seq is unconsumed — **one record authorizes exactly one write**. The
+      consumed-set is `[write_verbs].consumed_ledger`, an append-only JSON-lines
+      file in the broker's state dir (`{ts, seq, seat, path, sha256}` per
+      line), never the audit log. Its directory must be resident-unwritable or
+      the broker refuses to start; a line that does not parse refuses the write.
+
+Any check failing refuses and is audited like every other denial.
+
+**The post must be unedited and undeleted.** The record is what was shown, and
+an edit can rewrite the content and its sha line together, so a post with
+`edited_at` set refuses with `reason: "post-edited"` and a deleted one with
+`reason: "post-deleted"` (both `bad-args`, both audited with the reason). The
+caller posts the record again.
+
+**Consume-then-write.** The consumed mark is appended to the consumed-set and
+fsync'd before the target is touched. A crash in between leaves a spent record and an unapplied write, and a
+retry against that seq refuses like any consumed seq — the caller posts a fresh
+record. Fail toward the wasted record, never toward a free replay.
+
+**Publicity, not approval.** Check (a) means a seat authorizes its own Tier-0/1
+write by having posted it. The guarantee is that nothing reaches the surface
+without having been shown in #custodian first — **not** that anyone said yes.
+No human sits in this path; that is what fails-closed means here. Approval by
+another principal is the approval object's job, not this verb's.
+
+**Tier 2 stays plink-keyed.** Nothing above Tier 1 is written here, and the
+tier map is not this verb's to widen: it lives in `[tiers.<seat>]` in
+protected-paths.toml, beside the classifier's surface map, and is re-read on
+every call so a narrowing bites at once. That map answers a DIFFERENT question
+from the same file's `[protected]` list — `[protected]` tiers a diff at the
+merge gate, `[tiers]` tiers a seat writing its own live surface — and the file
+says so at length.
+
+**Arming it takes three plink-owned files agreeing**, and each ships shut:
+
+  1. `[write_verbs.<seat>]` in broker.toml (absent → no write surface at all);
+  2. rows in `[tiers.<seat>]` in protected-paths.toml (both seats ship empty);
+  3. the kill switch in verbs.toml (ships `false`).
+
+A row in one that the others do not back grants nothing. The broker **refuses
+to start** if a configured `root` is not provably resident-unwritable — the
+same assertion `start_build.specs_dir` and the wake spool carry, for the same
+reason: a seat that can already write the target does not need a record to
+write it, and the wall would be a promise again.
 
 ## Daily action budget (WP-H12)
 

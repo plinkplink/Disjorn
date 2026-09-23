@@ -594,6 +594,114 @@ no_leading_dash = true
 no_nul = true
 description = "Absolute path to the prompt file you just wrote, inside your own ~/apps-prompts/ — a file OUTSIDE that directory is refused. The `<session_id>-<turn>.md` name is a convention that keeps the directory readable, not a rule the harness checks; the turn number of record is the one this verb answers with."
 
+# ── approval-list ────────────────────────────────────────────────────────
+[verbs.approval-list]
+tool_name = "approval_list"
+cli_help = "list approval proposals, one line each"
+announce_preface = false
+description = """\
+List approval proposals, ONE LINE EACH, via the house broker. A proposal is one \
+record — its text, a remarks box, and an Approve / Deny / Rework state for each \
+of the three principals. plink answers it in a modal; you answer the SAME record \
+with approval_act, so there is one state of record rather than a chat thread \
+somebody has to reconstruct.\n\nEach line shows the derived decision, the id, \
+the slug and where every principal stands. Open the one you need with \
+approval_show; reading them all in full is what this line-per-row shape exists \
+to stop.\
+"""
+
+[verbs.approval-list.args.state]
+type = "string"
+pattern = "^(open|closed)$"
+description = "'open' for proposals still being answered, 'closed' for decided ones; omit for both."
+
+[verbs.approval-list.args.limit]
+type = "integer"
+minimum = 1
+maximum = 200
+description = "Max proposals, 1-200 (most recent first). Default 50."
+
+# ── approval-show ────────────────────────────────────────────────────────
+[verbs.approval-show]
+tool_name = "approval_show"
+cli_help = "one approval proposal, in full"
+announce_preface = false
+description = """\
+One approval proposal in full, via the house broker: the proposal text, the \
+derived decision, and every principal's state, remarks and timestamp. Read this \
+before you answer — the remarks are where the disagreement actually lives, and \
+your own past state is on the same record.\
+"""
+
+[verbs.approval-show.args.id]
+type = "integer"
+required = true
+minimum = 1
+description = "The proposal's id, as approval_list prints it."
+
+# ── approval-act ─────────────────────────────────────────────────────────
+[verbs.approval-act]
+tool_name = "approval_act"
+cli_help = "approve, deny or rework a proposal"
+announce_preface = false
+description = """\
+Answer an approval proposal — approve, deny, or rework — with remarks, via the \
+house broker. You answer AS YOURSELF: the principal is stamped by the broker \
+from your own identity and is not something an argument can name, so nothing you \
+send can answer for plink or for the other resident.\n\nRework is a distinct \
+answer, not a soft denial: it never closes the proposal. A denial does. You may \
+change your mind while the proposal is open — a second answer replaces your row \
+rather than appending to it — and say why in remarks, because a state with no \
+reasoning is one nobody can act on.\
+"""
+
+[verbs.approval-act.args.id]
+type = "integer"
+required = true
+minimum = 1
+description = "The proposal's id, as approval_list prints it."
+
+[verbs.approval-act.args.action]
+type = "string"
+required = true
+pattern = "^(approve|deny|rework)$"
+description = "'approve', 'deny', or 'rework'."
+
+[verbs.approval-act.args.remarks]
+type = "string"
+max_len = 4000
+no_nul = true
+description = "Why. Max 4000 chars; optional, but a bare state is one nobody can act on."
+
+# ── apply-posted-write ───────────────────────────────────────────────────
+[verbs.apply-posted-write]
+tool_name = "apply_posted_write"
+cli_help = "apply a write you already posted in #custodian"
+announce_preface = false
+description = """\
+Apply a change to your OWN Tier-0/1 surface that you have already posted in \
+#custodian, via the house broker. The argument is the #custodian seq of your \
+post and nothing else: the broker reads that post out of the ledger itself, so \
+nothing you send here describes the change — the post does.\n\nPost the record \
+first, as yourself, and post NOTHING ELSE in that message:\n\n    \
+disjorn-write-record v1\n    path: <repo-relative path>\n    sha256: <64 hex of \
+the content below>\n    --- content ---\n    <the exact new contents of the \
+file>\n    --- end ---\n\nThe write happens only if all of: the post is yours, \
+its path is Tier 0 or Tier 1 on your own surface map, its sha256 matches its own \
+content, it is younger than the freshness window, and its seq has not been used \
+before. One record authorizes exactly one write; a refused or repeated seq means \
+posting a fresh record. Everything else is refused and logged.\n\nThis is \
+publicity, not approval: it guarantees nothing reaches your surface without \
+having been shown in #custodian first, and it does not mean anyone said yes. \
+Use approval_act for that.\
+"""
+
+[verbs.apply-posted-write.args.seq]
+type = "integer"
+required = true
+minimum = 1
+description = "The #custodian seq of your posted record. The broker reads the post; you cannot hand it the content."
+
 # ══ ADAPTER TOOLS ═════════════════════════════════════════════════════════
 #
 # Everything above this line is a BROKER VERB. Everything below it is not.

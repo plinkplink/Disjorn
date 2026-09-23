@@ -452,6 +452,77 @@ VERB_SURFACE = {
             },
         },
     },
+    "approval-list": {
+        "help": "list approval proposals, one line each",
+        "args": {
+            "state": {
+                "flag": "--state",
+                "type": "string",
+                "required": False,
+                "help": "'open' for proposals still being answered, 'closed' for decided ones; omit for both.",
+                "pattern": "^(open|closed)$",
+            },
+            "limit": {
+                "flag": "--limit",
+                "type": "integer",
+                "required": False,
+                "help": "Max proposals, 1-200 (most recent first). Default 50.",
+                "minimum": 1,
+                "maximum": 200,
+            },
+        },
+    },
+    "approval-show": {
+        "help": "one approval proposal, in full",
+        "args": {
+            "id": {
+                "flag": "--id",
+                "type": "integer",
+                "required": True,
+                "help": "The proposal's id, as approval_list prints it.",
+                "minimum": 1,
+            },
+        },
+    },
+    "approval-act": {
+        "help": "approve, deny or rework a proposal",
+        "args": {
+            "id": {
+                "flag": "--id",
+                "type": "integer",
+                "required": True,
+                "help": "The proposal's id, as approval_list prints it.",
+                "minimum": 1,
+            },
+            "action": {
+                "flag": "--action",
+                "type": "string",
+                "required": True,
+                "help": "'approve', 'deny', or 'rework'.",
+                "pattern": "^(approve|deny|rework)$",
+            },
+            "remarks": {
+                "flag": "--remarks",
+                "type": "string",
+                "required": False,
+                "help": "Why. Max 4000 chars; optional, but a bare state is one nobody can act on.",
+                "max_len": 4000,
+                "no_nul": True,
+            },
+        },
+    },
+    "apply-posted-write": {
+        "help": "apply a write you already posted in #custodian",
+        "args": {
+            "seq": {
+                "flag": "--seq",
+                "type": "integer",
+                "required": True,
+                "help": "The #custodian seq of your posted record. The broker reads the post; you cannot hand it the content.",
+                "minimum": 1,
+            },
+        },
+    },
 }
 # ── END GENERATED VERB SURFACE ──────────────────────────────────────────
 

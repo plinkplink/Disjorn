@@ -104,6 +104,18 @@ Similarly, `daily_auto_apply_budget` in `[limits]` is just the plink-owned
 number; counting and escalation live in the broker/orchestrator
 (WP-H3/H12), not here.
 
+## The tier map is in that file and is not read by this one
+
+`protected-paths.toml` also carries `[tiers.<seat>]` since 2026-08-26 (spec:
+approval-object-and-resident-write-verbs). Those rows are read ONLY by the
+broker's `apply-posted-write` verb — the fails-closed Tier-1 wall — and
+`classify_diff.py` neither reads nor is affected by them. They live beside the
+surface map because the tiers spec put them there ("tier assignments live
+beside the surface map, not in code"), and they answer a different question
+from `[protected]`: `[protected]` tiers a DIFF at the merge gate, `[tiers]`
+tiers a SEAT WRITING ITS OWN LIVE SURFACE. The file's own comment carries the
+long form.
+
 ## Tests
 
 ```sh
