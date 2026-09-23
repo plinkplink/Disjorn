@@ -47,20 +47,14 @@ commit and two restarts.
 - **Streaming + `max_tokens`**: move to `.stream()`, raise the ceiling past the
   16,000 non-streaming cap. Pick the number from the 5.5 model page, not from
   memory.
-- **Prefix binding — the sleeper, and the one thing most likely to 400 us.**
-  5.5 checks whether the `system` prompt, the `tools`, or an earlier message
-  changed since a thinking block was produced. Claudette's system prompt is
-  regenerated every turn (surfaced-memory block, timestamp) and her `tools`
-  array is about to change under the per-seat generator (#2811). Both are
-  prefix changes by definition.
-  - Check the Anthropic account's creation date. On or after 2026-08-31 the
-    check is enforced BY DEFAULT and we start returning 400s.
-  - Either way: send the `thinking-binding-controls-2026-08-01` beta header and
-    set `thinking.block_binding.prefix_mismatch_behavior: "drop_block"`, so the
-    failure mode is a dropped block plus a visible `input_transformations`
-    entry, never a hard error.
-  - Log any `input_transformations` to the adapter log. A silent drop is the
-    thing we have been burned by four times.
+- **Prefix binding.** 5.5 checks that the `system` prompt, the `tools` and
+  every earlier message are unchanged under a replayed thinking block. Blocks
+  are replayed only within one turn, and nothing in front of them changes
+  there (fold 1), so the check cannot fire in normal operation. Send the
+  `thinking-binding-controls-2026-08-01` header with
+  `thinking.block_binding.prefix_mismatch_behavior: "drop_block"` anyway, and
+  log any `input_transformations`: a future edit then shows up as a logged drop,
+  never a 400.
 - **Content-block handling**: select blocks by `type`, never by position — a
   response can now begin with one or more `thinking` blocks. Pass `thinking`
   blocks back UNMODIFIED in tool-use loops.
