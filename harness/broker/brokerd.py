@@ -5333,6 +5333,23 @@ class Broker:
         card = body.get("card") or {}
         return work_item if card.get("column") == "Review" else None
 
+    def _unpark_refusal(self, work_item: str, seq: int) -> Optional[str]:
+        """Why the cited post cannot unpark `work_item`, or None if it can.
+        The broker reads the post itself: the reporting adapter runs as the
+        same res-* uid as the model it gates, so its word is no evidence."""
+        channel = self.disjorn.get("custodian_channel_id")
+        if not isinstance(channel, int) or channel < 1:
+            return "this broker has no #custodian to read the post from"
+        try:
+            post = self._build_message(channel, seq, act="unpark a hop chain")
+        except VerbError as exc:
+            return exc.message
+        cited = re.search(rf"(?<![\w-]){re.escape(work_item)}(?![\w-])",
+                          post["content"])
+        if cited is None:
+            return f"message {seq} does not cite {work_item}"
+        return None
+
     def _verb_summon_hop(self, resident: str, args: dict) -> tuple[dict, str]:
         """The bot-to-bot hop wall, for the summon adapters."""
         _reject_unknown(args, {"action", "work_item", "summoner", "seq"})
@@ -5351,6 +5368,13 @@ class Broker:
             if self.hops is None:
                 return ({"reset": False, "reason": "no-wall"},
                         "no hop wall configured")
+            if seq is None:
+                raise _bad("unpark needs the seq of the human post")
+            refused = self._unpark_refusal(work_item, seq)
+            if refused:
+                return ({"work_item": work_item, "reset": False,
+                         "reason": "not-a-human-post", "refusal": refused},
+                        f"unpark of {work_item} refused: {refused}")
             out = self.hops.unpark(work_item, seq)
             verb = ("unparked by" if out["reset"]
                     else "already unparked, reported again by")

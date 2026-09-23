@@ -218,8 +218,7 @@ def test_the_cli_table_in_the_repo_is_current():
 
 
 def test_generation_is_idempotent(tmp_path):
-    """A generator that rewrites its own output differently every run makes
-    every diff unreadable and the alarm above useless."""
+    """A generator that is not idempotent makes the alarm above useless."""
     surface = gen.load_surface()
     copy = tmp_path / "broker"
     copy.write_text(gen.CLI_PATH.read_text(encoding="utf-8"), encoding="utf-8")
@@ -242,11 +241,28 @@ def test_the_regenerated_cli_still_imports_and_still_parses(tmp_path):
 
 # ── the two seats get the shapes their consumers expect ──────────────────
 
-def test_every_verb_reaches_both_seats():
+def test_every_verb_reaches_both_seats_unless_marked_shell_only():
     surface = gen.load_surface()
     cli = gen.cli_table(surface)
     tools = {t["verb"] for t in gen.tool_schemas(surface)}
-    assert set(cli) == tools == set(surface)
+    assert set(cli) == set(surface)
+    assert tools == {v for v, e in surface.items() if e.get("tool", True)}
+
+
+def test_summon_hop_never_reaches_a_bot_seat_even_when_granted(tmp_path):
+    verbs = tmp_path / "verbs.toml"
+    verbs.write_text('[res-claudette]\n"summon-hop" = true\n"read-metrics" = true\n')
+    assert "summon-hop" in gen.cli_table(gen.load_surface())
+    module = gen.emit_tools_module(gen.seat_surface(verbs, "res-claudette"))
+    assert "summon_hop" not in module and "read_metrics" in module
+
+
+def test_a_non_boolean_tool_flag_is_refused(tmp_path):
+    surface = tmp_path / "verb_surface.toml"
+    surface.write_text('[verbs.x]\ntool_name = "x"\ncli_help = "h"\n'
+                       'description = "d"\ntool = "no"\n')
+    with pytest.raises(gen.SurfaceError, match="tool must be"):
+        gen.load_surface(surface)
 
 
 def test_a_cli_only_arg_is_not_handed_to_a_model():

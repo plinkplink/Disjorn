@@ -507,6 +507,9 @@ description = "The comment, 1-4000 chars."
 tool_name = "summon_hop"
 cli_help = "ask the shared bot-to-bot hop wall about a work item"
 announce_preface = false
+# Never a bot seat's tool, even where its section grants the verb: the summon
+# adapters call it, and a model holding it could spend or unpark its own wall.
+tool = false
 description = """\
 The bot-to-bot summon wall, kept by the house broker so both residents' summon \
 adapters spend against ONE counter. The summon adapters call this; a session \
