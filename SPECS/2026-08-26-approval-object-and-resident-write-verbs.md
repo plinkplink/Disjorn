@@ -132,6 +132,21 @@ Medium per slice; two build slots total.
      holds here too: a person account named like a resident seat
      (`res-*`) is not a principal.
 
+## Review record
+- Claudette, #custodian seq 3011, on `261364d`: PASS (all three f2c4bd7
+  findings in; the port's principal derivation accepted). Notes folded
+  before merge: the closed check is re-read inside the write transaction,
+  so a concurrent answer cannot reopen or rewrite a decision; a relayed
+  answer is labelled `res-<seat> (via broker)`. Her third note (two
+  migration 016s) is answered by the footer spec taking 017.
+- Gable, #custodian seq 3012, on `261364d`: PASS on his lane
+  (`[tiers.res-gable]` rows ship empty; regenerated CLI clean). Notes
+  folded before merge: `harness/classifier/protected-paths.toml` joins its
+  own `[protected].files`, so a tier-map edit is Tier 2 at the merge gate;
+  the "lower tier wins a tie" wording now says the tier only labels the
+  audit line. Installing the new file to `/etc/disjorn-broker/` is an
+  arming step, not a merge step.
+
 ## Confirm record
 - **Confirmed by**: plink
 - **#custodian seq**: 2022

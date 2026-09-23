@@ -25,6 +25,8 @@ files = [
     "client/package.json",
     "client/package-lock.json",
     "sdk/pyproject.toml",
+    # this file: it decides what is Tier 2 and what a seat may write live
+    "harness/classifier/protected-paths.toml",
 
     # --- Per-resident: Gable (repo at bots/fable) --------------------------
     "bots/fable/GENESIS.md",      # origin doc, read on wake
@@ -129,8 +131,9 @@ patterns = [
 # deliberately kept apart and this paragraph is the record of that choice.
 #
 # HOW AN ENTRY IS MATCHED: exact repo-relative path, or a directory prefix
-# (`bots/fable/spine` covers everything under it, file creation included). The
-# LOWER tier wins a tie, so a broad entry never widens a narrow one. A path no
+# (`bots/fable/spine` covers everything under it, file creation included). A
+# path both tiers name reports as Tier 0; the verb applies both tiers alike,
+# so the tier only labels the audit line. A path no
 # entry names has NO tier here and the write is refused — absence is a refusal,
 # not a default.
 #

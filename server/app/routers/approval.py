@@ -273,18 +273,21 @@ async def act_on_proposal(proposal_id: int, actor: CurrentActor,
     open, and `acted_at` says when."""
     _require_enabled()
     _require_writer(actor)
-    proposal = await _require_proposal(proposal_id)
+    await _require_proposal(proposal_id)
     principal = _acting_principal(actor, body.principal)
-    if proposal["closed_at"] is not None:
-        raise HTTPException(
-            status_code=409,
-            detail="That approval proposal is closed; its decision is already "
-                   "on the record.")
-
-    label = _actor_label(actor, None)
+    label = _actor_label(actor, principal)
     now = db.utc_now()
-    # One transaction, so no reader sees an answer without its closure.
+    # One transaction, so no reader sees an answer without its closure, and
+    # "closed" is read under the lock that closes it.
     async with db.transaction() as conn:
+        current = await db.fetch_one(
+            "SELECT closed_at FROM approval_proposal WHERE id = ?",
+            (proposal_id,))
+        if current["closed_at"] is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="That approval proposal is closed; its decision is "
+                       "already on the record.")
         await conn.execute(
             "INSERT INTO approval_state (proposal_id, principal, state, "
             "remarks, acted_by_type, acted_by_id, acted_by_label, acted_at) "

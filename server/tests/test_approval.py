@@ -20,7 +20,7 @@ import pytest
 
 from app import db
 from app.config import reset_settings_cache
-from app.routers import auth
+from app.routers import approval, auth
 
 PASSWORD = "correct horse battery staple"
 PASSWORD_HASH = auth.hash_password(PASSWORD)  # hash once — argon2 is slow
@@ -236,7 +236,8 @@ async def test_a_resident_answers_through_the_broker_with_typed_attribution(
                  if s["principal"] == "res-claudette")
     assert state["state"] == "approve"
     assert state["remarks"] == "Reads clean."
-    assert state["acted_by"] == {"type": "bot", "id": bot_id, "label": "broker"}
+    assert state["acted_by"] == {"type": "bot", "id": bot_id,
+                                 "label": "res-claudette (via broker)"}
     assert state["acted_at"]
 
 
@@ -430,6 +431,36 @@ async def test_deny_outranks_rework(client, app, armed, plink):
     body = (await answer(client, plink, proposal["id"], "plink",
                          "deny")).json()["proposal"]
     assert body["decision"] == "denied"
+
+
+async def test_a_proposal_closed_while_an_answer_was_in_flight_stays_closed(
+        client, app, armed, plink, monkeypatch):
+    """An answer that read the proposal open before another answer closed it
+    must not reopen or rewrite the decision."""
+    await make_bot()
+    proposal = await file_proposal(client)
+    stale = await approval._require_proposal(proposal["id"])
+    await answer(client, plink, proposal["id"], "plink", "deny")
+
+    async def read_before_the_close(_proposal_id):
+        return stale
+    monkeypatch.setattr(approval, "_require_proposal", read_before_the_close)
+    r = await act(client, proposal["id"], "res-gable", "approve")
+    assert r.status_code == 409
+    row = await db.fetch_one(
+        "SELECT state FROM approval_state WHERE proposal_id = ? AND principal = ?",
+        (proposal["id"], "res-gable"))
+    assert row is None or row["state"] != "approve"
+
+
+async def test_a_relayed_answer_is_labelled_with_its_resident(client, app, armed):
+    await make_bot()
+    proposal = await file_proposal(client)
+    await act(client, proposal["id"], "res-gable", "rework")
+    row = await db.fetch_one(
+        "SELECT acted_by_label FROM approval_state "
+        "WHERE proposal_id = ? AND principal = ?", (proposal["id"], "res-gable"))
+    assert row["acted_by_label"] == "res-gable (via broker)"
 
 
 async def test_answering_a_closed_proposal_is_refused(client, app, armed, plink):

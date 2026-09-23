@@ -748,7 +748,8 @@ def tier_for_path(tier_map: Any, seat: str, path: str) -> Optional[int]:
 
     None is a refusal, never a default: a path no seat's map names has no tier
     on this surface, and the write verb applies Tier 0 and Tier 1 only. The
-    lower tier wins a tie, so a broad entry can never widen a narrow one.
+    `tier0` list is checked first; both apply alike, so the tier only labels the
+    audit line.
 
     The map is `[tiers.<seat>]` in protected-paths.toml — beside the
     classifier's surface map, per the tiers spec's architecture note, and
