@@ -236,7 +236,7 @@ def _acting_principal(actor: Actor, named: Optional[str]) -> str:
                 status_code=403,
                 detail=f"You can only answer as yourself ({me}), not as "
                        f"{named}.")
-        if me not in principals:
+        if me not in principals or RESIDENT_PRINCIPAL_RE.match(me):
             raise HTTPException(
                 status_code=403,
                 detail=f"{me} is not a principal on this server.")

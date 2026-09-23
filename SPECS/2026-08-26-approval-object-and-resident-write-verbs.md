@@ -128,7 +128,9 @@ Medium per slice; two build slots total.
      signed-in human answers only as their own username. Only a bot on
      `APPROVAL_RELAY_BOT_NAMES` (default: the broker) may name a
      principal, and only a resident seat's, so a relayed answer is never a
-     person's. Every other bot key is refused.
+     person's. Every other bot key is refused. The mirror of fold 3
+     holds here too: a person account named like a resident seat
+     (`res-*`) is not a principal.
 
 ## Confirm record
 - **Confirmed by**: plink

@@ -337,6 +337,16 @@ async def test_an_admin_who_is_not_a_principal_cannot_answer(client, app, armed)
     assert r.status_code == 403
 
 
+async def test_a_person_account_named_like_a_resident_cannot_answer(
+        client, app, armed):
+    await make_bot()
+    proposal = await file_proposal(client)
+    await make_user("res-gable", admin=True)
+    await login(client, "res-gable")
+    r = await act(client, proposal["id"], "res-gable", "approve", headers={})
+    assert r.status_code == 403
+
+
 async def test_the_relay_must_name_the_resident(client, app, armed):
     await make_bot()
     proposal = await file_proposal(client)
