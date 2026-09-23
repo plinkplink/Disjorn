@@ -32,8 +32,13 @@ def det(tmp_path):
 
 @pytest.mark.parametrize("phrase", PHRASES)
 def test_a_phrase_at_the_start_wakes_him_outside_custodian(det, phrase):
-    ev = make_event(context=None, channel_id=7, content=f"  {phrase.upper()}look at this")
+    ev = make_event(context=None, channel_id=7, content=f"  {phrase.upper()} look at this")
     assert det.detect(ev).mode == "pattern"
+
+
+@pytest.mark.parametrize("text", ["gable look", "gable, look", "hey gable!", "bots?"])
+def test_the_name_ends_at_a_word_boundary_not_at_a_space(det, text):
+    assert det.detect(make_event(context=None, channel_id=7, content=text)).mode == "pattern"
 
 
 @pytest.mark.parametrize("phrase", PHRASES)
@@ -56,6 +61,8 @@ def test_a_bot_saying_a_phrase_wakes_nobody(det, phrase):
     assert det.detect(ev) is None
 
 
-@pytest.mark.parametrize("text", ["gabled roofs", "hey gabriel", "robots rule"])
+@pytest.mark.parametrize("text", ["gabled roofs", "hey gabriel", "robots rule",
+                                  "hey gabled roofs", "botswana is warm",
+                                  "hi gables everywhere", "thanks gableton"])
 def test_near_misses_do_not_wake_him(det, text):
     assert det.detect(make_event(context=None, channel_id=7, content=text)) is None
