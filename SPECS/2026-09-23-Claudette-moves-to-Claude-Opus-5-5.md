@@ -31,17 +31,19 @@ observable contract, in the order it is most likely to break:
    character.
 
 ## Architecture notes
-`bots/claudette/core.py` (both copies — resident and the Discord-side one, per
-the 2026-08-18 deploy note) plus the seat's config.
+`bots/claudette/core.py` is one file with two runners. `claudette.service`
+(Discord) runs the host repo in place. `resident-cc` (Disjorn) runs her clone,
+which `claudette-update.sh` fast-forwards from the host. So there is one
+commit and two restarts.
 
 - **`PRIMARY_MODEL` → `claude-opus-5-5`.** `CHAT_MODEL` knob unchanged in name.
 - **`thinking`**: omit the field, or send `{"type": "adaptive"}`. Any
   `disabled` or manual `budget_tokens` is a 400 on this model. Grep for both.
-- **`output_config.effort`**: set it EXPLICITLY. The default on 5.5 is
-  `medium`; on Opus 5 an omitted effort ran `high`. Silently dropping an effort
-  level on the upgrade turn is exactly the class of drift the 4096 incident was
-  — the number stayed, its meaning moved. Start at `high` to hold the current
-  behaviour, then sweep deliberately if we want to tune.
+- **`output_config.effort`**: already explicit. `CLAUDETTE_EFFORT` defaults to
+  `medium` (plink's order of 2026-08-24), and neither env file sets it, so every
+  call since then has sent `medium`. It stays `medium`. On 5.5, `medium` thinks
+  somewhat more per turn than it did on Opus 5, and the SUBSTRATE-LOG entry says
+  so. Any sweep is a later, separate change.
 - **Streaming + `max_tokens`**: move to `.stream()`, raise the ceiling past the
   16,000 non-streaming cap. Pick the number from the 5.5 model page, not from
   memory.
@@ -78,13 +80,16 @@ the 2026-08-18 deploy note) plus the seat's config.
 
 ## Lane → Review owner (DETERMINISTIC — filled from the lane, never preference)
 - **Lane**: custodian — Claudette's own code, config and spine.
-- **Review owner**: **Claudette**.
+- **Review owner**: Claudette by lane. **Overridden by plink at #custodian
+  2826**: BuildGable reviews the spec and owns sign-off, including the three
+  acceptance gates. Claudette reads the diff back (#2829). The cause is that
+  those gates can only be observed from outside her adapter, across its own
+  restart.
 
 ## Builder (USER PREFERENCE — who orchestrates; never touches Review owner)
-- **Builder**: keyboard. The change is small,
-  spans two copies of `core.py` outside the main repo, and needs a live
-  round-trip against the real API to verify the `display` setting — which a
-  detached build cannot observe.
+- **Builder**: BuildGable, the keyboard seat (#2826). It needs a live
+  round-trip against the real API to verify `display`, which a detached build
+  cannot observe.
 
 ## Expected diff tier
 Tier 2 — resident surface, model identity. Same class as 2026-08-18.
@@ -106,13 +111,59 @@ One keyboard session. No build budget burned.
 
 ## Rollback
 Revert `PRIMARY_MODEL` to `claude-opus-5` and the spine line with it, in one
-change. The effort/streaming/beta-header changes are safe on Opus 5 and can
-stay.
+change. Streaming and `max_tokens` can stay. The 5.5-only request fields are
+keyed on the model id (fold 3), so a model revert drops them by itself.
+
+## Folds from spec review (BuildGable, keyboard seat)
+1. **Prefix binding is narrower than stated above.** Thinking blocks are
+   replayed only inside one turn's tool loop, and every turn builds a fresh
+   `messages` list. Within a turn, `system` and `tools` are fixed, so neither a
+   per-turn system-prompt regeneration nor a tool-surface change can sit in
+   front of a replayed block. The one within-turn edit is the 529 fallback, and
+   that also changes the model, so the blocks drop by model binding. Moving
+   `cache_control` is not a history edit. The header and `drop_block` still go
+   on every 5.5 call, and `input_transformations` is logged. With `drop_block`
+   set, the account's creation date no longer decides anything.
+2. **`display: "updates"`** (beta `thinking-display-updates-2026-08-18`) is the
+   value that returns progress text while reasoning stays hidden. Under it, a
+   non-empty `thinking` block is a progress note. It is harvested in content
+   order through the same path as a `text` block: the preface flush before a
+   slow tool, or the final reply. An empty block is skipped. The
+   interrupted-work sentinel ("This part of the response was interrupted before
+   it finished.") is never posted as her words.
+3. **The 5.5-only fields are keyed on the model id.** `display`,
+   `block_binding` and their two beta headers go only on a `claude-opus-5-5`
+   call. The Opus 4.8 fallback keeps today's request shape, with no `thinking`
+   field, so `FALLBACK_NOTE`'s "does not run adaptive thinking here" stays
+   true. On the OAuth route the betas are joined with `oauth-2025-04-20` per
+   request; `default_headers` is unchanged.
+4. **`max_tokens` 64000 on `.stream()`.** 64K is Anthropic's starting point for
+   long agentic turns; the model allows 128K. The 360 s wall clock is the real
+   bound. The two truncation lines name the constant, not "16k".
+5. **Raw capture under streaming.** There is no single response body to keep,
+   so the anomaly dump records each `tool_use` block's concatenated
+   `input_json_delta` text. Those are the literal bytes the model emitted for
+   the input, which keeps the both-sides purpose of the 2026-08-23 dump.
+6. **SDK.** Both runners have `anthropic==0.67.0`. The new fields go as request
+   dicts and headers, verified by a live probe before the flip.
+7. **Grep result.** There is no `tool_choice`, `budget_tokens`, `disabled`
+   thinking or `computer_*` in core.py, disjorn_bot.py, services/ or memory/.
+8. **Refusals.** `bio` and `reasoning_extraction` arrive through the existing
+   refusal branch and are named in-channel. No server-side refusal fallback:
+   it substitutes a model without the seat knowing, which is the 2026-08-18
+   objection.
+9. **Model id, four places, one change.** `core.py` `PRIMARY_MODEL` default
+   (`config.py` defines no `CHAT_MODEL`, so the default is what runs), the
+   `CHAT_MODEL` line in `/srv/disjorn-resident-config/res-claudette/env` (read
+   only by the Apps card), the spine line in `40-relationship-context.md`, and
+   a new SUBSTRATE-LOG entry. That entry also records `effort = medium`, which
+   the 2026-08-24 change never logged.
 
 ## Confirm record
 - **Confirmed by**: plink
-- **#custodian seq**: 2825
-- **Confirmed at**: 9/23/2026
+- **#custodian seq**: 2826
+- **Confirmed at**: 2026-09-23T06:35:58Z
 
 ## Status
-`confirmed`
+`building`
+<!-- claimed by the keyboard seat; built on bots/claudette, not a detached build -->
