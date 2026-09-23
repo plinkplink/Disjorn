@@ -1,7 +1,7 @@
 """The fails-closed Tier-1 wall — `apply-posted-write`.
 
-SPECS/2026-08-26-approval-object-and-resident-write-verbs.md item 2 (confirmed
-by plink, #custodian seq 2022). These are the spec's slice-A acceptance tests:
+SPECS/2026-08-26-approval-object-and-resident-write-verbs.md item 2. These are
+the spec's slice-A acceptance tests:
 "fails-closed is only real if the tests have watched it close", so every one of
 the four checks is exercised END TO END — real socket, real SO_PEERCRED, real
 sqlite ledger, real file on disk.

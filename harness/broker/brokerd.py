@@ -304,22 +304,17 @@ DEFAULT_DAILY_WAKE_CAP = 3
 _WAKE_ID_RE = re.compile(r"^wake-\d{8}T\d{6}Z-[0-9a-f]{6}$")
 
 # ------------------------------------------------ the fails-closed Tier-1 wall
-# SPECS/2026-08-26-approval-object-and-resident-write-verbs.md item 2 (confirmed
-# seq 2022), which builds the tiers spec's "an unposted write fails closed —
-# the wall lives in tooling, not in a promise".
+# SPECS/2026-08-26-approval-object-and-resident-write-verbs.md item 2, building
+# the tiers spec's "an unposted write fails closed".
 #
-# A resident writes its OWN Tier-0/1 surface by POSTING the exact content in
-# #custodian and then naming that post's seq here. The verb's argument is the
-# seq and nothing else: the broker reads the post from the ledger, so a
-# caller-supplied copy of the record — or a token standing for one — is never in
-# the path. Same shape as the confirm gate, which reads SPECS/ rather than a
-# resident's claim about what SPECS/ says.
+# A seat writes its OWN Tier-0/1 surface by posting the exact content in
+# #custodian and naming that post's seq. The seq is the only argument: the
+# broker reads the post from the ledger, so no caller-supplied copy of the
+# record, or token standing for one, is ever in the path.
 #
-# WHAT THE WALL GUARANTEES, stated narrowly because the wide version is false:
-# nothing reaches the surface without having been SHOWN in #custodian first. NOT
-# that anyone said yes. No human sits in this path — that is what fails-closed
-# means here — and approval by another principal is the approval object's job
-# (the approval-* verbs below), never this one's.
+# The guarantee is narrow: nothing reaches the surface without having been
+# SHOWN in #custodian first. It is not an approval; no human sits in this path,
+# and approval by another principal is the approval-* verbs' job.
 WRITE_VERB = "apply-posted-write"
 WRITE_RECORD_HEADER = "disjorn-write-record v1"
 WRITE_RECORD_BEGIN = "--- content ---"
@@ -1935,16 +1930,14 @@ class Broker:
             "board-search": self._verb_board_search,
             "board-flag": self._verb_board_flag,
             "board-comment": self._verb_board_comment,
-            # The approval object (2026-08-26 item 1). Two read, one write, all
-            # three over the server's /approval surface — so a resident answers
-            # the SAME record plink answers in the modal. A second store for
-            # "what the residents said" would be forked truth.
+            # The approval object, over the server's /approval surface, so a
+            # resident answers the same record plink answers in the modal.
             "approval-list": self._verb_approval_list,
             "approval-show": self._verb_approval_show,
             "approval-act": self._verb_approval_act,
-            # The fails-closed Tier-1 wall (2026-08-26 item 2). The only verb in
-            # this table that writes a file outside the resident's own volume,
-            # and it does so ONLY on a #custodian record the broker read itself.
+            # The fails-closed Tier-1 wall: the only verb here that writes
+            # outside the resident's own volume, and only on a #custodian record
+            # the broker read itself.
             WRITE_VERB: self._verb_apply_posted_write,
             # APPS v1 stage 2.
             "apps-build": self._verb_apps_build,

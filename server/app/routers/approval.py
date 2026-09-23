@@ -1,7 +1,6 @@
-"""Approval object — one record per proposal, answered from either seat.
+"""Approval object: one record per proposal, answered from either seat.
 
-SPECS/2026-08-26-approval-object-and-resident-write-verbs.md (confirmed by
-plink, #custodian seq 2022). Slice A: the table and the endpoints. No client.
+SPECS/2026-08-26-approval-object-and-resident-write-verbs.md, slice A.
 
 | method | path                          | who                  |
 |--------|-------------------------------|----------------------|
@@ -10,23 +9,9 @@ plink, #custodian seq 2022). Slice A: the table and the endpoints. No client.
 | POST   | /approval/proposals           | admin, bot           |
 | POST   | /approval/proposals/{id}/act  | admin as self, relay |
 
-ONE STATE OF RECORD. plink answers from a client modal (slice B); residents
-answer through the broker's `approval-list` / `approval-show` / `approval-act`
-verbs, which arrive here as the broker's own bot identity. Both write the same
-`approval_state` row. A second store for "what the residents said" would be the
-forked truth the object exists to prevent.
-
-THE SURFACE SHIPS OFF. Every endpoint below, read and write alike, refuses with
-503 while `APPROVAL_ENABLED` is false, and the refusal names the setting: a
-disarmed surface and an empty one must not read alike, and that text is what the
-broker repeats verbatim to a resident who asks. Arming it is a witnessed plink
-config change, not something this build does.
-
-THE DECISION IS DERIVED, NEVER STORED (`_decision`). There is no column for it,
-so there is nothing for a client, a verb or a stray UPDATE to set out of step
-with the principals' own answers. `closed_at` is the single written consequence,
-computed from the same function inside the acting transaction; there is no close
-endpoint.
+plink's modal and the residents' broker verbs write the same row: a second
+store would be forked truth. The decision is derived on every read, never
+stored; `closed_at` is its one written consequence.
 """
 
 import re
@@ -48,9 +33,7 @@ MAX_SLUG_CHARS = 80
 MAX_TITLE_CHARS = 200
 MAX_TEXT_CHARS = 20000
 
-# A handle, not a path: a spec slug or any short kebab word. Anchored and
-# separator-free, because `slug` is what a resident types at the broker to name
-# a proposal and what the client will eventually put in a URL.
+# Typed at the broker and carried in a URL, so anchored and separator-free.
 SLUG_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
 
 ACTIONS = ("approve", "deny", "rework")
@@ -62,11 +45,8 @@ RESIDENT_PRINCIPAL_RE = re.compile(r"^res-[a-z][a-z0-9-]*$")
 # ── the arming gate ─────────────────────────────────────────────────────────
 
 def _require_enabled() -> None:
-    """503 while the surface is disarmed. Reads included, deliberately.
-
-    Gating reads too is what keeps "off" from looking like "nobody has filed
-    anything". The detail is carried back to a resident verbatim by the broker,
-    so it has to say what is wrong and what would fix it."""
+    """503 while disarmed, reads included, so off never reads as empty. The
+    broker relays the detail verbatim, so it names the fix."""
     if not get_settings().APPROVAL_ENABLED:
         raise HTTPException(
             status_code=503,
@@ -77,10 +57,7 @@ def _require_enabled() -> None:
 
 
 def _require_writer(actor: Actor) -> None:
-    """Admin or bot may file and answer; anyone authenticated may read.
-
-    The bot branch is the broker, which is how every resident reaches this
-    object. The client hiding a button is never the wall — this is."""
+    """Admin or bot may write; anyone authenticated may read."""
     if actor.type == "bot":
         return
     if actor.user is not None and actor.user.is_admin:
@@ -91,13 +68,9 @@ def _require_writer(actor: Actor) -> None:
 
 
 def _actor_label(actor: Actor, supplied: Optional[str]) -> str:
-    """Who a write is attributed to — same rule as planroom.py:_actor_label.
-
-    A human is themselves; `author` is ignored outright, because letting a
-    signed-in person label their own act with someone else's name is a forgery
-    affordance. A bot may supply a label — the broker stamps the calling
-    resident there from SO_PEERCRED, never from the resident's arguments — and
-    the bot's own identity stays on the row underneath it."""
+    """planroom.py's rule: a person is always themselves (a supplied name
+    would be a forgery affordance); a bot's label is an attestation, kept
+    beside its own name."""
     if actor.type == "user":
         return (actor.user.display_name or actor.user.username) if actor.user else "user"
     name = (actor.bot.name if actor.bot else "bot")
@@ -107,13 +80,8 @@ def _actor_label(actor: Actor, supplied: Optional[str]) -> str:
 # ── the object ──────────────────────────────────────────────────────────────
 
 def _decision(states: list[dict]) -> str:
-    """Approved / denied / rework / pending, computed on every read.
-
-    DERIVED, NEVER STORED: there is no column for this, so nothing can set it
-    directly and no row can disagree with the principals it is made of. Denial
-    outranks rework outranks pending — a single deny is an answer even while
-    others are still thinking, and rework is a distinct answer rather than a
-    soft denial, so it never closes anything."""
+    """Deny outranks rework outranks pending. Rework is its own answer, not a
+    soft deny, so it never closes a proposal."""
     values = [s["state"] for s in states]
     if any(v == "deny" for v in values):
         return "denied"
@@ -133,11 +101,8 @@ def _attribution(row: dict, prefix: str) -> Optional[dict]:
 
 
 def _order_states(rows: list[dict]) -> list[dict]:
-    """Configured principal order first, then anything else the row set holds.
-
-    The extras are not noise: the configured list can change, and a proposal
-    keeps the principals it was filed with (config.py). Dropping them here
-    would hide an answer somebody actually gave."""
+    """Configured order first, then principals the config no longer names: a
+    proposal keeps the principals it was filed with, and so do their answers."""
     configured = get_settings().approval_principals
     by_principal = {r["principal"]: r for r in rows}
     ordered = [by_principal[p] for p in configured if p in by_principal]
@@ -217,8 +182,7 @@ class ProposalIn(BaseModel):
                       pattern=SLUG_PATTERN)
     title: str = Field(min_length=1, max_length=MAX_TITLE_CHARS)
     text: str = Field(min_length=1, max_length=MAX_TEXT_CHARS)
-    # Only honoured for a BOT caller, and only as the bot's attestation of who
-    # asked it. A human's proposal is their own, always.
+    # Honoured for a bot only; a person's proposal is always their own.
     author: Optional[str] = Field(default=None, max_length=100)
 
 
@@ -231,12 +195,8 @@ class ActIn(BaseModel):
 @router.post("/approval/proposals")
 async def create_proposal(actor: CurrentActor,
                           body: ProposalIn = Body(...)) -> dict:
-    """File a proposal, with a pending row for every configured principal.
-
-    The state rows are written HERE, not on first answer, and that is the whole
-    reason the object can be read at a glance: an unanswered principal is a
-    `pending` row rather than an absent one, so nobody has to work out whether
-    silence means "has not looked" or "is not being asked"."""
+    """File a proposal with a pending row per configured principal, so an
+    unanswered principal is `pending`, never absent."""
     _require_enabled()
     _require_writer(actor)
     existing = await db.fetch_one(
@@ -264,9 +224,9 @@ async def create_proposal(actor: CurrentActor,
 
 
 def _acting_principal(actor: Actor, named: Optional[str]) -> str:
-    """Who this act answers as. Never taken from the caller except from the
-    relay, which stamps a resident seat from SO_PEERCRED; a relayed act can
-    never be a person's, and a person can only ever be themselves."""
+    """Who an act answers as. A person is only themselves. Only a relay bot
+    may name a principal (the broker stamps it from SO_PEERCRED), and only a
+    resident's: a relayed act is never a person's."""
     settings = get_settings()
     principals = settings.approval_principals
     if actor.type == "user":
@@ -323,9 +283,7 @@ async def act_on_proposal(proposal_id: int, actor: CurrentActor,
 
     label = _actor_label(actor, None)
     now = db.utc_now()
-    # Answer and consequence in ONE transaction: closed_at is derived from the
-    # rows this statement writes, so a reader must never see the new answer
-    # without the closure it implies.
+    # One transaction, so no reader sees an answer without its closure.
     async with db.transaction() as conn:
         await conn.execute(
             "INSERT INTO approval_state (proposal_id, principal, state, "
