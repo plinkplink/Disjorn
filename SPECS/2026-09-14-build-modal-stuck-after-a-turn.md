@@ -36,7 +36,7 @@ a confirm dialog does open, it is on top of the modal and its buttons work.
 Tier 1 (client only, no protected path).
 
 ## Review record
-- Gable, #custodian seq 2647: PASS, no BLOCK. `deployed` is always reached
+- Gable, #custodian seq 2647, on `1b5e68b`: PASS, no BLOCK. `deployed` is always reached
   for a committed turn; z-index band is free. NOTE: after Live the frozen
   clock shows the publish time, cosmetic and pre-existing.
 
