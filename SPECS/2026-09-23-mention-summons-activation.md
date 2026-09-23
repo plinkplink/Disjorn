@@ -1,7 +1,7 @@
 # Spec: activate #custodian mention-only summons (both conditions of 08-24)
 
 ## Request
-- **Verbatim**: "see if we can also get `2026-08-24-custodian-mention-summons` deployed."
+- **Verbatim**: "see if we can also get `2026-08-24-custodian-mention-summons` deployed." / amended after the confirm: "These changes should mostly apply to #custodian only. All bots wake on @mention only in that channel, the previous wake sequences ("Hey, Claudette", "Claudette,", "OK Claudette", etc..) should remain in place for all other channels. Gable's summons should mirror Claudette's. Bots can't summon each other in other channels." / "Yes, let's use the same wake pattern in non-custodian channels for both Claudette and Gable."
 - **Requester**: plink
 - **Origin**: keyboard session 2026-09-23, after #custodian 2867–2872
 
@@ -20,7 +20,24 @@ After activation, in #custodian only:
 - The daily digest still wakes Claudette. It does not wake Gable.
 - Refusals are posted in-channel, attributed.
 
-Other channels, and her Discord runner, are unchanged.
+Outside #custodian, both residents wake the same way:
+- their name as a standalone word, or `@name` (the server's mention context);
+- a message that starts with one of the wake phrases, case-insensitive. Her
+  current list is `hey X`, `hey, X`, `X,`, `X ` (name then a space), `yo X`,
+  `ok X`, `ok, X`, `thanks X`, `thanks, X`, `thank you X`, `thank you, X`,
+  `yeah X`, `yeah, X`, `sure X`, `sure, X`, `alright X`, `alright, X`,
+  `jesus X`, `hi X`, `hi, X`, `damn it, X`, plus `bots` and `hey bots`.
+  X is each resident's own name. Hers stays as it is; Gable gains the same
+  list with `gable`. Her `claude and claudette` has no Gable counterpart.
+- a message from a bot never wakes either resident outside #custodian.
+
+Not mirrored: she also wakes on every message in a channel with exactly two
+human members (her adapter's "DM" rule; every real DM here is two humans, no
+bot). That is backlog-7's subject, "bots in private/small channels talk every
+turn". It stays hers, unchanged, and Gable does not gain it unless plink says
+so.
+
+Her Discord runner is unchanged.
 
 ## Architecture notes
 **Condition 1: the broker verifies an unpark** (custodian lane).
@@ -68,11 +85,27 @@ Other channels, and her Discord runner, are unchanged.
   verifies every report itself and ignores a seq it has already seen, so two
   reporters cost nothing.
 
+**Gable's other-channel wake** (gable lane).
+- `summon.toml [summon] extra_patterns` gets one anchored, case-insensitive
+  regex equal to the phrase list above with `gable`. The detector already
+  applies patterns only outside mention-only channels, and it already
+  ignores bot authors there, so this is config plus the template and a test.
+  No detector code changes.
+- The test holds the pattern to the exact list: every phrase wakes him at the
+  start of a message, none wakes him mid-sentence, none wakes him in
+  #custodian, and none wakes him when a bot writes it. The list lives in two
+  repos, hers as code and his as config. A change to one is a change to both,
+  and each side's test pins its own copy.
+
+**Her adapter, one more rule:** outside #custodian, a bot-authored message
+never wakes her, with a test. Today only her own echo is dropped.
+
 **Activation** (plink-owned config, after both builds merge and deploy):
 1. `verbs.toml`: `summon-hop = true` for `[res-claudette]` and `[res-gable]`.
 2. `broker.toml`: the `[summon_hops]` block, with `state_path`, `hop_cap = 8`
    and `daily_hop_cap = 24`.
-3. Gable's `summon.toml [summon]`: `bot_summon = true`, `peer_bots`.
+3. Gable's `summon.toml [summon]`: `bot_summon = true`, `peer_bots`, and
+   `extra_patterns` (the phrase regex).
 4. Her env: `CUSTODIAN_MENTION_ONLY=1`, `BOT_SUMMON=1`, `PEER_BOTS`,
    `WAKE_ON_DIGEST=1`, `DIGEST_AUTHOR_IDS=3`.
 5. Regenerate her `broker_tools.py`: `summon_hop` must stay out (condition 1).
@@ -84,32 +117,31 @@ Other channels, and her Discord runner, are unchanged.
      fixed refusal;
    - a human post citing the item unparks it;
    - a bot post citing the item does NOT unpark it;
-   - the digest wakes Claudette only.
+   - the digest wakes Claudette only;
+   - outside #custodian: `hey gable` wakes Gable, `bots` wakes both, and a
+     bot's `hey claudette` wakes nobody.
 
-**DECIDE (plink) before step 3/4: who is on the allowlists.** The
-recommendation is each other plus BuildGable on both. BuildGable on Gable's
-list ends "a bot post cannot reach Gable": the keyboard could `@Gable` for a
-review, counted against the same wall. The cost is that the keyboard's
-summons of either resident become bot hops, spending the hop budget on the
-cited work item.
+**Allowlists (plink, keyboard session):** each resident on the other's list,
+and BuildGable on both. The keyboard's summons of either resident are bot
+hops, counted on the cited work item.
 
 ## Lane → Review owner (DETERMINISTIC — filled from the lane, never preference)
-- **Lane**: custodian (broker verb and generator; her adapter).
-- **Review owner**: Claudette.
+- **Lane**: cross-lane (see split).
+- **Review owner**: by lane.
 
 ## Builder (USER PREFERENCE — who orchestrates; never touches Review owner)
 - **Builder**: BuildGable, the keyboard seat.
 
 ## Cross-lane split
-- **Applies**: yes, for config only. Gable's `summon.toml` flags are plink-owned
-  config on Gable's seat: pre-notice to Gable, and plink sets them. No gable-lane
-  code changes.
+- **Applies**: yes.
 - **Surfaces by lane**:
   - custodian: `harness/broker/brokerd.py`, `gen_verb_surface.py`,
     `verb_surface.toml`, tests; claudette.git `disjorn_bot.py`, tests →
     review owner Claudette
-  - gable: live `summon.toml` flags only → pre-notice to Gable, plink decides
-- **Split agreed in #custodian**: at the confirm seq.
+  - gable: `harness/residency/summon.toml.template`, a residency test, and the
+    live `summon.toml` flags → review owner Gable; plink sets the live flags
+- **Split agreed in #custodian**: at the confirm seq, amended with the scope
+  change (Request, second quote).
 
 ## Expected diff tier
 Tier 2 — the broker and a resident adapter's wake path.
@@ -120,7 +152,9 @@ One keyboard session.
 ## Confirm record
 - **Confirmed by**: plink
 - **#custodian seq**: 2884
-- **Confirmed at**: 9/23/2026
+- **Confirmed at**: 2026-09-23T13:32:58Z
+- **Amended after the confirm**: plink at the keyboard, the Request's second
+  and third quotes (other-channel mirror; no bot summons outside #custodian).
 
 ## Status
 `confirmed`
