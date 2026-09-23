@@ -11,13 +11,16 @@ is the shape of the wall, not its politeness:
   * a human post unparks it, once, however many adapters report the post;
   * the clock unparks NOTHING (Claudette #1811) — midnight rolls the daily
     ceiling and only the daily ceiling;
-  * and that daily ceiling holds even across resets, which is what bounds the
-    trust the broker puts in an adapter's report of a human post.
+  * the broker reads the unparking post itself: only a person's post citing
+    the item counts, never an adapter's say-so;
+  * and the daily ceiling holds even across resets.
 """
 
 from __future__ import annotations
 
 import json
+
+import pytest
 
 SLUG = "2026-08-24-hop-counter"
 
@@ -38,10 +41,17 @@ def _spend(harness, slug=SLUG, summoner="claudette"):
     return harness.call("summon-hop", args)
 
 
-def _unpark(harness, slug=SLUG, seq=None, by="plink"):
+def _post(harness, seq, content=f"looked at {SLUG}, carry on", **kw):
+    harness.add_message(harness.broker.disjorn["custodian_channel_id"], seq,
+                        content, **kw)
+
+
+def _unpark(harness, slug=SLUG, seq=None, by="plink", posted=True):
     args = {"action": "unpark", "work_item": slug, "summoner": by}
     if seq is not None:
         args["seq"] = seq
+        if posted:
+            _post(harness, seq, f"looked at {slug}, carry on")
     return harness.call("summon-hop", args)
 
 
@@ -135,16 +145,14 @@ def test_a_human_post_unparks_the_chain(harness):
 
 
 def test_the_same_human_post_reported_twice_resets_once(harness):
-    """Both adapters watch #custodian and both report the post. Without the seq
-    guard the second report would be a second reset, and the daily ceiling
-    would be the only counter still doing any work."""
+    """Both adapters report the same post; the seq guard makes it one reset."""
     _enable(harness)
     _in_review(harness)
     for _ in range(8):
         _spend(harness)
     _unpark(harness, seq=1811)
     _spend(harness)                                  # 1/8
-    assert _unpark(harness, seq=1811)["result"]["reset"] is False
+    assert _unpark(harness, seq=1811, posted=False)["result"]["reset"] is False
     assert _spend(harness)["result"]["count"] == 2
 
 
@@ -219,6 +227,61 @@ def test_an_unknown_action_is_refused(harness):
     _enable(harness)
     assert harness.call("summon-hop", {"action": "reset"})["error"]["code"] \
         == "bad-args"
+
+
+def _parked(harness):
+    _enable(harness)
+    _in_review(harness)
+    for _ in range(8):
+        _spend(harness)
+
+
+def test_a_bot_post_citing_the_item_does_not_unpark_it(harness):
+    _parked(harness)
+    _post(harness, 1900, f"unpark {SLUG} please", author="gable",
+          author_type="bot")
+    res = _unpark(harness, seq=1900, posted=False)["result"]
+    assert res["reset"] is False and res["reason"] == "not-a-human-post"
+    assert _spend(harness)["result"]["reason"] == "parked"
+
+
+def test_a_human_post_that_does_not_cite_the_item_does_not_unpark_it(harness):
+    _parked(harness)
+    _post(harness, 1901, "morning all, nothing to see here")
+    res = _unpark(harness, seq=1901, posted=False)["result"]
+    assert res["reset"] is False and "does not cite" in res["refusal"]
+
+
+def test_a_longer_slug_is_not_a_citation_of_its_prefix(harness):
+    _parked(harness)
+    _post(harness, 1902, f"see {SLUG}-part-two")
+    assert _unpark(harness, seq=1902, posted=False)["result"]["reset"] is False
+
+
+@pytest.mark.parametrize("kw", [{"deleted": "2026-09-23T00:00:00Z"},
+                                {"flags": '{"secret": true}'}])
+def test_a_deleted_or_private_post_does_not_unpark(harness, kw):
+    _parked(harness)
+    _post(harness, 1903, f"unparking {SLUG}", **kw)
+    assert _unpark(harness, seq=1903, posted=False)["result"]["reset"] is False
+
+
+def test_a_seq_with_no_post_behind_it_does_not_unpark(harness):
+    _parked(harness)
+    res = _unpark(harness, seq=1904, posted=False)["result"]
+    assert res["reset"] is False and res["reason"] == "not-a-human-post"
+
+
+def test_unpark_needs_the_seq_of_the_post(harness):
+    _parked(harness)
+    assert _unpark(harness)["error"]["code"] == "bad-args"
+
+
+def test_the_refused_unpark_is_audited(harness):
+    _parked(harness)
+    _post(harness, 1905, f"unpark {SLUG}", author="gable", author_type="bot")
+    _unpark(harness, seq=1905, posted=False)
+    assert "refused" in harness.audit_lines()[-1]["result_summary"]
 
 
 def test_unpark_needs_a_work_item(harness):

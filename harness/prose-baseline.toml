@@ -2,7 +2,7 @@
 # A line may be lowered or removed, never raised (harness/tests/test_prose_ratio.py).
 
 [files]
-"harness/broker/gen_verb_surface.py" = 7010
+"harness/broker/gen_verb_surface.py" = 6864
 "harness/broker/tests/test_broker_budget.py" = 1870
 "harness/broker/tests/test_broker_build_unit.py" = 12771
 "harness/broker/tests/test_broker_file_vision.py" = 6441
@@ -10,8 +10,8 @@
 "harness/broker/tests/test_broker_spec_status.py" = 6681
 "harness/broker/tests/test_broker_specs_dir_guard.py" = 4044
 "harness/broker/tests/test_broker_start_build.py" = 12295
-"harness/broker/tests/test_broker_summon_hops.py" = 2961
-"harness/broker/tests/test_verb_surface.py" = 8759
+"harness/broker/tests/test_broker_summon_hops.py" = 2863
+"harness/broker/tests/test_verb_surface.py" = 8701
 "harness/cc/apps/apps_harvest.py" = 38639
 "harness/cc/apps/config/entrypoint.sh" = 3243
 "harness/cc/apps/run-apps.sh" = 12993

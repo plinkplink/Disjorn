@@ -718,7 +718,8 @@ broker-side so both residents' summon adapters spend against ONE counter. The
 adapters are the callers; a session has no reason to press it.
 
 - args: `{"action": "spend"|"unpark", "work_item": str, "summoner": str,
-  "seq": int}` — `action` required; `work_item` required for `unpark`.
+  "seq": int}` — `action` required; `work_item` and `seq` required for
+  `unpark`.
 - `spend` result: `{"allowed": bool, "chain": bool, "work_item": str|null,
   "reason": str, "count": int, "cap": int, "refusal": str}`.
   - `chain: false` is NOT a refusal: it means serve the summon but do not let
@@ -730,6 +731,11 @@ adapters are the callers; a session has no reason to press it.
     human posts on it`.
 - `unpark` result: `{"reset": bool, "count": int, "cap": int}`. Idempotent per
   `seq`, because both adapters see the same human post and both report it.
+  The broker reads the #custodian message at `seq` itself and resets only if it
+  is a person's post (not a bot's, not deleted, not private) that cites
+  `work_item`. Otherwise: `{"reset": false, "reason": "not-a-human-post",
+  "refusal": str}`. An adapter's report is never the evidence, because the
+  adapter runs as the same res-* uid as the model it gates.
 - Caps live in `broker.toml`; with `[summon_hops]` absent there is no wall and
   every `spend` answers `chain: false`.
 

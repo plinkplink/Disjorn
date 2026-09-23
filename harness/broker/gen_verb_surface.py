@@ -75,7 +75,8 @@ ARG_KEYS = {
     "min_len", "max_len", "pattern", "absolute_path", "no_dotdot",
     "no_leading_dash", "no_nul", "json_arg", "max_json_bytes",
 }
-VERB_KEYS = {"tool_name", "cli_help", "description", "announce_preface", "args"}
+VERB_KEYS = {"tool_name", "cli_help", "description", "announce_preface", "args",
+             "tool"}
 TYPES = {"string", "integer", "object"}
 
 # The adapter-tools table (SPECS/2026-08-19-read-repo-file-rev.md item 3).
@@ -141,6 +142,8 @@ def load_surface(surface_path: Path = SURFACE_TOML) -> dict:
         for key in ("tool_name", "cli_help", "description"):
             if not entry.get(key):
                 raise SurfaceError(f"{verb}: missing {key}")
+        if not isinstance(entry.get("tool", True), bool):
+            raise SurfaceError(f"{verb}: tool must be true or false")
         for arg, spec in (entry.get("args") or {}).items():
             unknown = set(spec) - ARG_KEYS
             if unknown:
@@ -187,9 +190,7 @@ def load_adapter_tools(surface_path: Path = SURFACE_TOML) -> dict:
     anything. Read the call sites before adding one.
     tests/test_verb_surface.py asserts the inertness from outside.
 
-    Validating it here is not the same as generating from it: a malformed
-    entry should fail at a keyboard, loudly, rather than sit in the catalogue
-    describing nothing."""
+    A malformed entry fails here, at a keyboard, not silently in a seat."""
     data = tomllib.loads(surface_path.read_text(encoding="utf-8"))
     tools = data.get("adapter_tools") or {}
     if not isinstance(tools, dict):
@@ -285,10 +286,12 @@ def cli_table(surface: dict) -> dict:
 
 
 def tool_schemas(surface: dict) -> list[dict]:
-    """Anthropic tool schemas, in catalogue order (= registration order = the
-    order they appear in a bot's prompt; see the note in verb_surface.toml)."""
+    """Anthropic tool schemas in catalogue order, which is prompt order; a
+    `tool = false` verb is left out."""
     schemas = []
     for verb, entry in surface.items():
+        if not entry.get("tool", True):
+            continue
         properties: dict = {}
         required: list[str] = []
         for arg, spec in _for_seat(entry, "tool").items():
