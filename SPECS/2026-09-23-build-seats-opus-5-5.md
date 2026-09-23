@@ -27,8 +27,10 @@ on `claude-fable-5-1`, and Claudette's adapter is its own spec.
   and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1`. Without these, built-in subagents
   already inherit the session model. The pin makes the house rule "Opus hands"
   mechanical instead of a default.
-- **Effort is not set.** Claude Code starts Opus 5.5 at `medium`, where Opus 5
-  started at `high`. plink's to pin (`modelSettings`), and not done here.
+- **Effort: held for plink's ruling (#2844).** Claude Code starts Opus 5.5 at
+  `medium`, where Opus 5 started at `high`. Deploy step 4 waits until plink
+  rules `high` (hold) or `medium` (on purpose). The ruling is pinned in
+  both managed settings as `modelSettings` and dated in the digest's record.
 - **Deploy, after merge, in order:**
   1. `07-resident-image.sh` and the apps image rebuild (`10-appsbuilding.sh`).
   2. A probe: `claude -p --model claude-opus-5-5` in each image.
@@ -59,9 +61,10 @@ Tier 2 — build-seat model and the image both seats run.
 One keyboard session.
 
 ## Confirm record
-- **Confirmed by**: plink (keyboard lane, instruction at the keyboard)
-- **#custodian seq**: the keyboard line with the review request
-- **Confirmed at**: 2026-09-23
+- **Confirmed by**: plink, by instruction at the keyboard. His own one-line
+  confirm in #custodian is owed, and it replaces the seq below.
+- **#custodian seq**: 2842 (the keyboard line, posted by the keyboard seat)
+- **Confirmed at**: 2026-09-23T07:19Z
 
 ## Status
 `built@loop/2026-09-23-build-seats-opus-5-5`
