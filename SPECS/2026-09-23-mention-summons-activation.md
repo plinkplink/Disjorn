@@ -156,5 +156,22 @@ One keyboard session.
 - **Amended after the confirm**: plink at the keyboard, the Request's second
   and third quotes (other-channel mirror; no bot summons outside #custodian).
 
+## Activation record (2026-09-23, 16:04Z)
+- Merged: Disjorn `ff86adc` (custodian half, review-seq 2888) and `d671089`
+  (gable half, review-seq 2901); claudette.git `b2509a0` + `0d73a09` (PASS
+  2888, 2896).
+- Live config, each with a `.bak-pre-mention-summons-20260923` beside it:
+  - `verbs.toml`: `summon-hop` on for both seats;
+  - `broker.toml`: `[summon_hops]` 8/24, with its state file;
+  - Gable's `summon.toml`: the template's phrase line, mention-only, bot
+    summons, peers `claudette, buildgable`, and `[hops]`;
+  - Claudette's env: the five switches, peers `gable, buildgable`.
+- Gable's live file was loaded through the residency config loader, and the
+  phrase and near-miss checks passed against it. Her regenerated
+  `broker_tools.py` is unchanged, with no `summon_hop`.
+- Restarts: broker, `gable-summon` and `resident-cc`, 16:03:53–16:04:00Z.
+- The live checks are posted in #custodian; results are recorded there.
+
 ## Status
-`confirmed`
+merged
+<!-- advanced from `confirmed` by `board --mark-merged` on 2026-09-23: build merged as d671089. The word `confirmed` on a merged spec made it indistinguishable from a buildable one. -->
