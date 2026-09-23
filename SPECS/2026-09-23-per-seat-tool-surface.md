@@ -51,4 +51,5 @@ One keyboard session.
 - **Confirmed at**: 2026-09-23T06:35:58Z
 
 ## Status
-`built@loop/2026-09-23-per-seat-tool-surface`
+merged
+<!-- advanced from `built@loop/2026-09-23-per-seat-tool-surface` by `board --mark-merged` on 2026-09-23: build merged as 54c1bd7. The word `built@loop/2026-09-23-per-seat-tool-surface` on a merged spec made it indistinguishable from a buildable one. -->
