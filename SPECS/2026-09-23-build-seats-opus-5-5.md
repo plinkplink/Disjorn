@@ -77,5 +77,26 @@ One keyboard session.
 - **#custodian seq**: 2860
 - **Confirmed at**: 2026-09-23T07:34:59Z
 
+## Deploy record (2026-09-23)
+1. Resident image `91d5a0a3f6eb` and apps image `84ec2d751ee4`, both Claude
+   Code 2.1.280, loaded into every seat store. `10-appsbuilding.sh` reports no
+   drift, and the installed launcher equals main.
+2. Probes, with modelUsage keys observed in each result event:
+   - build seat as res-gable under the new managed settings: a plain call
+     gave `claude-opus-5-5` only;
+   - the same with a spawned subagent that asked for haiku: still
+     `claude-opus-5-5` only, since FORCE hides the per-call model choice;
+   - apps image: `claude-opus-5-5` only.
+   Effort is not observable from the result event; no key is set, by ruling.
+3. `/srv/disjorn-build-config/{gable,claudette}/settings.json` equal the
+   repo (backups `.bak-pre-opus-5-5-20260923`).
+4. Live pins moved to `claude-opus-5-5`, with backups beside each file:
+   `/etc/disjorn-broker/broker.toml` `[start_build]` and `[apps]`, and
+   `/etc/disjorn-apps/launch.toml` `[runner]`.
+5. The broker, `gable-summon` and `resident-cc` restarted at 08:32:46Z. Her
+   container runs `91d5a0a3f6eb`.
+6. Gable's spine lines: bots/fable `5f0dc3b`, mirror republished.
+
 ## Status
-`built@loop/2026-09-23-build-seats-opus-5-5`
+merged
+<!-- advanced from `built@loop/2026-09-23-build-seats-opus-5-5` by `board --mark-merged` on 2026-09-23: build merged as 006ddbf. The word `built@loop/2026-09-23-build-seats-opus-5-5` on a merged spec made it indistinguishable from a buildable one. -->

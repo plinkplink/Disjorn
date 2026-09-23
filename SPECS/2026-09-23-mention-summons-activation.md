@@ -42,10 +42,15 @@ Other channels, and her Discord runner, are unchanged.
   `WAKE_ON_DIGEST`, `DIGEST_AUTHOR_IDS`, `DIGEST_PATTERN`.
 - In #custodian with mention-only on:
   - A user's message wakes her iff the server attached context AND the content
-    has `@claudette` as a whole word.
+    has `@claudette` as a whole word, case-insensitive. The server attests
+    against the bot's `name` (`claudette`), not a display name. A reply to her
+    post without an `@` does not wake her, the same as any other message.
   - A bot's message wakes her only in three cases:
     - The digest: an author in `DIGEST_AUTHOR_IDS` whose content matches
-      `DIGEST_PATTERN`, with `WAKE_ON_DIGEST` on.
+      `DIGEST_PATTERN`, with `WAKE_ON_DIGEST` on. The pattern is anchored at
+      the digest's fixed header (`^\[custodian daily `). The broker posts both
+      the digest and her proposal echoes, so the author id cannot tell them
+      apart; a test feeds #2849's text and expects no wake.
     - A bot chain: `BOT_SUMMON` on, context present, `@claudette`, the author
       in `PEER_BOTS`, and the broker's `summon-hop spend` allowing it.
     - Everything else is inert. Trigger phrases are off here.
@@ -54,9 +59,14 @@ Other channels, and her Discord runner, are unchanged.
   allowlist, or a hop refused) post in-channel with the broker's line.
 - Her context block gets one line naming the trigger: mode, summoner, author
   type, depth, and the work item if any (her #1803 condition 2).
-- Unparks are reported by Gable's adapter, which already does it for every
-  human post citing a work item. The broker's check (condition 1) is the same
-  whichever adapter reports, so hers does not duplicate it.
+- A message that does not wake her still reaches her history: ingest happens
+  before classification, and a test holds it. Mention-only must not become
+  mention-only-and-amnesiac.
+- Her adapter also reports unparks: a human post in #custodian citing a work
+  item, with `BOT_SUMMON` on. Gable's adapter already does, but one reporter
+  would park the chain silently whenever that daemon is down. The broker
+  verifies every report itself and ignores a seq it has already seen, so two
+  reporters cost nothing.
 
 **Activation** (plink-owned config, after both builds merge and deploy):
 1. `verbs.toml`: `summon-hop = true` for `[res-claudette]` and `[res-gable]`.
