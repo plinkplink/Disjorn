@@ -115,4 +115,4 @@ stay.
 - **Confirmed at**: 9/23/2026
 
 ## Status
-`draft`
+`confirmed`
