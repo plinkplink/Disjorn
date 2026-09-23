@@ -98,7 +98,7 @@ class WallHarness:
     # -- the ledger -------------------------------------------------------
     def post(self, content: str, *, author: str = SEAT_AUTHOR,
              channel: int = CUSTODIAN, age_sec: float = 0.0,
-             deleted: bool = False) -> int:
+             deleted: bool = False, author_type: str = "bot") -> int:
         """One #custodian message, as the server would have written it."""
         seq = self._next_seq
         self._next_seq += 1
@@ -106,17 +106,20 @@ class WallHarness:
         stamp = when.strftime("%Y-%m-%dT%H:%M:%S.") + f"{when.microsecond // 1000:03d}Z"
         db = sqlite3.connect(self.ledger)
         with db:
-            row = db.execute("select id from bots where name=?",
+            table, column = (("bots", "name") if author_type == "bot"
+                             else ("users", "username"))
+            row = db.execute(f"select id from {table} where {column}=?",
                              (author,)).fetchone()
             if row is None:
-                cur = db.execute("insert into bots (name) values (?)", (author,))
+                cur = db.execute(f"insert into {table} ({column}) values (?)",
+                                 (author,))
                 author_id = cur.lastrowid
             else:
                 author_id = row[0]
             db.execute(
                 "insert into messages (channel_id, seq, author_type, author_id, "
-                "content, created_at, deleted_at) values (?, ?, 'bot', ?, ?, ?, ?)",
-                (channel, seq, author_id, content, stamp,
+                "content, created_at, deleted_at) values (?, ?, ?, ?, ?, ?, ?)",
+                (channel, seq, author_type, author_id, content, stamp,
                  stamp if deleted else None))
         db.close()
         return seq
@@ -401,6 +404,18 @@ def test_another_seats_record_is_refused(wall):
     assert resp["error"]["code"] == "bad-args"
     assert "posted by" in resp["error"]["message"]
     assert not wall.surface_file("spine/05.md").exists()
+
+
+def test_a_person_account_named_like_the_seat_is_refused(wall):
+    """Check (a) is on the seat's bot identity. A human account that happens
+    to share the seat's name is not the seat."""
+    seq = wall.post_record(f"{PREFIX}/spine/05.md", "hello\n",
+                           author=SEAT_AUTHOR, author_type="user")
+    resp = wall.apply(seq)
+    assert resp["error"]["code"] == "bad-args"
+    assert resp["error"]["reason"] == "not-a-bot-post"
+    assert not wall.surface_file("spine/05.md").exists()
+    assert wall.audit_lines()[-1]["allowed"] is False
 
 
 def test_a_hash_mismatched_record_is_refused(wall):

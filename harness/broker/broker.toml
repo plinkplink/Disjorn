@@ -581,8 +581,9 @@ merge_work_dir = "/var/lib/disjorn-broker/merge-work"
 # consumed_ledger = "/var/lib/disjorn-broker/write-consumed.jsonl"
 
 # [write_verbs.res-gable]
-# author — the seat's #custodian identity, as the messages table names it (a
-#   bots.name / users.username). Check (a) is a comparison against THIS. Absent
+# author — the seat's #custodian bot identity, exactly as bots.name spells it
+#   (case matters: Gable is "Gable", Claudette is "claudette"). Check (a)
+#   compares against THIS, and only bot-authored posts qualify. Absent
 #   = the broker refuses to start: a section with no author reads as a grant
 #   while refusing every call.
 # author = "Gable"
@@ -599,7 +600,7 @@ merge_work_dir = "/var/lib/disjorn-broker/merge-work"
 # repo_prefix = "bots/fable"
 
 # [write_verbs.res-claudette]
-# author = "Claudette"
+# author = "claudette"
 # root = "/home/plink/bots/claudette"
 # repo_prefix = "bots/claudette"
 

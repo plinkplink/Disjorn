@@ -922,7 +922,9 @@ written — it would change the sha, and the write would refuse.
 **The write happens only if ALL of:**
 
   (a) the post's author is the requesting seat's own #custodian identity
-      (`[write_verbs.<seat>].author`);
+      (`[write_verbs.<seat>].author`, compared with `bots.name`). Only a
+      bot-authored post can qualify: a person account refuses with
+      `reason: "not-a-bot-post"` whatever its username;
   (b) the post names the target path and the sha256 of the exact content about
       to be written, and that path is Tier 0 or Tier 1 on the seat's own
       surface map;

@@ -5961,7 +5961,12 @@ class Broker:
                                 f"#custodian seq {seq} was edited after it was "
                                 f"posted; post the record again, unedited",
                                 reason="post-edited")
-            author = self._ledger_author(db, hit["author_type"], hit["author_id"])
+            if hit["author_type"] != "bot":
+                raise VerbError("bad-args",
+                                f"#custodian seq {seq} was posted by a person "
+                                f"account, and only a seat's bot identity can "
+                                f"post its record", reason="not-a-bot-post")
+            author = self._ledger_author(db, hit["author_id"])
         except sqlite3.Error as exc:
             raise VerbError("exec-failure",
                             f"the message store query failed: {exc}") from None
@@ -5971,14 +5976,11 @@ class Broker:
                 "created_at": hit["created_at"]}
 
     @staticmethod
-    def _ledger_author(db: Any, author_type: str, author_id: int) -> str:
-        # The table/column pair is chosen from a literal 2-tuple, never from
-        # input; the only value that reaches the query as data is bound.
-        table, column = (("bots", "name") if author_type == "bot"
-                         else ("users", "username"))
-        row = db.execute(f"select {column} as n from {table} where id=?",
+    def _ledger_author(db: Any, author_id: int) -> str:
+        """`bots.name` for a bot-authored post; never `users.username`."""
+        row = db.execute("select name as n from bots where id=?",
                          (author_id,)).fetchone()
-        return row["n"] if row and row["n"] else f"{author_type}:{author_id}"
+        return row["n"] if row and row["n"] else f"bot:{author_id}"
 
     def _load_tier_map(self) -> dict:
         """`[tiers]` from protected-paths.toml, re-read on EVERY call.
