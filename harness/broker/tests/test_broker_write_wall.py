@@ -124,6 +124,15 @@ class WallHarness:
     def post_record(self, path: str, content: str, **kw) -> int:
         return self.post(record_text(path, content), **kw)
 
+    def edit(self, seq: int, content: str) -> None:
+        """What PATCH /messages does: new content, edited_at stamped."""
+        db = sqlite3.connect(self.ledger)
+        with db:
+            db.execute("update messages set content=?, edited_at=? "
+                       "where channel_id=? and seq=?",
+                       (content, "2026-01-01T00:00:00.000Z", CUSTODIAN, seq))
+        db.close()
+
     # -- config side ------------------------------------------------------
     def set_verbs(self, **flags: bool) -> None:
         lines = [f"[{SEAT}]"]
@@ -165,7 +174,7 @@ def build_broker(tmp_path: Path, *, write_verbs: bool = True,
         db.execute("create table messages (id integer primary key autoincrement,"
                    " channel_id integer, seq integer, author_type text,"
                    " author_id integer, content text, created_at text,"
-                   " deleted_at text)")
+                   " edited_at text, deleted_at text)")
         db.execute("create table bots (id integer primary key autoincrement,"
                    " name text)")
         db.execute("create table users (id integer primary key autoincrement,"
@@ -288,7 +297,24 @@ def test_a_record_posted_in_another_channel_does_not_count(wall):
 
 def test_a_deleted_post_is_not_a_record(wall):
     seq = wall.post_record(f"{PREFIX}/spine/05.md", "hello\n", deleted=True)
-    assert wall.apply(seq)["error"]["code"] == "bad-args"
+    resp = wall.apply(seq)
+    assert resp["error"]["code"] == "bad-args"
+    assert resp["error"]["reason"] == "post-deleted"
+    line = wall.audit_lines()[-1]
+    assert line["allowed"] is False and "(post-deleted)" in line["result_summary"]
+
+
+def test_a_record_edited_after_it_was_posted_is_refused(wall):
+    """The sha cannot catch this: whoever edits the content edits the sha line
+    in the same stroke. What was shown is the only thing the wall may write."""
+    seq = wall.post_record(f"{PREFIX}/spine/05.md", "as shown\n")
+    wall.edit(seq, record_text(f"{PREFIX}/spine/05.md", "swapped in later\n"))
+    resp = wall.apply(seq)
+    assert resp["error"]["code"] == "bad-args"
+    assert resp["error"]["reason"] == "post-edited"
+    assert not wall.surface_file("spine/05.md").exists()
+    line = wall.audit_lines()[-1]
+    assert line["allowed"] is False and "(post-edited)" in line["result_summary"]
 
 
 def test_a_post_that_is_not_a_record_is_refused(wall):

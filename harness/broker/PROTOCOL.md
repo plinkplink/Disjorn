@@ -935,6 +935,12 @@ written — it would change the sha, and the write would refuse.
 
 Any check failing refuses and is audited like every other denial.
 
+**The post must be unedited and undeleted.** The record is what was shown, and
+an edit can rewrite the content and its sha line together, so a post with
+`edited_at` set refuses with `reason: "post-edited"` and a deleted one with
+`reason: "post-deleted"` (both `bad-args`, both audited with the reason). The
+caller posts the record again.
+
 **Consume-then-write.** The consumed mark is appended before the target is
 touched. A crash in between leaves a spent record and an unapplied write, and a
 retry against that seq refuses like any consumed seq — the caller posts a fresh

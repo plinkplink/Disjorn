@@ -378,7 +378,8 @@ class VerbError(Exception):
         self.code = code
         self.message = message
         self.status = status
-        # Which merge rule said no; on the wire beside code and message.
+        # Which rule said no (merge, apply-posted-write); on the wire beside
+        # code and message.
         self.reason = reason
 
 
@@ -5923,14 +5924,25 @@ class Broker:
         try:
             db.row_factory = sqlite3.Row
             rows = db.execute(
-                "select channel_id, author_type, author_id, content, created_at "
-                "from messages where seq=? and deleted_at is null",
+                "select channel_id, author_type, author_id, content, created_at, "
+                "edited_at, deleted_at from messages where seq=?",
                 (seq,)).fetchall()
             hit = next((r for r in rows if r["channel_id"] == channel_id), None)
             if hit is None:
                 raise _bad(f"seq {seq} resolves, but not in #custodian"
                            if rows else
                            f"#custodian seq {seq} does not resolve")
+            # The record is what was SHOWN. An edit can rewrite content and sha
+            # together, so any edited post is refused, as is a deleted one.
+            if hit["deleted_at"]:
+                raise VerbError("bad-args",
+                                f"#custodian seq {seq} was deleted; a deleted "
+                                f"post is not a record", reason="post-deleted")
+            if hit["edited_at"]:
+                raise VerbError("bad-args",
+                                f"#custodian seq {seq} was edited after it was "
+                                f"posted; post the record again, unedited",
+                                reason="post-edited")
             author = self._ledger_author(db, hit["author_type"], hit["author_id"])
         except sqlite3.Error as exc:
             raise VerbError("exec-failure",
