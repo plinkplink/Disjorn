@@ -118,9 +118,9 @@ Tier 2 — the broker and a resident adapter's wake path.
 One keyboard session.
 
 ## Confirm record
-- **Confirmed by**: <plink>
-- **#custodian seq**: <seq>
-- **Confirmed at**: <timestamp>
+- **Confirmed by**: plink
+- **#custodian seq**: 2884
+- **Confirmed at**: 9/23/2026
 
 ## Status
-`draft`
+`confirmed`
