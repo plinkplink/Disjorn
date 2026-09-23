@@ -218,7 +218,7 @@ GIT_USER_EMAIL = "apps-builder@disjorn.local"
 DEFAULT_IMAGE = "localhost/disjorn-apps-builder:latest"
 DEFAULT_RUNNER_COMMAND = ["claude", "-p", "--output-format", "stream-json",
                           "--verbose"]
-DEFAULT_MODEL = "claude-opus-5"
+DEFAULT_MODEL = "claude-opus-5-5"
 DEFAULT_PONYTAIL_MODE = "full"
 
 # ------------------------------------------------------------------ charsets

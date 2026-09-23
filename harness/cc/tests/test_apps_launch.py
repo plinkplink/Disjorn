@@ -698,7 +698,7 @@ def test_shipped_example_config_parses_and_launches(seat, tmp_path):
     data = tomllib.loads(EXAMPLE_TOML.read_text(encoding="utf-8"))
     assert set(data["prompt_dirs"]) == {"res-gable", "res-claudette"}
     assert data["runner"]["command"][0] == "claude"
-    assert data["runner"]["model"] == "claude-opus-5"
+    assert data["runner"]["model"] == "claude-opus-5-5"
     assert data["apps"]["turn_max_sec"] == 1800
     assert data["apps"]["ponytail_mode"] == "full"
     assert data["apps"]["image"] == "localhost/disjorn-apps-builder:latest"
