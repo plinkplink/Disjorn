@@ -391,10 +391,11 @@ def _adapter() -> _Adapter:
     mirror_present = _git(pin.repo, "rev-parse", "--git-dir").returncode == 0
     if pin.configured or mirror_present:
         pytest.fail(
-            f"the adapter's core.py did not resolve: {tried}. This is drift, "
-            f"not an absent adapter — the pin was configured, or the mirror "
-            f"is there and the pin is wrong. Fix the pin, or run "
-            f"refresh-mirror if the gatehouse branch was never fetched; "
+            f"the adapter's core.py did not resolve: {tried}. A configured "
+            f"pin, or a mirror that is present, that does not resolve is red, "
+            f"never a skip. Fix the pin; run refresh-mirror if the gatehouse "
+            f"branch was never fetched; at the gate, run-gates.sh's stderr "
+            f"names the host repo it mounts. "
             f"{ADAPTER_CORE_ENV}='<git repo>:<rev>:<path>' overrides it.")
     pytest.skip(
         f"no pin and no repo mirror on this disk, so adapter-tool drift "
@@ -580,6 +581,8 @@ def test_a_pin_that_does_not_resolve_is_red_rather_than_a_skip(monkeypatch):
     assert "/nonexistent/mirror" in str(exc.value)
     assert "gatehouse/claudette/nope" in str(exc.value)
     assert ADAPTER_CORE_ENV in str(exc.value)
+    assert "red, never a skip" in str(exc.value)
+    assert "not an absent adapter" not in str(exc.value)
 
 
 def test_a_rev_the_mirror_has_never_fetched_is_red_too(monkeypatch):
