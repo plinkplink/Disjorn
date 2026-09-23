@@ -50,6 +50,11 @@ audit_log = "/var/log/disjorn-broker/audit.jsonl"
 # broker refuses this identity every other verb in code, so listing it here
 # widens nothing: it only makes a human at the keyboard nameable at the socket.
 # Without this line the wake surface cannot start.
+#
+# The same line is ALSO what makes the `server` principal reachable: the Disjorn
+# server (deploy/disjorn.service) runs as uid 1000 too, and the broker tells the
+# two apart by reading the peer pid's cgroup (see [server] below). Without this
+# line `/build` cannot start either.
 # "1000" = "plink"
 
 [residents.res-claudette]
@@ -388,7 +393,7 @@ unit_state_command = ["systemctl", "show", "--property=ActiveState", "--value"]
 session_argv = ["bash", "-lc", "exec claude -p --output-format json \"$@\"", "build-session"]
 # WP-L5 MODEL PIN — no fallback. A blank/absent pin is config drift and the
 # verb refuses (never rides the account default).
-model = "claude-opus-5"
+model = "claude-opus-5-5"
 # The authoritative committed specs the confirm gate reads: the read-only repo
 # mirror's SPECS/ (refreshed by refresh-mirror). A spec must resolve DIRECTLY
 # inside this dir — no `..`, no symlink escape — and be status `confirmed` with
@@ -487,6 +492,52 @@ daily_build_cap = 10
 # /config/budget.json the summon seat does (harness/cc/config-template), which
 # is the spec's "same per-session action cap" and needs no second knob.
 
+[server]
+# THE SERVER PRINCIPAL (SPECS/2026-09-20-build-lane-v2-stage1-2b.md). The
+# Disjorn server shares plink's uid, so SO_PEERCRED alone cannot tell the two
+# apart. A caller is resolved to `server` only when its uid maps to "plink" in
+# [uids] AND /proc/<peer pid>/cgroup names this unit; anything else is whatever
+# [uids] says. An empty value is a refusal to start: it would match every
+# cgroup and hand the server principal to every process plink runs.
+unit = "disjorn.service"
+
+[build]
+# `/build <what to do>` from chat. With this block ABSENT the verb still exists
+# and answers "chat builds are not configured on this broker"; with it present
+# every key below is validated at boot and a bad one is a refusal to start.
+#
+# The accounts whose `/build` the broker will act on. Usernames on this server,
+# never a `res-*` seat — only a person may start a build, and a seat named here
+# is a refusal to start. An EMPTY list is legal and means the verb refuses
+# everything, which is how you disarm `/build` without editing verbs.toml.
+humans = ["plink"]
+# The resident the build RUNS as, without the `res-` prefix. It must be a
+# resident of this house ([uids] / [residents]).
+seat = "gable"
+# Chat builds per UTC day, spent under the `server` principal. A chat build does
+# NOT touch the build seat's [start_build] allowance: one entrance may not eat
+# the other's day.
+daily_build_cap = 4
+# One JSON line per accepted `/build`: ts, seq, channel_id, author,
+# text_sha256, slug, session_id. `/merge` appends here too, with kind = "merge"
+# (ts, seq, channel_id, author, slug, tier, sha, pass_seq), and the Tier 0
+# auto-merge budget is counted from those lines. Keep it somewhere no resident
+# can write.
+ledger = "/var/lib/disjorn-broker/build-ledger.jsonl"
+# THE GATES, AND WHOSE HANDS THEY RUN IN. The broker launches the suite itself
+# through the same sudo helper a build uses (`disjorn-build-launch gate`), reads
+# the verdict off the launcher's stdout, and merges nothing without a green run
+# it started. A caller-supplied gate result has no slot to arrive in. The gate
+# unit's own RuntimeMaxSec (1200s) is the kill that works, so the broker must
+# outwait it: a value of 1200 or less is refused at boot.
+gate_timeout_sec = 1320
+# The full stdout+stderr of each gate run, 0600. Never a resident-writable dir.
+gate_log_dir = "/var/lib/disjorn-broker/gate-logs"
+# Where `/merge` clones, merges and pushes from. A throwaway tree per merge, so
+# a half-done merge is a directory nobody reads rather than a gatehouse nobody
+# can build from.
+merge_work_dir = "/var/lib/disjorn-broker/merge-work"
+
 [disjorn]
 # file-proposal posts to #custodian AS THE BROKER'S OWN bot identity — the
 # proposal text is data; the authority to post is the broker's. Create a
@@ -523,7 +574,7 @@ custodian_channel_id = 4
 # suffix); a mismatch disables the verb with one audit line rather than handing
 # one resident's session to the other.
 # seat_bots = { res-gable = 2, res-claudette = 1 }
-# model = "claude-opus-5"         # INFORMATIONAL: what the `scoped` event and
+# model = "claude-opus-5-5"       # INFORMATIONAL: what the `scoped` event and
 #                                 # the ledger say when nothing better is known.
 #                                 # The truth for a finished turn is the model
 #                                 # result.json reports. The seat's actual pin

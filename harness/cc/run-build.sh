@@ -169,7 +169,26 @@ BUILD_KERNEL="${RESIDENT_BUILD_KERNEL:-/usr/local/lib/disjorn/build-kernel.md}"
 GATEHOUSE="${RESIDENT_GATEHOUSE:-/var/lib/disjorn-broker/gatehouse}"
 
 [ -d "$HOME_VOL" ] || { echo "run-build: build home missing: $HOME_VOL" >&2; exit 1; }
+# ABSENT is not UNREACHABLE (Claudette #2498). `[ -d ]` answers "can this uid
+# see a directory there", and from a uid locked out of the parent that is
+# false for a directory that exists — 2026-09-09 that read as "missing" and
+# sent the human to provisioning when it was a mode on the parent. So the
+# parent is walked upward and the line names the INNERMOST ancestor this
+# uid cannot enter (the one to fix first); then the credential itself must
+# be READABLE, not just there.
+_p="$CONFIG_DIR"
+while [ "$_p" != "/" ]; do
+  _p="$(dirname "$_p")"
+  [ -e "$_p" ] || continue
+  [ -x "$_p" ] || { echo "run-build: build config dir UNREACHABLE: $(id -un) cannot traverse $_p, the innermost ancestor it cannot enter (mode $(stat -c %a "$_p" 2>/dev/null || echo ?)) — $CONFIG_DIR may well exist" >&2; exit 1; }
+done
 [ -d "$CONFIG_DIR" ] || { echo "run-build: build config dir missing: $CONFIG_DIR" >&2; exit 1; }
+# An ABSENT env is the documented warning further down (a session with no
+# credential still starts and says so); a PRESENT env this uid cannot read
+# is the lockout shape and refuses here, by name.
+if [ -e "$CONFIG_DIR/env" ] && [ ! -r "$CONFIG_DIR/env" ]; then
+  echo "run-build: build credential exists but is UNREADABLE by $(id -un): $CONFIG_DIR/env ($(stat -c '%a %U:%G' "$CONFIG_DIR/env" 2>/dev/null))" >&2; exit 1
+fi
 [ -f "$BUILD_KERNEL" ] || { echo "run-build: build kernel missing: $BUILD_KERNEL" >&2; exit 1; }
 [ -d "$GATEHOUSE" ] || { echo "run-build: gatehouse missing: $GATEHOUSE" >&2; exit 1; }
 

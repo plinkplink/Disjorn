@@ -1220,7 +1220,9 @@ def test_a_refused_stop_is_asked_again_three_times_then_abandoned_loudly(apps, t
     time.sleep(0.2)                       # more polls: no further asks
     assert len(_stop_calls(record)) == 3
     ticket = json.loads(apps.sidecars()[0].read_text())
-    assert ticket["stop_sent"] is True and ticket["stop_refusals"] == 3
+    # abandoned is not sent (Claudette #2461): the ticket says what happened
+    assert ticket["stop_abandoned"] is True and ticket["stop_refusals"] == 3
+    assert not ticket.get("stop_sent")
     apps.write_result()
     proc.finish(0)
     apps.broker.join_apps(timeout=5)
@@ -1281,3 +1283,112 @@ def test_the_shipped_stop_default_is_the_same_helper_in_stop_mode(apps):
     apps.broker.apps.pop("stop_command", None)
     assert apps.broker._apps_argv("stop_command") == [
         "sudo", "-n", "/usr/local/lib/disjorn/disjorn-apps-launch", "stop"]
+
+
+# ------------------------------------------ a result.json that is not ours
+# 2026-09-09: the first build after the flip finished in 30 ms with the 09-07
+# proving turn's record — same session and turn numbers on a fresh database,
+# a turn dir nobody had cleared. The real build ran on orphaned.
+
+def test_a_stale_result_from_another_app_is_ignored_until_the_real_one_lands(apps):
+    """The record in the dir names a different app: not ours. The reaper says
+    so once, keeps waiting, and finishes on the harvest that IS ours."""
+    apps.write_result(app_id="smoketestapp", commit="c7d7df9",
+                      started_at="2026-09-07T19:46:07+00:00")
+    assert _handoff(apps)["ok"] is True
+    proc = apps.spawn.procs[-1]
+    time.sleep(0.3)
+    assert apps.stage_names() == ["scoped"], "nothing finished on the stale file"
+    assert apps.ledger() == []
+    stale = [a for a in apps.audit_lines()
+             if "not this turn's" in str(a.get("result_summary", ""))]
+    assert len(stale) == 1 and "'smoketestapp'" in stale[0]["result_summary"]
+    apps.write_result()                        # the real harvest, by rename
+    proc.finish(0)
+    apps.broker.join_apps(timeout=5)
+    assert apps.ledger()[-1]["commit"] == RESULT["commit"]
+    assert apps.stage_names()[-1] == "deployed"
+
+
+def test_a_stale_result_with_a_reused_session_number_is_not_ours(apps):
+    """The exact shape of the incident: the ticket says session 12 turn 1 for
+    THIS app; the file says session 12 turn 1 for the proving app. The id
+    decides, without a clock."""
+    apps.write_result(app_id="smoketestapp")
+    _handoff(apps)
+    proc = apps.spawn.procs[-1]
+    time.sleep(0.3)
+    assert apps.ledger() == []
+    apps.write_result()
+    proc.finish(0)
+    apps.broker.join_apps(timeout=5)
+    assert len(apps.ledger()) == 1
+
+
+def test_a_stale_result_is_not_ledgered_late_under_another_apps_ticket(apps):
+    """Claudette #2461 BLOCK: the reaper's ticket match was missing from the
+    OTHER reader of the same file. A synthesized turn whose dir holds a
+    well-formed result.json for a different app must not be ledgered `late`
+    with that app's commit — by the handoff sweep or by adoption at boot."""
+    proc = FakeAppsProc()
+    apps.broker._apps_spawn = FakeAppsSpawn(lambda: proc)
+    _handoff(apps)
+    proc.finish(rc=143)
+    apps.broker.join_apps(timeout=5)
+    assert apps.ledger()[0]["synthesized"] is True
+    assert len(apps.sidecars()) == 1
+    # the proving turn's record, same session and turn numbers, other app
+    apps.write_result(app_id="smoketestapp", commit="c7d7df9")
+    ledgered = len(apps.ledger())
+    posted = len(apps.stages)
+
+    # the next handoff for THIS app sweeps the ticket
+    proc2 = FakeAppsProc()
+    apps.broker._apps_spawn = FakeAppsSpawn(lambda: proc2)
+    apps.view["turns"] = 1
+    assert _handoff(apps, prompt=apps.prompt(name=f"{SESSION}-2.md"))["ok"] is True
+    assert [ln for ln in apps.ledger() if ln.get("late")] == [], \
+        "a foreign record was ledgered late"
+    assert len(apps.ledger()) == ledgered
+    assert [st for st in apps.stages[posted:]
+            if st["detail"].get("turn") == 1] == []
+    foreign = [a for a in apps.audit_lines()
+               if "not this turn's" in str(a.get("result_summary", ""))
+               and "ticket dropped" in str(a.get("result_summary", ""))]
+    assert len(foreign) == 1 and "'smoketestapp'" in foreign[0]["result_summary"]
+    # the swept ticket is gone; turn 2's own ticket is the only one left
+    tickets = [json.loads(p.read_text()) for p in apps.sidecars()]
+    assert [t["turn"] for t in tickets] == [2]
+    proc2.finish(rc=0)
+    apps.broker.join_apps(timeout=5)
+
+
+def test_a_stale_result_is_not_ledgered_late_by_adoption_at_boot(apps):
+    """Same defect, the startup reader: adopt_inflight_apps resolves marked
+    tickets and must apply the same predicate."""
+    proc = FakeAppsProc()
+    apps.broker._apps_spawn = FakeAppsSpawn(lambda: proc)
+    _handoff(apps)
+    proc.finish(rc=143)
+    apps.broker.join_apps(timeout=5)
+    apps.write_result(app_id="smoketestapp", commit="c7d7df9")
+    ledgered = len(apps.ledger())
+    assert apps.broker.adopt_inflight_apps() == []
+    assert len(apps.ledger()) == ledgered
+    assert apps.sidecars() == []
+    assert any("ticket dropped" in str(a.get("result_summary", ""))
+               for a in apps.audit_lines())
+
+
+def test_our_own_result_is_recognised():
+    from brokerd import Broker
+    rec = {"app_id": APP_ID, "session": SESSION, "turn": 1,
+           "started_at": "2026-09-09T02:47:00+00:00"}
+    ours = dict(RESULT)
+    assert Broker._apps_result_is_ours(rec, ours) is True
+    assert Broker._apps_result_is_ours(rec, dict(ours, app_id="other")) is False
+    assert Broker._apps_result_is_ours(rec, dict(ours, turn=2)) is False
+    assert Broker._apps_result_is_ours(rec, dict(ours, session=99)) is False
+    assert Broker._apps_result_is_ours(rec, dict(ours, session="x")) is False
+    # an old start with the right ids is still ours: the id decides, not a clock
+    assert Broker._apps_result_is_ours(rec, dict(ours, started_at="2026-09-07T00:00:00+00:00")) is True

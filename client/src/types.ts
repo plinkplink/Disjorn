@@ -34,6 +34,15 @@ export interface User {
   created_at: string;
 }
 
+/** GET /auth/users (admin only): enough to pick an account to reset. */
+export interface AdminUserRow {
+  id: number;
+  username: string;
+  display_name: string;
+  is_admin: boolean;
+  must_change_password: boolean;
+}
+
 export interface MessageAuthor {
   type: MemberType;
   id: number;
@@ -358,6 +367,13 @@ export interface TurnState {
   done: boolean;
 }
 
+/**
+ * What a session is building. `repo` is the platform itself, on a `loop/*`
+ * branch in the gatehouse; there is no app to serve, so no gate verb applies
+ * (SPECS/2026-09-20-build-lane-v2-stage1-2b.md).
+ */
+export type AppSessionMode = "app" | "repo";
+
 /** SessionOut — everything the build modal renders, in one payload. */
 export interface AppSession {
   id: number;
@@ -370,9 +386,70 @@ export interface AppSession {
   stage: AppStage | null;
   stages: StageEvent[];
   quota: Quota;
+  mode: AppSessionMode;
+  /** The branch is `loop/<repo_slug>`. Null in app mode, and in repo mode
+      until the broker has answered with a slug. */
+  repo_slug: string | null;
   /** Client-side, derived from `stages` — not a field the server sends. Null
       until the first event carrying a turn arrives. */
   lastTurn?: TurnState | null;
+}
+
+/* ---- serving gate (SPECS/2026-09-09-apps-serving-gate.md, stage 3) ---- */
+
+/**
+ * Which tree of an app the gate is being asked for.
+ *
+ * `preview` is the owner's working copy — what the build modal frames — and
+ * `live` is what everyone entitled sees (D4). They are separate roots on the
+ * gate, not two states of one file tree, which is why an app can be live and
+ * still have a preview three turns ahead of it.
+ */
+export type AppRoot = "live" | "preview";
+
+/**
+ * GET /apps/config — the house-wide facts about apps that are not per-app.
+ *
+ * `origin_base` is the gate's origin, e.g. `https://host:10000`, and the
+ * EMPTY STRING is a real answer: this house has no serving gate configured
+ * (D1). Every client path that would build a URL checks for it first and says
+ * so, rather than pointing an iframe at `/<id>/` on the house origin — which
+ * would be the house serving app code, the one thing the walls forbid.
+ *
+ * Extra keys a later server adds ride along ignored; nothing here consumes
+ * the object as a whole.
+ */
+export interface AppsConfig {
+  origin_base: string;
+}
+
+/**
+ * AppCardOut — GET /apps/{id}/card, the payload behind an in-channel card.
+ *
+ * It is deliberately NOT an `App`: a card is shown to anyone entitled to the
+ * app, including people who own nothing about it, so it carries names and
+ * flags rather than the owner's row. 404 means "not entitled", and the client
+ * renders the plain link — never an error — because a link to something you
+ * cannot see should look like a link, not like a locked door.
+ */
+export interface AppCardData {
+  id: string;
+  name: string;
+  description: string;
+  status: AppStatus;
+  builder: { bot_id: number; name: string; avatar_url?: string | null };
+  owner: { id: number; name: string };
+  /** A `live.prev` exists on disk, so Revert has somewhere to go (D6). */
+  has_previous_live: boolean;
+  parent_app_id: string | null;
+  can_remix: boolean;
+  /** Screenshot at live is DEFERRED (D9): null today, and the card draws a
+      generated tile instead. The field is the seam, kept so the card grows a
+      picture without a shape change. */
+  image_url: string | null;
+  /** Null until the app is live — an app with no live root has no URL that
+      would answer. */
+  live_url: string | null;
 }
 
 /* ---- WebSocket frames (server -> client) ---- */

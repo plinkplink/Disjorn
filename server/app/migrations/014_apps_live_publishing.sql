@@ -1,0 +1,25 @@
+-- 014_apps_live_publishing.sql — a build session records that a publish is in
+-- flight, so a second press of Live cannot start a second one.
+--
+-- SPECS/2026-09-09-apps-serving-gate.md (stage 3; Claudette #2551).
+--
+-- One column, and the same shape as `stop_requested_at` (013): the endpoint
+-- claims it with `UPDATE … WHERE live_publishing_at IS NULL` and reads the
+-- rowcount, so the DATABASE decides which of two concurrent presses wins
+-- rather than a check-then-act in the handler. The loser gets 409.
+--
+-- Why it has to be a wall and not a nicety: `publish` ROTATES the trees —
+-- live becomes live.prev, preview becomes live. Run it twice in a row and
+-- live.prev is a copy of live, so Revert still has a button and the tree it
+-- would come back to is the one already being served. The previous deploy is
+-- gone and nothing in the house says so.
+--
+-- Cleared as soon as the helper returns, success or failure, so a re-publish
+-- later (which IS allowed — that is just pressing Live again) is unblocked. A
+-- process killed mid-publish leaves the flag set; that is a stuck session an
+-- admin clears with one UPDATE, and it fails in the safe direction.
+--
+-- NULL is "nothing in flight". Every session created before this migration
+-- reads NULL, which is the truth.
+
+ALTER TABLE app_sessions ADD COLUMN live_publishing_at TEXT NULL;

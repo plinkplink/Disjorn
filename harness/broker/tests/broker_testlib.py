@@ -23,15 +23,17 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import gates  # noqa: E402
 from brokerd import Broker, VerbError, load_config  # noqa: E402
 
 PY = sys.executable
 ALL_VERBS = [
     "restart-disjorn", "run-server-tests", "refresh-mirror", "start-build",
-    "classify-diff", "read-prod-logs", "read-own-log", "read-metrics",
+    "classify-diff", "changed-files",
+    "read-prod-logs", "read-own-log", "read-metrics",
     "file-proposal", "query-own-audit",
     "board-list", "board-card", "board-search", "board-flag", "board-comment",
-    "summon-hop", "apps-build",
+    "summon-hop", "apps-build", "build", "merge",
 ]
 
 RECORD_STUB = textwrap.dedent("""\
@@ -59,7 +61,15 @@ CLASSIFY_STUB = textwrap.dedent("""\
     # --gates-json flag the real CLI never had, and omitted the required
     # --config: broker tests passed while every prod call died on argparse.
     # Keep this in lockstep with classify_diff.py main().)
-    import argparse, json
+    #
+    # argv[1] is a TEST control file (a JSON object, or absent): {tier, reasons,
+    # protected_hits}. A red gate answers Tier 2 without being asked, the way
+    # the real classifier fails closed.
+    import argparse, json, os, sys
+    control = {}
+    if len(sys.argv) > 1 and os.path.exists(sys.argv[1]):
+        control = json.loads(open(sys.argv[1]).read() or "{}")
+    del sys.argv[1:2]
     p = argparse.ArgumentParser()
     p.add_argument("--repo", default=".")
     spec = p.add_mutually_exclusive_group(required=True)
@@ -68,8 +78,16 @@ CLASSIFY_STUB = textwrap.dedent("""\
     p.add_argument("--config", required=True)
     p.add_argument("--gates", default="{}")
     ns = p.parse_args()
-    print(json.dumps({"tier": 1, "repo": ns.repo, "range": ns.range_spec,
-                      "config": ns.config, "gates": json.loads(ns.gates)}))
+    gates = json.loads(ns.gates)
+    tier = control.get("tier", 1)
+    reasons = control.get("reasons", ["code diff within size cap, gates pass"])
+    if any(v is False for v in gates.values()):
+        tier, reasons = 2, ["gate failed: tests"]
+    print(json.dumps({"tier": tier, "repo": ns.repo, "range": ns.range_spec,
+                      "config": ns.config, "gates": gates, "reasons": reasons,
+                      "protected_hits": control.get("protected_hits", []),
+                      "stats": {"files": 1, "lines_added": 2,
+                                "lines_removed": 0}}))
 """)
 
 # WP-L4 open fork: the build now runs in a TRANSIENT SYSTEMD UNIT under the
@@ -325,7 +343,17 @@ class BrokerHarness:
                  spec_repo: Path | None = None,
                  gatehouse: Path | None = None,
                  planroom_calls: list | None = None,
-                 planroom_state: dict | None = None) -> None:
+                 planroom_state: dict | None = None,
+                 channel_posts: list | None = None,
+                 message_db: Path | None = None,
+                 classify_control: Path | None = None) -> None:
+        # What the stubbed classifier is told to answer; see set_tier.
+        self.classify_control = classify_control
+        self._gate_work: Path | None = None
+        self.gate_calls: list = []
+        # Every post the broker made to a NAMED channel (the `/build` banner).
+        self.channel_posts = channel_posts if channel_posts is not None else []
+        self.message_db = message_db
         self.spec_repo = spec_repo
         self.gatehouse = gatehouse
         # Every /planroom call the broker made, and the fake board it talked to.
@@ -366,6 +394,212 @@ class BrokerHarness:
         self.broker.start_build["command"] = [
             PY, str(self.stub_dir / "flood.py"), str(self.build_record),
             str(megabytes)]
+
+    # -- the server principal (`/build`) ----------------------------------
+    def become_server(self, unit: str = "disjorn-test.service") -> None:
+        """Make this process's uid resolve to `server`: map it to the identity
+        the unit check sits behind, and answer the cgroup probe with `unit`."""
+        self.broker.uid_map[os.getuid()] = "plink"
+        self.broker.server_unit = unit
+        self.broker._read_peer_cgroup = lambda pid: f"0::/system.slice/{unit}\n"
+
+    def add_message(self, channel_id: int, seq: int, content: str, *,
+                    author: str = "plink", author_type: str = "user",
+                    flags: str = "{}", deleted: str | None = None) -> None:
+        """One row in the scratch server DB the build verb reads."""
+        import sqlite3
+        assert self.message_db is not None
+        db = sqlite3.connect(self.message_db)
+        with db:
+            db.execute("insert or ignore into users (id, username) values (?, ?)",
+                       (abs(hash(author)) % 100000 + 1, author))
+            uid_row = db.execute("select id from users where username = ?",
+                                 (author,)).fetchone()
+            db.execute("insert into messages (channel_id, seq, author_type, "
+                       "author_id, content, privacy_flags, deleted_at) "
+                       "values (?, ?, ?, ?, ?, ?, ?)",
+                       (channel_id, seq, author_type,
+                        uid_row[0] if author_type == "user" else 5,
+                        content, flags, deleted))
+        db.close()
+
+    def build_ledger_lines(self) -> list[dict]:
+        path = Path(self.broker.build_ledger)
+        if not path.exists():
+            return []
+        return [json.loads(ln) for ln in path.read_text().splitlines()
+                if ln.strip()]
+
+    # -- the broker's own gate run (`merge`, and the end of a chat build) ---
+    def stub_gates(self, *, tests: bool | None = True,
+                   typecheck: bool | None = None, build: bool | None = None,
+                   exit_code: int = 0, summary: str = "server 12 passed",
+                   log_path: str = "/var/lib/disjorn-broker/gate-logs/x.log",
+                   on_run=None) -> list[dict]:
+        """Answer gates.run_gates without launching anything. Returns the list
+        every call lands in, so a test can assert the argv prefix and the
+        timeout the broker asked for. `on_run` runs WHILE the gates are up —
+        the only window in which main can move under a merge."""
+        calls: list[dict] = []
+
+        def fake(argv_prefix, seat, slug, *, timeout, log_dir):
+            calls.append({"argv_prefix": list(argv_prefix), "seat": seat,
+                          "slug": slug, "timeout": timeout, "log_dir": log_dir})
+            if on_run is not None:
+                on_run()
+            return gates.GateResult(tests, typecheck, build, exit_code,
+                                    log_path, summary)
+
+        gates.run_gates = fake
+        self.gate_calls = calls
+        return calls
+
+    def finish_merges(self, timeout: float = 30) -> None:
+        """Wait for every background `/merge`. Production never waits: the room
+        hears the outcome as a post."""
+        for thread in list(self.broker._merge_threads):
+            thread.join(timeout=timeout)
+            assert not thread.is_alive(), "a merge thread never finished"
+
+    def merge_outcomes(self) -> list[list[str]]:
+        """Every `merge: …` outcome post, split into its two lines."""
+        return [c["body"].splitlines() for c in self.channel_posts
+                if c["body"].startswith("merge: ")]
+
+    def merge_denials(self) -> list[tuple[str, str]]:
+        """(reason, message) for every merge the audit log records as denied."""
+        out = []
+        for entry in self.audit_lines():
+            if entry["verb"] != "merge" or entry["allowed"] is not False:
+                continue
+            summary = entry["result_summary"][len("denied: "):]
+            message, _, reason = summary.rpartition(" (")
+            out.append((reason.rstrip(")"), message))
+        return out
+
+    # -- #custodian, where a reviewer's PASS lives ------------------------
+    def add_custodian_post(self, seq: int, content: str, *,
+                           author: str = "Claudette", created_at: str | None = None,
+                           author_type: str = "bot",
+                           channel_id: int | None = None) -> None:
+        """One bot post in #custodian — the shape a PASS arrives in."""
+        import sqlite3
+        assert self.message_db is not None
+        channel = (channel_id if channel_id is not None
+                   else int(self.broker.disjorn["custodian_channel_id"]))
+        db = sqlite3.connect(self.message_db)
+        with db:
+            db.execute("insert or ignore into bots (id, name) values (?, ?)",
+                       (abs(hash(author)) % 100000 + 1, author))
+            row = db.execute("select id from bots where name = ?",
+                             (author,)).fetchone()
+            db.execute("insert into messages (channel_id, seq, author_type, "
+                       "author_id, content, privacy_flags, created_at) "
+                       "values (?, ?, ?, ?, ?, '{}', ?)",
+                       (channel, seq, author_type, row[0], content,
+                        created_at or _utc_now()))
+        db.close()
+
+    # -- a REAL gatehouse ---------------------------------------------------
+    def make_gatehouse(self) -> Path:
+        """A real BARE repo at [gate].canonical_repo holding `main`, so the
+        merge path is exercised against git and not against a mock."""
+        assert self.gatehouse is not None
+        bare = self.gatehouse
+        _git_run(["git", "init", "-q", "--bare", "-b", "main", str(bare)])
+        work = bare.parent / f"{bare.name}-seed"
+        _git_run(["git", "clone", "-q", str(bare), str(work)])
+        self._gate_work = work
+        (work / "docs").mkdir(exist_ok=True)
+        (work / "docs" / "a.md").write_text("one\n")
+        _git(work, "add", "-A")
+        _git(work, "commit", "-q", "-m", "init")
+        _git(work, "push", "-q", "origin", "main")
+        return bare
+
+    def push_branch(self, slug: str, path: str = "docs/new.md",
+                    content: str = "two\n") -> str:
+        """One `loop/<slug>` branch off main, touching `path`. Returns its tip."""
+        work = self._gate_work
+        _git(work, "fetch", "-q", "origin")
+        _git(work, "checkout", "-q", "-B", f"loop/{slug}", "origin/main")
+        target = work / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content)
+        _git(work, "add", "-A")
+        _git(work, "commit", "-q", "-m", slug)
+        tip = _git(work, "rev-parse", "HEAD").strip()
+        _git(work, "push", "-q", "-f", "origin", f"loop/{slug}")
+        _git(work, "checkout", "-q", "main")
+        return tip
+
+    def move_main(self, path: str = "docs/a.md", content: str = "ours\n") -> None:
+        """Move main under a branch's feet. The default path is one every
+        branch here also touches, which is the conflict the broker refuses."""
+        work = self._gate_work
+        _git(work, "checkout", "-q", "-B", "main", "origin/main")
+        target = work / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content)
+        _git(work, "add", "-A")
+        _git(work, "commit", "-q", "-m", "main moves")
+        _git(work, "push", "-q", "origin", "main")
+        _git(work, "fetch", "-q", "origin")
+
+    def commit_on_branch(self, slug: str, path: str = "docs/late.md",
+                         content: str = "late\n") -> str:
+        """One more commit on top of `loop/<slug>`, pushed — what can land
+        under a gate run that has already read the tip."""
+        work = self._gate_work
+        _git(work, "fetch", "-q", "origin")
+        _git(work, "checkout", "-q", "-B", f"loop/{slug}",
+             f"origin/loop/{slug}")
+        target = work / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content)
+        _git(work, "add", "-A")
+        _git(work, "commit", "-q", "-m", f"{slug} again")
+        tip = _git(work, "rev-parse", "HEAD").strip()
+        _git(work, "push", "-q", "origin", f"loop/{slug}")
+        _git(work, "checkout", "-q", "main")
+        return tip
+
+    def push_empty_branch(self, slug: str) -> str:
+        """`loop/<slug>` at main exactly: a branch with nothing of its own."""
+        work = self._gate_work
+        _git(work, "fetch", "-q", "origin")
+        _git(work, "push", "-q", "origin",
+             f"origin/main:refs/heads/loop/{slug}")
+        return _git(work, "rev-parse", "origin/main").strip()
+
+    def branch_tip(self, slug: str) -> str:
+        """The gatehouse's own tip of `loop/<slug>` — the sha the gates see."""
+        assert self.gatehouse is not None
+        return _git(self.gatehouse, "rev-parse",
+                    f"refs/heads/loop/{slug}").strip()
+
+    def sha(self, ref: str = "main") -> str:
+        assert self.gatehouse is not None
+        return _git(self.gatehouse, "rev-parse", ref).strip()
+
+    def main_subjects(self) -> list[str]:
+        """Every commit subject on the gatehouse's main, newest first."""
+        assert self.gatehouse is not None
+        return _git(self.gatehouse, "log", "--format=%s", "main").splitlines()
+
+    def commit_message(self, ref: str = "main") -> str:
+        assert self.gatehouse is not None
+        return _git(self.gatehouse, "log", "-1", "--format=%B", ref)
+
+    def set_tier(self, tier: int, reasons: list[str] | None = None,
+                 protected_hits: list[str] | None = None) -> None:
+        """What the stubbed classifier answers for the next run."""
+        assert self.classify_control is not None
+        self.classify_control.write_text(json.dumps({
+            "tier": tier,
+            "reasons": reasons or [f"stub says tier {tier}", "second reason",
+                                   "third reason"],
+            "protected_hits": protected_hits or []}))
 
     # -- client side ------------------------------------------------------
     def _connect(self) -> socket.socket:
@@ -507,6 +741,26 @@ class BrokerHarness:
         return spawn
 
 
+_GIT_ENV = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+
+
+def _utc_now() -> str:
+    import datetime as dt
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _git_run(argv: list[str]) -> str:
+    import subprocess as sp
+    cp = sp.run(argv, check=True, capture_output=True, text=True,
+                env={**os.environ, **_GIT_ENV})
+    return cp.stdout
+
+
+def _git(repo: Path, *args: str) -> str:
+    return _git_run(["git", "-C", str(repo), *args])
+
+
 def _write_stub(path: Path, content: str) -> None:
     path.write_text(content)
     path.chmod(0o755)
@@ -526,6 +780,8 @@ def harness(tmp_path: Path):
     _write_stub(stub_dir / "flood.py", FLOOD_BUILD_STUB)
     _write_stub(stub_dir / "unitstate.py", UNIT_STATE_STUB)
     _write_stub(stub_dir / "buildstop.py", BUILD_STOP_STUB)
+    classify_control = tmp_path / "classify.json"
+    classify_control.write_text("{}")
     record_file = tmp_path / "record.jsonl"
     build_record = tmp_path / "build.jsonl"
     unit_state_file = tmp_path / "unit-state.json"
@@ -571,6 +827,24 @@ def harness(tmp_path: Path):
     sock = tmp_path / "b.sock"
     verbs_path = tmp_path / "verbs.toml"
 
+    # The server DB the `build` verb reads its message out of: just the two
+    # tables it joins, so no server import is needed to exercise the wire.
+    message_db = tmp_path / "disjorn.db"
+    import sqlite3 as _sq
+    _db = _sq.connect(message_db)
+    with _db:
+        _db.execute("create table users (id integer primary key, "
+                    "username text not null unique)")
+        _db.execute("create table bots (id integer primary key, "
+                    "name text not null unique)")
+        _db.execute("create table messages (id integer primary key autoincrement, "
+                    "channel_id integer not null, seq integer not null, "
+                    "author_type text not null, author_id integer not null, "
+                    "content text not null, privacy_flags text not null "
+                    "default '{}', deleted_at text, created_at text)")
+    _db.close()
+    build_ledger = tmp_path / "build-ledger.jsonl"
+
     broker_toml = tmp_path / "broker.toml"
     broker_toml.write_text(textwrap.dedent(f"""\
         [broker]
@@ -596,7 +870,7 @@ def harness(tmp_path: Path):
         run_server_tests = ["{PY}", "{stub_dir / 'tests.py'}"]
         run_server_tests_cwd = "{tmp_path}"
         read_prod_logs = ["{PY}", "{stub_dir / 'journal.py'}"]
-        classify_diff = ["{PY}", "{stub_dir / 'classify.py'}"]
+        classify_diff = ["{PY}", "{stub_dir / 'classify.py'}", "{classify_control}"]
         refresh_mirror_fetch = ["{PY}", "{stub_dir / 'mirror.py'}", "{record_file}", "fetch", "origin"]
         refresh_mirror_update = ["{PY}", "{stub_dir / 'mirror.py'}", "{record_file}", "merge", "--ff-only", "origin/main"]
         refresh_mirror_head = ["{PY}", "{stub_dir / 'mirror.py'}", "{record_file}", "rev-parse", "--short", "HEAD"]
@@ -628,11 +902,28 @@ def harness(tmp_path: Path):
         # local-stamp record naming the sha, because that commit never meets
         # the pre-receive hook and can never have a push-log line.
         canonical_repo = "{gatehouse}"
+        message_db = "{message_db}"
 
         [disjorn]
         url = "http://127.0.0.1:1"
         api_key_path = "{tmp_path / 'no-key'}"
         custodian_channel_id = 3
+
+        [server]
+        unit = "disjorn-test.service"
+
+        [planroom.lane_owners]
+        "docs/" = "Claudette"
+        "server/" = "Gable"
+
+        [build]
+        humans = ["plink"]
+        seat = "test"
+        ledger = "{build_ledger}"
+        daily_build_cap = 2
+        gate_timeout_sec = 1320
+        gate_log_dir = "{tmp_path / 'gate-logs'}"
+        merge_work_dir = "{tmp_path / 'merge-work'}"
     """))
 
     proposals: list = []
@@ -642,7 +933,12 @@ def harness(tmp_path: Path):
         return {"seq": 99, "message_id": 1234}
 
     planroom_calls: list = []
-    planroom_state: dict = {"face": {"available": True,
+    # The server's answer about a build session. A chat build asks before it
+    # launches; `sessions` overrides the default per session id.
+    planroom_state: dict = {"session": {"open": True, "mode": "repo",
+                                        "owner_username": "plink"},
+                            "sessions": {},
+                            "face": {"available": True,
                                      "derived_at": "2026-08-23T00:00:00+00:00",
                                      "mirror_head": "abc1234deadbeef",
                                      "deploy": {"badge": "green"}, "notes": []},
@@ -656,6 +952,17 @@ def harness(tmp_path: Path):
                                "payload": payload, "cfg": dict(disjorn_cfg)})
         if planroom_state.get("http_error"):
             raise VerbError("exec-failure", planroom_state["http_error"])
+        if path.endswith("/stage"):
+            return {"ok": True}
+        if path.endswith("/harness-view"):
+            session = int(path.split("/")[3])
+            view = planroom_state["sessions"].get(session)
+            if view is None:
+                view = planroom_state["session"]
+            if view is False:
+                raise VerbError("apps-refused", "no such build session",
+                                status=404)
+            return {"session_id": session, **view}
         cards = planroom_state["cards"]
         by_slug = {c["slug"]: c for c in cards}
         face = planroom_state["face"]
@@ -680,16 +987,26 @@ def harness(tmp_path: Path):
                     "comments": planroom_state["comments"].get(slug, [])}
         raise VerbError("exec-failure", f"unstubbed plan room path {path}")
 
+    channel_posts: list = []
+
+    def stub_channel_transport(disjorn_cfg: dict, channel_id: int,
+                               body: str) -> dict:
+        channel_posts.append({"channel_id": channel_id, "body": body})
+        return {"seq": 1, "message_id": 1}
+
     config = load_config(str(broker_toml))
     broker = Broker(config, str(verbs_path), transport=stub_transport,
-                    planroom_api=stub_planroom)
+                    planroom_api=stub_planroom,
+                    channel_transport=stub_channel_transport)
     h = BrokerHarness(broker, verbs_path, record_file, proposals,
                       specs_dir=specs_dir, build_record=build_record,
                       build_log_dir=build_logs, stub_dir=stub_dir,
                       unit_state_file=unit_state_file, stop_record=stop_record,
                       spec_repo=spec_repo, gatehouse=gatehouse,
                       planroom_calls=planroom_calls,
-                      planroom_state=planroom_state)
+                      planroom_state=planroom_state,
+                      channel_posts=channel_posts, message_db=message_db,
+                      classify_control=classify_control)
     h.set_verbs()  # everything explicitly OFF to start
 
     t = threading.Thread(target=broker.serve_forever, daemon=True)
@@ -699,6 +1016,8 @@ def harness(tmp_path: Path):
         if time.time() > deadline:
             raise RuntimeError("broker socket never appeared")
         time.sleep(0.01)
+    real_run_gates = gates.run_gates
     yield h
+    gates.run_gates = real_run_gates
     broker.shutdown()
     t.join(timeout=5)

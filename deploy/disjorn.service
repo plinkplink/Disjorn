@@ -33,7 +33,18 @@ RestartSec=3
 # --- Hardening basics -------------------------------------------------------
 # Keep this modest: faster-whisper downloads models into ~/.cache on first
 # use, so we deliberately do NOT set ProtectHome here.
-NoNewPrivileges=true
+#
+# NoNewPrivileges is DELIBERATELY ABSENT since 2026-09-14 (backlog #27). APPS
+# stage 3 made this server a caller of /etc/sudoers.d/92-disjorn-apps —
+# `sudo -n disjorn-apps-launch publish|revert|remix <id>` behind the Live,
+# Revert and Remix buttons — and NoNewPrivileges makes every sudo from this
+# process fail ("the no new privileges flag is set"). The first real press of
+# Live found it; stage 3's live proof had run on a hand-started scratch house
+# with no unit hardening. Same shape and same reason as disjorn-broker.service,
+# whose header has said "NoNewPrivileges= must stay OFF here" since it became
+# a sudo caller. What that sudoers file grants this uid is five shape-checked
+# modes of one root helper that re-enters itself as res-appsbuilding; nothing
+# here can name a program or a path.
 PrivateTmp=true
 ProtectSystem=full
 # The only path the server writes to (SQLite DB + WAL, uploads, assets).

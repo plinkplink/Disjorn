@@ -150,4 +150,5 @@ before the go-live flip so the first enabled verb ships with a stop.
 - **Confirmed at**: 2026-09-09 01:47Z (recorded at the keyboard on his behalf)
 
 ## Status
-`confirmed`
+merged
+<!-- advanced from `confirmed` by `board --mark-merged` on 2026-09-20: build merged as 77e8f1d. The word `confirmed` on a merged spec made it indistinguishable from a buildable one. -->

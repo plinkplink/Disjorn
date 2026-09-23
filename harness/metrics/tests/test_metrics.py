@@ -343,3 +343,32 @@ def test_the_header_states_its_bounds_and_its_timezone(cfg):
     assert "UTC" in line
     assert "complete day" in line
     assert "00:00:00–23:59:59" in line
+
+
+# ---------------------------------------------------------------- dirty paths
+# Claudette's wording card, third data point (#custodian #2502): "dirty" with
+# no address is a smoke alarm nobody can act on.
+
+def test_the_dirty_line_names_the_count_and_the_top_level_dirs():
+    import metrics as m
+    status = (" M SPECS/2026-09-06-apps-builder-seat.md\n"
+              " M harness/broker/brokerd.py\n"
+              " M harness/cc/apps/run-apps.sh\n"
+              "?? server/.env.bak\n"
+              "R  old.md -> deploy/new.md\n"
+              " M README.md\n")
+    paths = m._dirty_paths(status)
+    assert paths == ["SPECS/2026-09-06-apps-builder-seat.md", "harness/broker/brokerd.py",
+                     "harness/cc/apps/run-apps.sh", "server/.env.bak", "deploy/new.md",
+                     "README.md"]
+    line = m._dirty_sentence(paths)
+    assert line.startswith("prod's working tree is DIRTY: 6 paths under ")
+    assert "(root), SPECS, deploy, harness, server" in line
+    assert line.endswith("code is running that was never published")
+    assert m._dirty_sentence(["x.py"]).startswith("prod's working tree is DIRTY: 1 path under (root)")
+
+
+def test_a_clean_or_unreadable_status_has_no_dirty_paths():
+    import metrics as m
+    assert m._dirty_paths("") == []
+    assert m._dirty_paths(None) == []
