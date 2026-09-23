@@ -378,7 +378,7 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
 
 
 def _adapter() -> _Adapter:
-    """The adapter's core.py and where it came from. The only skip here."""
+    """The adapter's core.py and where it came from. A skip here is red."""
     pin = _adapter_pin()
     proc = _git(pin.repo, "cat-file", "-p", f"{pin.rev}:{pin.path}")
     if proc.returncode == 0:

@@ -44,5 +44,7 @@ Adapter layout (gatehouse)
 
     The gatehouse repo's root IS the bot directory: claudette's core.py is at the top of `gatehouse/claudette/<branch>`, so the canonical read is `read_repo_file(path="core.py", rev="gatehouse/claudette/<branch>")`. `bots/claudette/` is the HOST layout under /home/plink — not a path inside any repo, and reachable from no resident seat.
 
+    An adapter tool change lands in ONE sitting: merge its `verb_surface.toml` `[adapter_tools]` row and run `claudette-update.sh`. The gate's pin reads the deployed adapter, so between the two every disjorn gate is red, and the failure names the adapter commit it read.
+
 
 
