@@ -28,14 +28,13 @@ import subprocess
 import sys
 import tomllib
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import gen_verb_surface as gen  # noqa: E402
-
-REPO = Path(gen.__file__).resolve().parent.parent.parent
 
 
 # ── the check, both directions ───────────────────────────────────────────
@@ -314,51 +313,103 @@ def test_the_catalogue_describes_the_gatehouse_fetch_to_its_reader():
 # tool, a row that fed generation would BE the grant, and editing a config
 # file would become a new path that hands a bot a tool.
 #
-# So the tests split in two. The INERTNESS tests below run everywhere and are
-# about this repo alone. The DRIFT tests need the adapter repo on disk,
-# because the thing they compare against is core.py — they say so and skip
-# when it is absent rather than pass quietly.
+# The INERTNESS tests below run everywhere. The DRIFT tests read the adapter's
+# core.py through one pin, and a pin that does not resolve is red.
+#
+# The pin names a git object, never a checkout path. The gate sets it to the
+# gatehouse claudette.git (run-gates.sh); elsewhere it is the mirror named by
+# broker.toml [gate].mirror, else the /opt/disjorn mount. The gatehouse repo's
+# root IS the bot directory, so core.py sits at the top of its branch.
 
-ADAPTER_CORE_ENV = "DISJORN_ADAPTER_CORE"
+ADAPTER_CORE_ENV = "DISJORN_ADAPTER_CORE"       # "<git repo>:<rev>:<path>"
+BROKER_CONFIG_ENV = "DISJORN_BROKER_CONFIG"
+BROKER_CONFIG_PATH = Path("/etc/disjorn-broker/broker.toml")
+ADAPTER_MIRROR_FALLBACK = Path("/opt/disjorn")
+ADAPTER_REV = "gatehouse/claudette/disjorn-port"
+ADAPTER_PATH = "core.py"
 
 
-def _adapter_core_candidates() -> list[Path]:
+class _Pin(NamedTuple):
+    repo: Path
+    rev: str
+    path: str
+    origin: str        # named in every message this pin can produce
+    configured: bool   # False only for the built-in default
+
+
+class _Adapter(NamedTuple):
+    source: str
+    at: str            # path, commit and pin, named in every drift failure
+
+
+def _adapter_pin() -> _Pin:
+    """ONE location, resolved by rule rather than by trying paths until one
+    exists. `[gate].mirror` is the broker's own record of where the mirror is,
+    so an already-deployed broker needs no edit to make this suite honest."""
     env = os.environ.get(ADAPTER_CORE_ENV)
     if env:
-        return [Path(env)]
-    return [
-        REPO.parent / "claudette" / "core.py",       # the build-clone layout
-        REPO / "bots" / "claudette" / "core.py",     # if it ever moves in-repo
-        Path.home() / "work" / "claudette" / "core.py",
-        Path("/opt/claudette/core.py"),
-    ]
+        parts = env.split(":")
+        if len(parts) != 3 or not all(parts):
+            pytest.fail(
+                f"{ADAPTER_CORE_ENV}={env!r} is not '<git repo>:<rev>:<path>'. "
+                f"It names a git object, not a file: e.g. "
+                f"'/opt/disjorn:{ADAPTER_REV}:{ADAPTER_PATH}'.")
+        return _Pin(Path(parts[0]), parts[1], parts[2],
+                    f"${ADAPTER_CORE_ENV}", True)
+
+    config = Path(os.environ.get(BROKER_CONFIG_ENV) or BROKER_CONFIG_PATH)
+    try:
+        data = tomllib.loads(config.read_text(encoding="utf-8"))
+        mirror = (data.get("gate") or {}).get("mirror")
+    except (OSError, tomllib.TOMLDecodeError):
+        mirror = None
+    if mirror:
+        return _Pin(Path(mirror), ADAPTER_REV, ADAPTER_PATH,
+                    f"{config} [gate].mirror", True)
+    return _Pin(ADAPTER_MIRROR_FALLBACK, ADAPTER_REV, ADAPTER_PATH,
+                "the built-in default", False)
 
 
-def _adapter_core() -> Path:
-    for path in _adapter_core_candidates():
-        if path.is_file():
-            return path
+def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
+    # The mirror is another uid's; without safe.directory it reads as absent.
+    return subprocess.run(
+        ["git", "-c", f"safe.directory={repo}", "-C", str(repo), *args],
+        capture_output=True, text=True, timeout=60)
+
+
+def _adapter() -> _Adapter:
+    """The adapter's core.py and where it came from. A skip here is red."""
+    pin = _adapter_pin()
+    proc = _git(pin.repo, "cat-file", "-p", f"{pin.rev}:{pin.path}")
+    if proc.returncode == 0:
+        sha = _git(pin.repo, "rev-parse", "--verify",
+                   f"{pin.rev}^{{commit}}").stdout.strip()
+        return _Adapter(proc.stdout, f"{pin.path} at {sha[:12]} ({pin.rev} "
+                                     f"in {pin.repo}, from {pin.origin})")
+    tried = (f"{pin.rev}:{pin.path} in {pin.repo} (from {pin.origin}); git "
+             f"said: {(proc.stderr or proc.stdout).strip()}")
+    mirror_present = _git(pin.repo, "rev-parse", "--git-dir").returncode == 0
+    if pin.configured or mirror_present:
+        pytest.fail(
+            f"the adapter's core.py did not resolve: {tried}. A configured "
+            f"pin, or a mirror that is present, that does not resolve is red, "
+            f"never a skip. Fix the pin; run refresh-mirror if the gatehouse "
+            f"branch was never fetched; at the gate, run-gates.sh's stderr "
+            f"names the host repo it mounts. "
+            f"{ADAPTER_CORE_ENV}='<git repo>:<rev>:<path>' overrides it.")
     pytest.skip(
-        "the adapter's core.py is not on this disk, so the two directions of "
-        "adapter-tool drift cannot be checked from here. Looked at: "
-        + ", ".join(str(p) for p in _adapter_core_candidates())
-        + f". Set {ADAPTER_CORE_ENV} to point at it.")
+        f"no pin and no repo mirror on this disk, so adapter-tool drift "
+        f"cannot be checked from here: {tried}. The gate sets "
+        f"{ADAPTER_CORE_ENV} (run-gates.sh); resident and build containers "
+        f"mount the mirror at {ADAPTER_MIRROR_FALLBACK}; the broker box names "
+        f"it in {BROKER_CONFIG_PATH}. Set {ADAPTER_CORE_ENV} to check here.")
 
 
-def _declared_tools(core_path: Path) -> dict[str, list[str]]:
-    """Every tool core.py DECLARES AND REGISTERS, name -> argument names.
-
-    Read statically, with ast, rather than by importing: core.py imports
-    anthropic, aiohttp and a chromadb-backed memory package at module level,
-    and this repo's test suite has no business standing any of that up to find
-    out what a dict literal says.
-
-    A tool counts when it is a module-level dict literal with a "name" key AND
-    that variable is passed to register_tool(). Both halves matter: an
-    unregistered schema is a draft, and a registration of something that is
-    not a literal here (the MEMORY_TOOLS loop) is a tool this file's table
-    deliberately does not scope."""
-    tree = ast.parse(core_path.read_text(encoding="utf-8"))
+def _registrations(source: str) -> tuple[dict[str, list[str]], list[int]]:
+    """(name -> arg names for each module-level dict literal passed to
+    register_tool, lines of register_tool calls on anything else). Static,
+    with ast: importing core.py would stand up anthropic and chromadb."""
+    tree = ast.parse(source)
     literals: dict[str, dict] = {}
     for node in tree.body:
         if not isinstance(node, ast.Assign) or len(node.targets) != 1:
@@ -374,27 +425,39 @@ def _declared_tools(core_path: Path) -> dict[str, list[str]]:
             literals[target.id] = value
 
     registered: dict[str, list[str]] = {}
+    unseen: list[int] = []
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Name)
                 and node.func.id == "register_tool"
-                and node.args
-                and isinstance(node.args[0], ast.Name)):
+                and node.args):
             continue
-        schema = literals.get(node.args[0].id)
+        arg = node.args[0]
+        schema = (literals.get(arg.id) if isinstance(arg, ast.Name) else None)
         if schema is None:
+            unseen.append(node.lineno)
             continue
         props = (schema.get("input_schema") or {}).get("properties") or {}
         registered[schema["name"]] = sorted(props)
-    return registered
+    return registered, unseen
+
+
+def _declared_tools(source: str) -> dict[str, list[str]]:
+    return _registrations(source)[0]
+
+
+def _verb_tools() -> set[str]:
+    return {e["tool_name"] for e in gen.load_surface().values()}
 
 
 def _adapter_only(declared: dict[str, list[str]]) -> dict[str, list[str]]:
-    """Registered tools minus the broker verbs, which the [verbs] table above
-    already covers and the generator already generates."""
-    verb_tools = {e["tool_name"] for e in gen.load_surface().values()}
+    verbs = _verb_tools()
     return {name: args for name, args in declared.items()
-            if name not in verb_tools}
+            if name not in verbs}
+
+
+def _verb_literals(source: str) -> list[str]:
+    return sorted(set(_declared_tools(source)) & _verb_tools())
 
 
 def test_the_adapter_table_loads_and_the_shipped_one_is_well_formed():
@@ -496,67 +559,146 @@ def test_an_unknown_top_level_table_is_caught(tmp_path):
 
 # ── the adapter table vs the adapter itself, both directions ─────────────
 
-def test_a_missing_adapter_repo_says_so_instead_of_passing_quietly(monkeypatch):
-    """A cross-repo check that silently no-ops when the other repo is absent
-    is worse than no check: it reads as a green suite. This one skips, and the
-    skip names both the paths it looked at and the way to fix it."""
-    monkeypatch.setenv(ADAPTER_CORE_ENV, "/nonexistent/claudette/core.py")
+def test_the_shipped_configuration_does_not_skip_the_drift_checks():
+    """A skip here would claim coverage with nothing behind it, and a skip
+    reads as green. It runs under the configuration the suite really has,
+    e.g. at the gate."""
+    try:
+        source = _adapter().source
+    except pytest.skip.Exception as exc:
+        pytest.fail(f"_adapter() skipped under the shipped configuration, so "
+                    f"the adapter-drift tests below cover nothing: {exc}")
+    assert "register_tool" in source
+
+
+def test_a_pin_that_does_not_resolve_is_red_rather_than_a_skip(monkeypatch):
+    """A cross-repo check that no-ops when the other repo is absent is worse
+    than no check: no check does not lie about coverage."""
+    monkeypatch.setenv(ADAPTER_CORE_ENV,
+                       "/nonexistent/mirror:gatehouse/claudette/nope:core.py")
+    with pytest.raises(pytest.fail.Exception) as exc:
+        _adapter()
+    assert "/nonexistent/mirror" in str(exc.value)
+    assert "gatehouse/claudette/nope" in str(exc.value)
+    assert ADAPTER_CORE_ENV in str(exc.value)
+    assert "red, never a skip" in str(exc.value)
+    assert "not an absent adapter" not in str(exc.value)
+
+
+def test_a_rev_the_mirror_has_never_fetched_is_red_too(monkeypatch):
+    """Mirror present, branch gone — harvested, renamed, or never fetched.
+    Same answer, because the coverage is equally absent."""
+    repo = _adapter_pin().repo
+    monkeypatch.setenv(
+        ADAPTER_CORE_ENV, f"{repo}:gatehouse/claudette/no-such-branch:core.py")
+    with pytest.raises(pytest.fail.Exception) as exc:
+        _adapter()
+    assert "no-such-branch" in str(exc.value)
+
+
+def test_the_env_pin_must_name_a_git_object_not_a_file(monkeypatch):
+    """The shape the old candidate list taught everyone to expect. A bare
+    path accepted here would resolve to nothing and skip."""
+    monkeypatch.setenv(ADAPTER_CORE_ENV, "/home/plink/bots/claudette/core.py")
+    with pytest.raises(pytest.fail.Exception, match="git repo"):
+        _adapter()
+
+
+def test_the_one_surviving_skip_needs_no_pin_and_no_mirror(
+        monkeypatch, tmp_path):
+    monkeypatch.delenv(ADAPTER_CORE_ENV, raising=False)
+    monkeypatch.setenv(BROKER_CONFIG_ENV, str(tmp_path / "no-broker.toml"))
+    monkeypatch.setattr(sys.modules[__name__], "ADAPTER_MIRROR_FALLBACK",
+                        tmp_path / "no-mirror")
     with pytest.raises(pytest.skip.Exception) as exc:
-        _adapter_core()
-    assert "/nonexistent/claudette/core.py" in str(exc.value)
+        _adapter()
+    assert "no repo mirror on this disk" in str(exc.value)
+    assert "run-gates.sh" in str(exc.value)
     assert ADAPTER_CORE_ENV in str(exc.value)
 
 
-def test_the_static_scan_finds_the_adapter_tools_and_not_the_broker_ones():
-    """The scan is the whole basis of the two drift tests below, so it gets
-    asserted rather than assumed: it must see core.py's own tools, and it must
-    not see the MEMORY_TOOLS loop (registered from a name, not a literal),
-    which this table deliberately does not scope."""
-    declared = _declared_tools(_adapter_core())
-    assert "read_repo_file" in declared
-    assert "brave_search" in declared
-    # Broker verbs ARE declared in core.py today and the scan sees them; it is
-    # _adapter_only that takes them back out, using the [verbs] table.
-    assert "start_build" in declared
-    assert set(_adapter_only(declared)) == {"read_repo_file", "brave_search"}
+SYNTHETIC_CORE = (
+    'A = {"name": "tool_a", "input_schema": {"properties": {"y": {}, "x": {}}}}\n'
+    'B = {"name": "tool_b"}\n'
+    'DRAFT = {"name": "draft"}\n'
+    'V = {"name": "refresh_mirror"}\n'
+    'register_tool(A, h)\n'
+    'register_tool(V, h)\n'
+    'if flag:\n'
+    '    register_tool(B, h)\n'
+    'for t in LOOP:\n'
+    '    register_tool(t, h)\n')
+
+
+def test_the_scan_sees_registered_literals_and_nothing_else():
+    """The scan is the basis of every drift test, so it is asserted on a
+    source whose answer is known, not on the live file, whose tool list is
+    allowed to grow without editing this test."""
+    declared, unseen = _registrations(SYNTHETIC_CORE)
+    assert declared == {"tool_a": ["x", "y"], "tool_b": [],
+                        "refresh_mirror": []}
+    assert unseen == [10]
+    assert _adapter_only(declared) == {"tool_a": ["x", "y"], "tool_b": []}
+    assert _verb_literals(SYNTHETIC_CORE) == ["refresh_mirror"]
+
+
+def test_no_broker_verb_is_declared_as_a_literal_in_the_adapter():
+    """Broker verbs reach the seat from generated broker_tools.py only."""
+    adapter = _adapter()
+    shadowed = _verb_literals(adapter.source)
+    assert not shadowed, (
+        f"{adapter.at} declares broker verbs {shadowed} as literals; they "
+        f"must come from the generated broker_tools.py, not by hand.")
+
 
 def test_every_adapter_tool_the_adapter_registers_is_described():
-    """The invisible direction, ported: a tool a seat HAS and no catalogue
-    mentions. For a broker verb that shows up as verbs.toml drift; an adapter
-    tool has no verbs.toml row to drift against, so this test is the only
-    place it can show up at all."""
-    declared = _adapter_only(_declared_tools(_adapter_core()))
-    described = gen.load_adapter_tools()
-    missing = sorted(set(declared) - set(described))
+    """The invisible direction: a tool a seat HAS and no catalogue mentions."""
+    adapter = _adapter()
+    declared = _adapter_only(_declared_tools(adapter.source))
+    missing = sorted(set(declared) - set(gen.load_adapter_tools()))
     assert not missing, (
-        f"core.py registers {missing} and verb_surface.toml's [adapter_tools] "
-        f"does not describe them — nothing in this house says what shape they "
-        f"have. Add an entry each.")
+        f"{adapter.at} registers {missing} and verb_surface.toml's "
+        f"[adapter_tools] does not describe them. Add an entry each.")
 
 
 def test_every_described_adapter_tool_actually_exists():
-    """The other direction: a described tool the adapter lacks. Harmless in
-    the way a button wired to nothing is harmless — right up until someone
-    reads the catalogue and believes it."""
-    declared = _adapter_only(_declared_tools(_adapter_core()))
-    described = gen.load_adapter_tools()
-    phantom = sorted(set(described) - set(declared))
+    """The other direction: a described tool the adapter lacks. Harmless the
+    way a button wired to nothing is harmless — until someone believes it."""
+    adapter = _adapter()
+    declared = _adapter_only(_declared_tools(adapter.source))
+    phantom = sorted(set(gen.load_adapter_tools()) - set(declared))
     assert not phantom, (
-        f"verb_surface.toml describes {phantom} and core.py registers no such "
-        f"tool. Remove the entry, or write the tool.")
+        f"verb_surface.toml describes {phantom} and {adapter.at} registers "
+        f"no such tool. Remove the entry, or write the tool.")
 
 
 def test_the_described_args_are_the_args_the_tool_takes():
     """Tool-level agreement is not enough: `rev` and `sha_only` arrived on a
-    tool that already existed (2026-08-19), and a table that tracked only
-    names would have gone on being correct and useless through that change."""
-    declared = _adapter_only(_declared_tools(_adapter_core()))
+    tool that already existed, and a names-only table would have gone on
+    being correct and useless through that change."""
+    adapter = _adapter()
+    declared = _adapter_only(_declared_tools(adapter.source))
     for name, entry in gen.load_adapter_tools().items():
         if name not in declared:
             continue                      # the phantom test above owns that
         assert sorted(entry["args"]) == declared[name], (
             f"{name}: verb_surface.toml says args {sorted(entry['args'])}, "
-            f"core.py's schema says {declared[name]}")
+            f"{adapter.at} says {declared[name]}")
+
+
+def test_a_drift_failure_names_the_adapter_commit(monkeypatch, tmp_path):
+    """A cross-repo red names the commit that drifted, not just the file."""
+    repo = tmp_path / "adapter"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "core.py").write_text(
+        'EXTRA = {"name": "extra_tool"}\nregister_tool(EXTRA, h)\n')
+    subprocess.run(["git", "-C", str(repo), "add", "core.py"], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c",
+                    "user.email=t@t", "commit", "-qm", "x"], check=True)
+    sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    monkeypatch.setenv(ADAPTER_CORE_ENV, f"{repo}:HEAD:core.py")
+    with pytest.raises(AssertionError, match=sha[:12]):
+        test_every_adapter_tool_the_adapter_registers_is_described()
 
 
 def test_read_repo_file_is_described_with_its_rev_and_sha_only(tmp_path):

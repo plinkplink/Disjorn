@@ -44,8 +44,72 @@ Tier 1 — tests, one config key, two doc sentences. No production code path. Cl
 ## Token estimate
 Small. One file of real work, two of prose.
 
+## Revisions
+- rev 1 — 2026-09-23, folds on `port/adapter-drift` after a pre-merge
+  diagnosis. The build at `f5c5981` was right about the suite and wrong about
+  where it runs. The `/merge` gate (`run-gates.sh`, which came to main after this
+  branch was cut) runs the suite in a `--network none` container with no
+  broker.toml and no `/opt/disjorn`. So the "unreachable" skip was reached on
+  every gate run, and `test_the_shipped_configuration_does_not_skip_the_drift_checks`
+  would have turned every `/build` banner and every `/merge` red. That is chronic
+  noise, the thing this spec exists to end. Folds:
+  1. **Gate pin** (`harness/cc/run-gates.sh`, builder lane): mount the gatehouse
+     `claudette.git` read-only at `/opt/claudette.git` and always set
+     `DISJORN_ADAPTER_CORE=/opt/claudette.git:disjorn-port:core.py`. A missing
+     repo is named on stderr and the pin is still set, so the suite goes red
+     naming what it tried. `--network none` is unchanged.
+  2. **Deployed == pinned** (claudette.git `claudette-update.sh`, custodian lane):
+     after the ff-merge into her clone, fast-forward-only push `disjorn-port` to
+     the gatehouse. It fails loudly if the push is refused. The pin tracks a branch
+     that the deploy itself advances, so it never needs a bump.
+  3. **Scan self-test re-anchored again**: the hardcoded
+     `{read_repo_file, brave_search}` equality went red on every legitimate new
+     adapter tool, duplicating the table test. The scanner is now asserted on a
+     synthetic source. Against the live `core.py`, the only assertion is that no
+     `[verbs]` tool name is declared there as a literal (`_adapter_only` used to
+     subtract those silently).
+  4. **Prose wall**: the history that lived in the test file moved here. Until
+     this spec, `_adapter_core()` walked four candidate filesystem paths, one of
+     them the host layout `REPO/bots/claudette/core.py`, and skipped when none
+     existed. The drift tests read "skipped" under a suite everyone read as green.
+     The static-scan test asserted `start_build` was a `core.py` literal, which
+     stopped being true when broker verbs moved to the generated `BROKER_TOOLS`
+     loop. `test_verb_surface.py` holds its baseline exactly, and both dated
+     citations are gone.
+  5. **Messages**: the no-pin skip names the gate's env pin instead of claiming to
+     be unreachable. Every drift failure names the resolved adapter commit
+     (`core.py at <sha> (<rev> in <repo>, from <origin>)`).
+  6. **Skips named where a human reads**: the gate summary line
+     (`harness/broker/gates.py`) appends each suite's skip count. `run-gates.sh`
+     also passes `-rs` to both suites, because item 5's `conftest.py` hook is
+     inert under the gate's `pytest harness`. A nested conftest loads after
+     the terminal reporter has read its options, so it only names skips when
+     pytest starts inside `harness/broker/tests`.
+
+  Claudette's proposal of 2026-09-23 (#custodian #2850, "the static-scan test is
+  broken on main and has never shown red") is covered here: the `start_build`
+  assertion is gone (built at `f5c5981`), and fold 3 asserts broker verbs are
+  absent from `core.py`, as she asked. Her suggested positive anchor
+  (`remember`/`recall`) is not used. Those tools arrive through the
+  `MEMORY_TOOLS` loop, which the static scan cannot see, so asserting them would
+  fail on the first run.
+
 ## Gates
 Broker suite green, AND a run showing the five adapter-drift tests executed rather than skipped. A pass count alone doesn't gate this one, for the obvious reason.
+
+## Review record
+- Gable, #custodian seq 3018, on `1dad145`: PASS on his lane
+  (`run-gates.sh` mount and pin, `test_run_gates.py`, the pin logic). His
+  deploy precondition, that the gate can read `claudette.git` under keep-id
+  as res-gable, was met by a real gate run as res-gable with the branch's
+  `run-gates.sh`: exit 0, harness 2364 passed, 19 skipped, none in
+  `test_verb_surface.py`.
+- Claudette, #custodian seq 3017, on `1dad145` + claudette.git `af08f04`:
+  two holds in `claudette-update.sh` (push before deploy; a failed push
+  worded as a failed push), folded at claudette.git `f2cf149`; notes 3 and
+  4 folded at `a78b246`. Seq 3021: PASS on `f2cf149` + `a78b246`. Her
+  remaining note (say the pin already moved when the clone will not
+  fast-forward) folded at claudette.git `413eb1e`.
 
 ## Confirm record
 - **Confirmed by**: plink

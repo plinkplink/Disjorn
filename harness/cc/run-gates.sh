@@ -33,6 +33,9 @@ GATEHOUSE="${RESIDENT_GATEHOUSE:-/var/lib/disjorn-broker/gatehouse}"
 # Mounted, not installed: `npm install` needs a network this gate lacks.
 NODE_MODULES="${RESIDENT_CLIENT_NODE_MODULES:-/srv/disjorn-client-node-modules}"
 BARE="$GATEHOUSE/disjorn.git"
+# The adapter-drift tests read core.py from here; the pin is set even when it is missing.
+ADAPTER_REPO="$GATEHOUSE/claudette.git"
+ADAPTER_PIN="/opt/claudette.git:disjorn-port:core.py"
 BRANCH="loop/$SLUG"
 RUN_ROOT="${RESIDENT_GATE_RUNS:-$HOME/gate-runs}"
 
@@ -60,6 +63,11 @@ git -C "$WORK" checkout --quiet --detach FETCH_HEAD >&2 \
 CLIENT_CHANGED="$(git -C "$WORK" diff --name-only main...HEAD -- client/ 2>/dev/null | head -1)"
 
 mounts=( -v "$WORK:/work" )
+if [ -d "$ADAPTER_REPO" ]; then
+  mounts+=( -v "$ADAPTER_REPO:/opt/claudette.git:ro" )
+else
+  echo "$TAG: adapter repo missing: $ADAPTER_REPO — the adapter-drift tests will be red" >&2
+fi
 client_gate=1
 if [ -n "$CLIENT_CHANGED" ]; then
   if [ -d "$NODE_MODULES" ]; then
@@ -74,10 +82,10 @@ fi
 # PYTHONPATH names the in-tree house_memory package; the image has no copy.
 INNER='
 set -u
-cd /work/server && python3 -m pytest tests -q -p no:cacheprovider >&2
+cd /work/server && python3 -m pytest tests -q -rs -p no:cacheprovider >&2
 _server=$?
 export PYTHONPATH=/work/harness/house_memory
-cd /work && python3 -m pytest harness -q -p no:cacheprovider --ignore=harness/cc/tests/test_container.sh >&2
+cd /work && python3 -m pytest harness -q -rs -p no:cacheprovider --ignore=harness/cc/tests/test_container.sh >&2
 _harness=$?
 if [ "$_server" -eq 0 ] && [ "$_harness" -eq 0 ]; then
   echo "GATE tests pass"
@@ -112,6 +120,7 @@ out="$(podman run --rm --network none \
   --name "$CONTAINER" \
   --userns "keep-id:uid=1000,gid=1000" \
   "${mounts[@]}" \
+  -e "DISJORN_ADAPTER_CORE=$ADAPTER_PIN" \
   -e "GATE_CLIENT=$([ -n "$CLIENT_CHANGED" ] && [ "$client_gate" = 1 ] && echo 1 || echo 0)" \
   "$IMAGE" bash -c "$INNER")"
 podman_rc=$?
