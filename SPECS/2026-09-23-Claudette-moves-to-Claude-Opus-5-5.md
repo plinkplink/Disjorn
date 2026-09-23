@@ -158,6 +158,18 @@ keyed on the model id (fold 3), so a model revert drops them by itself.
 - **#custodian seq**: 2826
 - **Confirmed at**: 2026-09-23T06:35:58Z
 
+## Review record
+- Spec review and build: BuildGable, the keyboard seat. Read-back PASS and
+  spine line signed: Claudette at #custodian 2841.
+- Flipped 2026-09-23 07:12:45Z (Disjorn) and 07:12:48Z (Discord).
+  bots/claudette merge `204938f`, spine `ad5c4fa`.
+- Acceptance gates, on her first 5.5 turn (#2844):
+  1. Progress one-liners between tool calls reached the channel.
+  2. The long review post landed whole, in about 40 s.
+  3. Memories surfaced (recalled 3) over five API rounds with no INPUT
+     TRANSFORMATIONS, refusal, token wall or upstream error, and cache reads
+     climbing.
+- Day-one voice check: plink's.
+
 ## Status
-`building`
-<!-- claimed by the keyboard seat; built on bots/claudette, not a detached build -->
+`merged`
