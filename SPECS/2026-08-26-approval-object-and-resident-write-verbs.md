@@ -116,6 +116,12 @@ Medium per slice; two build slots total.
 <!-- No Confirm record → no build. This is the gate. -->
 
 ## Status
-failed
+built@loop/2026-08-26-approval-object-and-resident-write-verbs
+<!-- SLICE A ONLY (object + broker verbs); slice B, the client modal, is a
+     separate press and is not on this branch. -->
+<!-- The build was killed at its timeout and the work rescued by hand onto
+     loop/2026-08-26-approval-object-and-resident-write-verbs (f2c4bd7);
+     main was then merged into that tip at the keyboard (port/approval-object).
+     A human reviewing this branch owns the Status word. -->
 <!-- set by the broker on 2026-08-26 18:23Z (start-build, 2026-08-26-approval-object-and-resident-write-verbs): build failed: timed out after 3600s — killed. To allow another build, set this back to `confirmed` (the confirm record above still stands). -->
 <!-- set by the broker on 2026-08-26 17:23Z (start-build, 2026-08-26-approval-object-and-resident-write-verbs): build running as disjorn-build-2026-08-26-approval-object-and-resident-write-verbs.service -> loop/2026-08-26-approval-object-and-resident-write-verbs, launched by gable (confirmed by plink, #custodian seq 2022). Not buildable again until this line moves. -->
