@@ -8,7 +8,7 @@ plink, #custodian seq 2022). Slice A: the table and the endpoints. No client.
 | GET    | /approval/proposals           | anyone authenticated |
 | GET    | /approval/proposals/{id}      | anyone authenticated |
 | POST   | /approval/proposals           | admin, bot           |
-| POST   | /approval/proposals/{id}/act  | admin, bot           |
+| POST   | /approval/proposals/{id}/act  | admin as self, relay |
 
 ONE STATE OF RECORD. plink answers from a client modal (slice B); residents
 answer through the broker's `approval-list` / `approval-show` / `approval-act`
@@ -29,6 +29,7 @@ computed from the same function inside the acting transaction; there is no close
 endpoint.
 """
 
+import re
 from typing import Annotated, Literal, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
@@ -53,6 +54,9 @@ MAX_TEXT_CHARS = 20000
 SLUG_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
 
 ACTIONS = ("approve", "deny", "rework")
+
+# A resident seat's principal name. Anything else configured is a person.
+RESIDENT_PRINCIPAL_RE = re.compile(r"^res-[a-z][a-z0-9-]*$")
 
 
 # ── the arming gate ─────────────────────────────────────────────────────────
@@ -219,7 +223,7 @@ class ProposalIn(BaseModel):
 
 
 class ActIn(BaseModel):
-    principal: str = Field(min_length=1, max_length=100)
+    principal: Optional[str] = Field(default=None, min_length=1, max_length=100)
     action: Literal["approve", "deny", "rework"]
     remarks: Optional[str] = Field(default=None, max_length=MAX_REMARKS_CHARS)
 
@@ -259,36 +263,58 @@ async def create_proposal(actor: CurrentActor,
     return {"proposal": await _compose(await _require_proposal(proposal_id))}
 
 
+def _acting_principal(actor: Actor, named: Optional[str]) -> str:
+    """Who this act answers as. Never taken from the caller except from the
+    relay, which stamps a resident seat from SO_PEERCRED; a relayed act can
+    never be a person's, and a person can only ever be themselves."""
+    settings = get_settings()
+    principals = settings.approval_principals
+    if actor.type == "user":
+        me = actor.user.username if actor.user else ""
+        if named is not None and named != me:
+            raise HTTPException(
+                status_code=403,
+                detail=f"You can only answer as yourself ({me}), not as "
+                       f"{named}.")
+        if me not in principals:
+            raise HTTPException(
+                status_code=403,
+                detail=f"{me} is not a principal on this server.")
+        return me
+    bot_name = actor.bot.name if actor.bot else ""
+    if bot_name not in settings.APPROVAL_RELAY_BOT_NAMES:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Bot {bot_name!r} is not an approval relay "
+                   f"(APPROVAL_RELAY_BOT_NAMES); only the relay answers for a "
+                   f"resident.")
+    if not named:
+        raise HTTPException(status_code=400,
+                            detail="The relay must name the resident it "
+                                   "answers for.")
+    if named not in principals:
+        raise HTTPException(
+            status_code=400,
+            detail=f"'{named}' is not a principal on this server. "
+                   f"Valid principals: {', '.join(principals)}.")
+    if not RESIDENT_PRINCIPAL_RE.match(named):
+        raise HTTPException(
+            status_code=403,
+            detail=f"A relayed answer cannot be {named}'s: a person answers "
+                   f"from their own session.")
+    return named
+
+
 @router.post("/approval/proposals/{proposal_id}/act")
 async def act_on_proposal(proposal_id: int, actor: CurrentActor,
                           body: ActIn = Body(...)) -> dict:
-    """One principal's answer: approve, deny or rework, with remarks.
-
-    WHO MAY ANSWER AS WHOM is the load-bearing rule. A signed-in human answers
-    as themselves and nobody else — the client modal is plink's seat, not a way
-    to answer for a resident. A bot may name any configured principal, because
-    the broker stamps it from the connecting seat's SO_PEERCRED exactly as
-    `board-flag` stamps its author, and this process cannot re-derive that.
-
-    Re-acting replaces that principal's row (primary key, not an append log): a
-    principal may change its mind while the proposal is open, and the new
-    `acted_at` is when they did."""
+    """One principal's answer, as `_acting_principal` derives it. Re-acting
+    replaces that principal's row: a mind may change while the proposal is
+    open, and `acted_at` says when."""
     _require_enabled()
     _require_writer(actor)
     proposal = await _require_proposal(proposal_id)
-    principals = get_settings().approval_principals
-    if body.principal not in principals:
-        raise HTTPException(
-            status_code=400,
-            detail=f"'{body.principal}' is not a principal on this server. "
-                   f"Valid principals: {', '.join(principals)}.")
-    if actor.type == "user":
-        username = actor.user.username if actor.user else None
-        if body.principal != username:
-            raise HTTPException(
-                status_code=403,
-                detail=f"You can only answer as yourself ({username}), not as "
-                       f"{body.principal}.")
+    principal = _acting_principal(actor, body.principal)
     if proposal["closed_at"] is not None:
         raise HTTPException(
             status_code=409,
@@ -311,7 +337,7 @@ async def act_on_proposal(proposal_id: int, actor: CurrentActor,
             "acted_by_id = excluded.acted_by_id, "
             "acted_by_label = excluded.acted_by_label, "
             "acted_at = excluded.acted_at",
-            (proposal_id, body.principal, body.action, body.remarks,
+            (proposal_id, principal, body.action, body.remarks,
              actor.type, actor.id, label, now))
         rows = await db.fetch_all(
             "SELECT state FROM approval_state WHERE proposal_id = ?",

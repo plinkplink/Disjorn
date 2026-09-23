@@ -15,6 +15,7 @@ Three claims are on trial and the rest is detail:
    and a `rework` closes nothing.
 """
 
+import httpx
 import pytest
 
 from app import db
@@ -70,6 +71,25 @@ async def login(client, username: str) -> None:
 
 def key(api_key: str = BOT_KEY) -> dict:
     return {"X-Api-Key": api_key}
+
+
+@pytest.fixture
+async def plink(app, house_origin):
+    """plink's own signed-in session, on a client of its own: a cookie on the
+    shared client would turn every later bot call into a plink call."""
+    await make_user("plink", admin=True)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url=house_origin,
+                                 headers={"Origin": house_origin}) as c:
+        await login(c, "plink")
+        yield c
+
+
+async def answer(client, plink, proposal_id: int, principal: str, action: str):
+    """plink answers from his session; a resident answers through the relay."""
+    if principal == "plink":
+        return await act(plink, proposal_id, "plink", action, headers={})
+    return await act(client, proposal_id, principal, action)
 
 
 async def file_proposal(client, slug: str = "2026-08-26-approval-object",
@@ -205,8 +225,8 @@ async def test_an_unknown_proposal_id_is_a_404(client, app, armed):
 
 async def test_a_resident_answers_through_the_broker_with_typed_attribution(
         client, app, armed):
-    """The broker names the principal from SO_PEERCRED; the server cannot
-    re-derive that, so a bot may name any configured principal."""
+    """The broker stamps the resident principal from SO_PEERCRED; the server
+    takes a named principal only from the configured relay."""
     bot_id = await make_bot()
     proposal = await file_proposal(client)
     r = await act(client, proposal["id"], "res-claudette", "approve",
@@ -250,6 +270,81 @@ async def test_a_human_can_answer_as_themselves(client, app, armed):
                                  "label": "Plink"}
 
 
+async def pending(proposal_id: int, principal: str) -> bool:
+    row = await db.fetch_one(
+        "SELECT state FROM approval_state WHERE proposal_id = ? AND "
+        "principal = ?", (proposal_id, principal))
+    return row["state"] == "pending"
+
+
+async def test_a_bot_off_the_relay_list_cannot_answer(client, app, armed):
+    """Any other bot key (a resident adapter's, the keyboard's) is refused,
+    whatever principal it names."""
+    await make_bot()
+    await make_bot("Gable", "gable-own-key")
+    proposal = await file_proposal(client)
+    for principal in PRINCIPALS:
+        r = await act(client, proposal["id"], principal, "approve",
+                      headers=key("gable-own-key"))
+        assert r.status_code == 403, (principal, r.text)
+        assert "APPROVAL_RELAY_BOT_NAMES" in r.json()["detail"]
+        assert await pending(proposal["id"], principal)
+
+
+async def test_the_relay_cannot_answer_as_a_human_principal(client, app, armed):
+    """A relayed answer is always a resident's; plink answers from his own
+    session or not at all."""
+    await make_bot()
+    proposal = await file_proposal(client)
+    r = await act(client, proposal["id"], "plink", "approve")
+    assert r.status_code == 403
+    assert "plink" in r.json()["detail"]
+    assert await pending(proposal["id"], "plink")
+
+
+async def test_the_relay_list_is_config(client, app, armed, monkeypatch):
+    monkeypatch.setenv("APPROVAL_RELAY_BOT_NAMES", '["relay"]')
+    reset_settings_cache()
+    await make_bot()                      # "broker", now off the list
+    await make_bot("relay", "relay-key")
+    proposal = await file_proposal(client)
+    r = await act(client, proposal["id"], "res-gable", "approve")
+    assert r.status_code == 403
+    r = await act(client, proposal["id"], "res-gable", "approve",
+                  headers=key("relay-key"))
+    assert r.status_code == 200, r.text
+
+
+async def test_a_humans_principal_is_derived_not_named(client, app, armed, plink):
+    """A signed-in human is their own principal; naming one is optional, and
+    naming anyone else is refused."""
+    await make_bot()
+    proposal = await file_proposal(client)
+    r = await plink.post(f"/approval/proposals/{proposal['id']}/act",
+                         json={"action": "rework", "remarks": "Tighten it."})
+    assert r.status_code == 200, r.text
+    state = next(s for s in r.json()["proposal"]["states"]
+                 if s["principal"] == "plink")
+    assert state["state"] == "rework"
+
+
+async def test_an_admin_who_is_not_a_principal_cannot_answer(client, app, armed):
+    await make_bot()
+    proposal = await file_proposal(client)
+    await make_user("deputy", admin=True)
+    await login(client, "deputy")
+    r = await act(client, proposal["id"], "deputy", "approve", headers={})
+    assert r.status_code == 403
+
+
+async def test_the_relay_must_name_the_resident(client, app, armed):
+    await make_bot()
+    proposal = await file_proposal(client)
+    r = await client.post(f"/approval/proposals/{proposal['id']}/act",
+                          json={"action": "approve"}, headers=key())
+    assert r.status_code == 400
+
+
 async def test_an_unknown_principal_is_refused_and_names_the_valid_set(
         client, app, armed):
     await make_bot()
@@ -285,22 +380,23 @@ async def test_re_acting_replaces_that_principals_row_rather_than_appending(
 # ── the derived decision ────────────────────────────────────────────────────
 
 async def test_every_principal_approving_closes_the_proposal_as_approved(
-        client, app, armed):
+        client, app, armed, plink):
     await make_bot()
     proposal = await file_proposal(client)
     for principal in PRINCIPALS:
-        r = await act(client, proposal["id"], principal, "approve")
+        r = await answer(client, plink, proposal["id"], principal, "approve")
         assert r.status_code == 200, r.text
     body = r.json()["proposal"]
     assert body["decision"] == "approved"
     assert body["closed_at"]
 
 
-async def test_a_single_deny_closes_the_proposal_as_denied(client, app, armed):
+async def test_a_single_deny_closes_the_proposal_as_denied(
+        client, app, armed, plink):
     """Denial outranks everything, and it does not wait for the others."""
     await make_bot()
     proposal = await file_proposal(client)
-    await act(client, proposal["id"], "plink", "approve")
+    await answer(client, plink, proposal["id"], "plink", "approve")
     body = (await act(client, proposal["id"], "res-gable",
                       "deny")).json()["proposal"]
     assert body["decision"] == "denied"
@@ -317,19 +413,19 @@ async def test_a_rework_does_not_close_the_proposal(client, app, armed):
     assert body["closed_at"] is None
 
 
-async def test_deny_outranks_rework(client, app, armed):
+async def test_deny_outranks_rework(client, app, armed, plink):
     await make_bot()
     proposal = await file_proposal(client)
     await act(client, proposal["id"], "res-claudette", "rework")
-    body = (await act(client, proposal["id"], "plink",
-                      "deny")).json()["proposal"]
+    body = (await answer(client, plink, proposal["id"], "plink",
+                         "deny")).json()["proposal"]
     assert body["decision"] == "denied"
 
 
-async def test_answering_a_closed_proposal_is_refused(client, app, armed):
+async def test_answering_a_closed_proposal_is_refused(client, app, armed, plink):
     await make_bot()
     proposal = await file_proposal(client)
-    await act(client, proposal["id"], "plink", "deny")
+    await answer(client, plink, proposal["id"], "plink", "deny")
     r = await act(client, proposal["id"], "res-gable", "approve")
     assert r.status_code == 409
 
@@ -345,12 +441,12 @@ async def test_the_decision_is_derived_not_stored(client, app, armed):
 # ── listing ─────────────────────────────────────────────────────────────────
 
 async def test_the_list_is_most_recent_first_and_filters_on_open_or_closed(
-        client, app, armed):
+        client, app, armed, plink):
     await make_bot()
     first = await file_proposal(client, slug="first")
     second = await file_proposal(client, slug="second")
     for principal in PRINCIPALS:
-        await act(client, first["id"], principal, "approve")
+        await answer(client, plink, first["id"], principal, "approve")
 
     body = (await client.get("/approval/proposals", headers=key())).json()
     assert [p["slug"] for p in body["proposals"]] == ["second", "first"]

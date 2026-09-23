@@ -79,6 +79,7 @@ class Settings(BaseSettings):
     # back-filling a `pending` row into a closed record would rewrite what was
     # asked. Extra principals found in the DB still render, after these.
     APPROVAL_PRINCIPALS: str = "plink,res-claudette,res-gable"
+    APPROVAL_RELAY_BOT_NAMES: list[str] = ["broker"]
 
     # APPS tab (SPECS/2026-08-30-apps-tab-v1.md, stage 1).
     #

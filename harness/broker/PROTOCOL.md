@@ -877,7 +877,11 @@ The server's refusal text is carried back verbatim.
   cannot tell which seat is behind the broker's bot identity, so a principal a
   caller could name is a principal any caller could answer as. Same attribution
   rule as `board-flag`. Re-acting replaces that principal's row; `rework` never
-  closes a proposal, a `deny` does.
+  closes a proposal, a `deny` does. The server takes a named principal only
+  from a bot on its `APPROVAL_RELAY_BOT_NAMES` (default `["broker"]`), and only
+  a `res-*` principal: every other bot key is refused, a relayed answer can
+  never be a person's, and a signed-in admin answers only as their own
+  username.
 
 There is deliberately **no create verb**. Filing a proposal is a server
 endpoint; these three verbs answer proposals, and nothing here can invent one.
