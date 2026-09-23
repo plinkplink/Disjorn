@@ -167,6 +167,8 @@ def build_broker(tmp_path: Path, *, write_verbs: bool = True,
                  repo_prefix: str | None = PREFIX,
                  protected_paths: bool = True,
                  message_db: bool = True,
+                 consumed_ledger: bool = True,
+                 state_dir: Path | None = None,
                  extra_seat: str | None = None) -> WallHarness:
     ledger = tmp_path / "disjorn.db"
     db = sqlite3.connect(ledger)
@@ -184,6 +186,8 @@ def build_broker(tmp_path: Path, *, write_verbs: bool = True,
     surface = root if root is not None else tmp_path / "surface"
     surface.mkdir(exist_ok=True)
     (surface / "spine").mkdir(exist_ok=True)
+    state = state_dir if state_dir is not None else tmp_path / "state"
+    state.mkdir(exist_ok=True)
     tier_map = tmp_path / "protected-paths.toml"
     tier_map.write_text("[protected]\nfiles = []\n"
                         f"[tiers.{SEAT}]\ntier1 = [\"{PREFIX}/spine\"]\n")
@@ -194,6 +198,8 @@ def build_broker(tmp_path: Path, *, write_verbs: bool = True,
         block += f"freshness_sec = {FRESHNESS}\n"
         if message_db:
             block += f'message_db = "{ledger}"\n'
+        if consumed_ledger:
+            block += f'consumed_ledger = "{state / "write-consumed.jsonl"}"\n'
         block += f"\n[write_verbs.{extra_seat or SEAT}]\n"
         if author is not None:
             block += f'author = "{author}"\n'
@@ -230,6 +236,7 @@ def build_broker(tmp_path: Path, *, write_verbs: bool = True,
     verbs_path.write_text(f'[{SEAT}]\n"apply-posted-write" = true\n')
     broker = Broker(load_config(str(broker_toml)), str(verbs_path))
     h = WallHarness(broker, verbs_path, ledger, surface, tier_map)
+    h.consumed = state / "write-consumed.jsonl"
     t = threading.Thread(target=broker.serve_forever, daemon=True)
     t.start()
     deadline = time.time() + 5
@@ -435,6 +442,60 @@ def test_consume_happens_before_the_write(wall):
     assert "already consumed" in retry["error"]["message"]
 
 
+def test_a_spent_seq_still_refuses_after_the_audit_log_is_truncated(wall):
+    """The consumed-set is its own file, so the audit log can be rotated,
+    truncated or lost without re-arming a spent record."""
+    seq = wall.post_record(f"{PREFIX}/spine/05.md", "first\n")
+    assert wall.apply(seq)["ok"] is True
+    wall.surface_file("spine/05.md").write_text("edited by hand\n")
+    Path(wall.broker.audit_path).write_text("")
+    resp = wall.apply(seq)
+    assert resp["error"]["code"] == "bad-args"
+    assert "already consumed" in resp["error"]["message"]
+    assert wall.surface_file("spine/05.md").read_text() == "edited by hand\n"
+
+
+def test_a_spent_seq_still_refuses_after_the_audit_log_is_rotated(wall):
+    seq = wall.post_record(f"{PREFIX}/spine/05.md", "first\n")
+    assert wall.apply(seq)["ok"] is True
+    audit = Path(wall.broker.audit_path)
+    audit.rename(audit.with_suffix(".jsonl.1"))
+    assert "already consumed" in wall.apply(seq)["error"]["message"]
+
+
+def test_the_consumed_set_names_seq_seat_path_and_hash(wall):
+    content = "hello\n"
+    seq = wall.post_record(f"{PREFIX}/spine/05.md", content)
+    assert wall.apply(seq)["ok"] is True
+    entry, = [json.loads(ln) for ln in wall.consumed.read_text().splitlines()]
+    assert entry["seq"] == seq and entry["seat"] == SEAT
+    assert entry["path"] == f"{PREFIX}/spine/05.md"
+    assert entry["sha256"] == hashlib.sha256(content.encode()).hexdigest()
+
+
+def test_an_unreadable_consumed_set_refuses_the_write(wall):
+    """A line that does not parse could be hiding a spent seq."""
+    wall.consumed.write_text("not json\n")
+    seq = wall.post_record(f"{PREFIX}/spine/05.md", "hello\n")
+    resp = wall.apply(seq)
+    assert resp["error"]["code"] == "internal"
+    assert not wall.surface_file("spine/05.md").exists()
+
+
+def test_a_torn_final_line_is_dropped_not_fatal(wall):
+    """A crash mid-append leaves a line with no newline. Its fsync never
+    returned, so nothing was written on it: the next mark trims it away."""
+    first = wall.post_record(f"{PREFIX}/spine/05.md", "one\n")
+    assert wall.apply(first)["ok"] is True
+    with wall.consumed.open("a") as fh:
+        fh.write('{"seq": 9')
+    second = wall.post_record(f"{PREFIX}/spine/06.md", "two\n")
+    assert wall.apply(second)["ok"] is True
+    seqs = [json.loads(ln)["seq"] for ln in wall.consumed.read_text().splitlines()]
+    assert seqs == [first, second]
+    assert "already consumed" in wall.apply(first)["error"]["message"]
+
+
 # ------------------------------------------------------------ the tier map
 
 def test_a_path_no_tier_row_names_is_refused(wall):
@@ -540,6 +601,22 @@ def test_no_tier_map_configured_refuses_to_start(tmp_path):
     with pytest.raises(ConfigError) as exc:
         build_broker(tmp_path, protected_paths=False)
     assert "protected_paths" in str(exc.value)
+
+
+def test_no_consumed_ledger_refuses_to_start(tmp_path):
+    with pytest.raises(ConfigError) as exc:
+        build_broker(tmp_path, consumed_ledger=False)
+    assert "consumed_ledger" in str(exc.value)
+
+
+def test_a_resident_writable_consumed_ledger_dir_refuses_to_start(tmp_path):
+    state = tmp_path / "open-state"
+    state.mkdir()
+    state.chmod(0o777)
+    with pytest.raises(ConfigError) as exc:
+        build_broker(tmp_path, state_dir=state)
+    assert "consumed_ledger" in str(exc.value)
+    assert "world-writable" in str(exc.value)
 
 
 def test_no_message_store_refuses_to_start(tmp_path):

@@ -1862,20 +1862,17 @@ class Broker:
                 "gate_log_dir", DEFAULT_GATE_LOG_DIR)
             self.merge_work_dir = self._parse_build_dir(
                 "merge_work_dir", DEFAULT_MERGE_WORK_DIR)
-        # The fails-closed Tier-1 wall (2026-08-26). Absent section = no write
-        # surface: the verb exists, every caller is refused, and the refusal is
-        # audited — the same shape as an unflipped kill switch. Present section
-        # = plink means seats to write their own surfaces, and then every field
-        # below is mandatory and checked here, once, loudly.
+        # The fails-closed Tier-1 wall. An empty [write_verbs] is no write
+        # surface (every caller refused and audited, like an unflipped switch);
+        # a populated one is checked here, once, loudly.
         self.write_verbs: dict[str, Any] = config.get("write_verbs", {}) or {}
         self.write_seats: dict[str, dict] = (
             self._parse_write_seats() if self.write_verbs else {})
+        self.write_consumed: str = (
+            self._parse_write_consumed() if self.write_verbs else "")
         self._audit_lock = threading.Lock()
-        # Consume-then-write (rev 2) is only atomic against a concurrent caller
-        # if the consumed-set check and the consume mark are one step. The
-        # audit log IS the consumed-set, so this lock is held across reading it
-        # and appending to it — the same count-with-reservation discipline every
-        # other budget in this file runs under.
+        # Held across reading the consumed-set and appending to it, so two
+        # concurrent calls can never both spend one record.
         self._write_lock = threading.Lock()
         # Build-budget lock (H13-D4): count-with-reservation is held under this, so
         # two concurrent start-builds can NEVER both slip past the cap — the
@@ -2164,6 +2161,27 @@ class Broker:
                 "ledger itself; with no ledger there is nothing to read. "
                 "Refusing to start.")
         return seats
+
+    def _parse_write_consumed(self) -> str:
+        """`[write_verbs].consumed_ledger`: the consumed-set, one JSON line per
+        spent seq. Mandatory, in a resident-unwritable directory, because a seat
+        that could truncate it could spend one record twice."""
+        path = self.write_verbs.get("consumed_ledger")
+        if not isinstance(path, str) or not path.strip().startswith("/"):
+            raise ConfigError(
+                "[write_verbs] is configured but write_verbs.consumed_ledger is "
+                "missing or not an absolute path; refusing to start (without "
+                "it no record can be marked spent)")
+        path = path.strip()
+        parent = assert_dir_resident_unwritable(
+            os.path.dirname(path),
+            label="write_verbs.consumed_ledger",
+            remedy=("Keep it in the broker's own state dir, e.g. "
+                    "/var/lib/disjorn-broker/write-consumed.jsonl."),
+            stake=("A seat that can truncate the consumed-set can spend one "
+                   "record twice."),
+            uid_map=self.uid_map, residents=self.residents)
+        return os.path.join(parent, os.path.basename(path))
 
     def _write_message_db(self) -> Optional[str]:
         """Where the #custodian ledger lives. `[write_verbs].message_db` wins,
@@ -5980,32 +5998,64 @@ class Broker:
         return tiers if isinstance(tiers, dict) else {}
 
     def _consumed_seqs(self) -> set[int]:
-        """The consumed-set: every seq the audit log records as spent.
-
-        The spec pins the audit log as the ledger here, and it is the right
-        one — it is append-only, plink-owned, off every resident's filesystem,
-        and already the thing a reader trusts about what this broker did."""
+        """Every seq the consumed-set records as spent. A complete line that
+        does not parse refuses the write, since it could be hiding a spent seq;
+        a torn final line (no newline) is skipped, because its fsync never
+        returned and so nothing was written on it."""
         seqs: set[int] = set()
         try:
-            with open(self.audit_path, "r", encoding="utf-8") as fh:
+            with open(self.write_consumed, "r", encoding="utf-8") as fh:
                 for line in fh:
-                    if '"consumed_seq"' not in line:
+                    if not line.endswith("\n"):
+                        break
+                    if not line.strip():
                         continue
                     try:
-                        rec = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    value = rec.get("consumed_seq")
-                    if isinstance(value, int) and not isinstance(value, bool):
-                        seqs.add(value)
+                        value = json.loads(line).get("seq")
+                    except (ValueError, AttributeError):
+                        value = None
+                    if not isinstance(value, int) or isinstance(value, bool):
+                        raise VerbError(
+                            "internal",
+                            f"the consumed-set {self.write_consumed} has a line "
+                            f"that does not parse; refusing the write")
+                    seqs.add(value)
         except FileNotFoundError:
             return seqs
+        except (OSError, UnicodeDecodeError) as exc:
+            raise VerbError("internal",
+                            f"the consumed-set is unreadable ({exc}); refusing "
+                            f"the write") from None
+        return seqs
+
+    def _mark_consumed(self, entry: dict) -> None:
+        """Append one spent seq and fsync it before the target is touched."""
+        line = (json.dumps(entry, ensure_ascii=False) + "\n").encode("utf-8")
+        try:
+            fd = os.open(self.write_consumed,
+                         os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600)
+            try:
+                size = os.fstat(fd).st_size
+                if size:
+                    keep = os.pread(fd, size, 0).rfind(b"\n") + 1
+                    if keep != size:
+                        os.ftruncate(fd, keep)
+                view = memoryview(line)
+                while view:
+                    view = view[os.write(fd, view):]
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            if not size:
+                dfd = os.open(os.path.dirname(self.write_consumed), os.O_RDONLY)
+                try:
+                    os.fsync(dfd)
+                finally:
+                    os.close(dfd)
         except OSError as exc:
             raise VerbError("internal",
-                            f"the audit log is unreadable ({exc}), so the "
-                            f"consumed-set cannot be checked; refusing the "
-                            f"write") from None
-        return seqs
+                            f"the consumed-set cannot be written ({exc}); "
+                            f"refusing the write") from None
 
     def _resolve_write_target(self, seat: dict, repo_path: str) -> str:
         """repo-relative path -> the host file this verb may write, or refuse.
@@ -6127,6 +6177,10 @@ class Broker:
                 raise _bad(f"#custodian seq {seq} is already consumed: one "
                            f"record authorizes exactly one write. Post a fresh "
                            f"record.")
+            self._mark_consumed({
+                "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                "seq": seq, "seat": resident, "path": record["path"],
+                "sha256": record["sha256"]})
             self._audit(resident, WRITE_VERB, {"seq": seq}, True,
                         f"consumed seq {seq} for {record['path']} "
                         f"(tier {tier}) — writing next",

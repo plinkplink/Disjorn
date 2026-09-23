@@ -573,6 +573,12 @@ merge_work_dir = "/var/lib/disjorn-broker/merge-work"
 # and no message store resolvable anywhere, the broker refuses to start: the
 # whole verb is "read the record from the ledger".
 # message_db = "/home/plink/Disjorn/Disjorn/server/data/disjorn.db"
+#
+# consumed_ledger — the consumed-set (check (d)): one JSON line per spent seq,
+# fsync'd before the target is written. REQUIRED once any seat section exists,
+# and its directory must be resident-unwritable or the broker refuses to start.
+# Never the audit log: rotating that must not re-arm a spent record.
+# consumed_ledger = "/var/lib/disjorn-broker/write-consumed.jsonl"
 
 # [write_verbs.res-gable]
 # author — the seat's #custodian identity, as the messages table names it (a

@@ -81,14 +81,12 @@ budget is the `server` principal's; `wake` carries `"wake_id"`; and
 lines: `"merge_started": true` when the call is taken, then `"merge_tier"` and
 `"merged_sha"` when the merge itself lands.
 
-**`apply-posted-write` also writes two lines, and their order is the point.**
-It appends a line marking the #custodian seq it is about to spend
-(`"consumed_seq": <n>`) *before* the ordinary result line. The audit log is
-that verb's consumed-set, and the mark has to be durable before the target file
-is touched — a mark written afterwards would be a mark a crash could skip,
-which is a free replay. So a successful write appends two lines: the consume
-mark, then the ordinary result line. A refused write appends only the ordinary
-denial line, and nothing is consumed.
+**`apply-posted-write` also writes two lines**: a human-readable line marking
+the #custodian seq it is about to spend (`"consumed_seq": <n>`), then the
+ordinary result line. These lines are for readers only. The verb's consumed-set
+is its own file, `[write_verbs].consumed_ledger`, so rotating or truncating the
+audit log re-arms nothing. A refused write appends only the ordinary denial
+line, and nothing is consumed.
 
 ## Verb table
 
@@ -930,8 +928,11 @@ written — it would change the sha, and the write would refuse.
       surface map;
   (c) the post is younger than the freshness window
       (`[write_verbs].freshness_sec`, default 24h);
-  (d) the seq is unconsumed — **one record authorizes exactly one write**, and
-      the broker's audit log is the consumed-set.
+  (d) the seq is unconsumed — **one record authorizes exactly one write**. The
+      consumed-set is `[write_verbs].consumed_ledger`, an append-only JSON-lines
+      file in the broker's state dir (`{ts, seq, seat, path, sha256}` per
+      line), never the audit log. Its directory must be resident-unwritable or
+      the broker refuses to start; a line that does not parse refuses the write.
 
 Any check failing refuses and is audited like every other denial.
 
@@ -941,8 +942,8 @@ an edit can rewrite the content and its sha line together, so a post with
 `reason: "post-deleted"` (both `bad-args`, both audited with the reason). The
 caller posts the record again.
 
-**Consume-then-write.** The consumed mark is appended before the target is
-touched. A crash in between leaves a spent record and an unapplied write, and a
+**Consume-then-write.** The consumed mark is appended to the consumed-set and
+fsync'd before the target is touched. A crash in between leaves a spent record and an unapplied write, and a
 retry against that seq refuses like any consumed seq — the caller posts a fresh
 record. Fail toward the wasted record, never toward a free replay.
 
