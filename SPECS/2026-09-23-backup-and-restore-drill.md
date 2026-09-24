@@ -62,4 +62,5 @@ plink runs the first drill by hand, witnessed in #custodian. It must pass every 
 - **Confirmed at**: 9/23/2026
 
 ## Status
-`confirmed`
+building
+<!-- set by the broker on 2026-09-24 00:07Z (start-build, 2026-09-23-backup-and-restore-drill): build running as disjorn-build-2026-09-23-backup-and-restore-drill.service -> loop/2026-09-23-backup-and-restore-drill, launched by gable (confirmed by plink, #custodian seq 3036). Not buildable again until this line moves. -->
