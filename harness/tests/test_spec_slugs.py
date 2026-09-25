@@ -12,9 +12,19 @@ import brokerd  # noqa: E402
 SPECS = HARNESS.parent / "SPECS"
 
 
+def bad_stems(specs: Path) -> list[str]:
+    cards = brokerd._load_planroom_module().spec_files(specs)
+    return [f.stem for f in cards if not brokerd.BOARD_SLUG_RE.match(f.stem)]
+
+
 def test_every_spec_stem_matches_the_board_slug_pattern():
-    stems = sorted(p.stem for p in SPECS.glob("20*.md"))
-    assert stems, f"no SPECS/20*.md under {SPECS}"
-    bad = [s for s in stems if not brokerd.BOARD_SLUG_RE.match(s)]
+    assert SPECS.is_dir(), f"no SPECS/ at {SPECS}"
+    bad = bad_stems(SPECS)
     assert not bad, ("not a canonical spec slug; rename to lowercase "
                      "YYYY-MM-DD-kebab-name.md:\n" + "\n".join(bad))
+
+
+def test_an_undated_card_file_is_caught(tmp_path):
+    for name in ("README", "TEMPLATE", "PASSDOWN-x", "2026-08-20-thing", "Foo"):
+        (tmp_path / f"{name}.md").write_text("# x\n")
+    assert bad_stems(tmp_path) == ["Foo"]

@@ -425,6 +425,14 @@ def _card(**kw) -> dict:
     return base
 
 
+def spec_files(specs_dir: Path) -> list:
+    if not specs_dir.is_dir():
+        return []
+    return [f for f in sorted(specs_dir.glob("*.md"))
+            if f.stem not in {"README", "TEMPLATE"}
+            and not f.stem.startswith("PASSDOWN")]
+
+
 def derive_cards(config: Optional[dict] = None, *, repo: Optional[Path] = None,
                  gatehouse: Optional[Path] = None,
                  message_db: Optional[str] = None,
@@ -489,9 +497,7 @@ def derive_cards(config: Optional[dict] = None, *, repo: Optional[Path] = None,
         notes.append(f"no SPECS/ directory at {specs_dir} — nothing to derive")
 
     reviewed: set[str] = set()
-    for f in sorted(specs_dir.glob("*.md")) if specs_dir.is_dir() else []:
-        if f.stem in {"README", "TEMPLATE"} or f.stem.startswith("PASSDOWN"):
-            continue
+    for f in spec_files(specs_dir):
         text = f.read_text(encoding="utf-8", errors="replace")
         reviewed |= _reviewed_shas(text)
         status = brokerd().parse_spec_status(text) or ""
