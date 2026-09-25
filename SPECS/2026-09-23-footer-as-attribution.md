@@ -109,4 +109,5 @@ Tier 2. The adapter change edits the path that produces my own posts, and the se
 <!-- No Confirm record → no build. This is the gate. -->
 
 ## Status
-built@loop/2026-09-23-footer-as-attribution
+merged
+<!-- advanced from `built@loop/2026-09-23-footer-as-attribution` by `board --mark-merged` on 2026-09-25: build merged as 5fa46bf. The word `built@loop/2026-09-23-footer-as-attribution` on a merged spec made it indistinguishable from a buildable one. -->
