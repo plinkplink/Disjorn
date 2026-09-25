@@ -1004,14 +1004,14 @@ def seat_surfaces(config: dict) -> list:
     except (OSError, tomllib.TOMLDecodeError) as exc:
         verbs_err = (f"cannot read live verbs.toml {verbs_path}: "
                      f"{getattr(exc, 'strerror', None) or exc}")
-    seats += [s for s, e in table.items() if s not in seats and "shell" not in e]
+    seats += [s for s in table if s not in seats]
     return [_seat_row(s, table.get(s), verbs_path, verbs_err) for s in seats]
 
 
 def _seat_line(s: dict) -> str:
     head = f"seat surface: {s['seat']} "
     if s["state"] == "MATCH":
-        return head + (f"matches live verbs.toml ({s['tools']} tools, "
+        return head + (f"deployed ref matches live verbs.toml ({s['tools']} tools, "
                        f"{s['source']})")
     if s["state"] == "SHELL":
         return head + f"not compared — shell seat, {s['detail']}"
@@ -1020,7 +1020,7 @@ def _seat_line(s: dict) -> str:
             ("not deployed", s["missing"]),
             ("deployed, not listed", s["extra"]),
             ("schema differs", s["changed"])) if verbs]
-        return head + (f"DRIFT from live verbs.toml — {'; '.join(parts)} "
+        return head + (f"deployed ref DRIFT from live verbs.toml — {'; '.join(parts)} "
                        f"({s['source']})")
     return head + f"{s['state']} — {s['detail']}"
 

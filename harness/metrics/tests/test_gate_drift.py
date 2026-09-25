@@ -1406,7 +1406,7 @@ def seat_lines(lane, live=LIVE_VERBS) -> dict:
 def test_a_seat_whose_deployed_tools_match_live_verbs_is_one_quiet_line(lane):
     deploy_tools(lane, emit_tools(lane, LIVE_VERBS))
     assert seat_lines(lane)["res-claudette"] == (
-        "seat surface: res-claudette matches live verbs.toml "
+        "seat surface: res-claudette deployed ref matches live verbs.toml "
         "(4 tools, claudette.git disjorn-port:broker_tools.py)")
 
 
@@ -1419,7 +1419,7 @@ def test_seat_drift_names_each_verb_that_differs_and_no_other(lane):
     deploy_tools(lane, stale)
     line = seat_lines(lane)["res-claudette"]
     assert line.startswith(
-        "seat surface: res-claudette DRIFT from live verbs.toml — ")
+        "seat surface: res-claudette deployed ref DRIFT from live verbs.toml — ")
     assert "not deployed: changed-files" in line
     assert "deployed, not listed: apps-build" in line
     assert "schema differs: refresh-mirror" in line
@@ -1431,7 +1431,7 @@ def test_a_kill_switch_flip_is_not_seat_surface_drift(lane):
                                  '"restart-disjorn" = true', 1)
     assert flipped != LIVE_VERBS
     deploy_tools(lane, emit_tools(lane, flipped))
-    assert "matches live verbs.toml" in seat_lines(lane)["res-claudette"]
+    assert "deployed ref matches live verbs.toml" in seat_lines(lane)["res-claudette"]
 
 
 def test_an_unreadable_deployed_module_is_loud_and_never_a_match(lane):
@@ -1456,6 +1456,15 @@ def test_an_unreadable_live_verbs_toml_is_loud_and_never_a_match(lane):
     assert "matches" not in line
 
 
+def test_every_configured_seat_prints_a_line_when_verbs_toml_is_unreadable(lane):
+    lines = seat_lines(lane, live=None)
+    assert set(lines) == {"res-claudette", "res-gable"}
+    assert lines["res-claudette"].startswith(
+        "seat surface: res-claudette UNCHECKED — ")
+    assert lines["res-gable"] == (
+        "seat surface: res-gable not compared — shell seat, the broker CLI")
+
+
 def test_a_verb_the_catalogue_does_not_describe_is_unchecked(lane):
     deploy_tools(lane, emit_tools(lane, LIVE_VERBS))
     live = LIVE_VERBS.replace('"board-list" = true',
@@ -1470,7 +1479,7 @@ def test_a_seat_with_no_tools_module_named_is_not_configured(lane):
     lines = seat_lines(lane, LIVE_VERBS + '\n[res-caveman]\n"read-metrics" = true\n')
     assert lines["res-caveman"].startswith(
         "seat surface: res-caveman NOT CONFIGURED — ")
-    assert "matches live verbs.toml" in lines["res-claudette"]
+    assert "deployed ref matches live verbs.toml" in lines["res-claudette"]
 
 
 def test_a_shell_seat_is_named_and_not_compared(lane):

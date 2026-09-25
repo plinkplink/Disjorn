@@ -129,24 +129,29 @@ every `res-*` section in `/etc/disjorn-broker/verbs.toml`, the digest runs
 <live> --seat res-<name>` prints today) and compares that, tool by tool, with
 the deployed module's `BROKER_TOOLS` literal. The module is parsed with
 `ast.literal_eval` and never imported. The line reads
-`seat surface: res-claudette matches live verbs.toml (16 tools, claudette.git
-disjorn-port:broker_tools.py)`, or `DRIFT` naming the verbs `not deployed`,
-`deployed, not listed` and `schema differs`. A kill-switch flip is not drift
+`seat surface: res-claudette deployed ref matches live verbs.toml (16 tools,
+claudette.git disjorn-port:broker_tools.py)`, or `deployed ref DRIFT` naming
+the verbs `not deployed`, `deployed, not listed` and `schema differs`. A kill-switch flip is not drift
 because the generator never reads the booleans. An unreadable verbs.toml, a
 section the catalogue cannot describe, an unreadable or non-literal module,
 and a seat with no module named each print `UNCHECKED`, `UNREADABLE` or
-`NOT CONFIGURED` with the reason. None of them prints as a match.
+`NOT CONFIGURED` with the reason. None of them prints as a match. Every
+configured seat prints a line even when verbs.toml cannot be read.
 
 "Deployed" means the `disjorn-port` ref in the gatehouse's `claudette.git`,
 not her running clone. `claudette-update.sh` fast-forwards that ref before it
 deploys, plink owns it, and no resident can write it. Her clone is resident-
 writable and readable by the digest's uid only through an ACL on her home.
 The mirror's `refs/gatehouse/claudette/*` copy moves only when
-`refresh-mirror` runs, so it can lag. Gable's line says `not compared — shell
+`refresh-mirror` runs, so it can lag. The line says "deployed ref" because
+it reads that ref, not the module her running process loaded. The two differ
+when the script fails after its push, or runs with `--no-restart` and she has
+not been restarted since. The script reports both cases when they happen. Gable's line says `not compared — shell
 seat`. His surface is the broker CLI baked into the resident image. That
 table is the union of verbs and no seat filters it, so "matches live
 verbs.toml" is a claim it cannot support. He still gets a line so that every
-seat is accounted for. The table is `metrics.SEAT_SURFACES`, overridden whole
+seat is accounted for. His line is the same when verbs.toml cannot be read,
+because nothing about him is compared either way. The table is `metrics.SEAT_SURFACES`, overridden whole
 by `[drift].seat_surfaces` (`res-x = {repo, ref, path}` or `res-x = {shell =
 "<why>"}`). The live file's path is `[drift].verbs_toml`.
 
