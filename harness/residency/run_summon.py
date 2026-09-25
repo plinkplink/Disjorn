@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import logging
 import os
 import sys
@@ -23,6 +24,15 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import load_config  # noqa: E402
+
+
+def sdk_refusal(client_cls) -> str | None:
+    """Why this SDK cannot carry the adapter's replies, or None."""
+    if "attribution" not in inspect.signature(client_cls.send).parameters:
+        return ("disjorn_sdk DisjornClient.send() takes no attribution=, so "
+                "every reply would fail; install the SDK client that shipped "
+                "with this adapter, then start again")
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -46,6 +56,11 @@ def main(argv: list[str] | None = None) -> int:
     # Deferred imports: keep the module importable (and tests fast) without the
     # SDK's network stack.
     from disjorn_sdk import DisjornClient
+
+    refusal = sdk_refusal(DisjornClient)
+    if refusal:
+        logging.getLogger("run_summon").error(refusal)
+        return 2
 
     from adapter import SummonAdapter
 

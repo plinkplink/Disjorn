@@ -332,9 +332,9 @@ def _require_author(row: dict[str, Any], actor: Actor) -> None:
 class Attribution(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)  # unknown key or type: 422
 
-    model: Optional[str] = None
+    model: Optional[str] = Field(default=None, max_length=100)
     verified: bool = False
-    summoner: Optional[str] = None
+    summoner: Optional[str] = Field(default=None, max_length=100)
 
 
 class MessageCreate(BaseModel):

@@ -157,3 +157,20 @@ async def test_migration_017_gives_existing_rows_an_empty_attribution(
     finally:
         await db.close()
         reset_settings_cache()
+
+
+async def test_a_model_or_summoner_over_100_chars_is_422(client):
+    main, hdrs = await _bot_in_main(client)
+    for field in ("model", "summoner"):
+        body = {"model": "m", "verified": True, "summoner": "plink"}
+        body[field] = "x" * 101
+        r = await client.post(f"/channels/{main}/messages",
+                              json={"content": "hi", "attribution": body},
+                              headers=hdrs)
+        assert r.status_code == 422, field
+    r = await client.post(
+        f"/channels/{main}/messages",
+        json={"content": "hi", "attribution": {"model": "m" * 100, "verified": True,
+                                               "summoner": "s" * 100}},
+        headers=hdrs)
+    assert r.status_code == 200, r.text

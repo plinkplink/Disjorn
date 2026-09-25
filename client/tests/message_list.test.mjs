@@ -92,7 +92,7 @@ function rows(html) {
 test('renders the span after the time from a fixture with attribution', () => {
   const html = render([botMessage(1, { attribution:
     { model: 'claude-fable-5-1', verified: true, summoner: 'plink' } })]);
-  const span = '<span class="msg-attrib" title="model attribution">'
+  const span = '<span class="msg-attrib" title="model as reported by the posting bot">'
     + 'claude-fable-5-1 · summoned by plink</span>';
   assert.ok(html.includes(span), html);
   const meta = html.slice(html.indexOf('class="msg-meta"'));

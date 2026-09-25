@@ -223,3 +223,16 @@ def test_a_body_with_no_trailing_sign_adds_no_token(tmp_path, reply):
     posted, audit = _serve(tmp_path, reply)
     assert posted.content == reply
     assert "hand-signed" not in audit
+
+
+def test_the_daemon_refuses_an_sdk_whose_send_takes_no_attribution():
+    import run_summon
+    from disjorn_sdk import DisjornClient
+
+    class OldClient:
+        async def send(self, channel_id, content, *, reply_to=None):
+            return None
+
+    assert run_summon.sdk_refusal(DisjornClient) is None
+    refusal = run_summon.sdk_refusal(OldClient)
+    assert refusal is not None and "attribution" in refusal

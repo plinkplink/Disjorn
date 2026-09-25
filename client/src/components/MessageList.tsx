@@ -395,7 +395,7 @@ function MessageRow({
                 {shortTime(message.created_at)}
               </time>
               {attribution !== null && (
-                <span className="msg-attrib" title="model attribution">
+                <span className="msg-attrib" title="model as reported by the posting bot">
                   {attribution}
                 </span>
               )}
