@@ -33,6 +33,7 @@ bot, not by any resident.
 from __future__ import annotations
 
 import argparse
+import ast
 import datetime as _dt
 import hashlib
 import json
@@ -877,6 +878,153 @@ def judging_artifacts(paths: dict, config: dict) -> list:
     return out
 
 
+DEFAULT_VERBS_PATH = "/etc/disjorn-broker/verbs.toml"
+SEAT_SURFACES = {
+    "res-claudette": {"repo": "/var/lib/disjorn-broker/gatehouse/claudette.git",
+                      "ref": "disjorn-port", "path": "broker_tools.py"},
+    "res-gable": {"shell": "the broker CLI in the resident image, "
+                           "which no seat filters"},
+}
+_SEAT_MODULE_KEYS = ("repo", "ref", "path")
+
+
+def seat_surface_table(config: dict) -> dict:
+    d = config.get("drift")
+    raw = d.get("seat_surfaces") if isinstance(d, dict) else None
+    if not isinstance(raw, dict) or not raw:
+        return dict(SEAT_SURFACES)
+    table = {}
+    for seat, entry in raw.items():
+        if not isinstance(entry, dict):
+            return dict(SEAT_SURFACES)
+        shell = isinstance(entry.get("shell"), str) and bool(entry["shell"].strip())
+        module = all(isinstance(entry.get(k), str) and entry[k].strip()
+                     for k in _SEAT_MODULE_KEYS)
+        if shell == module:
+            return dict(SEAT_SURFACES)
+        table[str(seat)] = ({"shell": entry["shell"].strip()} if shell else
+                            {k: entry[k] for k in _SEAT_MODULE_KEYS})
+    return table
+
+
+_GENERATOR = None
+
+
+def _generator():
+    global _GENERATOR
+    if _GENERATOR is None:
+        import importlib.util
+        path = Path(__file__).resolve().parent.parent / "broker" / "gen_verb_surface.py"
+        spec = importlib.util.spec_from_file_location("gen_verb_surface", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _GENERATOR = mod
+    return _GENERATOR
+
+
+def _git_show(repo: str, ref: str, path: str) -> tuple[Optional[str], str]:
+    text = _git(repo, "show", f"{ref}:{path}")
+    if text is not None:
+        return text, ""
+    if _git(repo, "rev-parse", "--git-dir") is None:
+        return None, "not a git repository this uid can read"
+    if _git(repo, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}") is None:
+        return None, f"ref {ref} does not resolve"
+    return None, f"no {path} at {ref}"
+
+
+def _deployed_tools(text: str) -> dict:
+    for node in ast.parse(text).body:
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "BROKER_TOOLS"
+                for t in node.targets):
+            try:
+                tools = ast.literal_eval(node.value)
+            except ValueError:
+                raise ValueError("BROKER_TOOLS is not a plain literal") from None
+            return {t["verb"]: t for t in tools}
+    raise ValueError("no BROKER_TOOLS assignment")
+
+
+def _seat_row(seat: str, entry: Optional[dict], verbs_path: str,
+              verbs_err: Optional[str]) -> dict:
+    row = {"seat": seat, "state": "UNCHECKED", "detail": "", "source": None,
+           "tools": 0, "missing": [], "extra": [], "changed": []}
+    if entry is None:
+        row.update(state="NOT CONFIGURED", detail="no tools module is named "
+                   "for this seat in [drift].seat_surfaces")
+        return row
+    if "shell" in entry:
+        row.update(state="SHELL", detail=entry["shell"])
+        return row
+    spec = f"{entry['ref']}:{entry['path']}"
+    row["source"] = f"{Path(entry['repo']).name} {spec}"
+    if verbs_err:
+        row["detail"] = verbs_err
+        return row
+    try:
+        gen = _generator()
+        expected = {t["verb"]: t for t in
+                    gen.tool_schemas(gen.seat_surface(Path(verbs_path), seat))}
+    except Exception as exc:
+        row["detail"] = f"cannot generate the seat's surface: {exc}"
+        return row
+    text, err = _git_show(entry["repo"], entry["ref"], entry["path"])
+    if text is None:
+        row.update(state="UNREADABLE",
+                   detail=f"cannot read {spec} from {entry['repo']}: {err}")
+        return row
+    try:
+        deployed = _deployed_tools(text)
+    except (SyntaxError, ValueError, TypeError, KeyError) as exc:
+        row.update(state="UNREADABLE", detail=f"{row['source']} is not a "
+                   f"generated tools module: {type(exc).__name__}: {exc}")
+        return row
+    row["tools"] = len(expected)
+    row["missing"] = [v for v in expected if v not in deployed]
+    row["extra"] = [v for v in deployed if v not in expected]
+    row["changed"] = [v for v in expected
+                      if v in deployed and deployed[v] != expected[v]]
+    drifted = row["missing"] or row["extra"] or row["changed"]
+    row["state"] = "DRIFT" if drifted else "MATCH"
+    return row
+
+
+def seat_surfaces(config: dict) -> list:
+    d = config.get("drift")
+    verbs_path = str((d.get("verbs_toml") if isinstance(d, dict) else None)
+                     or DEFAULT_VERBS_PATH)
+    table = seat_surface_table(config)
+    seats, verbs_err = [], None
+    try:
+        with open(verbs_path, "rb") as fh:
+            live = tomllib.load(fh)
+        seats = [s for s, v in live.items()
+                 if s.startswith("res-") and isinstance(v, dict)]
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        verbs_err = (f"cannot read live verbs.toml {verbs_path}: "
+                     f"{getattr(exc, 'strerror', None) or exc}")
+    seats += [s for s, e in table.items() if s not in seats and "shell" not in e]
+    return [_seat_row(s, table.get(s), verbs_path, verbs_err) for s in seats]
+
+
+def _seat_line(s: dict) -> str:
+    head = f"seat surface: {s['seat']} "
+    if s["state"] == "MATCH":
+        return head + (f"matches live verbs.toml ({s['tools']} tools, "
+                       f"{s['source']})")
+    if s["state"] == "SHELL":
+        return head + f"not compared — shell seat, {s['detail']}"
+    if s["state"] == "DRIFT":
+        parts = [f"{label}: {', '.join(verbs)}" for label, verbs in (
+            ("not deployed", s["missing"]),
+            ("deployed, not listed", s["extra"]),
+            ("schema differs", s["changed"])) if verbs]
+        return head + (f"DRIFT from live verbs.toml — {'; '.join(parts)} "
+                       f"({s['source']})")
+    return head + f"{s['state']} — {s['detail']}"
+
+
 def _image_cc_version(image: str) -> tuple[Optional[str], str]:
     """`claude --version` inside the built image, from THIS uid's podman store
     (07-resident-image.sh builds there and loads the residents from the same
@@ -1433,6 +1581,7 @@ def gate_drift(config: dict, *, date: str, now: Optional[_dt.datetime] = None,
     drift["liveness"] = hook_liveness(paths)
     drift["cc"] = cc_version(paths)
     drift["judging_artifacts"] = judging_artifacts(paths, config)
+    drift["seat_surfaces"] = seat_surfaces(config)
 
     db = _open_db(paths["message_db"])
     try:
@@ -1771,6 +1920,7 @@ def compose_drift_block(drift: dict, *, verbose: bool = False) -> str:
     d = drift.get("deploy", {})
     L.append(f"deploy: {d.get('state', 'unknown')}"
              + (f" — {d['detail']}" if d.get("detail") else ""))
+    L.extend(_seat_line(s) for s in drift.get("seat_surfaces") or [])
 
     # 8. prose ceiling, report only; the wall is harness/tests/test_prose_ratio.py
     pr = drift.get("prose")

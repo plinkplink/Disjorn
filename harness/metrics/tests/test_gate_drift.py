@@ -25,9 +25,11 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -230,7 +232,14 @@ class Lane:
                 "deploy_tree": str(self.prod), "message_db": str(self.db_path)}
         gate.update(over)
         return {"gate": gate,
-                "drift": {"judging_artifacts": self.artifact_rows()},
+                "drift": {"judging_artifacts": self.artifact_rows(),
+                          "verbs_toml": str(self.root / "verbs.toml"),
+                          "seat_surfaces": {
+                              "res-claudette": {
+                                  "repo": str(self.root / "claudette.git"),
+                                  "ref": "disjorn-port",
+                                  "path": "broker_tools.py"},
+                              "res-gable": {"shell": "the broker CLI"}}},
                 "build": {"humans": list(humans)},
                 "disjorn": {"custodian_channel_id": CUSTODIAN,
                             "api_key_path": str(self.key_path)},
@@ -1347,6 +1356,136 @@ def test_deploy_state_takes_explicit_paths_for_the_plan_room(lane):
 def test_the_drift_block_carries_the_deploy_line(lane):
     lane.deploy()
     assert "deploy: in-sync" in lane.block()
+
+
+GENERATOR = Path(__file__).resolve().parents[2] / "broker" / "gen_verb_surface.py"
+
+LIVE_VERBS = """\
+[res-claudette]
+"restart-disjorn" = false
+"changed-files" = true
+"refresh-mirror" = true
+"board-list" = true
+
+[res-gable]
+"summon-hop" = true
+"restart-disjorn" = false
+
+[server]
+"build" = true
+"""
+
+
+def emit_tools(lane, verbs_text: str) -> str:
+    src = lane.root / "emit-verbs.toml"
+    src.write_text(verbs_text, encoding="utf-8")
+    proc = subprocess.run([sys.executable, str(GENERATOR), "emit-tools",
+                           "--verbs", str(src), "--seat", "res-claudette"],
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout
+
+
+def deploy_tools(lane, text: str) -> None:
+    repo = lane.root / "claudette.git"
+    if not repo.exists():
+        repo.mkdir()
+        git(repo, "init", "-q", "-b", "disjorn-port")
+    (repo / "broker_tools.py").write_text(text, encoding="utf-8")
+    git(repo, "add", "broker_tools.py")
+    git(repo, "commit", "-q", "-m", "regenerate broker_tools")
+
+
+def seat_lines(lane, live=LIVE_VERBS) -> dict:
+    if live is not None:
+        (lane.root / "verbs.toml").write_text(live, encoding="utf-8")
+    return {ln.split()[2]: ln for ln in lane.block().splitlines()
+            if ln.startswith("seat surface:")}
+
+
+def test_a_seat_whose_deployed_tools_match_live_verbs_is_one_quiet_line(lane):
+    deploy_tools(lane, emit_tools(lane, LIVE_VERBS))
+    assert seat_lines(lane)["res-claudette"] == (
+        "seat surface: res-claudette matches live verbs.toml "
+        "(4 tools, claudette.git disjorn-port:broker_tools.py)")
+
+
+def test_seat_drift_names_each_verb_that_differs_and_no_other(lane):
+    stale = emit_tools(lane, LIVE_VERBS.replace('"changed-files" = true',
+                                                '"apps-build" = true'))
+    stale, n = re.subn(r'("name": "refresh_mirror",\s*"description": ")',
+                       r"\1An older wording. ", stale)
+    assert n == 1
+    deploy_tools(lane, stale)
+    line = seat_lines(lane)["res-claudette"]
+    assert line.startswith(
+        "seat surface: res-claudette DRIFT from live verbs.toml — ")
+    assert "not deployed: changed-files" in line
+    assert "deployed, not listed: apps-build" in line
+    assert "schema differs: refresh-mirror" in line
+    assert "board-list" not in line and "restart-disjorn" not in line
+
+
+def test_a_kill_switch_flip_is_not_seat_surface_drift(lane):
+    flipped = LIVE_VERBS.replace('"restart-disjorn" = false',
+                                 '"restart-disjorn" = true', 1)
+    assert flipped != LIVE_VERBS
+    deploy_tools(lane, emit_tools(lane, flipped))
+    assert "matches live verbs.toml" in seat_lines(lane)["res-claudette"]
+
+
+def test_an_unreadable_deployed_module_is_loud_and_never_a_match(lane):
+    line = seat_lines(lane)["res-claudette"]
+    assert line.startswith("seat surface: res-claudette UNREADABLE — ")
+    assert str(lane.root / "claudette.git") in line
+    assert "matches" not in line
+
+
+def test_a_deployed_module_that_is_not_a_literal_is_unreadable(lane):
+    deploy_tools(lane, "BROKER_TOOLS = load()\n")
+    line = seat_lines(lane)["res-claudette"]
+    assert line.startswith("seat surface: res-claudette UNREADABLE — ")
+    assert "matches" not in line
+
+
+def test_an_unreadable_live_verbs_toml_is_loud_and_never_a_match(lane):
+    deploy_tools(lane, emit_tools(lane, LIVE_VERBS))
+    line = seat_lines(lane, live=None)["res-claudette"]
+    assert line.startswith("seat surface: res-claudette UNCHECKED — ")
+    assert str(lane.root / "verbs.toml") in line
+    assert "matches" not in line
+
+
+def test_a_verb_the_catalogue_does_not_describe_is_unchecked(lane):
+    deploy_tools(lane, emit_tools(lane, LIVE_VERBS))
+    live = LIVE_VERBS.replace('"board-list" = true',
+                              '"board-list" = true\n"no-such-verb" = true')
+    line = seat_lines(lane, live)["res-claudette"]
+    assert line.startswith("seat surface: res-claudette UNCHECKED — ")
+    assert "no-such-verb" in line
+
+
+def test_a_seat_with_no_tools_module_named_is_not_configured(lane):
+    deploy_tools(lane, emit_tools(lane, LIVE_VERBS))
+    lines = seat_lines(lane, LIVE_VERBS + '\n[res-caveman]\n"read-metrics" = true\n')
+    assert lines["res-caveman"].startswith(
+        "seat surface: res-caveman NOT CONFIGURED — ")
+    assert "matches live verbs.toml" in lines["res-claudette"]
+
+
+def test_a_shell_seat_is_named_and_not_compared(lane):
+    assert seat_lines(lane)["res-gable"] == (
+        "seat surface: res-gable not compared — shell seat, the broker CLI")
+
+
+def test_the_seat_table_comes_from_config_and_falls_back_whole(lane):
+    assert M.seat_surface_table({}) == M.SEAT_SURFACES
+    only = {"res-x": {"shell": "cli"}}
+    assert M.seat_surface_table({"drift": {"seat_surfaces": only}}) == only
+    half = {"res-x": {"repo": "/r"}}
+    assert M.seat_surface_table({"drift": {"seat_surfaces": half}}) \
+        == M.SEAT_SURFACES
+    assert "/var/lib" not in str(M.seat_surface_table(lane.config()))
 
 
 # --------------------------------------------------------------------------
