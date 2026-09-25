@@ -271,10 +271,13 @@ async def test_bot_send_appears_via_user_fetch(server, alice, main_id, bot_strea
         "bot reply here",
         reply_to=trigger["id"],
         emote_refs=[{"name": "happy"}],
+        attribution={"model": "m-1", "verified": True, "summoner": "alice"},
     )
     assert sent["author_type"] == "bot" and sent["author_id"] == bot.bot_id
     assert sent["reply_to_id"] == trigger["id"]
     assert sent["emote_refs"] == [{"name": "happy"}]
+    assert sent["attribution"] == {"model": "m-1", "verified": True,
+                                   "summoner": "alice"}
 
     resp = await alice.get(f"/channels/{main_id}/messages", params={"limit": 10})
     resp.raise_for_status()
