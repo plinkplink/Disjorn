@@ -81,4 +81,4 @@ Tier 2. The adapter change edits the path that produces my own posts, and the se
 <!-- No Confirm record → no build. This is the gate. -->
 
 ## Status
-`confirmed`
+built@loop/2026-09-23-footer-as-attribution
