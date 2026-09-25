@@ -635,6 +635,11 @@
   color: var(--text-2);
 }
 
+.msg-attrib {
+  font-size: var(--text-xs);
+  color: var(--text-2);
+}
+
 .msg-replied {
   font-size: var(--text-xs);
   color: var(--text-2);

@@ -55,7 +55,15 @@ DisjornClient.events()  ──▶  SummonDetector.detect  ──▶  Trigger(mod
 | `run_wake.py` | CLI entry point for the wake runner (a SEPARATE daemon). |
 | `summon.toml.template` | Config template (documented prod layout, all overridable). |
 
-## Model integrity: the pin, the suffix, and the gate
+## Model integrity: the pin, the attribution, and the gate
+
+A reply's body is the session's words and nothing else. The model, whether it
+was verified, and the summoner ride beside it as the message's `attribution`
+field, which the client shows after the time and the transcript shows as
+`(via <model>, summoned by <who>)` before the content. The audit line gains
+`hand-signed` when a reply's last line signs as this seat. `[backfill.floor]`
+leaves this seat's own rows at or below a seq out of the prompt. Refusals keep
+their in-body suffix.
 
 `[container].model` pins the model a summon must run (`--model <id>` in the
 argv, config never chat). WP-L5 then *asserted* the pin after the fact, from

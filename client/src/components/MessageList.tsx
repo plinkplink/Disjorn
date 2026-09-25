@@ -107,6 +107,20 @@ function chibiEmotes(message: Message): ChibiEmote[] {
   return out;
 }
 
+/** "claude-fable-5-1 · summoned by plink", or null when the message names no
+    model. An unverified model is the pin, and says so. */
+function attributionLabel(message: Message): string | null {
+  const a = message.attribution;
+  if (a === undefined || typeof a.model !== "string" || a.model === "") {
+    return null;
+  }
+  let label = a.verified === true ? a.model : `${a.model} (pinned; actual unverified)`;
+  if (typeof a.summoner === "string" && a.summoner !== "") {
+    label += ` · summoned by ${a.summoner}`;
+  }
+  return label;
+}
+
 /* ------------------------------------------------------------- feed model */
 
 type FeedItem =
@@ -146,6 +160,7 @@ function buildFeed(list: Message[], gaps: number[]): FeedItem[] {
       prev.author_type !== m.author_type ||
       prev.author_id !== m.author_id ||
       m.reply_to_id !== null ||
+      attributionLabel(m) !== null ||
       ts(m) - ts(prev) > GROUP_GAP_MS;
     out.push({ kind: "message", key: `m${m.id}`, message: m, withHeader });
     prev = m;
@@ -289,6 +304,7 @@ function MessageRow({
     [unfurlUrl, originBase],
   );
   const hasText = message.content.trim().length > 0;
+  const attribution = attributionLabel(message);
   // Touch: no hover — tapping the row (not a control inside it) shows/hides
   // the action bar. Desktop keeps pure hover; this state stays false there.
   const [actionsShown, setActionsShown] = useState(false);
@@ -378,6 +394,11 @@ function MessageRow({
               >
                 {shortTime(message.created_at)}
               </time>
+              {attribution !== null && (
+                <span className="msg-attrib" title="model as reported by the posting bot">
+                  {attribution}
+                </span>
+              )}
               {hasReplies && (
                 <span className="msg-replied" title="Has replies in this channel">
                   ↩ replied to

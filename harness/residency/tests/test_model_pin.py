@@ -135,10 +135,10 @@ def test_parse_output_carries_model_from_usage():
     assert (reply, actions, model) == ("hi", 2, PIN)
 
 
-# --------------------------------------------- 3/4. VISIBLE suffix + AUDIT line
+# ---------------------------------------- 3/4. VISIBLE attribution + AUDIT line
 
 
-def test_reply_carries_model_suffix_and_summary_records_model(tmp_path):
+def test_reply_carries_model_attribution_and_summary_records_model(tmp_path):
     config = make_config(tmp_path, container={"model": PIN})
     client = FakeClient(events=[
         make_event(channel_id=7, seq=50, msg_id=1234, author_name="alice",
@@ -150,9 +150,10 @@ def test_reply_carries_model_suffix_and_summary_records_model(tmp_path):
     ))
     _run(SummonAdapter(client, config, launcher=launcher))
 
-    reply = client.replies_to(7)[0].content
-    assert reply.startswith("Hello from Gable.")
-    assert f"— gable · {PIN}" in reply          # VISIBLE identity suffix
+    reply = client.replies_to(7)[0]
+    assert reply.content == "Hello from Gable."
+    assert reply.kwargs["attribution"] == {     # VISIBLE, beside the body
+        "model": PIN, "verified": True, "summoner": "alice"}
 
     line = client.replies_to(4)[0].content
     assert line.endswith(f"| {PIN}")            # AUDIT line carries the model
@@ -174,7 +175,7 @@ def test_unpinned_deployment_keeps_bare_reply_and_summary(tmp_path):
     assert "·" not in client.replies_to(4)[0].content
 
 
-def test_suffix_shows_pin_when_actual_unknown(tmp_path):
+def test_attribution_shows_pin_when_actual_unknown(tmp_path):
     """Output carried no model id: we cannot PROVE the pin ran (fail-open guard,
     adversarial-verify Finding). Show the pin but mark it UNVERIFIED — never
     stamp it as if confirmed, and never fabricate an 'actual'."""
@@ -187,8 +188,10 @@ def test_suffix_shows_pin_when_actual_unknown(tmp_path):
         ok=True, reply="Hi.", action_count=1, duration_sec=1.0, model=None,
     ))
     _run(SummonAdapter(client, config, launcher=launcher))
-    reply = client.replies_to(7)[0].content
-    assert f"— gable · {PIN} (pinned; actual unverified)" in reply
+    reply = client.replies_to(7)[0]
+    assert reply.content == "Hi."
+    assert reply.kwargs["attribution"]["model"] == PIN
+    assert reply.kwargs["attribution"]["verified"] is False
     custodian = [s.content for s in client.replies_to(4)]
     assert any(c.endswith(f"| {PIN}") for c in custodian)
     assert not any("MODEL DRIFT" in c for c in custodian)  # unknown != drift
@@ -219,10 +222,10 @@ def test_drift_posts_alert_and_still_replies(tmp_path):
     _run(SummonAdapter(client, config, launcher=launcher))
 
     # The reply STILL goes out (alert, don't swallow the reply)...
-    reply = client.replies_to(7)[0].content
-    assert reply.startswith("Hello from Gable.")
+    reply = client.replies_to(7)[0]
+    assert reply.content == "Hello from Gable."
     # ...and shows what's actually running, not the pin.
-    assert "claude-sonnet-9-wrong" in reply
+    assert reply.kwargs["attribution"]["model"] == "claude-sonnet-9-wrong"
 
     # A loud #custodian alert names expected vs actual.
     custodian = [s.content for s in client.replies_to(4)]

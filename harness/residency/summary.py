@@ -49,6 +49,7 @@ def format_summary(
     model: Optional[str] = None,
     posted_seq: Optional[int] = None,
     posted_chars: Optional[int] = None,
+    hand_signed: bool = False,
 ) -> str:
     """One-line #custodian audit of a served summon.
 
@@ -69,6 +70,8 @@ def format_summary(
     )
     if model:
         line += f" | {model}"
+    if hand_signed:
+        line += " | hand-signed"
     return line
 
 

@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Optional
 
 from disjorn_sdk import MessageCreate, Ready
@@ -60,7 +61,6 @@ from summary import (
     format_gate_refusal_alert,
     format_refusal_summary,
     format_refusal_suffix,
-    format_reply_suffix,
     format_summary,
 )
 
@@ -331,16 +331,12 @@ class SummonAdapter:
         # WP-L5 model integrity: assert the actually-used model against the
         # pin where knowable. pin = config (never chat); actual = what the
         # session reported (best-effort, may be None). display = what's really
-        # running, for the visible suffix + audit line.
+        # running, for the attribution and the audit line.
         pin = self.config.container.model
-        # A failed session can still have proven its model: the stream's init
-        # event names the resolved id before the turn runs, so a timeout kill
-        # leaves the identity known even though the reply is lost. Gating this
-        # on result.ok discarded that proof and reported every failure as
-        # "actual unverified" — the same words the drift alarm uses (see
-        # #custodian 2026-07-26). Trust the gate's observation, not the
-        # session's exit status. A gate ABORT is the one exception: there the
-        # model is the refusal's subject and the session is disowned entirely.
+        # A failed session can still have proven its model: the init event
+        # names it before the turn runs, so a timeout kill leaves it known.
+        # Trust the gate's observation, not the exit status. A gate ABORT is
+        # the one exception: there the model is the refusal's subject.
         actual = None if result.gate_abort else result.model
         verified = actual is not None
         display_model = actual or pin
@@ -353,7 +349,7 @@ class SummonAdapter:
         elif pin and not verified:
             # Fail-OPEN guard: with no reported model we cannot prove the pin
             # ran. Do NOT let this pass as a clean match — log it, and the
-            # suffix below marks it unverified rather than advertising the pin.
+            # attribution below marks it unverified rather than advertising the pin.
             logger.warning(
                 "model unverified: pinned %s but session reported no model id "
                 "(summon by %s in %s)", pin, summoner, where,
@@ -362,13 +358,21 @@ class SummonAdapter:
         reply = result.reply.strip() if result.ok else ""
         text = reply if reply else self.config.text.error_line
         text = self._end_the_chain(text, trigger)
-        # An unpinned deployment has no identity line to hang the attribution
-        # off; a bot summon needs one anyway, because the reply is then the
-        # only thing in the channel that says whose turn this was.
+        # Beside the body, never in it, and built from the pin and the
+        # session's reported id only: no reply text reaches this field. A bot
+        # summon carries one even unpinned, to say whose turn this was.
+        attribution = None
         if display_model or trigger.summoner_type == "bot":
-            text = f"{text}\n\n{format_reply_suffix(self.config.summon.bot_name, display_model, verified=verified, summoner=summoner)}"
+            attribution = {"model": display_model, "verified": verified,
+                           "summoner": summoner}
+        hand_signed = _hand_signed(text, self.config.summon.bot_name)
+        if hand_signed:
+            logger.warning("hand-signed reply: its last line signs as %s "
+                           "(summon by %s in %s)", self.config.summon.bot_name,
+                           summoner, where)
         posted = await self._post_reply(channel_id, text, where,
-                                        reply_to=trigger_id)
+                                        reply_to=trigger_id,
+                                        attribution=attribution)
 
         # Fail-loud, never fail-over: on drift the reply still went out above;
         # here the house gets a loud alert naming expected vs actual.
@@ -388,17 +392,20 @@ class SummonAdapter:
                 duration_sec=result.duration_sec, ok=result.ok,
                 model=display_model,
                 posted_seq=posted[0], posted_chars=posted[1],
+                hand_signed=hand_signed,
             ),
         )
 
     async def _post_reply(self, channel_id: int, text: str, where: str, *,
-                          reply_to=None) -> tuple[Optional[int], Optional[int]]:
+                          reply_to=None, attribution=None
+                          ) -> tuple[Optional[int], Optional[int]]:
         """Post this summon's reply and return (seq, chars) as the SERVER
         answered — the evidence the audit line carries and the ledger keeps.
         (None, None) when the send failed: nothing is recorded, and the audit
         line says `posted none`, because a post that did not happen must not
         leave a trace that reads as if it did."""
-        sent = await self._safe_send(channel_id, text, reply_to=reply_to)
+        sent = await self._safe_send(channel_id, text, reply_to=reply_to,
+                                     attribution=attribution)
         if not sent:
             return None, None
         seq = sent.get("seq") if isinstance(sent, dict) else None
@@ -443,6 +450,10 @@ class SummonAdapter:
             recent = []
         # before_seq mode returns newest-first; make it chronological.
         backfill = list(reversed(recent))
+        floor = self.config.backfill.floor_for(channel_id)
+        if floor:
+            backfill = [m for m in backfill
+                        if not self._own_row_at_or_below(m, floor)]
         try:
             posts = self.posts.recent(5)
         except Exception:  # noqa: BLE001 — a ledger is a convenience
@@ -453,6 +464,13 @@ class SummonAdapter:
             where=where, how=trigger.describe(), context=event.context,
             posts=posts,
         )
+
+    def _own_row_at_or_below(self, msg: dict, floor: int) -> bool:
+        name = str((msg.get("author") or {}).get("name") or "")
+        seq = msg.get("seq")
+        return (msg.get("author_type") == "bot"
+                and name.lower() == self.config.summon.bot_name.lower()
+                and isinstance(seq, int) and seq <= floor)
 
     # --------------------------------------------------------------- helpers
 
@@ -469,14 +487,25 @@ class SummonAdapter:
         except Exception:  # noqa: BLE001 — no live WS / rate limit: keep going
             logger.debug("typing failed for channel %s", channel_id, exc_info=True)
 
-    async def _safe_send(self, channel_id: int, content: str, *, reply_to=None):
+    async def _safe_send(self, channel_id: int, content: str, *, reply_to=None,
+                         attribution=None):
         """Send, never raise. Returns the server's message dict (seq included)
         so a caller that needs evidence of the post has it; None on failure."""
+        extra = {} if attribution is None else {"attribution": attribution}
         try:
-            return await self.client.send(channel_id, content, reply_to=reply_to)
+            return await self.client.send(channel_id, content, reply_to=reply_to,
+                                          **extra)
         except Exception:  # noqa: BLE001 — a failed post never crashes the daemon
             logger.warning("send to channel %s failed", channel_id, exc_info=True)
             return None
+
+
+def _hand_signed(text: str, bot_name: str) -> bool:
+    """The meter: the last non-empty line opens with a dash run and the bot
+    name. Wide on purpose; it counts, and never edits the body."""
+    lines = [line for line in text.splitlines() if line.strip()]
+    sign = re.compile(rf"^\s*[-—–]+\s*{re.escape(bot_name)}\b", re.IGNORECASE)
+    return bool(lines) and sign.match(lines[-1]) is not None
 
 
 def _room_name(where: str) -> str:

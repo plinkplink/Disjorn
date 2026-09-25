@@ -22,7 +22,7 @@ Bus events (published AFTER commit, full materialized payloads):
     {"type": "message_create"|"message_edit", "channel_id": int, "message": payload}
     {"type": "message_delete", "channel_id": int, "id": int, "seq": int}
 
-Privacy integration (WP5 not landed yet — ImportError-guarded):
+Privacy integration:
     - privacy.detect_flags(content) merged into user-authored messages on
       create/edit; bots set their own flags explicitly. Flags are only ever
       ADDED, never removed.
@@ -35,7 +35,7 @@ import json
 from typing import Annotated, Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .. import db, events, privacy
 from ..models import User
@@ -180,7 +180,7 @@ async def message_payload(row: dict[str, Any]) -> dict[str, Any]:
         {id, channel_id, seq, author_type, author_id,
          author: {type, id, name, username?, avatar_path, avatar_url},
          content, created_at, edited_at, deleted_at, reply_to_id,
-         privacy_flags: {}, emote_refs: [], attachments: [
+         privacy_flags: {}, emote_refs: [], attribution: {}, attachments: [
              {id, original_filename, mime_type, size_bytes, width, height,
               url, thumb_url, orig_url}]}
 
@@ -226,6 +226,7 @@ async def message_payload(row: dict[str, Any]) -> dict[str, Any]:
         "reply_to_id": row["reply_to_id"],
         "privacy_flags": json.loads(row["privacy_flags"] or "{}"),
         "emote_refs": json.loads(row["emote_refs"] or "[]"),
+        "attribution": json.loads(row["attribution"] or "{}"),
         "attachments": attachments,
     }
 
@@ -271,6 +272,7 @@ async def deliver_message(
     *,
     flags: Optional[dict[str, Any]] = None,
     emote_refs: Optional[list[Any]] = None,
+    attribution: Optional[dict[str, Any]] = None,
     reply_to_id: Optional[int] = None,
 ) -> dict[str, Any]:
     """Allocate a per-channel seq, insert the message, publish message_create.
@@ -290,8 +292,8 @@ async def deliver_message(
         cur = await db.execute(
             """INSERT INTO messages
                    (channel_id, seq, author_type, author_id, content, created_at,
-                    reply_to_id, privacy_flags, emote_refs)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    reply_to_id, privacy_flags, emote_refs, attribution)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 channel_id,
                 seq_row["next_seq"],
@@ -302,6 +304,7 @@ async def deliver_message(
                 reply_to_id,
                 json.dumps(flags or {}),
                 json.dumps(emote_refs or []),
+                json.dumps(attribution or {}),
             ),
             commit=False,
         )
@@ -326,6 +329,14 @@ def _require_author(row: dict[str, Any], actor: Actor) -> None:
 # Schemas
 # ---------------------------------------------------------------------------
 
+class Attribution(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)  # unknown key or type: 422
+
+    model: Optional[str] = Field(default=None, max_length=100)
+    verified: bool = False
+    summoner: Optional[str] = Field(default=None, max_length=100)
+
+
 class MessageCreate(BaseModel):
     # max_length is the intake wall for oversized content (BL-D6): pydantic
     # rejects with a 422 before anything is persisted, indexed by FTS5, or
@@ -336,6 +347,7 @@ class MessageCreate(BaseModel):
     # bot authors only; resolved via chibi (WP8)
     emotion: Optional[str] = Field(default=None, max_length=200)
     emote_refs: Optional[list[Any]] = None  # bot authors only; stored as-is
+    attribution: Optional[Attribution] = None  # bot authors only
 
     @model_validator(mode="after")
     def _bound_metadata(self) -> "MessageCreate":
@@ -343,6 +355,8 @@ class MessageCreate(BaseModel):
         for name, value in (
             ("privacy_flags", self.privacy_flags),
             ("emote_refs", self.emote_refs),
+            ("attribution",
+             None if self.attribution is None else self.attribution.model_dump()),
         ):
             if value is None:
                 continue
@@ -402,9 +416,12 @@ async def create_message(
         _detect_flags(content) if actor.type == "user" else {},
     )
 
-    # emote_refs / emotion: bot authors only; silently ignored for users.
+    # emote_refs / emotion / attribution: bot authors only; ignored for users.
     emote_refs: list[Any] = []
+    attribution: dict[str, Any] = {}
     if actor.type == "bot":
+        if body.attribution is not None:
+            attribution = body.attribution.model_dump()
         if body.emote_refs:
             emote_refs = list(body.emote_refs)
         if body.emotion:
@@ -424,6 +441,7 @@ async def create_message(
         content,
         flags=flags,
         emote_refs=emote_refs,
+        attribution=attribution,
         reply_to_id=body.reply_to_id,
     )
 

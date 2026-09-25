@@ -82,7 +82,15 @@ export interface Message {
   reply_to_id: number | null;
   privacy_flags: Record<string, unknown>;
   emote_refs: unknown[];
+  /** Set by the posting bot, beside the body; `{}` on every other message. */
+  attribution?: MessageAttribution;
   attachments: Attachment[];
+}
+
+export interface MessageAttribution {
+  model?: string | null;
+  verified?: boolean;
+  summoner?: string | null;
 }
 
 /** Backfill (`?from_seq=`) returns deleted messages as tombstones. */

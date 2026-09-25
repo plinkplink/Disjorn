@@ -63,6 +63,13 @@ count = 30                        # default recent messages pulled into the sess
 # (a #main number) is too shallow there — give it a deeper window:
 [backfill.per_channel]
 4 = 100                           # #custodian: deep window for long design threads
+# Per-channel floor: this seat's OWN rows (author_type bot, author name equal to
+# bot_name in any case) at or below the seq are left out of that channel's
+# backfill; every other author's rows are kept. Config is read once at startup,
+# so set the floor before the adapter starts. Keys are channel ids. Unset = no
+# floor.
+# [backfill.floor]
+# 4 = 3065                        # #custodian: its max seq when the floor was set
 
 [container]
 # The container-launch contract. In prod this is the run-resident.sh wrapper

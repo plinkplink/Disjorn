@@ -449,9 +449,9 @@ def test_off_end_to_end_with_a_real_stream_session(tmp_path):
     ])
     _run(SummonAdapter(client, config))
 
-    reply = client.replies_to(7)[0].content
-    assert reply.startswith("Wrong-model answer.")
-    assert f"— gable · {OTHER}" in reply
+    reply = client.replies_to(7)[0]
+    assert reply.content == "Wrong-model answer."
+    assert reply.kwargs["attribution"]["model"] == OTHER
     assert any("MODEL DRIFT" in s.content for s in client.replies_to(4))
 
 
