@@ -70,13 +70,13 @@
 "harness/metrics/metrics.py" = 30980
 "harness/metrics/tests/test_gate_drift.py" = 13670
 "harness/planroom/planroom.py" = 13454
-"harness/residency/adapter.py" = 7679
-"harness/residency/config.py" = 9474
+"harness/residency/adapter.py" = 7516
+"harness/residency/config.py" = 9454
 "harness/residency/detector.py" = 4613
 "harness/residency/hops.py" = 1429
 "harness/residency/launcher.py" = 14005
 "harness/residency/posts.py" = 1040
-"harness/residency/prompt.py" = 6632
+"harness/residency/prompt.py" = 6494
 "harness/residency/run_wake.py" = 1332
 "harness/residency/summary.py" = 5671
 "harness/residency/tests/stub_launch.py" = 1406

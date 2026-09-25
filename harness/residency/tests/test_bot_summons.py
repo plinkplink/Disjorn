@@ -6,7 +6,7 @@ The four guards, from the outside:
   2. the work-loop provision — a chain the broker grants keeps its mentions;
   3. loud refusal — never a silent drop, always attributed;
   4. budget + attribution — a summon spends the SUMMONED seat's budget and the
-     footer says whose turn it was.
+     attribution says whose turn it was.
 
 Plus the request that started it: a bare name in #custodian is inert data, so a
 human can type "gable" mid-sentence without summoning anyone.
@@ -339,7 +339,8 @@ def test_a_bot_summon_spends_the_summoned_seats_budget(tmp_path):
     _run(SummonAdapter(client, config, launcher=FakeLauncher(),
                        hops=FakeArbiter()))
     assert json.loads((tmp_path / "budget.json").read_text())["count"] == 1
-    assert "summoned by claudette" in client.replies_to(CUSTODIAN)[0].content
+    reply = client.replies_to(CUSTODIAN)[0]
+    assert reply.kwargs["attribution"]["summoner"] == "claudette"
 
 
 def test_an_exhausted_seat_refuses_before_it_spends_a_hop(tmp_path):

@@ -98,15 +98,18 @@ class SummonConfig:
 @dataclass
 class BackfillConfig:
     count: int = 30  # default recent messages pulled to seed the session prompt
-    # Per-channel depth overrides. Design threads in #custodian run long, so a
-    # deeper window there than the #main default; same sub-table idiom as
-    # summon.channel_names.
+    # Per-channel depth overrides; same sub-table idiom as summon.channel_names.
     per_channel: dict[int, int] = field(default_factory=dict)
+    # Per channel: this seat's rows at or below the seq stay out of the prompt.
+    floor: dict[int, int] = field(default_factory=dict)
 
     def count_for(self, channel_id: int) -> int:
         """Backfill depth for a channel: the per-channel override if one is
         configured, else the default count."""
         return self.per_channel.get(channel_id, self.count)
+
+    def floor_for(self, channel_id: int) -> int:
+        return self.floor.get(channel_id, 0)
 
 
 @dataclass
@@ -382,6 +385,10 @@ class AdapterConfig:
                 per_channel={
                     int(k): int(v)
                     for k, v in (bf.get("per_channel", {}) or {}).items()
+                },
+                floor={
+                    int(k): int(v)
+                    for k, v in (bf.get("floor", {}) or {}).items()
                 },
             ),
             container=ContainerConfig(

@@ -178,26 +178,41 @@ def format_posts_line(posts: list[dict[str, Any]], *, limit: int = 5) -> str:
 
 
 def format_line(msg: dict[str, Any]) -> str:
-    """One transcript line: ``author: [#seq] content``.
+    """One transcript line: ``author: [#seq] (via model, summoned by who) content``.
 
-    The ``[#N]`` marker (2026-08-17) is the message's seq — the number every
-    "at seq N" in #custodian and every spec's confirm record points at. Until
-    today the API sent it on every message and this line dropped it, so Gable
-    read a transcript full of citations he could not resolve, and pressed builds
-    against a confirm gate keyed on a number he could not see. Same marker
-    Claudette's context uses, on purpose: one grammar for both residents.
+    ``[#N]`` is the message's seq, the number citations and confirm records
+    point at, in the same grammar Claudette's context uses. A message with no
+    seq gets no marker.
 
-    A message with no seq (a fixture, a synthetic line) renders exactly as
-    before — no marker is invented for a number that does not exist.
+    The label renders only when the message's ``attribution`` names a model.
+    It sits before the content and never after it, so no post in the transcript
+    ends in a signature. Its values go through safe_name, because any bot can
+    set them on its own posts.
     """
     author = (msg.get("author") or {}).get("name") or (
         f"{msg.get('author_type', 'someone')}:{msg.get('author_id', '?')}"
     )
-    content = msg.get("content") or ""
+    content = _attribution_label(msg) + (msg.get("content") or "")
     seq = msg.get("seq")
     if seq is None:
         return f"{author}: {content}"
     return f"{author}: [#{seq}] {content}"
+
+
+def _attribution_label(msg: dict[str, Any]) -> str:
+    attribution = msg.get("attribution")
+    if not isinstance(attribution, dict):
+        return ""
+    model = safe_name(attribution.get("model"))
+    if not model:
+        return ""
+    label = f"via {model}"
+    if attribution.get("verified") is not True:
+        label += " pinned, actual unverified"
+    summoner = safe_name(attribution.get("summoner"))
+    if summoner:
+        label += f", summoned by {summoner}"
+    return f"({label}) "
 
 
 def assemble_prompt(
