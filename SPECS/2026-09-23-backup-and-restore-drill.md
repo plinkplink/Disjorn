@@ -62,7 +62,8 @@ plink runs the first drill by hand, witnessed in #custodian. It must pass every 
 - **Confirmed at**: 9/23/2026
 
 ## Status
-building
+built@loop/2026-09-23-backup-and-restore-drill
+<!-- set by the broker on 2026-09-25 01:53Z (start-build, 2026-09-23-backup-and-restore-drill): build published: disjorn.git 1ca72ed7450f64282eb5df9dcb4adb17bc6e46e4 — on the branch for review, nothing merged. `board --mark-merged` advances this to `merged` once the merge lands. -->
 <!-- set by the broker on 2026-09-25 01:40Z (start-build, 2026-09-23-backup-and-restore-drill): build running as disjorn-build-2026-09-23-backup-and-restore-drill.service -> loop/2026-09-23-backup-and-restore-drill, launched by gable (confirmed by plink, #custodian seq 3036). Not buildable again until this line moves. -->
 <!-- set by the broker on 2026-09-24 00:09Z (start-build, 2026-09-23-backup-and-restore-drill): the build ran and produced no commits — no branch, nothing to review; buildable again. -->
 <!-- set by the broker on 2026-09-24 00:07Z (start-build, 2026-09-23-backup-and-restore-drill): build running as disjorn-build-2026-09-23-backup-and-restore-drill.service -> loop/2026-09-23-backup-and-restore-drill, launched by gable (confirmed by plink, #custodian seq 3036). Not buildable again until this line moves. -->
