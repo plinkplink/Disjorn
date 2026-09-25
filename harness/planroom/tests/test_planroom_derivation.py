@@ -205,6 +205,20 @@ def test_an_unreadable_status_lands_in_review_and_says_so(repo, gatehouse):
     assert "unparseable-status" in c["flags"]
 
 
+def test_a_filename_the_board_verbs_refuse_is_flagged_not_silent(repo, gatehouse):
+    """The card stays on the board, flagged, because its slug cannot be opened,
+    commented on or blocked."""
+    write_spec(repo / "SPECS", "2026-08-20-Mixed-Case", status="confirmed")
+    write_spec(repo / "SPECS", "2026-08-20-thing", status="confirmed")
+    cards = by_slug(derive(repo, gatehouse))
+    c = cards["2026-08-20-Mixed-Case"]
+    assert "non-canonical-slug" in c["flags"]
+    assert c["whose_move"] == "plink"
+    assert "rename it to lowercase" in c["note"]
+    assert "SPECS/2026-08-20-mixed-case.md" in c["note"]
+    assert "non-canonical-slug" not in cards["2026-08-20-thing"]["flags"]
+
+
 def test_readme_and_template_are_not_cards(repo, gatehouse):
     (repo / "SPECS" / "TEMPLATE.md").write_text("# Spec: <title>\n")
     (repo / "SPECS" / "PASSDOWN-x.md").write_text("# passdown\n")

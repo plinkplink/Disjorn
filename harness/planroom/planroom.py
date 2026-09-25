@@ -548,6 +548,13 @@ def derive_cards(config: Optional[dict] = None, *, repo: Optional[Path] = None,
             note = (f"Merged as {merged[f.stem]}, but the file still says "
                     f"`{word}` — `board --mark-merged` advances it.")
 
+        if not brokerd().BOARD_SLUG_RE.match(f.stem):
+            flags.append("non-canonical-slug")
+            whose = "plink"
+            note = ("Filename is not a canonical spec slug, so the board verbs "
+                    "refuse this card: rename it to lowercase, "
+                    f"`SPECS/{f.stem.lower()}.md`.")
+
         parts = by_slug.get(f.stem, [])
         unmerged = [p for p in parts if not p["merged"]]
         branch = f"loop/{f.stem}" if parts else None
