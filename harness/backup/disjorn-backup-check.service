@@ -1,0 +1,13 @@
+[Unit]
+Description=Disjorn monthly restic repository check (5%% data subset)
+OnFailure=disjorn-backup-alert@%n.service
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/disjorn-backup/restic.env
+Environment=RESTIC_CACHE_DIR=/var/cache/disjorn-backup
+CacheDirectory=disjorn-backup
+Nice=10
+ExecStart=/usr/bin/restic check --retry-lock 30m --read-data-subset=5%%

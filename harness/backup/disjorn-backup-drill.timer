@@ -1,0 +1,9 @@
+[Unit]
+Description=Weekly Disjorn restore drill (must stay shorter than the 7-daily retention tier)
+
+[Timer]
+OnCalendar=Sun *-*-* 05:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,12 @@
+[Unit]
+Description=Disjorn backup freshness: post red if the newest snapshot is over 26h old
+OnFailure=disjorn-backup-alert@%n.service
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/disjorn-backup/restic.env
+Environment=RESTIC_CACHE_DIR=/var/cache/disjorn-backup
+CacheDirectory=disjorn-backup
+ExecStart=/bin/bash /home/plink/Disjorn/Disjorn/harness/backup/freshness.sh

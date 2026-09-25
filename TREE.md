@@ -36,6 +36,7 @@ derivative that syncs one way, or a resident's own volume you cannot write.
 | Build-seat kernel | `harness/cc/build-kernel.md` | **`/usr/local/lib/disjorn/build-kernel.md`** | `sudo install`; copied into the build home per run |
 | Broker / verbs | repo templates | `/etc/disjorn-broker/*` | sudoedit; verbs.toml is re-read per request |
 | Metrics, errorlog | `harness/…` | **the repo** (unit ExecStart points at it) | nothing — next timer tick |
+| Offsite backup + drill | `harness/backup/…` | scripts: **the repo**; units: `/etc/systemd/system/disjorn-backup-*`; secrets: `/etc/disjorn-backup/restic.env` | scripts: nothing — next timer tick; units: `sudo cp` + `daemon-reload` |
 
 **The trap, concretely.** `house_memory` is editable-installed into
 `/home/plink/bots/claudette/.venv` pointing at the repo — but that is the

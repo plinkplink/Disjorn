@@ -1,0 +1,8 @@
+# OnFailure= target for every disjorn-backup-* unit; %i is the failed unit's name.
+[Unit]
+Description=Post a red #custodian line for failed backup unit %i
+After=disjorn-broker.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c '. /home/plink/Disjorn/Disjorn/harness/backup/lib.sh; { printf "backup RED: %%s failed; last log lines:\\n" "$$1"; journalctl -u "$$1" -n 8 --no-pager -o cat; } | post' alert %i
