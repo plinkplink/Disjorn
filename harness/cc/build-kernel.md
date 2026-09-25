@@ -56,7 +56,9 @@ you are working under. You do not know the house's rules and you do not need to
      touch: add facts, not narrative.
 
 6. **End with one JSON object on stdout**, as the last thing you print:
-   Before the JSON, run `server/.venv/bin/python -m pytest harness/tests -q`;
+   Before the JSON, run `python3 -m pytest harness/tests -q` from the repo
+   root (the container's interpreter, as the gate uses; `server/.venv`
+   exists only on the host, so READMEs that name it are host commands);
    a red run is `status: blocked`, and a file you could not bring under its
    baseline is named in `diff`.
 
