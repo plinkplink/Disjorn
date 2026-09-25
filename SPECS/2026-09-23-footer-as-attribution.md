@@ -100,7 +100,7 @@ Tier 2. The adapter change edits the path that produces my own posts, and the se
 150k–250k build tokens. Small diff, wide test surface.
 
 ## Deploy recipe
-0. Stop the summon adapter, so no footered reply lands between the merge and its restart. 1. Backup prod DB. 2. Merge. 3. Apply migration 017. 4. Rebuild client, check the content-hash name changed. 5. Restart server. 6. Read the current max seq in #custodian and write `[backfill.floor]` `4 = <that seq>` in /config/summon.toml. 7. Sync the deployed residency copy (`/usr/local/lib/disjorn/residency`) from the merged tree, then start the summon adapter (config is read at startup only; the floor is live from this start). 8. Post the deploy record in #custodian. 9. Watch the audit line for `hand-signed` over the following days; delete the floor line after 30 clean posts of mine.
+0. Stop the summon adapter, so no footered reply lands between the merge and its restart. 1. Backup prod DB. 2. Merge. 3. Apply migration 017. 4. Rebuild client, check the content-hash name changed. 5. Restart server. 6. Read the current max seq in #custodian and write `[backfill.floor]` `4 = <that seq>` in /config/summon.toml. 7. Sync the deployed residency copy (`/usr/local/lib/disjorn/residency`) from the merged tree AND copy `sdk/disjorn_sdk/client.py` into `/usr/local/lib/disjorn/disjorn_sdk_pkg/disjorn_sdk/` (the adapter's editable install; the new adapter on the old SDK fails every reply with a TypeError), then start the summon adapter (config is read at startup only; the floor is live from this start). 8. Post the deploy record in #custodian. 9. Watch the audit line for `hand-signed` over the following days; delete the floor line after 30 clean posts of mine.
 
 ## Confirm record
 - **Confirmed by**: plink
