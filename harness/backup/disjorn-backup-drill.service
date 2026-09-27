@@ -12,4 +12,5 @@ CacheDirectory=disjorn-backup
 PrivateTmp=true
 UMask=0077
 Nice=10
+MemoryMax=8G
 ExecStart=/bin/bash /home/plink/Disjorn/Disjorn/harness/backup/drill.sh

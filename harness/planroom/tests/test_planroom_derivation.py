@@ -255,6 +255,30 @@ def test_open_backlog_rows_are_backlog_cards(repo, gatehouse, tmp_path):
     assert c["title"] == "dark mode please"
 
 
+def test_a_long_backlog_title_is_clipped_at_a_word_boundary(tmp_path):
+    first = ("Backup drill counts the live memory store: at drill time, count "
+             "Claudette's live collection (an owner-made sqlite copy plus "
+             "memory_export.py, the snapshot's own path) and compare it with the "
+             "snapshot's count")
+    db = _backlog_db(tmp_path, [
+        (39, first + "\nmore body", "plink", "2026-09-27T00:00:00Z", "open", None)])
+    [row] = P.collect_backlog(db)
+    assert row["title"] == first[:first.index(" it with")] + "…"
+    assert row["body"].startswith(first)
+
+
+@pytest.mark.parametrize("title,limit,clipped", [
+    ("one two three", 13, "one two three"),
+    ("one two", 20, "one two"),
+    ("one two three", 9, "one two…"),
+    ("one two three", 7, "one two…"),
+    ("one   two three", 8, "one…"),
+    ("onetwothree", 5, "onetw…"),
+])
+def test_clip_title_cuts_whole_words_and_marks_only_a_real_cut(title, limit, clipped):
+    assert P.clip_title(title, limit) == clipped
+
+
 def test_a_missing_message_db_is_an_empty_backlog_not_a_crash(repo, gatehouse):
     data = derive(repo, gatehouse, message_db="/nonexistent/nope.db")
     assert [c for c in data["cards"] if c["kind"] == "backlog"] == []

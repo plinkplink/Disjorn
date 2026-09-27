@@ -236,6 +236,9 @@ def test_every_unit_has_a_timer_and_reports_its_own_failure(kind):
     assert "OnFailure=disjorn-backup-alert@%n.service" in svc
     assert "EnvironmentFile=/etc/disjorn-backup/restic.env" in svc
     assert "OnCalendar=" in _unit(f"disjorn-backup-{kind}.timer")
+    if kind in ("snapshot", "drill"):
+        service = svc.partition("\n[Service]\n")[2].splitlines()
+        assert any(line.startswith("MemoryMax=") for line in service)
 
 
 def test_alert_unit_posts_the_failed_unit_name_and_its_log(house):

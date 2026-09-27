@@ -320,10 +320,17 @@ def collect_backlog(message_db: Optional[str], limit: int = 200) -> list:
     for r in rows:
         text = (r["text"] or "").strip()
         title = next((l.strip() for l in text.splitlines() if l.strip()), "(empty)")
-        out.append({"id": r["id"], "title": title[:180], "body": text,
+        out.append({"id": r["id"], "title": clip_title(title), "body": text,
                     "author": r["author"], "created_at": r["created_at"],
                     "spec_ref": r["spec_ref"]})
     return out
+
+
+def clip_title(title: str, limit: int = 180) -> str:
+    if len(title) <= limit:
+        return title
+    words = re.match(r"(.*\S)\s", title[:limit + 1])
+    return (words.group(1) if words else title[:limit]) + "…"
 
 
 def spec_dates(repo: Path, specs_rel: str = "SPECS") -> dict:
