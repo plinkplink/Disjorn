@@ -54,7 +54,10 @@ backup_live_db() {
     owner="$(stat -c %U "$src")"
     tmp="$(mktemp -d)"
     chown "$owner" "$tmp"
-    runuser -u "$owner" -- sqlite3 "$src" ".backup '$tmp/copy.db'"
+    if ! runuser -u "$owner" -- sqlite3 "$src" ".backup '$tmp/copy.db'"; then
+        rm -rf "$tmp"
+        return 1
+    fi
     mv "$tmp/copy.db" "$dest"
     rm -rf "$tmp"
 }

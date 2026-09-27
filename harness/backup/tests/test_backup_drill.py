@@ -157,6 +157,17 @@ def test_the_live_databases_are_backed_up_as_their_owner(house):
     assert restored(house, snap, house["stage"] / "disjorn.db").exists()
 
 
+def test_a_failed_owner_backup_leaves_no_temp_copy(house):
+    bin_ = house["tmp"] / "bin"
+    (bin_ / "id").write_text('#!/bin/sh\n[ "$1" = "-u" ] && echo 0 && exit 0\nexec /usr/bin/id "$@"\n')
+    (bin_ / "runuser").write_text("#!/bin/sh\nexit 1\n")
+    for name in ("id", "runuser"):
+        (bin_ / name).chmod(0o755)
+    r = run(house, "snapshot.sh")
+    assert r.returncode != 0
+    assert list((house["tmp"] / "t").iterdir()) == []
+
+
 def test_drill_passes_on_an_untouched_snapshot(house):
     assert run(house, "snapshot.sh").returncode == 0
     r = run(house, "drill.sh")
