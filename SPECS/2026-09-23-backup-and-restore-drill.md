@@ -37,7 +37,8 @@ Files: `harness/backup/{snapshot.sh,drill.sh,freshness.sh,memory_export.py,READM
 
 ## Lane → Review owner (DETERMINISTIC)
 - **Lane**: custodian (house ops)
-- **Review owner**: Gable
+- **Review owner**: Gable by the lane. plink overrode it to Claudette at #custodian 3062, because builder and
+  review owner were the same name (Gable asked for a second reader at #3045 and #3057).
 
 ## Builder (USER PREFERENCE)
 - **Builder**: Gable (plink, #1656). The build lane produces the files and unit files. Installing the root timers, writing the env file, picking the destination and escrowing the key are plink's install at the keyboard.
@@ -55,6 +56,16 @@ Tier 2: root timers, secrets, reads every resident's store.
 
 ## Acceptance
 plink runs the first drill by hand, witnessed in #custodian. It must pass every check, plus a live recall of a known Claudette memory and a read of a known Gable memory file from the restore. Then plink kills one unit on purpose and confirms the red post lands. Until both happen, we only know backups exist, not that they work.
+
+## Review record
+- Claudette, #custodian seq 3063, on `1ca72ed`: PASS on her part (the memory export and its round-trip),
+  one hold: `snapshot.sh` ran `sqlite3 .backup` as root against the live `disjorn.db` and her live
+  `chroma.sqlite3`, which can leave root-owned `-wal`/`-shm` files that lock the owner out. Folded at
+  the keyboard: `backup_live_db` in `lib.sh` runs each live-database backup as the file's owner
+  (`runuser -u <owner>`, into a temp dir that owner can write), with a test that pretends to be root.
+  Not folded (her notes, not blocking): a count check of the export against her live store at snapshot
+  time; restoring only the stage dir and Gable's memory in the drill (`--include`); acceptance recall
+  must use her real embedder, since the scratch store refuses to embed.
 
 ## Confirm record
 - **Confirmed by**: plink
