@@ -42,6 +42,23 @@ backup_paths() {
 
 git_() { git -c safe.directory='*' "$@"; }
 
+# `.backup` of a live sqlite database as its owner: sqlite may create -wal/-shm
+# beside the source, and root-owned ones lock that owner out of it.
+backup_live_db() {
+    local src="$1" dest="$2" owner tmp
+    if [[ "$(id -u)" == "$(stat -c %u "$src")" ]]; then
+        sqlite3 "$src" ".backup '$dest'"
+        return
+    fi
+    need runuser
+    owner="$(stat -c %U "$src")"
+    tmp="$(mktemp -d)"
+    chown "$owner" "$tmp"
+    runuser -u "$owner" -- sqlite3 "$src" ".backup '$tmp/copy.db'"
+    mv "$tmp/copy.db" "$dest"
+    rm -rf "$tmp"
+}
+
 need() {
     local t
     for t in "$@"; do

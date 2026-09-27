@@ -11,7 +11,7 @@ rm -rf "$STAGE"
 mkdir -p -m 0700 "$STAGE"
 mkdir -p "$STAGE/bundles" "$STAGE/claudette"
 
-sqlite3 "$DB" ".backup '$STAGE/disjorn.db'"
+backup_live_db "$DB" "$STAGE/disjorn.db"
 messages="$(sqlite3 "$STAGE/disjorn.db" 'SELECT COUNT(*) FROM messages')"
 migration="$(sqlite3 "$STAGE/disjorn.db" 'SELECT MAX(filename) FROM schema_migrations')"
 
@@ -19,7 +19,7 @@ migration="$(sqlite3 "$STAGE/disjorn.db" 'SELECT MAX(filename) FROM schema_migra
 copy="$STAGE/claudette/chroma-copy"
 cp -a "$CLAUDETTE_MEMORY_DIR" "$copy"
 rm -f "$copy"/chroma.sqlite3*
-sqlite3 "$CLAUDETTE_MEMORY_DIR/chroma.sqlite3" ".backup '$copy/chroma.sqlite3'"
+backup_live_db "$CLAUDETTE_MEMORY_DIR/chroma.sqlite3" "$copy/chroma.sqlite3"
 "$CLAUDETTE_PY" "$HERE/memory_export.py" export \
     --data-dir "$copy" --out "$STAGE/claudette/memory-export.json" > "$STAGE/claudette/export.json"
 rm -rf "$copy"

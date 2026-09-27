@@ -2,6 +2,7 @@
 
 import json
 import os
+import pwd
 import shlex
 import sqlite3
 import subprocess
@@ -134,6 +135,26 @@ def test_snapshot_writes_manifest_and_prunes_with_the_retention_policy(house):
     assert not restored(house, snap, house["stage"] / "claudette/chroma-copy").exists()
     calls = (house["tmp"] / "repo/calls.log").read_text()
     assert "forget --retry-lock 30m --tag disjorn-nightly --prune --keep-daily 7 --keep-weekly 4 --keep-monthly 12" in calls
+
+
+def test_the_live_databases_are_backed_up_as_their_owner(house):
+    """Run as root, sqlite may leave root-owned -wal/-shm beside a live
+    database and lock its owner out; the backup runs as the owner instead."""
+    bin_ = house["tmp"] / "bin"
+    log = house["tmp"] / "runuser.log"
+    (bin_ / "id").write_text('#!/bin/sh\n[ "$1" = "-u" ] && echo 0 && exit 0\nexec /usr/bin/id "$@"\n')
+    (bin_ / "runuser").write_text(
+        f'#!/bin/sh\necho "$@" >> {log}\nwhile [ "$1" != "--" ]; do shift; done\nshift\nexec "$@"\n')
+    for name in ("id", "runuser"):
+        (bin_ / name).chmod(0o755)
+    r = run(house, "snapshot.sh")
+    assert r.returncode == 0, r.stderr
+    me = pwd.getpwuid(os.getuid()).pw_name
+    calls = log.read_text().splitlines()
+    assert any(c.startswith(f"-u {me} -- sqlite3 ") and "disjorn.db" in c for c in calls), calls
+    assert any(c.startswith(f"-u {me} -- sqlite3 ") and "chroma.sqlite3" in c for c in calls), calls
+    snap = only_snapshot(house)
+    assert restored(house, snap, house["stage"] / "disjorn.db").exists()
 
 
 def test_drill_passes_on_an_untouched_snapshot(house):

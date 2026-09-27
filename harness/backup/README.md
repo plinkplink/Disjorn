@@ -64,6 +64,18 @@ CLAUDETTE_RETRIEVAL_LOG=<host path of her memory_retrieval.jsonl>
 # plus any credentials the destination backend needs
 ```
 
+Backblaze B2 goes through its S3-compatible API, which is restic's recommended path for B2:
+
+```sh
+RESTIC_REPOSITORY=s3:https://<bucket Endpoint, e.g. s3.us-east-005.backblazeb2.com>/<bucket>/<path>
+AWS_ACCESS_KEY_ID=<B2 keyID>              # an application key limited to that bucket
+AWS_SECRET_ACCESS_KEY=<B2 applicationKey>
+```
+
+On this host `CLAUDETTE_MEMORY_DIR` is `/home/res-claudette/resident-home/memory/chroma_data` and
+`CLAUDETTE_RETRIEVAL_LOG` is `/home/res-claudette/resident-home/memory/memory_retrieval.jsonl`, the host
+side of what her container sees under `/home/resident/memory`.
+
 Key escrow: print `RESTIC_PASSWORD` and keep it off-box. Without it the
 offsite copy is unreadable.
 
