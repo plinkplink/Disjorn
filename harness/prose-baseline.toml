@@ -57,7 +57,7 @@
 "harness/keyboard/09-build-lane-preflight.sh" = 6593
 "harness/keyboard/10-appsbuilding.sh" = 15296
 "harness/keyboard/11-apps-gitdir-migrate.sh" = 9443
-"harness/keyboard/board.py" = 7941
+"harness/keyboard/board.py" = 7881
 "harness/keyboard/prose_sweep.py" = 5552
 "harness/keyboard/retag_shredded.py" = 6119
 "harness/keyboard/scrub_channel.py" = 1848

@@ -430,10 +430,10 @@ def build_board() -> dict:
             })
 
     running_slugs = {r["slug"] for r in running}
-    # "built" = merged, by either witness — a spec whose branch was cleaned off
-    # the shelf is still built. Shelf-only detection is how seven merged specs
-    # went on reading as buildable.
-    built_slugs = set(by_slug) | set(merged_slugs())
+    # Only `merged` may call a spec merged; it is the truth `--mark-merged`
+    # acts on. A shelf branch alone means built, not merged.
+    merged = merged_slugs()
+    built_slugs = set(by_slug) | set(merged)
 
     for s in specs:
         word = s["status_word"]
@@ -462,7 +462,7 @@ def build_board() -> dict:
                 "where": s["path"],
                 "how": "a resident presses start_build; nothing needed from you",
                 "slug": s["slug"]})
-        elif _advances_to_merged(word) and s["slug"] in built_slugs:
+        elif _advances_to_merged(word) and s["slug"] in merged:
             tidy.append({
                 "kind": "stale-status",
                 "what": f"Merged, but the file still says '{word}': {s['slug']}",
