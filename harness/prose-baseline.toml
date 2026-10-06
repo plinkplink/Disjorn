@@ -100,7 +100,7 @@
 "server/app/routers/messages.py" = 10842
 "server/app/routers/notifications.py" = 4622
 "server/app/routers/planroom.py" = 11305
-"server/app/routers/slash.py" = 10462
+"server/app/routers/slash.py" = 10432
 "server/app/routers/summarize.py" = 1656
 "server/app/services/backlog.py" = 4599
 "server/app/services/chibi.py" = 3985
