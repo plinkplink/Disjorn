@@ -53,53 +53,53 @@ class ResetRequestOut(BaseModel):
     requested_at: str
 
 
-async def _tell_admins(requester_id: int, username: str) -> None:
+async def _file_request(username: str, note: Optional[str]) -> None:
     try:
+        user = await db.fetch_one(
+            "SELECT id, username FROM users WHERE username = ?", (username,)
+        )
+        if user is None:
+            return
+        cur = await db.execute(
+            "INSERT OR IGNORE INTO password_reset_requests (user_id, note) VALUES (?, ?)",
+            (user["id"], note),
+        )
+        if not cur.rowcount:
+            return
         admins = await db.fetch_all(
-            "SELECT id FROM users WHERE is_admin = 1 AND id != ?", (requester_id,)
+            "SELECT id FROM users WHERE is_admin = 1 AND id != ?", (user["id"],)
         )
         await push.notify_users(
             [a["id"] for a in admins],
             {
                 "title": "Password reset requested",
-                "body": f"{username} asked for a password reset",
+                "body": f"{user['username']} asked for a password reset",
                 "channel_id": None,
                 "message_id": None,
                 "url": "/settings",
                 "kind": "message",
             },
         )
-    except Exception:  # noqa: BLE001 — the request row is already stored
-        logger.exception("reset request push failed")
+    except Exception:  # noqa: BLE001 — nobody is waiting on this
+        logger.exception("filing a reset request failed")
 
 
 @router.post("/auth/reset-requests", status_code=202)
 async def request_reset(body: ResetRequestIn, request: Request):
-    ip = throttle.client_ip(request)
-    name_key = body.username.strip().casefold()
-    wait = max(_per_ip.retry_after(ip), _per_username.retry_after(name_key))
+    """Answers before looking the name up, so timing says nothing about it."""
+    name = body.username.strip()
+    wait = throttle.attempt(
+        [(_per_ip, throttle.client_ip(request)), (_per_username, name.casefold())]
+    )
     if wait:
         return JSONResponse(
             status_code=429,
             content={"detail": "Too many requests. Try again later."},
             headers={"Retry-After": str(wait)},
         )
-    _per_ip.hit(ip)
-    _per_username.hit(name_key)
-
-    note = (body.note or "").strip() or None
-    user = await db.fetch_one(
-        "SELECT id, username FROM users WHERE username = ?", (body.username.strip(),)
-    )
-    if user is not None:
-        cur = await db.execute(
-            "INSERT OR IGNORE INTO password_reset_requests (user_id, note) VALUES (?, ?)",
-            (user["id"], note),
-        )
-        if cur.rowcount:
-            task = asyncio.create_task(_tell_admins(user["id"], user["username"]))
-            _pending_tasks.add(task)
-            task.add_done_callback(_pending_tasks.discard)
+    task = asyncio.create_task(_file_request(name, (body.note or "").strip() or None))
+    _pending_tasks.add(task)
+    task.add_done_callback(_pending_tasks.discard)
     return {"detail": GENERIC_ANSWER}
 
 

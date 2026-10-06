@@ -1,5 +1,7 @@
 """Asking an admin to reset a password from the login page."""
 
+import asyncio
+
 import httpx
 import pytest
 
@@ -34,7 +36,9 @@ async def ask(client, username, note=None):
     body = {"username": username}
     if note is not None:
         body["note"] = note
-    return await client.post("/auth/reset-requests", json=body)
+    r = await client.post("/auth/reset-requests", json=body)
+    await reset_requests.wait_pending()
+    return r
 
 
 async def open_requests():
@@ -78,6 +82,25 @@ async def test_an_admin_asking_is_not_notified_about_themself(client, pushes):
     await ask(client, "root")
     await reset_requests.wait_pending()
     assert pushes[0][0] == [other_id]
+
+
+async def test_the_answer_does_not_wait_for_the_lookup(client, pushes, monkeypatch):
+    await make_user("alice")
+    looked_up = []
+    gate = asyncio.Event()
+    real_fetch_one = db.fetch_one
+
+    async def held_fetch_one(sql, params=()):
+        await gate.wait()
+        looked_up.append(params)
+        return await real_fetch_one(sql, params)
+
+    monkeypatch.setattr(db, "fetch_one", held_fetch_one)
+    r = await client.post("/auth/reset-requests", json={"username": "alice"})
+    assert r.status_code == 202 and looked_up == []
+    gate.set()
+    await reset_requests.wait_pending()
+    assert looked_up == [("alice",)]
 
 
 async def test_a_note_over_two_hundred_characters_is_refused(client, pushes):
