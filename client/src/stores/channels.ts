@@ -1,7 +1,21 @@
 import { create } from "zustand";
 
-import { listChannels, markRead as apiMarkRead, openDm as apiOpenDm } from "../api";
+import {
+  ApiError,
+  listChannels,
+  markRead as apiMarkRead,
+  openDm as apiOpenDm,
+} from "../api";
 import type { ChannelListItem, ChannelVisibility, Message } from "../types";
+
+/** Backoff between first-load attempts that got no answer or a 5xx. */
+const LOAD_RETRY_DELAYS_MS = [500, 1500, 4000];
+
+function retryable(err: unknown): boolean {
+  return !(err instanceof ApiError) || err.status === 0 || err.status >= 500;
+}
+
+let firstLoad: Promise<void> | null = null;
 
 function sortChannels(channels: ChannelListItem[]): ChannelListItem[] {
   // main_feed pinned first; text channels alphabetically; DMs by most recent
@@ -25,9 +39,13 @@ interface ChannelsState {
   channels: ChannelListItem[];
   activeChannelId: number | null;
   loaded: boolean;
+  /** The first load gave up; the shell offers a retry instead of an empty list. */
+  loadFailed: boolean;
 
   /** Fetch GET /channels (initial load and WS reconnect resync). */
   refresh: () => Promise<void>;
+  /** First load with backoff; no-op once loaded, shared while in flight. Never rejects. */
+  ensureLoaded: () => Promise<void>;
   /** Switch channels. Side effects (hash, focus op, mark-read) live in AppShell/ws. */
   setActive: (channelId: number | null) => void;
   /** Open (or create) the 1:1 DM with a user; returns the channel id. */
@@ -53,10 +71,36 @@ export const useChannels = create<ChannelsState>()((set, get) => ({
   channels: [],
   activeChannelId: null,
   loaded: false,
+  loadFailed: false,
 
   refresh: async () => {
     const channels = await listChannels();
-    set({ channels, loaded: true });
+    set({ channels, loaded: true, loadFailed: false });
+  },
+
+  ensureLoaded: () => {
+    if (get().loaded) return Promise.resolve();
+    if (firstLoad !== null) return firstLoad;
+    set({ loadFailed: false });
+    firstLoad = (async () => {
+      for (let attempt = 0; !get().loaded; attempt++) {
+        try {
+          await get().refresh();
+          return;
+        } catch (err) {
+          if (!retryable(err) || attempt >= LOAD_RETRY_DELAYS_MS.length) {
+            set({ loadFailed: true });
+            return;
+          }
+          await new Promise((resolve) =>
+            setTimeout(resolve, LOAD_RETRY_DELAYS_MS[attempt]),
+          );
+        }
+      }
+    })().finally(() => {
+      firstLoad = null;
+    });
+    return firstLoad;
   },
 
   setActive: (channelId) => set({ activeChannelId: channelId }),

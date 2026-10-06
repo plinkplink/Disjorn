@@ -23,6 +23,8 @@ export function ChatView() {
   const channel = useChannels((s) =>
     s.channels.find((c) => c.id === s.activeChannelId),
   );
+  const listLoaded = useChannels((s) => s.loaded);
+  const listFailed = useChannels((s) => s.loadFailed);
 
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   const [editing, setEditing] = useState<Message | null>(null);
@@ -49,6 +51,27 @@ export function ChatView() {
       void useMembers.getState().ensureLoaded(activeChannelId);
     }
   }, [activeChannelId, canRead]);
+
+  if (!listLoaded && channel === undefined) {
+    return (
+      <div className="chat-placeholder">
+        {listFailed ? (
+          <p>
+            Couldn&rsquo;t load channels.{" "}
+            <button
+              className="link-btn"
+              type="button"
+              onClick={() => void useChannels.getState().ensureLoaded()}
+            >
+              Retry
+            </button>
+          </p>
+        ) : (
+          <p>Loading channels…</p>
+        )}
+      </div>
+    );
+  }
 
   if (activeChannelId === null) {
     return (

@@ -8,6 +8,7 @@
    - On RECONNECT (any ready after the first): refetch GET /channels and, for
      every channel with local messages, backfill `?from_seq=lastSeq+1`
      (current-state semantics — edits applied, tombstones drop deletions).
+     The FIRST ready retries the channel list if the boot fetch lost it.
    - Focus protocol: sendFocus on every channel switch and on window
      blur/focus — the server suppresses push notifications for focused
      channels, so this must stay accurate. The last focus is re-sent after
@@ -61,6 +62,28 @@ export class DisjornSocket {
     const ws = this.ws;
     this.ws = null;
     ws?.close();
+  }
+
+  /**
+   * The app came back (foreground, network, bfcache). A pending backoff is
+   * cut short so a resumed phone does not sit out a 30 s timer; a socket
+   * that is already up resyncs when `resync` says we were away long enough
+   * to have missed frames.
+   */
+  wake(resync: boolean): void {
+    if (this.stopped) return;
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+      this.attempt = 0;
+      this.open();
+      return;
+    }
+    if (this.ws === null) {
+      this.open();
+      return;
+    }
+    if (resync && this.state === "ready") void this.resync();
   }
 
   /* ---- client ops ---- */
@@ -143,6 +166,7 @@ export class DisjornSocket {
           this.send({ op: "focus", channel_id: this.focusedChannelId });
         }
         if (isReconnect) void this.resync();
+        else void useChannels.getState().ensureLoaded();
         return;
       }
       case "message_create": {
