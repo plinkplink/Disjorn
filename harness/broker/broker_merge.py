@@ -49,6 +49,8 @@ MAX_SLUG_CHARS = 100
 _PASS_WORD_RE = re.compile(r"\bPASS\b")
 # A verdict that also blocks is not a PASS, whatever else the post says.
 _BLOCK_WORD_RE = re.compile(r"\bBLOCK\b")
+_NEGATED_PASS_RE = re.compile(r"\b(?:not|no|isn't|never)\s+(?:a\s+)?PASS\b", re.IGNORECASE)
+_QUOTED_RE = re.compile(r"`[^`]*`|\"[^\"\n]*\"|\u201c[^\u201d\n]*\u201d")
 
 # ------------------------------------------------ the fails-closed Tier-1 wall
 # SPECS/2026-08-26-approval-object-and-resident-write-verbs.md item 2, building
@@ -496,16 +498,14 @@ class MergeVerbs:
         return _as_utc(cp.stdout) if cp.returncode == 0 else None
 
     def _lane_owner(self, path: str) -> Optional[str]:
-        """`[planroom].lane_owners`, prefix map, first match wins. There is no
+        """`[planroom].lane_owners`, prefix map, longest match wins. There is no
         default map in code: an unmapped path has no reviewer, which is true."""
         owners = self.planroom.get("lane_owners")
         if not isinstance(owners, dict):
             return None
         low = path.lower()
-        for prefix, owner in owners.items():
-            if low.startswith(str(prefix).lower()):
-                return str(owner)
-        return None
+        hits = [(len(str(p)), str(o)) for p, o in owners.items() if low.startswith(str(p).lower())]
+        return max(hits)[1] if hits else None
 
     def _pass_message(self, pass_seq: int) -> dict:
         """The reviewer's post, which is only ever a bot's, only ever in
@@ -568,7 +568,8 @@ class MergeVerbs:
                 f"seq {pass_seq} was posted before the tip of loop/{slug}",
                 "pass-invalid")
         text = message["content"]
-        if not _PASS_WORD_RE.search(text) or slug not in text:
+        names = re.search(rf"(?<![0-9A-Za-z-]){re.escape(slug)}(?![0-9A-Za-z-])", text)
+        if not _PASS_WORD_RE.search(text) or names is None or _NEGATED_PASS_RE.search(_QUOTED_RE.sub(" ", text)):
             raise self._merge_refused(
                 f"seq {pass_seq} does not say PASS for {slug}", "pass-invalid")
         if _BLOCK_WORD_RE.search(text):

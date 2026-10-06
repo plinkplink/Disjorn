@@ -905,3 +905,38 @@ def test_the_defaults_are_the_shipped_ones(harness):
     assert broker.gate_timeout == 1320
     assert broker.gate_log_dir == "/var/lib/disjorn-broker/gate-logs"
     assert broker.merge_work_dir == "/var/lib/disjorn-broker/merge-work"
+
+
+def test_a_pass_for_a_longer_slug_does_not_count_for_this_one(harness):
+    arm(harness, tier=2)
+    harness.add_custodian_post(PASS_SEQ, f"PASS {SLUG}-v2", author="Claudette",
+                               created_at=later())
+    reason, message = early_refusal(harness, pass_seq=PASS_SEQ)
+    assert reason == "pass-invalid" and "does not say PASS" in message
+
+
+@pytest.mark.parametrize("text", ["this is not a PASS for {slug}", "No PASS on {slug} yet",
+                                  "{slug}: isn't a PASS, see notes"])
+def test_a_negated_pass_is_not_a_pass(harness, text):
+    arm(harness, tier=2)
+    harness.add_custodian_post(PASS_SEQ, text.format(slug=SLUG), author="Claudette",
+                               created_at=later())
+    reason, message = early_refusal(harness, pass_seq=PASS_SEQ)
+    assert reason == "pass-invalid" and "does not say PASS" in message
+
+
+def test_the_longest_lane_prefix_owns_a_path_whatever_the_order(harness):
+    broker = fresh(harness)
+    broker.planroom = {**broker.planroom,
+                       "lane_owners": {"harness/": "Claudette", "harness/cc/": "Gable"}}
+    assert broker._lane_owner("harness/cc/run-gates.sh") == "Gable"
+    assert broker._lane_owner("harness/broker/brokerd.py") == "Claudette"
+    assert broker._lane_owner("client/src/App.tsx") is None
+
+
+def test_a_quoted_negation_does_not_spoil_a_real_pass(harness):
+    arm(harness, tier=2)
+    harness.add_custodian_post(
+        PASS_SEQ, f'PASS on {SLUG}. The old regex also matched "not a PASS".',
+        author="Claudette", created_at=later())
+    assert call(harness, pass_seq=PASS_SEQ)["ok"] is True
