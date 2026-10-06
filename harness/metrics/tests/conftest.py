@@ -25,3 +25,14 @@ def _no_podman(monkeypatch):
 @pytest.fixture(autouse=True)
 def _no_systemd(monkeypatch):
     monkeypatch.setattr(_M, "service_started_at", lambda unit: (None, "not asked in tests"))
+
+
+REAL_DEPLOY_PROCESSES = _M.DEPLOY_PROCESSES
+
+
+@pytest.fixture(autouse=True)
+def _no_live_processes(monkeypatch):
+    monkeypatch.setattr(_M, "user_unit_started_at",
+                        lambda user, unit: (None, "not asked in tests"))
+    monkeypatch.setattr(_M, "DEPLOY_PROCESSES",
+                        {"server": REAL_DEPLOY_PROCESSES["server"]})

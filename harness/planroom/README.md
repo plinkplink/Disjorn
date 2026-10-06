@@ -108,19 +108,35 @@ Computed from `metrics.deploy_state()` and from nothing else. It shows two
 facts and one colour:
 
 - **staged**: prod's checkout is at mirror head and its working tree is clean.
-- **running**: the live `disjorn` server started after the server code on disk
-  landed. The start time is systemd's `ActiveEnterTimestamp`; the landing time
-  is prod's reflog, so a commit made days earlier still counts from when it
-  arrived. Only a change under `server/` (outside `server/tests`) needs a
-  restart; a client-only landing does not.
+- **running**: every measured process started after the code it loads
+  landed. The processes are `metrics.DEPLOY_PROCESSES`, overridable by name in
+  `broker.toml [deploy.processes.<name>]`:
+
+  | Process | Start time | Code | Current when |
+  |---|---|---|---|
+  | server | system unit `disjorn` | prod `server/` (not tests) | started after the last landing that touched it |
+  | broker | system unit `disjorn-broker` | prod `harness/broker`, `planroom`, `metrics`, `keyboard/board.py` | same |
+  | gable-summon | res-gable user unit, from its cgroup and `/proc` | deployed copy `/usr/local/lib/disjorn/residency` | the copy equals prod's `harness/residency` and the process started after the copy's newest ctime |
+  | custodian-adapter | res-claudette user unit `resident-cc`, cgroup and `/proc` | her clone in `resident-home/bots/claudette` | the clone is at the host repo's `disjorn-port` and started after the last landing of `*.py` |
+  | custodian-discord | system unit `claudette` | host repo `/home/plink/bots/claudette` | started after the last landing of `*.py` |
+
+  Landing time is the checkout's reflog, so a commit made days earlier still
+  counts from when it arrived. An uncommitted edit under a watched path makes
+  that process `unknown`, never yes. A user unit's start comes from the cgroup
+  because `systemctl --user -M` needs privilege the broker does not have.
 
 | Badge | Label | Means |
 |---|---|---|
-| green | live | staged and running |
-| amber | restart pending | staged, but the server predates the server code on disk |
+| green | live | staged and every process current |
+| amber | restart pending: names | staged, but the named processes predate their code on disk |
+| amber | copy differs: names | the named processes would load code that is not the repo's on restart |
 | amber | not deployed | merged, prod only `behind` |
 | red | live, not merged | prod `ahead`, or a dirty prod tree |
-| unknown | unknown / running unknown | the gate is not configured, or systemd or the reflog could not be read |
+| unknown | unknown / running unknown | the gate is not configured, or some process's start, reflog or files could not be read |
+
+The client lists each process with yes, no, differs or unknown beside the
+badge, the reason in its tooltip, and the reasons as text in a Merged card's
+pane.
 
 A fact that cannot be read is `unknown`, and an unknown fact never renders
 green.

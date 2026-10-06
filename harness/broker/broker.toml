@@ -271,6 +271,17 @@ deploy_tree = "/home/plink/Disjorn/Disjorn"
 # #custodian name.
 # keyboard = ["plink"]
 
+# [deploy.processes.<name>]
+# The deploy badge's running fact, one entry per long-running process. The
+# defaults (server, broker, gable-summon, custodian-adapter, custodian-discord)
+# live in metrics.DEPLOY_PROCESSES; a table here overrides one by name, adds
+# one, or drops one with `enabled = false`. Keys: unit, user (a user unit of
+# that account), repo (default deploy_tree), watch (pathspecs), copy + source
+# (a deployed copy), upstream + ref (a clone that must match a branch).
+# [deploy.processes.apps-gate]
+# unit = "disjorn-apps-gate"
+# watch = ["harness/cc/apps", ":(exclude,glob)**/tests/**"]
+
 [planroom]
 # THE PLAN ROOM (SPECS/2026-08-20-plan-room.md, confirmed seq 1434). The board
 # tab, the `board-*` verbs, and the CLI all render one derivation, and this

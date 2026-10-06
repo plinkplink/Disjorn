@@ -684,11 +684,20 @@ export const PLAN_COLUMNS = [
 export type PlanColumn = (typeof PLAN_COLUMNS)[number];
 
 /* Two facts, one colour. staged: prod's checkout is mirror head and clean.
-   running: the live server started after the server code on disk landed.
-   green = both; amber = not deployed, or restart pending; red = LIVE, NOT
-   MERGED, code running that the mirror has never seen; unknown = either fact
-   could not be read. Computed once, broker-side, by metrics.deploy_state(). */
+   running: every measured process started after the code it loads landed.
+   green = both; amber = not deployed, or restart pending / copy differs for
+   the named processes; red = LIVE, NOT MERGED, code running that the mirror
+   has never seen; unknown = either fact could not be read. Computed once,
+   broker-side, by metrics.deploy_state(). */
 export type DeployBadge = "green" | "amber" | "red" | "unknown";
+
+/* One process's running fact; null is unknown and never renders as yes. */
+export interface PlanProcess {
+  name: string;
+  running: boolean | null;
+  state: "current" | "stale" | "differs" | "unknown";
+  detail: string;
+}
 
 export interface PlanDeploy {
   badge: DeployBadge;
@@ -698,6 +707,7 @@ export interface PlanDeploy {
   running?: boolean | null;
   staged_detail?: string;
   running_detail?: string;
+  processes?: PlanProcess[];
   state?: string;
   ahead?: number;
   behind?: number;

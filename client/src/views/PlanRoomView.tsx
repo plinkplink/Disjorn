@@ -55,6 +55,7 @@ import {
   type PlanCard,
   type PlanCardDetail,
   type PlanDeploy,
+  type PlanProcess,
 } from "../types";
 
 const ARCHIVED = "Archived";
@@ -84,9 +85,14 @@ function factWord(v: boolean | null | undefined): string {
   return v === true ? "yes" : v === false ? "no" : "unknown";
 }
 
-/* The two facts behind the colour. A fact the broker could not read shows
-   as unknown, never as yes. */
+function processWord(p: PlanProcess): string {
+  return p.state === "differs" ? "differs" : factWord(p.running);
+}
+
+/* The two facts behind the colour; running is one fact per process. A fact
+   the broker could not read shows as unknown, never as yes. */
 function DeployFacts({ deploy }: { deploy: PlanDeploy }) {
+  const procs = deploy.processes ?? [];
   return (
     <>
       <span
@@ -95,13 +101,43 @@ function DeployFacts({ deploy }: { deploy: PlanDeploy }) {
       >
         staged: {factWord(deploy.staged)}
       </span>
-      <span
-        className={`plan-fact plan-fact-${factWord(deploy.running)}`}
-        title={deploy.running_detail ?? ""}
-      >
-        running: {factWord(deploy.running)}
-      </span>
+      {procs.length === 0 ? (
+        <span
+          className={`plan-fact plan-fact-${factWord(deploy.running)}`}
+          title={deploy.running_detail ?? ""}
+        >
+          running: {factWord(deploy.running)}
+        </span>
+      ) : (
+        <span className="plan-procs" title={deploy.running_detail ?? ""}>
+          {procs.map((p) => (
+            <span
+              key={p.name}
+              className={`plan-proc plan-fact-${factWord(p.running)}`}
+              title={p.detail}
+            >
+              {p.name}: {processWord(p)}
+            </span>
+          ))}
+        </span>
+      )}
     </>
+  );
+}
+
+/* The per-process reasons as text, for the card pane: a tooltip never shows
+   on a phone. */
+function ProcessReasons({ deploy }: { deploy: PlanDeploy }) {
+  const procs = (deploy.processes ?? []).filter((p) => p.running !== true);
+  if (procs.length === 0) return null;
+  return (
+    <ul className="plan-proc-reasons">
+      {procs.map((p) => (
+        <li key={p.name}>
+          {p.name}: {p.detail}
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -380,6 +416,7 @@ function CardModal({
                   </span>{" "}
                   <DeployFacts deploy={card.deploy} />
                   <div className="plan-deploy-detail">{card.deploy.detail}</div>
+                  <ProcessReasons deploy={card.deploy} />
                 </dd>
               </>
             )}

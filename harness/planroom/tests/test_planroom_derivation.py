@@ -92,6 +92,13 @@ def gatehouse(tmp_path: Path) -> Path:
     return g
 
 
+@pytest.fixture(autouse=True)
+def _no_live_processes(monkeypatch):
+    m = P.metrics()
+    monkeypatch.setattr(m, "service_started_at", lambda unit: (None, "not asked"))
+    monkeypatch.setattr(m, "user_unit_started_at", lambda u, unit: (None, "not asked"))
+
+
 def derive(repo: Path, gatehouse: Path, **kw) -> dict:
     return P.derive_cards(None, repo=repo, gatehouse=gatehouse,
                           drift=kw.pop("drift", {}), **kw)
@@ -487,12 +494,46 @@ def test_the_face_asks_the_configured_unit_when_the_server_started(
     asked = []
     monkeypatch.setattr(m, "gate_paths", lambda cfg: {
         "configured": False, "mirror": str(repo), "message_db": None,
-        "deploy_tree": str(prod), "branch": "main", "deploy_service": "unit-x"})
+        "deploy_tree": str(prod), "branch": "main", "deploy_service": "unit-x",
+        "deploy_processes": {"server": {"unit": "unit-x"}}})
     monkeypatch.setattr(m, "service_started_at",
                         lambda unit: asked.append(unit) or (2 ** 40, ""))
     face = P.derive_cards({}, repo=repo, gatehouse=gatehouse)["face"]
     assert asked == ["unit-x"]
     assert (face["deploy"]["badge"], face["deploy"]["running"]) == ("green", True)
+
+
+def procs(**states):
+    return [{"name": n, "ok": {"current": True, "stale": False,
+                               "differs": False}.get(st),
+             "state": st, "detail": f"{n} is {st}"} for n, st in states.items()]
+
+
+def staged_with(**states):
+    ps = procs(**states)
+    return {"state": "in-sync", "detail": "clean", "ahead": 0, "behind": 0,
+            "processes": ps, "running": P.metrics().running_summary(ps)}
+
+
+def test_the_amber_label_names_every_process_that_is_not_current():
+    b = P.deploy_badge(staged_with(server="current", broker="stale",
+                                   adapter="stale", gable="differs"))
+    assert (b["badge"], b["label"]) == (
+        "amber", "restart pending: broker, adapter; copy differs: gable")
+
+
+def test_one_unknown_process_keeps_the_badge_off_green_and_is_listed():
+    b = P.deploy_badge(staged_with(server="current", gable="unknown"))
+    assert (b["badge"], b["label"]) == ("unknown", "running unknown")
+    assert b["processes"][1] == {"name": "gable", "running": None,
+                                 "state": "unknown", "detail": "gable is unknown"}
+    assert b["detail"] == "clean; running: unknown: gable"
+
+
+def test_every_process_current_is_green():
+    b = P.deploy_badge(staged_with(server="current", broker="current"))
+    assert (b["badge"], [p["running"] for p in b["processes"]]) == (
+        "green", [True, True])
 
 
 def test_only_merged_cards_carry_the_badge(repo, gatehouse):
