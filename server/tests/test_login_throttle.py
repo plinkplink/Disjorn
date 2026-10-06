@@ -1,10 +1,13 @@
-"""Failed logins are throttled per client address and per username."""
+"""Failed logins are throttled per client address, per address and username,
+and per username with a much higher ceiling."""
 
+import asyncio
 import time
 
 import httpx
 import pytest
 
+from app.routers import auth
 from app.services import throttle
 
 from .test_password import PASSWORD, login, make_user
@@ -30,7 +33,9 @@ async def fail(client, username="alice", times=1):
         assert r.status_code == 401
 
 
-async def test_five_failures_lock_the_username_even_for_the_right_password(client):
+async def test_five_failures_lock_the_username_from_that_address_even_for_the_right_password(
+    client,
+):
     await make_user("alice")
     await fail(client, times=5)
     r = await login(client, "alice", PASSWORD)
@@ -38,13 +43,44 @@ async def test_five_failures_lock_the_username_even_for_the_right_password(clien
     assert int(r.headers["retry-after"]) > 0
 
 
-async def test_the_username_lock_follows_the_name_across_addresses(app, house_origin):
+async def test_failures_from_one_address_do_not_lock_the_owner_out_elsewhere(
+    app, house_origin
+):
     await make_user("alice")
-    for n in range(5):
-        async with client_from(app, house_origin, f"10.1.0.{n}") as c:
-            await fail(c)
-    async with client_from(app, house_origin, "10.1.0.99") as c:
+    async with client_from(app, house_origin, "10.1.0.1") as attacker:
+        await fail(attacker, times=5)
+        assert (await login(attacker, "alice", PASSWORD)).status_code == 429
+    async with client_from(app, house_origin, "10.1.0.2") as owner:
+        assert (await login(owner, "alice", PASSWORD)).status_code == 200
+
+
+async def test_fifty_failures_across_addresses_lock_the_username(app, house_origin):
+    await make_user("alice")
+    for n in range(10):
+        async with client_from(app, house_origin, f"10.1.1.{n}") as c:
+            await fail(c, times=5)
+    async with client_from(app, house_origin, "10.1.1.99") as c:
         assert (await login(c, "Alice", PASSWORD)).status_code == 429
+
+
+async def test_a_concurrent_burst_reaches_verify_no_more_than_the_limit(
+    client, monkeypatch
+):
+    await make_user("alice")
+    verified = []
+    monkeypatch.setattr(auth, "verify_password", lambda h, p: verified.append(p) or False)
+    results = await asyncio.gather(
+        *(login(client, "alice", "not the password") for _ in range(20))
+    )
+    codes = sorted(r.status_code for r in results)
+    assert len(verified) <= 5
+    assert codes == [401] * len(verified) + [429] * (20 - len(verified))
+
+
+async def test_successful_logins_never_count_against_the_address(client):
+    await make_user("alice")
+    for _ in range(12):
+        assert (await login(client, "alice", PASSWORD)).status_code == 200
 
 
 async def test_unknown_usernames_are_counted_like_real_ones(client):

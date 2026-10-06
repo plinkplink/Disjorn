@@ -50,6 +50,27 @@ class Limiter:
     def clear(self, key: str) -> None:
         self._hits.pop(key, None)
 
+    def forget_one(self, key: str) -> None:
+        hits = self._hits.get(key)
+        if hits:
+            hits.pop()
+            if not hits:
+                del self._hits[key]
+
+
+def attempt(checks: list[tuple[Limiter, str]]) -> int:
+    """Count one attempt against every (limiter, key), or none if any is full.
+
+    Synchronous on purpose: check and count happen with no await between, so
+    a burst of concurrent requests cannot all pass before the first counts.
+    Returns the seconds to wait, 0 when the attempt was counted.
+    """
+    wait = max(limiter.retry_after(key) for limiter, key in checks)
+    if not wait:
+        for limiter, key in checks:
+            limiter.hit(key)
+    return wait
+
 
 def reset_all() -> None:
     for limiter in _limiters:

@@ -317,15 +317,19 @@ class LoginResult(User):
     password_reset: Optional[PasswordResetNotice] = None
 
 
-_failed_logins_by_ip = throttle.Limiter(10, 15 * 60)
-_failed_logins_by_name = throttle.Limiter(5, 15 * 60)
+_logins_by_ip = throttle.Limiter(10, 15 * 60)
+_logins_by_ip_and_name = throttle.Limiter(5, 15 * 60)
+_logins_by_name = throttle.Limiter(50, 15 * 60)
 
 
 @router.post("/auth/login")
 async def login(body: LoginRequest, request: Request, response: Response) -> LoginResult:
     ip = throttle.client_ip(request)
     name = body.username.casefold()
-    wait = max(_failed_logins_by_ip.retry_after(ip), _failed_logins_by_name.retry_after(name))
+    pair = f"{ip}\0{name}"
+    wait = throttle.attempt(
+        [(_logins_by_ip, ip), (_logins_by_ip_and_name, pair), (_logins_by_name, name)]
+    )
     if wait:
         raise HTTPException(
             status_code=429,
@@ -336,10 +340,10 @@ async def login(body: LoginRequest, request: Request, response: Response) -> Log
     if row is None:
         _dummy_verify(body.password)
     if row is None or not verify_password(row["password_hash"], body.password):
-        _failed_logins_by_ip.hit(ip)
-        _failed_logins_by_name.hit(name)
         raise HTTPException(status_code=401, detail="Invalid username or password")
-    _failed_logins_by_name.clear(name)
+    _logins_by_ip.forget_one(ip)
+    _logins_by_ip_and_name.clear(pair)
+    _logins_by_name.clear(name)
     if _ph.check_needs_rehash(row["password_hash"]):
         await db.execute(
             "UPDATE users SET password_hash = ? WHERE id = ?",
