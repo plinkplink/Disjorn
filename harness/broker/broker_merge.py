@@ -354,6 +354,12 @@ class MergeVerbs:
                                         gates.gates_json(result))
         return result, classification
 
+    def _ledger_tier(self, slug: str, tier: int, tip: str, result: Any) -> None:
+        self._build_ledger_line({
+            "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            "kind": "tier", "slug": slug, "tier": tier, "tip": tip,
+            "gates_green": result.exit_code == 0})
+
     def _claim_gate_run(self, slug: str) -> bool:
         """False when this slug is already being gated somewhere else."""
         with self._gate_lock:
@@ -846,6 +852,7 @@ class MergeVerbs:
         result, classification = self._gate_and_classify(slug)
         note["gates_red"] = result.exit_code != 0
         tier = self._tier_of(classification)
+        self._ledger_tier(slug, tier, tip, result)
         reviewer = None
         if tier == 2:
             note["owner"] = self._first_lane_owner(slug)
@@ -920,10 +927,7 @@ class MergeVerbs:
                     "tier": "unknown — the gates did not run",
                     "next": "fix the red gate, then /build again"}
         # Written before any self-merge so the merge stays the slug's last line.
-        self._build_ledger_line({
-            "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-            "kind": "tier", "slug": slug, "tier": tier, "tip": tip,
-            "gates_green": result.exit_code == 0})
+        self._ledger_tier(slug, tier, tip, result)
         out = {"tests": format_gate_tests_line(result),
                "tier": format_tier_line(tier, classification.get("reasons"))}
         if folded is not None:
