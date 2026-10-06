@@ -4,6 +4,7 @@ Counts live in this process only: a restart forgets them and a second worker
 would keep its own. The server runs as a single uvicorn process.
 """
 
+import ipaddress
 import math
 import time
 from collections import deque
@@ -78,4 +79,14 @@ def reset_all() -> None:
 
 
 def client_ip(request) -> str:
-    return request.client.host if request.client is not None else "unknown"
+    """An IPv6 client is keyed by its /64: one allocation, one address for limits."""
+    host = request.client.host if request.client is not None else "unknown"
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return host
+    if ip.version == 4:
+        return str(ip)
+    if ip.ipv4_mapped is not None:
+        return str(ip.ipv4_mapped)
+    return str(ipaddress.ip_network(f"{ip}/64", strict=False))

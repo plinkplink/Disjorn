@@ -112,3 +112,13 @@ async def test_the_lock_lifts_after_fifteen_minutes(client, clock):
     assert (await login(client, "alice", PASSWORD)).status_code == 429
     clock[0] += 15 * 60
     assert (await login(client, "alice", PASSWORD)).status_code == 200
+
+
+def test_ipv6_clients_are_keyed_by_their_slash_64():
+    from types import SimpleNamespace
+    from app.services.throttle import client_ip
+    req = lambda host: SimpleNamespace(client=SimpleNamespace(host=host))
+    assert client_ip(req("2600:1900:0:2d10::1b01")) == client_ip(req("2600:1900:0:2d10:ffff::9"))
+    assert client_ip(req("2600:1900:0:2d10::1")) != client_ip(req("2600:1900:0:2d11::1"))
+    assert client_ip(req("100.101.54.21")) == "100.101.54.21"
+    assert client_ip(req("::ffff:10.0.0.1")) == "10.0.0.1"
