@@ -103,20 +103,32 @@ def parse_meta(html: str, base_url: str) -> dict[str, Optional[str]]:
     return {"title": title, "description": description, "image_url": image}
 
 
-async def require_public(url: str) -> None:
-    """Every address the host resolves to must be globally routable."""
+async def require_public(url: str) -> str:
+    """The first resolved address, once every address the host resolves to is globally routable."""
     parts = urlsplit(url)
     if parts.scheme not in ("http", "https") or not parts.hostname:
         raise ValueError("unfurl fetches only http(s) URLs with a host")
     port = parts.port or (443 if parts.scheme == "https" else 80)
     infos = await asyncio.get_running_loop().getaddrinfo(
         parts.hostname, port, type=socket.SOCK_STREAM)
+    checked = []
     for info in infos:
         ip = ipaddress.ip_address(info[4][0].split("%")[0])
         if ip.version == 6 and ip.ipv4_mapped is not None:
             ip = ip.ipv4_mapped
         if not ip.is_global:
             raise ValueError("unfurl refuses a non-public address")
+        checked.append(ip)
+    if not checked:
+        raise ValueError("unfurl: the host resolved to nothing")
+    return str(checked[0])
+
+
+def _pinned(url: str, ip: str) -> str:
+    parts = urlsplit(url)
+    host = f"[{ip}]" if ":" in ip else ip
+    netloc = f"{host}:{parts.port}" if parts.port else host
+    return parts._replace(netloc=netloc).geturl()
 
 
 async def fetch_head(url: str, transport: Optional[httpx.AsyncBaseTransport] = None
@@ -133,8 +145,13 @@ async def fetch_head(url: str, transport: Optional[httpx.AsyncBaseTransport] = N
         transport=transport,
     ) as client:
         for _ in range(MAX_REDIRECTS + 1):
-            await require_public(url)
-            async with client.stream("GET", url) as resp:
+            ip = await require_public(url)
+            host = urlsplit(url).hostname
+            async with client.stream(
+                "GET", _pinned(url, ip),
+                headers={"Host": urlsplit(url).netloc.rsplit("@", 1)[-1]},
+                extensions={"sni_hostname": host},
+            ) as resp:
                 if resp.is_redirect:
                     url = urljoin(url, resp.headers.get("location", ""))
                     continue
@@ -148,7 +165,7 @@ async def fetch_head(url: str, transport: Optional[httpx.AsyncBaseTransport] = N
                         break
                 body = b"".join(chunks)[:UNFURL_MAX_BYTES]
                 encoding = resp.charset_encoding or "utf-8"
-                return str(resp.url), body.decode(encoding, errors="replace")
+                return url, body.decode(encoding, errors="replace")
     raise ValueError("unfurl: too many redirects")
 
 

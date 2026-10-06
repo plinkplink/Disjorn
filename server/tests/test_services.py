@@ -598,3 +598,29 @@ def test_a_redirect_into_the_lan_is_refused_at_the_hop():
     with pytest.raises(ValueError, match="non-public"):
         asyncio.run(unfurl_service.fetch_head(
             "https://93.184.215.14/", transport=httpx.MockTransport(handler)))
+
+
+def test_the_fetch_connects_to_the_checked_address_under_the_original_name(monkeypatch):
+    seen = {}
+
+    async def checked(url):
+        return "93.184.215.14"
+
+    def handler(request):
+        seen.update(host=request.url.host, header=request.headers["host"],
+                    sni=request.extensions.get("sni_hostname"))
+        return httpx.Response(200, html="<title>ok</title>")
+
+    monkeypatch.setattr(unfurl_service, "require_public", checked)
+    final, html = asyncio.run(unfurl_service.fetch_head(
+        "https://example.com:8443/page", transport=httpx.MockTransport(handler)))
+    assert seen == {"host": "93.184.215.14", "header": "example.com:8443", "sni": "example.com"}
+    assert final == "https://example.com:8443/page" and "ok" in html
+
+
+@pytest.mark.parametrize("url, ip, pinned", [
+    ("https://example.com/a?b=1", "93.184.215.14", "https://93.184.215.14/a?b=1"),
+    ("http://example.com:8080/", "2606:2800:21f:cb07::1", "http://[2606:2800:21f:cb07::1]:8080/"),
+])
+def test_pinning_swaps_only_the_host(url, ip, pinned):
+    assert unfurl_service._pinned(url, ip) == pinned
