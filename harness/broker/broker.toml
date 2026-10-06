@@ -255,6 +255,8 @@ mirror = "/srv/disjorn-ro"
 # belt-and-braces, except for the one thing nothing else catches: a DIRTY
 # working tree here is code that is running and was never published.
 deploy_tree = "/home/plink/Disjorn/Disjorn"
+# The unit serving deploy_tree; the badge's running fact asks systemd when it started.
+# deploy_service = "disjorn"    # default
 
 # The message store, for resolving cited seqs (G2: the seq must exist and live
 # in #custodian) and for reading the digest's own previous post back — that

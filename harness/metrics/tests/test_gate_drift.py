@@ -36,6 +36,8 @@ import pytest
 
 import metrics as M
 
+REAL_SERVICE_STARTED_AT = M.service_started_at
+
 DATE = "2026-08-20"
 CUSTODIAN = 4
 HOOK_SRC = (Path(__file__).resolve().parents[2]
@@ -1356,6 +1358,111 @@ def test_deploy_state_takes_explicit_paths_for_the_plan_room(lane):
 def test_the_drift_block_carries_the_deploy_line(lane):
     lane.deploy()
     assert "deploy: in-sync" in lane.block()
+
+
+LANDED = 1787216400  # DATE 09:00Z, the pinned committer date of every move
+
+
+def deploy_later(lane, rel, hours=1):
+    lane.commit(rel, "x = 2\n", "server: a later change")
+    env = {**ENV, "GIT_COMMITTER_DATE": f"{DATE}T{9 + hours:02d}:00:00Z"}
+    git(lane.prod, "fetch", "-q", "origin", env=env)
+    git(lane.prod, "checkout", "-q", "--detach", "origin/main", env=env)
+
+
+def started(monkeypatch, at):
+    monkeypatch.setattr(M, "service_started_at", lambda unit: (at, ""))
+
+
+def test_a_server_started_after_the_last_landing_is_running(lane, monkeypatch):
+    lane.deploy()
+    started(monkeypatch, LANDED + 60)
+    run = M.deploy_state(lane.config())["running"]
+    assert run["ok"] is True and run["started_head"] == lane.head()
+
+
+def test_server_code_landing_after_the_start_is_a_restart_pending(lane, monkeypatch):
+    lane.deploy()
+    first = lane.head()
+    deploy_later(lane, "server/app/x.py")
+    started(monkeypatch, LANDED + 60)
+    d = M.deploy_state(lane.config())
+    assert d["state"] == "in-sync"
+    assert d["running"]["ok"] is False and d["running"]["started_head"] == first
+    assert "restart pending" in d["running"]["detail"]
+
+
+@pytest.mark.parametrize("rel", ["client/src/x.ts", "server/tests/test_x.py"])
+def test_a_landing_that_spares_server_code_needs_no_restart(lane, monkeypatch, rel):
+    lane.deploy()
+    deploy_later(lane, rel)
+    started(monkeypatch, LANDED + 60)
+    assert M.deploy_state(lane.config())["running"]["ok"] is True
+
+
+def test_reflog_time_not_commit_time_decides_when_code_landed(lane, monkeypatch):
+    lane.deploy()
+    deploy_later(lane, "server/app/x.py", hours=5)
+    started(monkeypatch, LANDED + 3 * 3600)
+    assert M.deploy_state(lane.config())["running"]["ok"] is False
+
+
+def test_a_start_older_than_the_reflog_is_unknown_never_running(lane, monkeypatch):
+    lane.deploy()
+    started(monkeypatch, LANDED - 3600)
+    run = M.deploy_state(lane.config())["running"]
+    assert run["ok"] is None and "reflog does not reach back" in run["detail"]
+
+
+def test_an_unreadable_start_time_is_unknown_never_running(lane):
+    lane.deploy()
+    run = M.deploy_state(lane.config())["running"]
+    assert run["ok"] is None and "not asked in tests" in run["detail"]
+
+
+def test_the_digest_deploy_line_carries_the_running_fact(lane, monkeypatch):
+    lane.deploy()
+    started(monkeypatch, LANDED + 60)
+    line = [l for l in lane.block().splitlines() if l.startswith("deploy:")][0]
+    assert line.endswith(f"; running: server started on {lane.head()[:8]}")
+
+
+def test_the_unit_is_configurable_and_defaults_to_disjorn(lane, monkeypatch):
+    asked = []
+    monkeypatch.setattr(M, "service_started_at",
+                        lambda unit: asked.append(unit) or (None, ""))
+    lane.deploy()
+    M.deploy_state(lane.config())
+    M.deploy_state(lane.config(deploy_service="disjorn-staging"))
+    assert asked == ["disjorn", "disjorn-staging"]
+
+
+class FakeSystemctl:
+    def __init__(self, out="", rc=0, raises=None):
+        self.out, self.rc, self.raises, self.argv = out, rc, raises, None
+
+    def __call__(self, argv, **kw):
+        self.argv = argv
+        if self.raises:
+            raise self.raises
+        return subprocess.CompletedProcess(argv, self.rc, self.out, "")
+
+
+@pytest.mark.parametrize("fake,want", [
+    (FakeSystemctl("ActiveState=active\nActiveEnterTimestamp=@1790349959\n"),
+     (1790349959, "")),
+    (FakeSystemctl("ActiveState=inactive\nActiveEnterTimestamp=\n"),
+     (None, "disjorn is inactive")),
+    (FakeSystemctl("ActiveState=active\nActiveEnterTimestamp=n/a\n"),
+     (None, "systemd gave no start time for disjorn")),
+    (FakeSystemctl(rc=1), (None, "cannot ask systemd about disjorn")),
+    (FakeSystemctl(raises=FileNotFoundError()),
+     (None, "cannot ask systemd about disjorn: FileNotFoundError")),
+])
+def test_the_start_time_comes_from_systemd_in_epoch_seconds(monkeypatch, fake, want):
+    monkeypatch.setattr(M.subprocess, "run", fake)
+    assert REAL_SERVICE_STARTED_AT("disjorn") == want
+    assert "--timestamp=unix" in fake.argv
 
 
 GENERATOR = Path(__file__).resolve().parents[2] / "broker" / "gen_verb_surface.py"
