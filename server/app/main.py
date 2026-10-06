@@ -36,6 +36,7 @@ from .routers import (
     apps,
     auth,
     bots_admin,
+    chibi_admin,
     channels,
     media,
     messages,
@@ -395,6 +396,7 @@ def create_app() -> FastAPI:
     app.include_router(media.router)
     app.include_router(notifications.router)
     app.include_router(bots_admin.router)
+    app.include_router(chibi_admin.router)
     app.include_router(planroom.router)
     app.include_router(apps.router)
     app.include_router(approval.router)

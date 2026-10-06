@@ -109,6 +109,10 @@ def pack_exists(pack: str) -> bool:
     return _pack_dir(pack) is not None
 
 
+def pack_path(pack: str) -> Optional[Path]:
+    return _pack_dir(pack)
+
+
 def _mtime_signature(pack_dir: Path) -> tuple:
     sig: list = [pack_dir.stat().st_mtime_ns]
     # Editing a file doesn't touch its directory's mtime, so Aliases.txt
@@ -148,6 +152,12 @@ def _get_pack(
     aliases = emotion_match.parse_aliases(pack_dir / ALIASES_FILENAME)
     _index_cache[key] = (sig, index, aliases)
     return index, aliases
+
+
+def pack_tables(
+    pack_dir: Path,
+) -> tuple[dict[str, tuple[str, str]], dict[str, tuple[str, ...]]]:
+    return _get_pack(pack_dir)
 
 
 def _get_index(pack_dir: Path) -> dict[str, tuple[str, str]]:
@@ -234,5 +244,5 @@ def safe_file(pack: str, category: str, filename: str) -> Optional[Path]:
 
 
 def clear_cache() -> None:
-    """Drop all cached pack indexes — used by tests."""
+    """Drop all cached pack indexes."""
     _index_cache.clear()
