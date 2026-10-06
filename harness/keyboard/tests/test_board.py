@@ -101,3 +101,33 @@ def test_a_confirmed_spec_with_its_build_on_the_shelf_is_not_waiting_to_be_built
     b = board.build_board()
     assert rows(b, "ready") == [] and rows(b, "stale-status") == []
     assert rows(b, "build") == [UNMERGED]
+
+
+def test_a_merge_counts_only_the_slug_it_merges_not_one_it_mentions(tmp_path):
+    work = tmp_path / "w"
+    work.mkdir()
+    env = {**os.environ, **GIT_ENV}
+    git = lambda *a: subprocess.run(["git", "-C", str(work), *a], check=True,
+                                    capture_output=True, env=env)
+    git("init", "-q", "-b", "main")
+    git("commit", "-q", "--allow-empty", "-m", "init")
+    subjects = [
+        ("2099-02-01-ritual", "merge: 2099-02-01-ritual (SPECS/2099-02-01-ritual.md, confirmed seq 1)"),
+        ("2099-02-02-fix", "merge: a fix, as asked by 2099-09-09-in-passing (fix/2099-02-02-fix)"),
+        ("2099-02-03-branch", "Merge branch 'loop/2099-02-03-branch'"),
+        ("2099-02-04-amender", "merge: fix/2099-02-04-amender (amends SPECS/2099-09-08-parent.md D5)"),
+    ]
+    for slug, subject in subjects:
+        git("checkout", "-q", "-b", slug, "main")
+        git("commit", "-q", "--allow-empty", "-m", slug)
+        git("checkout", "-q", "main")
+        git("merge", "-q", "--no-ff", slug, "-m", subject)
+    merged = board.merged_slugs(repo=work, gatehouse=tmp_path / "no-shelf")
+    assert set(merged) == {"2099-02-01-ritual", "2099-02-02-fix", "2099-02-03-branch",
+                           "2099-02-04-amender"}
+
+
+def test_a_long_proposal_title_is_clipped_at_a_word():
+    title = "word " * 50
+    clipped = board.clip_title(title.strip())
+    assert clipped.endswith("word…") and len(clipped) <= 181
