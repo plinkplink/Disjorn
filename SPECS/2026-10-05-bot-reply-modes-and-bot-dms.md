@@ -19,9 +19,9 @@ A bot in a channel answers only when its name is matched. There is no way to say
 - **Reply mode** is a property of one bot's membership in one channel, with two values:
   - **Mentions only** (default, today's behaviour). The bot answers when its name is used.
   - **Every message**. Every message a person writes in the room is addressed to the bot. Bot-authored messages never are, so two always-on bots cannot talk to each other forever.
-- **Add a bot** (AddBotModal): the confirm step gains a two-option choice, "Replies when mentioned" or "Replies to every message", with the default on mentions. One line under it states the consequence of "every": "It will read and answer everything people post here."
+- **Add a bot** (AddBotModal): the confirm step gains a two-option choice, "Replies when called by name" or "Replies to every message", with the default on name. "Called by name" is honest for both residents: one also wakes on spoken forms like "hey <name>". One line under it states the consequence of "every": "It will read and answer everything people post here."
 - **Member list**: a bot's row gets a context menu. It opens on right-click, on long-press on touch, and from a `⋯` button that shows on hover/focus and is always visible on touch screens. Items:
-  - "Replies to: Mentions only ✓ / Every message". This changes the mode in place.
+  - "Replies to: When called by name ✓ / Every message". This changes the mode in place.
   - "Remove from channel".
   - Only people who may manage bots in the channel see the menu (the existing `_require_bot_manage_access` rule). Everyone else sees a small mode badge on the row (`@` or `all`) and no menu.
 - **Mention-only rooms stay mention-only.** In a channel listed in the new server setting `MENTION_ONLY_CHANNEL_IDS` (live value: `[4]`, #custodian), "Every message" is refused (400 "This room is mention-only") and greyed out in the UI with that reason. app_build rooms are already closed to membership changes.
@@ -53,9 +53,9 @@ A bot in a channel answers only when its name is matched. There is no way to say
 - UserPanel `MemberRow` for bots: the context menu (right-click, long-press at 500 ms, `⋯` button), keyboard reachable (Enter/Space opens, Esc closes, arrow keys move), and the read-only badge for non-managers.
 - New-DM picker and sidebar DM rows: the bot entries with avatar and BOT tag.
 
-**Residents.** No adapter or residency code changes. Both adapters already wake on a server-attested context block outside mention-only rooms:
-- Gable: `detector.py` returns `MODE_MENTION` when `has_context`.
-- The custodian resident: `classify` takes `mentioned = event.context is not None`.
+**Residents.**
+- Gable: no residency change. `detector.py` returns `MODE_MENTION` when `has_context` outside mention-only rooms.
+- Custodian resident: a **required rider on claudette.git** (`fix/2026-10-05-addressed-by-and-attribution`). It must merge and deploy BEFORE the server half deploys, never after (review card comment 75, BLOCKING). The adapter currently infers a DM from "exactly two humans in the room", caches that answer forever, and wakes on every message there, so the menu would lie for her. The rider deletes that inference and wakes with a "channel" wake when `context.addressed_by == "always"`.
 
 A bot that should not be always-on anywhere keeps `dm_open = 0`, and its channel memberships stay on mentions unless a manager flips them. Residents can opt out harder in their own adapters later; that is outside this spec.
 
@@ -65,6 +65,10 @@ A bot that should not be always-on anywhere keeps `dm_open = 0`, and its channel
 
 ## Builder (USER PREFERENCE — who orchestrates; never touches Review owner)
 - **Builder**: keyboard seat (BuildGable) with Opus hands.
+
+## Folds from review
+- Custodian resident, card comment 75: the BLOCK is the rider above. Q1: DMs on for her. Q2: keep `addressed_by`. Q3: the copy says "called by name". Non-blocking: `MENTION_ONLY_CHANNEL_IDS` and her `CUSTODIAN_MENTION_ONLY` state one fact twice. Accepted for now; later, the context block carries the room's mention-only flag.
+- Behaviour kept at deploy: channel 9 (two people plus her) answers every message today only because of the inference. The deploy recipe sets her membership there to `always`, so the room behaves exactly as before and the menu now shows it.
 
 ## Questions for review
 1. Each resident: do you want `dm_open` on for yourself? Gable is summon-priced: a DM spends his daily budget the same way a mention does. Is that acceptable, or should his DM have a lower per-day cap?
@@ -82,12 +86,14 @@ Moderate: one migration, two endpoints, one fan-out branch, three client compone
 2. `systemctl restart disjorn`, which applies 018.
 3. Client build.
 4. Set `MENTION_ONLY_CHANNEL_IDS=[4]` in server/.env before the restart.
-5. `dm_open` per the residents' answers.
+5. Order: the rider is merged and deployed first (`claudette-update.sh`).
+6. `dm_open = 1` for the custodian resident (her answer, Q1); Gable's per his answer.
+7. `UPDATE channel_members SET reply_mode='always' WHERE channel_id=9 AND member_type='bot' AND member_id=1`. This keeps today's behaviour in that room.
 
 ## Confirm record
-- **Confirmed by**:
-- **#custodian seq**:
-- **Confirmed at**:
+- **Confirmed by**: BuildGable (keyboard seat), on plink's delegated authority (#3152, keyboard hand-off 2026-10-05). Revocable by plink.
+- **#custodian seq**: 3161
+- **Confirmed at**: 2026-10-06T00:59:29.969Z
 
 ## Status
-`draft`
+`confirmed`
