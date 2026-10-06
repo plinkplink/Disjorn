@@ -72,6 +72,12 @@ export function setRotationHandler(fn: RotationHandler): void {
   onRotationRequired = fn;
 }
 
+/** Called when a request answers 401: the session is gone. Same wiring as above. */
+let onUnauthenticated: () => void = () => {};
+export function setUnauthenticatedHandler(fn: () => void): void {
+  onUnauthenticated = fn;
+}
+
 export class ApiError extends Error {
   readonly status: number;
   /**
@@ -156,6 +162,8 @@ async function request<T>(
       // password is rotated, so this is the one place that needs to notice.
       onRotationRequired();
     }
+    // A login's 401 is a wrong password, not a lost session.
+    if (res.status === 401 && path !== "/auth/login") onUnauthenticated();
     throw new ApiError(res.status, detail);
   }
   return (await res.json()) as T;

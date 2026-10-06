@@ -1,4 +1,4 @@
-"""Runs client/tests/ws_rotation.test.mjs, so a client regression fails the gate."""
+"""Runs client/tests/ws_session.test.mjs, so a client regression fails the gate."""
 
 import os
 import shutil
@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 CLIENT = Path(__file__).resolve().parents[2] / "client"
-NODE_TEST = CLIENT / "tests" / "ws_rotation.test.mjs"
+NODE_TEST = CLIENT / "tests" / "ws_session.test.mjs"
 
 
 def _toolchain() -> str | None:
@@ -21,10 +21,10 @@ def _toolchain() -> str | None:
 
 @pytest.mark.skipif(shutil.which("node") is None or _toolchain() is None,
                     reason="no node, or no client node_modules, on this host")
-def test_a_rotation_pending_socket_stops_instead_of_reconnecting(tmp_path):
+def test_the_socket_stops_or_rechecks_instead_of_blindly_reconnecting(tmp_path):
     env = {**os.environ, "DISJORN_CLIENT_NODE_MODULES": _toolchain(),
            "TMPDIR": str(tmp_path)}
     r = subprocess.run(["node", "--test", str(NODE_TEST)], capture_output=True,
                        text=True, timeout=180, env=env)
     assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]
-    assert "# pass 3" in r.stdout
+    assert "# pass 6" in r.stdout

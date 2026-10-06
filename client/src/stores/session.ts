@@ -7,6 +7,7 @@ import {
   login as apiLogin,
   logout as apiLogout,
   setRotationHandler,
+  setUnauthenticatedHandler,
   updateMe,
 } from "../api";
 import type { PasswordResetNotice, SettableStatus, User } from "../types";
@@ -46,6 +47,12 @@ interface SessionState {
 
   /** App boot: resolve the session cookie into a user (or null). */
   bootstrap: () => Promise<void>;
+  /**
+   * Ask the server whether the session still stands. False only when it
+   * answered 401 (and the store is now signed out); an unreachable server
+   * says nothing about the session, so that is true.
+   */
+  recheck: () => Promise<boolean>;
   login: (username: string, password: string) => Promise<boolean>;
   logout: () => Promise<void>;
   /** Persist a status change (also mirror it over WS via ws.sendStatus). */
@@ -107,6 +114,15 @@ export const useSession = create<SessionState>()((set, get) => ({
           setTimeout(resolve, BOOT_RETRY_DELAYS_MS[attempt]),
         );
       }
+    }
+  },
+
+  recheck: async () => {
+    try {
+      set({ user: await fetchMe() });
+      return true;
+    } catch (err) {
+      return !(err instanceof ApiError && err.status === 401);
     }
   },
 
@@ -195,5 +211,18 @@ export const useSession = create<SessionState>()((set, get) => ({
 setRotationHandler(() => {
   if (!useSession.getState().mustChangePassword) {
     useSession.setState({ mustChangePassword: true });
+  }
+});
+
+// Any 401 means the cookie no longer names a session: show the login form.
+// Unmounting the shell is what disconnects the socket.
+setUnauthenticatedHandler(() => {
+  if (useSession.getState().user !== null) {
+    useSession.setState({
+      user: null,
+      mustChangePassword: false,
+      changePasswordError: null,
+      resetNotice: null,
+    });
   }
 });
