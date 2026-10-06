@@ -1,12 +1,29 @@
 """Bot reply modes per channel membership, and direct messages with a bot."""
 
 import json
+from contextlib import ExitStack
 
 import pytest
 
 from app import db, events
 from app.config import reset_settings_cache
 from app.routers import auth
+
+from .test_ws import (
+    BOT2_KEY,
+    BOT_KEY,
+    add_member,
+    call,
+    cookie,
+    login as ws_login,
+    main_feed_id as ws_main_feed_id,
+    make_bot as ws_make_bot,
+    make_user as ws_make_user,
+    open_bot,
+    open_user,
+    post_msg,
+    wsc,  # noqa: F401 — fixture
+)
 
 PASSWORD = "correct horse battery staple"
 
@@ -307,3 +324,149 @@ async def test_a_person_to_person_dm_still_cannot_be_left(client):
     await login(client, "alice")
     dm = (await client.post("/dms", json={"user_id": bob})).json()["id"]
     assert (await client.post(f"/channels/{dm}/leave")).status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Fan-out
+# ---------------------------------------------------------------------------
+
+def set_mode(wsc, channel_id, bot_id, mode):
+    call(
+        wsc,
+        db.execute,
+        "UPDATE channel_members SET reply_mode = ? WHERE channel_id = ? AND member_type = 'bot' AND member_id = ?",
+        (mode, channel_id, bot_id),
+    )
+
+
+def test_an_always_bot_is_addressed_by_every_person_but_never_by_a_bot(wsc):
+    a = ws_make_user(wsc, "alice")
+    ta = ws_login(wsc, "alice")
+    always = ws_make_bot(wsc, "claudette", BOT_KEY)
+    named = ws_make_bot(wsc, "otto", BOT2_KEY)
+    main = ws_main_feed_id(wsc)
+    add_member(wsc, main, "bot", always)
+    add_member(wsc, main, "bot", named)
+    set_mode(wsc, main, always, "always")
+
+    with ExitStack() as stack:
+        open_user(stack, wsc, ta, a)
+        wal = open_bot(stack, wsc, always, BOT_KEY)
+        wot = open_bot(stack, wsc, named, BOT2_KEY)
+
+        post_msg(wsc, ta, main, "good morning")
+        assert wal.receive_json()["context"]["addressed_by"] == "always"
+        assert "context" not in wot.receive_json()
+
+        post_msg(wsc, ta, main, "otto, thoughts?")
+        assert wal.receive_json()["context"]["addressed_by"] == "always"
+        assert wot.receive_json()["context"]["addressed_by"] == "mention"
+
+        post_msg(wsc, ta, main, "claudette, thoughts?")
+        assert wal.receive_json()["context"]["addressed_by"] == "mention"
+        assert "context" not in wot.receive_json()
+
+        r = wsc.post(
+            f"/channels/{main}/messages", json={"content": "beep"}, headers={"X-Api-Key": BOT2_KEY}
+        )
+        assert r.status_code == 200, r.text
+        bot_said = wal.receive_json()
+        assert bot_said["message"]["author_type"] == "bot"
+        assert "context" not in bot_said
+
+
+def test_member_update_reaches_the_rooms_people_and_the_bot(wsc):
+    a = ws_make_user(wsc, "alice")
+    ta = ws_login(wsc, "alice")
+    bot_id = ws_make_bot(wsc, "claudette", BOT_KEY)
+    main = ws_main_feed_id(wsc)
+    add_member(wsc, main, "bot", bot_id)
+
+    with ExitStack() as stack:
+        wa = open_user(stack, wsc, ta, a)
+        wbot = open_bot(stack, wsc, bot_id, BOT_KEY)
+        r = wsc.patch(
+            f"/channels/{main}/bots/{bot_id}", json={"reply_mode": "always"}, headers=cookie(ta)
+        )
+        assert r.status_code == 200, r.text
+        for ws in (wa, wbot):
+            frame = ws.receive_json()
+            assert frame["type"] == "member_update"
+            assert frame["member_id"] == bot_id and frame["reply_mode"] == "always"
+            assert frame["by_user_id"] == a
+
+
+def test_a_mention_only_room_never_addresses_an_always_row(wsc, monkeypatch):
+    a = ws_make_user(wsc, "alice")
+    ta = ws_login(wsc, "alice")
+    bot_id = ws_make_bot(wsc, "claudette", BOT_KEY)
+    main = ws_main_feed_id(wsc)
+    add_member(wsc, main, "bot", bot_id)
+    set_mode(wsc, main, bot_id, "always")
+    monkeypatch.setenv("MENTION_ONLY_CHANNEL_IDS", json.dumps([main]))
+    reset_settings_cache()
+
+    with ExitStack() as stack:
+        open_user(stack, wsc, ta, a)
+        wbot = open_bot(stack, wsc, bot_id, BOT_KEY)
+        post_msg(wsc, ta, main, "good morning")
+        assert "context" not in wbot.receive_json()
+        post_msg(wsc, ta, main, "claudette?")
+        assert wbot.receive_json()["context"]["addressed_by"] == "mention"
+
+
+def test_a_secret_in_an_always_room_reaches_no_bot(wsc):
+    a = ws_make_user(wsc, "alice")
+    ta = ws_login(wsc, "alice")
+    bot_id = ws_make_bot(wsc, "claudette", BOT_KEY)
+    main = ws_main_feed_id(wsc)
+    add_member(wsc, main, "bot", bot_id)
+    set_mode(wsc, main, bot_id, "always")
+
+    with ExitStack() as stack:
+        open_user(stack, wsc, ta, a)
+        wbot = open_bot(stack, wsc, bot_id, BOT_KEY)
+        secret = post_msg(wsc, ta, main, "don't tell anyone, claudette")
+        assert secret["privacy_flags"] == {"secret": True}
+        post_msg(wsc, ta, main, "off the record: the plan")
+        post_msg(wsc, ta, main, "all clear")
+        frame = wbot.receive_json()
+        assert frame["message"]["content"] == "all clear"
+        assert frame["context"]["addressed_by"] == "always"
+
+
+def test_every_context_block_says_how_the_bot_was_addressed(wsc):
+    a = ws_make_user(wsc, "alice")
+    ta = ws_login(wsc, "alice")
+    builder = ws_make_bot(wsc, "gable", BOT_KEY)
+    main = ws_main_feed_id(wsc)
+    add_member(wsc, main, "bot", builder)
+    build = call(
+        wsc, db.execute,
+        "INSERT INTO channels (type, name, visibility, created_by) VALUES ('app_build', 'App', 'private', ?)",
+        (a,),
+    ).lastrowid
+    add_member(wsc, build, "user", a)
+    add_member(wsc, build, "bot", builder)
+    call(
+        wsc, db.execute,
+        "INSERT INTO apps (id, owner_user_id, name, builder_bot_id) VALUES ('abcdefghijkl', ?, 'App', ?)",
+        (a, builder),
+    )
+    call(
+        wsc, db.execute,
+        """INSERT INTO app_sessions (app_id, user_id, builder_bot_id, channel_id, locked_until)
+           VALUES ('abcdefghijkl', ?, ?, ?, '2999-01-01T00:00:00.000Z')""",
+        (a, builder, build),
+    )
+
+    with ExitStack() as stack:
+        open_user(stack, wsc, ta, a)
+        wbot = open_bot(stack, wsc, builder, BOT_KEY)
+        post_msg(wsc, ta, main, "gable, a word")
+        assert wbot.receive_json()["context"]["addressed_by"] == "mention"
+        set_mode(wsc, main, builder, "always")
+        post_msg(wsc, ta, main, "a word for the room")
+        assert wbot.receive_json()["context"]["addressed_by"] == "always"
+        post_msg(wsc, ta, build, "make me a to-do list")
+        assert wbot.receive_json()["context"]["addressed_by"] == "always"

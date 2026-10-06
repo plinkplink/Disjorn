@@ -883,6 +883,7 @@ def test_context_is_attested_in_a_build_chat_not_name_matched(
         assert frame["type"] == "message_create"
         assert "gable" not in frame["message"]["content"]
         context = frame["context"]
+        assert context["addressed_by"] == "always"
         assert context["channel_state"]["type"] == "app_build"
         assert context["channel_state"]["name"] == "Untitled app"
         assert context["channel_state"]["app"] == {
@@ -911,6 +912,7 @@ def test_context_is_attested_in_a_build_chat_not_name_matched(
         # And the name rule still works where it always did.
         post_msg(wsc, cookie(token), shed, "gable can you look")
         named = wbot.receive_json()
+        assert named["context"]["addressed_by"] == "mention"
         assert named["context"]["channel_state"]["type"] == "text"
         assert "app" not in named["context"]["channel_state"]
 

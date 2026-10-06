@@ -43,8 +43,9 @@ Server -> client frames (Architecture §8.2; ephemeral events carry no seq):
                                             sidebar row).
                                             `channel` describes what is gone so
                                             a client can name it.
-    {"type": "member_add"|"member_remove", "channel_id", "member_type",
-     "member_id", "by_user_id", "channel": {...}}
+    {"type": "member_add"|"member_remove"|"member_update", "channel_id",
+     "member_type", "member_id", "by_user_id", "channel": {...},
+     "reply_mode" (member_update only)}
                                             membership changed — to the
                                             channel's members plus the member
                                             it happened to. The member may be a
@@ -75,19 +76,17 @@ lifespan): message events go to connected users who are members of the channel
 listed members only) and to connected bots that are EXPLICIT members
 (bot_channel_ids semantics), after privacy.filter_event_for_bot — a
 secret/off_the_record message reaches no bot in any form, not even the
-tombstone of its deletion. When a message_create mentions a receiving bot
-(`@name` or its name as a word, case-insensitive), that bot's copy — and only
-that bot's — gets a "context" block (Architecture §8.3).
+tombstone of its deletion. A receiving bot's copy of a message_create gets a
+"context" block (Architecture §8.3) when the bot is addressed, and the block's
+`addressed_by` says how: "mention" when the text names it (`@name` or its name
+as a word, case-insensitive), "always" when its membership row is
+reply_mode='always' (never in a MENTION_ONLY_CHANNEL_IDS room) and a user wrote
+the message.
 
 CONTEXT IN AN `app_build` CHANNEL IS SERVER-ATTESTED, not name-matched
-(SPECS/2026-08-30-apps-tab-v1.md, stage 1). Such a channel has exactly two
-members — the person building and the builder resident — so "was I addressed"
-has one answer and the server already knows it. Every USER-authored
-message_create there carries the context block to the member bot, whether or
-not the resident's name appears in the text; bot-authored messages (the system
-opener included) never carry it, which is what stops the room talking to
-itself. This IS the resident integration for the APPS feature: a builder
-summons on `context is not None`, and no harness or adapter code changed.
+(SPECS/2026-08-30-apps-tab-v1.md). Every USER-authored message_create there
+carries the block, addressed_by "always", to the session's builder bot alone;
+bot-authored messages never do, which stops the room talking to itself.
 
 Exports for WP7: `manager` (ConnectionManager singleton) with
 `is_user_connected(user_id)` and `user_focused_channel_ids(user_id)`.
@@ -104,7 +103,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from . import db, events, privacy
 from .routers.auth import COOKIE_NAME, _bot_for_key, _user_for_token
-from .routers.channels import is_member
+from .routers.channels import is_member, is_mention_only
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +114,7 @@ TYPING_INTERVAL = 3.0       # min seconds between typing_start per sender+channe
 CLOSE_UNAUTHENTICATED = 4401
 
 _MESSAGE_EVENT_TYPES = ("message_create", "message_edit", "message_delete")
-_MEMBER_EVENT_TYPES = ("member_add", "member_remove")
+_MEMBER_EVENT_TYPES = ("member_add", "member_remove", "member_update")
 
 
 # ---------------------------------------------------------------------------
@@ -351,7 +350,7 @@ async def _app_block(channel_id: int) -> Optional[dict[str, Any]]:
 
 
 async def _context_block(
-    channel: dict[str, Any], message: dict[str, Any]
+    channel: dict[str, Any], message: dict[str, Any], addressed_by: str
 ) -> dict[str, Any]:
     """Structured context injection (§8.3), from already-filtered data.
 
@@ -391,6 +390,7 @@ async def _context_block(
         "awake_users": awake_users,
         "channel_state": channel_state,
         "privacy_flags_on_current_message": message.get("privacy_flags") or {},
+        "addressed_by": addressed_by,
     }
 
 
@@ -525,11 +525,11 @@ async def handle_bus_event(event: dict[str, Any]) -> None:
             "channel_id": event["channel_id"],
             "member_type": event["member_type"],
             "member_id": event["member_id"],
-            # .get, not [...]: an event published before by_user_id existed (or
-            # by a future caller with no acting user) still fans out, as null.
             "by_user_id": event.get("by_user_id"),
             "channel": event["channel"],
         }
+        if "reply_mode" in event:
+            frame["reply_mode"] = event["reply_mode"]
         await _send_to_members(
             event["channel_id"],
             frame,
@@ -576,6 +576,7 @@ async def handle_bus_event(event: dict[str, Any]) -> None:
     if not connected_bots:
         return
     bot_names: dict[int, str] = {}
+    always_bots: set[int] = set()
     if event["type"] == "message_create":
         placeholders = ",".join("?" * len(connected_bots))
         bot_names = {
@@ -585,6 +586,18 @@ async def handle_bus_event(event: dict[str, Any]) -> None:
                 connected_bots,
             )
         }
+        # Read per message, uncached: a mode set by hand in the DB must take
+        # effect on the next message, with no event to invalidate a cache.
+        if channel["type"] != "app_build" and not is_mention_only(channel_id):
+            always_bots = {
+                r["member_id"]
+                for r in await db.fetch_all(
+                    """SELECT member_id FROM channel_members
+                       WHERE channel_id = ? AND member_type = 'bot'
+                         AND reply_mode = 'always'""",
+                    (channel_id,),
+                )
+            }
     for bot_id in connected_bots:
         if not await is_member(channel_id, "bot", bot_id):
             continue
@@ -604,20 +617,27 @@ async def handle_bus_event(event: dict[str, Any]) -> None:
                 # other path is never summoned by it (channels.py refuses such
                 # additions, and this is the second wall in case that one moves).
                 app = await _app_block(channel["id"])
-                attach = (
-                    message.get("author_type") == "user"
+                addressed_by = (
+                    "always"
+                    if message.get("author_type") == "user"
                     and app is not None
                     and bot_id == app["builder_bot_id"]
+                    else None
                 )
             else:
                 name = bot_names.get(bot_id)
-                attach = bool(name) and _mentions_bot(
-                    message.get("content") or "", name
-                )
-            if attach:
+                if name and _mentions_bot(message.get("content") or "", name):
+                    addressed_by = "mention"
+                elif bot_id in always_bots and message.get("author_type") == "user":
+                    # Never bot-authored: two always-on bots would answer each
+                    # other forever.
+                    addressed_by = "always"
+                else:
+                    addressed_by = None
+            if addressed_by is not None:
                 bot_frame = {
                     **bot_frame,
-                    "context": await _context_block(channel, message),
+                    "context": await _context_block(channel, message, addressed_by),
                 }
         for ws in manager.bot_sockets(bot_id):
             await _send(ws, bot_frame)
