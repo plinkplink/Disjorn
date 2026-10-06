@@ -612,7 +612,7 @@ class MergeVerbs:
         today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
         n = 0
         try:
-            with open(self.build_ledger, "r", encoding="utf-8") as fh:
+            with open(self.build_ledger, "r", encoding="utf-8", errors="replace") as fh:
                 for raw in fh:
                     try:
                         rec = json.loads(raw)
