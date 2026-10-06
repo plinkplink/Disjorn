@@ -36,18 +36,18 @@ export { actBlockReason, pendingForMe, planRoomHash, planRoomRouteFromHash,
 
 const noop = () => {};
 
-export function modal(proposal, me) {
+export function modal(proposal, me, list = { status: "ready", detail: null }) {
   return renderToStaticMarkup(createElement(ApprovalModal, {
-    slug: proposal ? proposal.slug : "missing", proposal, me,
+    slug: proposal ? proposal.slug : "missing", proposal, me, ...list,
     hasSpecCard: false, onOpenCard: noop, onClose: noop,
   }));
 }
 
-export function panel(state) {
+export function panel(state, slug = null) {
   // A server render reads the store's initial state, so the fixture goes there.
   Object.assign(useApprovals.getInitialState(), state);
   return renderToStaticMarkup(createElement(ApprovalsPanel, {
-    slug: null, onOpen: noop, hasSpecCard: () => false, onOpenCard: noop,
+    slug, onOpen: noop, hasSpecCard: () => false, onOpenCard: noop,
   }));
 }
 `;
@@ -142,6 +142,23 @@ test('the disarmed panel shows the detail verbatim and never says empty', () => 
   const html = m.panel({ status: 'unavailable', detail: DISARMED, proposals: [] });
   assert.ok(html.includes(DISARMED), html);
   assert.ok(!/no open proposals/i.test(html), html);
+});
+
+test('a deep link waits for the list before it says not found', () => {
+  for (const status of ['idle', 'loading']) {
+    const html = m.modal(null, 'plink', { status, detail: null });
+    assert.ok(html.includes('Loading'), html);
+    assert.ok(!/No approval proposal/.test(html), html);
+  }
+  assert.ok(/No approval proposal has the slug <code>missing<\/code>/
+    .test(m.modal(null, 'plink', { status: 'ready', detail: null })));
+});
+
+test('a deep link on a disarmed server shows the detail, not not-found', () => {
+  const html = m.panel({ status: 'unavailable', detail: DISARMED, proposals: [] }, 'p-9');
+  assert.ok(html.includes('role="dialog"'), html);
+  assert.equal(html.split(DISARMED).length - 1, 2, html);
+  assert.ok(!/No approval proposal/.test(html), html);
 });
 
 test('deny and rework wait for remarks while approve does not', () => {

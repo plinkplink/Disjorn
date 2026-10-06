@@ -150,12 +150,28 @@ export function ApprovalsPanel({
     // Only on opening: live frames keep it current after that.
   }, [current?.id]);
 
+  // A deep link opens before the list answers, so the modal says why it has
+  // no proposal yet rather than "not found".
+  const modal = slug !== null && (
+    <ApprovalModal
+      slug={slug}
+      status={status}
+      detail={detail}
+      proposal={current}
+      me={me}
+      hasSpecCard={hasSpecCard(slug)}
+      onOpenCard={() => onOpenCard(slug)}
+      onClose={() => onOpen(null)}
+    />
+  );
+
   if (status === "unavailable" || status === "error") {
     return (
       <section className="approvals">
         <p className={`approvals-off${status === "error" ? " approvals-error" : ""}`}>
           {detail}
         </p>
+        {modal}
       </section>
     );
   }
@@ -201,16 +217,7 @@ export function ApprovalsPanel({
         </>
       )}
 
-      {slug !== null && status === "ready" && (
-        <ApprovalModal
-          slug={slug}
-          proposal={current}
-          me={me}
-          hasSpecCard={hasSpecCard(slug)}
-          onOpenCard={() => onOpenCard(slug)}
-          onClose={() => onOpen(null)}
-        />
-      )}
+      {modal}
     </section>
   );
 }

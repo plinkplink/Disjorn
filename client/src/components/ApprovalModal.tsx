@@ -12,6 +12,7 @@ import {
   isOpen,
   isPrincipalOn,
   useApprovals,
+  type ApprovalsStatus,
 } from "../stores/approvals";
 import type {
   ApprovalAction,
@@ -197,8 +198,35 @@ export function AnswerBox({ proposal }: { proposal: ApprovalProposal }) {
   );
 }
 
+/** Why a slug has no proposal to show: the list may not have answered yet. */
+function Absent({
+  slug,
+  status,
+  detail,
+}: {
+  slug: string;
+  status: ApprovalsStatus;
+  detail: string | null;
+}) {
+  if (status === "unavailable" || status === "error") {
+    return (
+      <p className={`approvals-off${status === "error" ? " approvals-error" : ""}`}>
+        {detail}
+      </p>
+    );
+  }
+  if (status !== "ready") return <p className="approvals-empty">Loading…</p>;
+  return (
+    <p className="plan-modal-note">
+      No approval proposal has the slug <code>{slug}</code>.
+    </p>
+  );
+}
+
 export function ApprovalModal({
   slug,
+  status,
+  detail,
   proposal,
   me,
   hasSpecCard,
@@ -206,6 +234,8 @@ export function ApprovalModal({
   onClose,
 }: {
   slug: string;
+  status: ApprovalsStatus;
+  detail: string | null;
   proposal: ApprovalProposal | null;
   me: string | null;
   hasSpecCard: boolean;
@@ -237,9 +267,7 @@ export function ApprovalModal({
         </header>
 
         {proposal === null ? (
-          <p className="plan-modal-note">
-            No approval proposal has the slug <code>{slug}</code>.
-          </p>
+          <Absent slug={slug} status={status} detail={detail} />
         ) : (
           <>
             <p className="approval-byline">
