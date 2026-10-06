@@ -720,6 +720,22 @@ def test_a_tier_two_build_with_no_lane_owner_names_a_reviewer(harness):
         f"/merge {SLUG} pass <seq>")
 
 
+def test_the_build_end_puts_its_tier_on_the_ledger_before_any_merge(harness):
+    arm(harness, tier=2)
+    outcome(harness)
+    line = harness.build_ledger_lines()[-1]
+    assert (line["kind"], line["slug"], line["tier"], line["gates_green"]) == (
+        "tier", SLUG, 2, True)
+    assert line["tip"] == harness.branch_tip(SLUG)
+
+
+def test_a_self_merge_follows_its_tier_line_on_the_ledger(harness):
+    arm(harness, tier=0)
+    outcome(harness)
+    kinds = [ln.get("kind") for ln in harness.build_ledger_lines()]
+    assert kinds[-2:] == ["tier", "merge"]
+
+
 def test_a_red_gate_sends_the_build_back(harness):
     arm(harness, tier=0, gate_exit=1)
     lines = outcome(harness)

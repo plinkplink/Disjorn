@@ -919,6 +919,11 @@ class MergeVerbs:
             return {"tests": f"fail — {exc!r}",
                     "tier": "unknown — the gates did not run",
                     "next": "fix the red gate, then /build again"}
+        # Written before any self-merge so the merge stays the slug's last line.
+        self._build_ledger_line({
+            "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            "kind": "tier", "slug": slug, "tier": tier, "tip": tip,
+            "gates_green": result.exit_code == 0})
         out = {"tests": format_gate_tests_line(result),
                "tier": format_tier_line(tier, classification.get("reasons"))}
         if folded is not None:

@@ -523,7 +523,8 @@ daily_build_cap = 4
 # One JSON line per accepted `/build`: ts, seq, channel_id, author,
 # text_sha256, slug, session_id. `/merge` appends here too, with kind = "merge"
 # (ts, seq, channel_id, author, slug, tier, sha, pass_seq), and the Tier 0
-# auto-merge budget is counted from those lines. Keep it somewhere no resident
+# auto-merge budget is counted from those lines. A build end that classified
+# its branch appends kind = "tier" (ts, slug, tier, tip, gates_green). Keep it somewhere no resident
 # can write.
 ledger = "/var/lib/disjorn-broker/build-ledger.jsonl"
 # THE GATES, AND WHOSE HANDS THEY RUN IN. The broker launches the suite itself

@@ -429,6 +429,10 @@ the message DB.
   nothing about the branch) is not classified: the banner says
   `tests: gates misconfigured: <reason>`, `tier: n/a — nothing to classify`,
   `next: fix at the keyboard`.
+- A build end that classified the branch appends one line to `[build].ledger`
+  before any self-merge line:
+  `{ts, kind: "tier", slug, tier, tip: <gated tip>, gates_green}`. The Plan
+  Room reads it for the tier on an unmerged chat build's Review card.
 - A branch that fell behind main while it was building is FOLDED before the
   gates run (`merge`, below), under the same gate claim, and the whole banner
   then describes the folded tip; the `diffstat` line, which is read before the
