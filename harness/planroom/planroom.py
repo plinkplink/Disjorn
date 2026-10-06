@@ -396,7 +396,9 @@ def deploy_badge(deploy: Optional[dict]) -> dict:
            "staged_detail": deploy.get("detail") or "deploy state not configured",
            "running": run.get("ok"),
            "running_detail": run.get("detail") or "running: unknown",
-           "processes": [{"name": p.get("name"), "running": p.get("ok"),
+           "processes": [{"name": p.get("name"),
+                          "label": p.get("label") or p.get("name"),
+                          "running": p.get("ok"),
                           "state": p.get("state") or "unknown",
                           "detail": p.get("detail") or ""}
                          for p in deploy.get("processes") or []]}

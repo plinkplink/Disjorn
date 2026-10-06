@@ -280,6 +280,16 @@ def test_the_default_table_measures_five_processes():
         "custodian-discord": ("claudette", None)}
 
 
+def test_the_discord_side_bot_is_labelled_as_one_wherever_it_is_named(monkeypatch):
+    monkeypatch.setattr(M, "_probe", lambda spec, tree: {"state": "stale"})
+    p = M.process_state("custodian-discord",
+                        REAL_DEPLOY_PROCESSES["custodian-discord"], "/nonexistent")
+    assert p["label"] == "custodian-discord (Discord bot)"
+    assert M.running_summary([p])["detail"] == (
+        "running: restart pending: custodian-discord (Discord bot)")
+    assert M.process_state("broker", {"unit": "x"}, "/nonexistent")["label"] == "broker"
+
+
 def test_broker_toml_adds_overrides_and_drops_processes_by_name(monkeypatch):
     monkeypatch.setattr(M, "DEPLOY_PROCESSES", REAL_DEPLOY_PROCESSES)
     table = M.deploy_processes({"deploy": {"processes": {
