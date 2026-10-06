@@ -15,14 +15,21 @@ backup_live_db "$DB" "$STAGE/disjorn.db"
 messages="$(sqlite3 "$STAGE/disjorn.db" 'SELECT COUNT(*) FROM messages')"
 migration="$(sqlite3 "$STAGE/disjorn.db" 'SELECT MAX(filename) FROM schema_migrations')"
 
-# Never open the live chroma dir as root: files chroma creates there lock the resident out.
-copy="$STAGE/claudette/chroma-copy"
-cp -a "$CLAUDETTE_MEMORY_DIR" "$copy"
-rm -f "$copy"/chroma.sqlite3*
-backup_live_db "$CLAUDETTE_MEMORY_DIR/chroma.sqlite3" "$copy/chroma.sqlite3"
-"$CLAUDETTE_PY" "$HERE/memory_export.py" export \
-    --data-dir "$copy" --out "$STAGE/claudette/memory-export.json" > "$STAGE/claudette/export.json"
-rm -rf "$copy"
+# Never open a live chroma dir as root: files chroma creates there lock its owner out.
+export_store() {
+    local src="$1" prefix="$2" copy="$STAGE/claudette/chroma-copy"
+    cp -a "$src" "$copy"
+    rm -f "$copy"/chroma.sqlite3*
+    backup_live_db "$src/chroma.sqlite3" "$copy/chroma.sqlite3"
+    "$CLAUDETTE_PY" "$HERE/memory_export.py" export \
+        --data-dir "$copy" --out "$STAGE/claudette/${prefix}memory-export.json" \
+        > "$STAGE/claudette/${prefix}export.json"
+    rm -rf "$copy"
+}
+export_store "$CLAUDETTE_MEMORY_DIR" ""
+if [[ -f "$CLAUDETTE_DISCORD_MEMORY_DIR/chroma.sqlite3" ]]; then
+    export_store "$CLAUDETTE_DISCORD_MEMORY_DIR" discord-
+fi
 cp "$CLAUDETTE_RETRIEVAL_LOG" "$STAGE/claudette/memory_retrieval.jsonl"
 
 for pair in "${BUNDLES[@]}"; do
@@ -48,6 +55,9 @@ manifest = {
     "migration": int(re.match(r"\d+", migration).group()),
     "bundles": bundles,
     "claudette": json.loads((stage / "claudette" / "export.json").read_text()),
+    "claudette_discord": (json.loads(discord.read_text())
+                          if (discord := stage / "claudette" / "discord-export.json").exists()
+                          else None),
     "gable": {"memory_files": int(gable_files), "memory_md_sha256": gable_sha},
 }
 (stage / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")

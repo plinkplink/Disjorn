@@ -41,12 +41,25 @@ migration="$(sqlite3 "$db" 'SELECT MAX(filename) FROM schema_migrations' 2>&1)"
 [[ "$migration" =~ ^0*([0-9]+) && "${BASH_REMATCH[1]}" == "$(mget "$m" migration)" ]] \
     || fail "db migration $migration != manifest $(mget "$m" migration)"
 
+# Manifests older than the store_count/ids_sha256 fields verify without them.
+verify_store() {
+    local key="$1" prefix="$2" extra=() out
+    if mget "$m" "$key.store_count" >/dev/null 2>&1; then
+        extra=(--store-count "$(mget "$m" "$key.store_count")" --ids-sha "$(mget "$m" "$key.ids_sha256")")
+    fi
+    if ! out="$("$CLAUDETTE_PY" "$HERE/memory_export.py" verify \
+            --export "$stage/claudette/${prefix}memory-export.json" \
+            --count "$(mget "$m" "$key.count")" --sha "$(mget "$m" "$key.export_sha256")" \
+            --scratch "$scratch/$key-store" "${extra[@]}" 2>&1)"; then
+        fail "$key: ${out//$'\n'/; }"
+    fi
+}
 c_count="$(mget "$m" claudette.count)"
-if ! out="$("$CLAUDETTE_PY" "$HERE/memory_export.py" verify \
-        --export "$stage/claudette/memory-export.json" \
-        --count "$c_count" --sha "$(mget "$m" claudette.export_sha256)" \
-        --scratch "$scratch/claudette-store" 2>&1)"; then
-    fail "claudette: ${out//$'\n'/; }"
+verify_store claudette ""
+d_note=", discord-side absent"
+if [[ "$(mget "$m" claudette_discord 2>/dev/null)" =~ ^[0-9] ]]; then
+    verify_store claudette_discord discord-
+    d_note=", discord-side $(mget "$m" claudette_discord.count)"
 fi
 
 if facts="$(gable_facts "$r$GABLE_MEMORY" 2>&1)"; then
@@ -74,6 +87,6 @@ if ((${#fails[@]})); then
       printf -- '- %s\n' "${fails[@]}"; } | post
     exit 1
 fi
-printf 'backup drill PASS on snapshot %s (%s): db ok, %s messages, migration %s; claudette %s memories round-trip; gable %s memory files; %d bundles verified\n' \
+printf 'backup drill PASS on snapshot %s (%s): db ok, %s messages, migration %s; claudette %s memories round-trip%s; gable %s memory files; %d bundles verified\n' \
     "${snap:0:8}" "$(mget "$m" created_at)" "$messages" "$(mget "$m" migration)" \
-    "$c_count" "$g_files" "$n_bundles" | post
+    "$c_count" "$d_note" "$g_files" "$n_bundles" | post
