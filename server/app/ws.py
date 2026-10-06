@@ -9,7 +9,8 @@ Auth:
              a house origin (app/origin_wall.py).
     Bots   — first frame `{"op": "auth", "api_key": "..."}` within AUTH_TIMEOUT
              seconds.
-    Anything else -> 4401; a rotation-pending session -> 4403.
+    Anything else -> 4401; a rotation-pending session -> 4403. A user socket
+    re-checks its session on every op and every SESSION_RECHECK_SECONDS.
     On success the server sends `{"type": "ready", "user_id"|"bot_id": N}`.
 
 Client -> server ops (JSON; invalid/unknown frames are ignored):
@@ -100,6 +101,7 @@ import time
 from typing import Any, Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from starlette.websockets import WebSocketState
 
 from . import db, events, privacy
 from .routers.auth import (
@@ -118,6 +120,7 @@ AUTH_TIMEOUT = 5.0          # seconds for a bot's first auth frame
 TYPING_INTERVAL = 3.0       # min seconds between typing_start per sender+channel
 CLOSE_UNAUTHENTICATED = 4401
 CLOSE_PASSWORD_CHANGE_REQUIRED = 4403
+SESSION_RECHECK_SECONDS = 60.0
 
 _MESSAGE_EVENT_TYPES = ("message_create", "message_edit", "message_delete")
 _MEMBER_EVENT_TYPES = ("member_add", "member_remove", "member_update")
@@ -496,9 +499,7 @@ async def handle_bus_event(event: dict[str, Any]) -> None:
     if etype == "app_stage":
         # Owner's sockets only. `owner_user_id` rides on the bus event and is
         # stripped here — it is routing, not content, and the modal already
-        # knows whose it is. The client store is the subscriber; a second one
-        # (a notifier, a log tail) can be added without the publisher learning
-        # about it.
+        # knows whose it is.
         await _send_to_user(
             event.get("owner_user_id"),
             {
@@ -684,13 +685,11 @@ async def _handle_user_op(ws: WebSocket, user_id: int, data: dict[str, Any]) -> 
             manager.set_focus(ws, channel_id)
     elif op == "ping":
         await _send(ws, {"type": "pong"})
-    # unknown ops: ignored
 
 
 async def _handle_bot_op(bot_id: int, data: dict[str, Any]) -> None:
     if data.get("op") == "typing":
         await _handle_typing("bot", bot_id, data)
-    # bots have no status/focus; unknown ops ignored
 
 
 async def _receive_op(ws: WebSocket) -> Optional[dict[str, Any]]:
@@ -707,20 +706,53 @@ async def _receive_op(ws: WebSocket) -> Optional[dict[str, Any]]:
 # Endpoint
 # ---------------------------------------------------------------------------
 
-async def _run_user(ws: WebSocket, user_id: int, stored_status: str) -> None:
+async def _session_close_code(token: str) -> Optional[int]:
+    row = await db.fetch_one(
+        """SELECT s.expires_at, u.must_change_password
+           FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?""",
+        (token,),
+    )
+    if row is None or row["expires_at"] <= db.utc_now():
+        return CLOSE_UNAUTHENTICATED
+    if row["must_change_password"]:
+        return CLOSE_PASSWORD_CHANGE_REQUIRED
+    return None
+
+
+async def _closed_for_session(ws: WebSocket, token: str) -> bool:
+    code = await _session_close_code(token)
+    if code is None:
+        return False
+    try:
+        await ws.close(code=code)
+    except Exception:  # noqa: BLE001 — socket already closing/closed
+        logger.debug("ws close failed", exc_info=True)
+    return True
+
+
+async def _watch_session(ws: WebSocket, token: str) -> None:
+    while True:
+        await asyncio.sleep(SESSION_RECHECK_SECONDS)
+        if await _closed_for_session(ws, token):
+            return
+
+
+async def _run_user(ws: WebSocket, user_id: int, stored_status: str, token: str) -> None:
     status = stored_status if stored_status in ("idle", "dnd") else "online"
     first = manager.connect_user(ws, user_id, status)
     await _send(ws, {"type": "ready", "user_id": user_id})
     if first:
         await _broadcast_presence(user_id, status)
+    watcher = asyncio.create_task(_watch_session(ws, token))
     try:
-        while True:
+        while ws.application_state == WebSocketState.CONNECTED:
             data = await _receive_op(ws)
-            if data is not None:
+            if data is not None and not await _closed_for_session(ws, token):
                 await _handle_user_op(ws, user_id, data)
     except WebSocketDisconnect:
         pass
     finally:
+        watcher.cancel()
         if manager.disconnect_user(ws, user_id):
             await _broadcast_presence(user_id, "offline")
 
@@ -752,7 +784,8 @@ async def ws_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
 
     # Humans: session cookie on the handshake (sliding-expiry refresh included).
-    found = await _session_user(websocket.cookies.get(COOKIE_NAME))
+    token = websocket.cookies.get(COOKIE_NAME)
+    found = await _session_user(token)
     if found is not None:
         user, must_change_password = found
         if must_change_password:
@@ -760,7 +793,7 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                 code=CLOSE_PASSWORD_CHANGE_REQUIRED, reason=PASSWORD_CHANGE_REQUIRED
             )
             return
-        await _run_user(websocket, user.id, user.status)
+        await _run_user(websocket, user.id, user.status, token)
         return
 
     # Bots: first frame {"op": "auth", "api_key": ...} within AUTH_TIMEOUT.
