@@ -23,6 +23,7 @@ import { useApprovals } from "./stores/approvals";
 import { useApps } from "./stores/apps";
 import { useChannelDelete } from "./stores/channelDelete";
 import { useChannels } from "./stores/channels";
+import { useMembers } from "./stores/members";
 import { useMembership } from "./stores/membership";
 import { useMessages } from "./stores/messages";
 import { usePresence } from "./stores/presence";
@@ -272,6 +273,11 @@ export class DisjornSocket {
         return;
       case "member_remove":
         useMembership.getState().onMemberRemove(frame);
+        return;
+      case "member_update":
+        useMembers
+          .getState()
+          .applyReplyMode(frame.channel_id, frame.member_id, frame.reply_mode);
         return;
       /* Apps (SPECS/2026-08-30-apps-tab-v1.md). Both frames reach the app
          owner's sockets and nobody else's — the server decides that, and

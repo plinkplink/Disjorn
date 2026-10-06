@@ -34,6 +34,7 @@ import type {
   PlanCard,
   PlanCardDetail,
   Quota,
+  ReplyMode,
   SearchResult,
   SettableStatus,
   SummarizeResponse,
@@ -286,6 +287,12 @@ export function openDm(userId: number): Promise<DmResponse> {
   return request<DmResponse>("POST", "/dms", { user_id: userId });
 }
 
+/** Get-or-create a private 1:1 room with a bot. 404 unless the bot is open
+    to DMs (`Bot.dm_open`). The bot answers every message there. */
+export function openBotDm(botId: number): Promise<DmResponse> {
+  return request<DmResponse>("POST", "/dms", { bot_id: botId });
+}
+
 export function markRead(
   channelId: number,
   seq: number,
@@ -312,8 +319,24 @@ export function listBots(): Promise<Bot[]> {
 export function addChannelBot(
   channelId: number,
   botId: number,
+  replyMode: ReplyMode = "mention",
 ): Promise<{ ok: boolean; added: boolean }> {
-  return request("POST", `/channels/${channelId}/bots`, { bot_id: botId });
+  return request("POST", `/channels/${channelId}/bots`, {
+    bot_id: botId,
+    reply_mode: replyMode,
+  });
+}
+
+/** Same access rule as adding. 400 "This room is mention-only" for
+    "always" in such a room; 403 in a bot DM, whose bot always replies. */
+export function setBotReplyMode(
+  channelId: number,
+  botId: number,
+  replyMode: ReplyMode,
+): Promise<{ ok: boolean; reply_mode: ReplyMode; changed: boolean }> {
+  return request("PATCH", `/channels/${channelId}/bots/${botId}`, {
+    reply_mode: replyMode,
+  });
 }
 
 export function removeChannelBot(

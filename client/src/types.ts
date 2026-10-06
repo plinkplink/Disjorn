@@ -2,6 +2,9 @@
    These are the client-side contract for WP10-12 — extend, don't fork. */
 
 export type MemberType = "user" | "bot";
+/** How a bot is addressed in one channel: by name, or by every message a
+    person writes there. */
+export type ReplyMode = "mention" | "always";
 /* `app_build` is the modal chat behind an app build session: exactly two
    members (the session owner and the builder resident), created by the server
    with the session. The sidebar never lists one — AppShell filters the type
@@ -157,8 +160,13 @@ export interface ChannelListItem {
   type: ChannelType;
   /** main_feed/text: channel name; DMs: the OTHER participant's display name. */
   name: string | null;
-  /** DMs only: the OTHER participant's user id. */
+  /** DMs only: the OTHER participant's user id. Null in a bot DM. */
   dm_user_id: number | null;
+  /** Bot DMs only: the bot's id and avatar; `name` is the bot's name. */
+  dm_bot_id?: number | null;
+  dm_bot_avatar_url?: string | null;
+  /** No bot may be set to answer every message here (server setting). */
+  mention_only?: boolean;
   unread: number;
   last_message: LastMessage | null;
   /* The three fields below arrived with per-channel membership. All optional
@@ -193,7 +201,8 @@ export interface DmResponse {
   id: number;
   type: ChannelType;
   name: string;
-  dm_user_id: number;
+  dm_user_id: number | null;
+  dm_bot_id?: number | null;
   created: boolean;
 }
 
@@ -205,6 +214,8 @@ export interface Bot {
   avatar_url?: string | null;
   chibi_pack: string | null;
   created_at: string;
+  /** People may open a DM with this bot. */
+  dm_open?: boolean;
 }
 
 /** One face in a bot's chibi pack (GET /chibi/{pack}/faces, admin). */
@@ -230,6 +241,7 @@ export interface ChannelMemberOut {
   status?: UserStatus | null; // users only
   avatar_path?: string | null;
   avatar_url?: string | null;
+  reply_mode?: ReplyMode | null; // bots only
 }
 
 export interface SearchResult {
@@ -627,6 +639,12 @@ export interface MemberRemoveFrame extends MemberEventFrame {
   type: "member_remove";
 }
 
+/** A bot's reply mode in a channel changed. Same audience as member_add. */
+export interface MemberUpdateFrame extends MemberEventFrame {
+  type: "member_update";
+  reply_mode: ReplyMode;
+}
+
 /**
  * A build reached a stage. Fanned out to EVERY socket of the session's owner
  * and to nobody else — not the builder bot, not other users (brief D7).
@@ -667,6 +685,7 @@ export type ServerFrame =
   | ChannelDeleteFrame
   | MemberAddFrame
   | MemberRemoveFrame
+  | MemberUpdateFrame
   | AppStageFrame
   | AppUpdateFrame
   | PongFrame

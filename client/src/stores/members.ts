@@ -1,7 +1,7 @@
 import { create } from "zustand";
 
 import { listMembers } from "../api";
-import type { ChannelMemberOut, MemberType } from "../types";
+import type { ChannelMemberOut, MemberType, ReplyMode } from "../types";
 
 /* Per-channel member roster — WP10 uses it to resolve typing-indicator names
    and to highlight @mentions. Loaded lazily per channel; live display-name
@@ -20,6 +20,8 @@ interface MembersState {
   refreshIfLoaded: (channelId: number) => void;
   /** Forget a roster (membership revoked). */
   drop: (channelId: number) => void;
+  /** WS member_update: a bot's reply mode changed in a loaded roster. */
+  applyReplyMode: (channelId: number, botId: number, mode: ReplyMode) => void;
   nameFor: (channelId: number, type: MemberType, id: number) => string | null;
   /** Best-effort display name for a user from ANY loaded roster — the client's
       only user directory (the main-feed roster lists every user). Null when we
@@ -61,6 +63,19 @@ export const useMembers = create<MembersState>()((set, get) => ({
     const next = { ...get().byChannel };
     delete next[channelId];
     set({ byChannel: next });
+  },
+
+  applyReplyMode: (channelId, botId, mode) => {
+    const members = get().byChannel[channelId];
+    if (members === undefined) return;
+    set({
+      byChannel: {
+        ...get().byChannel,
+        [channelId]: members.map((m) =>
+          m.type === "bot" && m.id === botId ? { ...m, reply_mode: mode } : m,
+        ),
+      },
+    });
   },
 
   nameFor: (channelId, type, id) => {

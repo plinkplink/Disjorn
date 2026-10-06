@@ -4,6 +4,7 @@ import {
   ApiError,
   listChannels,
   markRead as apiMarkRead,
+  openBotDm as apiOpenBotDm,
   openDm as apiOpenDm,
 } from "../api";
 import type { ChannelListItem, ChannelVisibility, Message } from "../types";
@@ -50,6 +51,8 @@ interface ChannelsState {
   setActive: (channelId: number | null) => void;
   /** Open (or create) the 1:1 DM with a user; returns the channel id. */
   openDm: (userId: number) => Promise<number>;
+  /** Open (or create) the 1:1 DM with a bot; returns the channel id. */
+  openBotDm: (botId: number) => Promise<number>;
   /** Persist read state and zero the local unread badge. */
   markRead: (channelId: number, seq: number) => Promise<void>;
   /** Live update from a message_create frame: unread badge + last_message + order. */
@@ -113,6 +116,18 @@ export const useChannels = create<ChannelsState>()((set, get) => ({
     }
     const dm = await apiOpenDm(userId);
     await get().refresh(); // pull the fresh channel row into the sidebar
+    set({ activeChannelId: dm.id });
+    return dm.id;
+  },
+
+  openBotDm: async (botId) => {
+    const existing = get().channels.find((c) => c.dm_bot_id === botId);
+    if (existing !== undefined) {
+      set({ activeChannelId: existing.id });
+      return existing.id;
+    }
+    const dm = await apiOpenBotDm(botId);
+    await get().refresh();
     set({ activeChannelId: dm.id });
     return dm.id;
   },
