@@ -2752,6 +2752,42 @@
   border-radius: var(--radius-s);
 }
 
+.settings-deletions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.settings-deletion {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-2) var(--space-3);
+  background: var(--bg-0);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-s);
+  min-width: 0;
+}
+
+.settings-deletion-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.settings-deletion-name {
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+.settings-deletion-head .settings-hint {
+  display: inline;
+}
+
 /* ================= per-channel membership (private channels) ================= */
 
 /* The private-channel glyph: the "#" slot, with the shackle on. Sized and

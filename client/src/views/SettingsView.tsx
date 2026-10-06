@@ -3,6 +3,7 @@
      Notifications  per-device Web Push enable/disable + notify_all_main pref
      Sounds         per-device in-app chimes: on/off, mentions only, volume
      Reset password admin only: hand another account a temporary password
+     Deleted channels admin only: the paper trail of channel deletions
      Account        username + log out
    Push permission is requested HERE and only here (spec §10). */
 
@@ -13,6 +14,7 @@ import {
   PASSWORD_MIN_LENGTH,
   adminResetPassword,
   getNotifyPrefs,
+  listChannelDeletions,
   listUsers,
   putNotifyPrefs,
   updateMe,
@@ -22,7 +24,7 @@ import { isIos, isStandalone, useInstall } from "../install";
 import { usePush } from "../push";
 import { previewSound, useSoundSettings } from "../sounds";
 import { useSession } from "../stores/session";
-import type { AdminUserRow } from "../types";
+import type { AdminUserRow, ChannelDeletion } from "../types";
 import { socket } from "../ws";
 
 /* ---------------------------------------------------------------- profile */
@@ -560,6 +562,102 @@ function ResetPasswordSection() {
   );
 }
 
+/* ------------------------------------------------------ deleted channels */
+
+const DELETIONS_PAGE = 25;
+
+function deletionTitle(d: ChannelDeletion): string {
+  switch (d.channel_type) {
+    case "text":
+      return `#${d.channel_name ?? "unnamed"}`;
+    case "dm_1to1":
+      return "Direct message";
+    case "app_build":
+      return d.channel_name ?? "App build chat";
+    case "main_feed":
+      return "#main";
+  }
+}
+
+function deletionKind(d: ChannelDeletion): string {
+  if (d.channel_type === "dm_1to1") return "DM";
+  if (d.channel_type === "app_build") return "app build";
+  return d.visibility === "private" ? "private channel" : "public channel";
+}
+
+function plural(n: number, word: string): string {
+  return `${n.toLocaleString()} ${word}${n === 1 ? "" : "s"}`;
+}
+
+/** Admin only: which channels were deleted, by whom and when. No contents exist to show. */
+function DeletedChannelsSection() {
+  const [rows, setRows] = useState<ChannelDeletion[] | null>(null);
+  const [more, setMore] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = async (beforeId?: number) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const page = await listChannelDeletions(beforeId, DELETIONS_PAGE);
+      setRows((prev) => (beforeId === undefined || prev === null ? page : [...prev, ...page]));
+      setMore(page.length === DELETIONS_PAGE);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.detail : "Could not load deleted channels");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  return (
+    <section className="settings-section">
+      <h2>Deleted channels</h2>
+      {error !== null && <p className="form-error">{error}</p>}
+      {rows === null && error === null && <p className="settings-note">Loading…</p>}
+      {rows !== null && rows.length === 0 && (
+        <p className="settings-note">No channel has been deleted.</p>
+      )}
+      {rows !== null && rows.length > 0 && (
+        <ul className="settings-deletions">
+          {rows.map((d) => (
+            <li key={d.id} className="settings-deletion">
+              <div className="settings-deletion-head">
+                <strong className="settings-deletion-name">{deletionTitle(d)}</strong>
+                <span className="settings-hint">{deletionKind(d)}</span>
+              </div>
+              <span className="settings-hint">
+                {plural(d.message_count, "message")} · {plural(d.member_count, "member")}
+              </span>
+              <span className="settings-hint">
+                Deleted by {d.deleted_by_name ?? `${d.deleted_by_type} ${d.deleted_by_id}`} ·{" "}
+                <time dateTime={d.deleted_at}>{new Date(d.deleted_at).toLocaleString()}</time>
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {more && rows !== null && (
+        <button
+          type="button"
+          className="btn settings-reset-btn"
+          disabled={busy}
+          onClick={() => {
+            const oldest = rows[rows.length - 1];
+            if (oldest !== undefined) void load(oldest.id);
+          }}
+        >
+          {busy ? "Loading…" : "Show older"}
+        </button>
+      )}
+    </section>
+  );
+}
+
 /* ------------------------------------------------------------------ view */
 
 export function SettingsView({ onClose }: { onClose: () => void }) {
@@ -580,6 +678,7 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
         <SoundsSection />
         <InstallSection />
         <ResetPasswordSection />
+        {user?.is_admin === true && <DeletedChannelsSection />}
         <section className="settings-section">
           <h2>Account</h2>
           {user !== null && (

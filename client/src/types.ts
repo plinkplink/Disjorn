@@ -43,6 +43,23 @@ export interface AdminUserRow {
   must_change_password: boolean;
 }
 
+/** GET /channels/deletions (admin only): that a channel existed, never what was said in it. */
+export interface ChannelDeletion {
+  id: number;
+  channel_id: number;
+  channel_type: ChannelType;
+  channel_name: string | null;
+  visibility: ChannelVisibility;
+  created_by: number | null;
+  channel_created_at: string;
+  deleted_by_type: MemberType;
+  deleted_by_id: number;
+  deleted_by_name: string | null;
+  deleted_at: string;
+  message_count: number;
+  member_count: number;
+}
+
 export interface MessageAuthor {
   type: MemberType;
   id: number;
