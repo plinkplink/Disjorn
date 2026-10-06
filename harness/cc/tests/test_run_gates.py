@@ -1,7 +1,8 @@
-"""run-gates.sh: what it refuses, and the four lines it is allowed to print.
+"""run-gates.sh: what it refuses, and the GATE lines it is allowed to print.
 
 The broker parses this script's stdout and merges on the answer, so stdout is
-a contract: four GATE lines, in order, and nothing else. Real git repos in
+a contract: four GATE lines, in order, a fifth only for a misconfigured gate,
+and nothing else. Real git repos in
 tmp_path — whether a branch exists and whether it touched client/ are git's
 questions — and a fake podman, because the container is the one thing these
 tests do not need.
@@ -278,8 +279,8 @@ def test_the_inner_script_refuses_a_toolchain_that_is_not_there(rig):
     tsc = text.index("[ ! -x /opt/node_modules/.bin/tsc ]")
     link = text.index("ln -s /opt/node_modules/*")
     assert tsc < link
-    misconfigured = ('echo "gate misconfigured: /opt/node_modules has no '
-                     'toolchain (expected .bin/tsc)" >&2')
+    misconfigured = ('echo "GATE misconfigured /opt/node_modules has no '
+                     'toolchain (expected .bin/tsc)"')
     assert misconfigured in text
     after = text[tsc:link]
     assert misconfigured in after
@@ -287,12 +288,40 @@ def test_the_inner_script_refuses_a_toolchain_that_is_not_there(rig):
     assert 'echo "GATE build fail"' in after
 
 
-def test_a_client_change_with_no_toolchain_is_red_not_skipped(rig):
+def test_a_client_change_with_no_toolchain_is_red_and_says_misconfigured(rig):
     rig.branch("client/src/app.tsx")
     cp = rig.run(NAME, SLUG)
-    assert gate_lines(cp) == ["GATE tests pass", "GATE typecheck fail",
-                              "GATE build fail", "GATE exit 1"]
+    lines = gate_lines(cp)
+    uid = subprocess.run(["id", "-un"], capture_output=True,
+                         text=True).stdout.strip()
+    assert lines[:3] == ["GATE tests pass", "GATE typecheck fail",
+                         "GATE build fail"]
+    assert lines[3] == (f"GATE misconfigured {rig.tmp / 'absent'} is not a "
+                        f"directory {uid} can see")
+    assert lines[4:] == ["GATE exit 1"]
     assert cp.returncode == 1
+
+
+def test_the_containers_misconfigured_line_is_carried_through(rig):
+    rig.branch("client/src/app.tsx")
+    node_modules = rig.tmp / "node_modules"
+    node_modules.mkdir()
+    reason = "/opt/node_modules has no toolchain (expected .bin/tsc)"
+    cp = rig.run(NAME, SLUG, node_modules=str(node_modules),
+                 stdout_lines=(f"GATE tests pass\nGATE misconfigured {reason}\n"
+                               "GATE typecheck fail\nGATE build fail"))
+    assert gate_lines(cp) == ["GATE tests pass", "GATE typecheck fail",
+                              "GATE build fail",
+                              f"GATE misconfigured {reason}", "GATE exit 1"]
+
+
+def test_a_red_branch_says_nothing_about_misconfiguration(rig):
+    rig.branch("client/src/app.tsx")
+    node_modules = rig.tmp / "node_modules"
+    node_modules.mkdir()
+    cp = rig.run(NAME, SLUG, node_modules=str(node_modules),
+                 stdout_lines="GATE tests pass\nGATE typecheck fail\nGATE build fail")
+    assert not any("misconfigured" in ln for ln in gate_lines(cp))
 
 
 # ======================================================================

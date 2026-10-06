@@ -123,7 +123,8 @@ MERGE_REFUSED = "merge-refused"
 # The closed set of refusal reasons; the wire carries one of these verbatim.
 MERGE_REASONS = frozenset({
     "human", "branch-missing", "slug-mismatch", "busy", "moved", "gates",
-    "tier", "pass-missing", "pass-invalid", "budget", "conflict", "push"})
+    "tier", "pass-missing", "pass-invalid", "budget", "conflict", "push",
+    "misconfigured"})
 # The gate unit's own RuntimeMaxSec; the broker has to outwait the kill that works.
 GATE_UNIT_RUNTIME_CAP_SEC = 1200
 DEFAULT_GATE_TIMEOUT_SEC = 1320
@@ -1036,6 +1037,8 @@ def format_merge_refused(*, slug: str, reason_text: str, next_line: str) -> str:
 def merge_next_step(reason: str, *, slug: str, owner: Optional[str] = None,
                     gates_red: bool = False) -> str:
     """What the human does about a refusal, in their own hands."""
+    if reason == "misconfigured":
+        return "fix at the keyboard"
     if gates_red:
         return "fix the red gate, then /build again"
     if reason in ("moved", "conflict"):
@@ -3782,10 +3785,13 @@ class Broker:
     def _gate_and_classify(self, slug: str) -> tuple[Any, dict]:
         """The gates, then the classifier over the same range with their result.
 
-        A red gate is NOT special-cased here: the classifier answers Tier 2 on
-        a failed gate, and that fail-closed answer is the only one used."""
+        A red gate is NOT special-cased: the classifier answers Tier 2 on it
+        and that is the answer used. A misconfigured gate is no answer."""
         repo = self._gatehouse_or_refuse()
         result = self._gate_branch(slug)
+        if result.misconfigured:
+            raise self._merge_refused(
+                f"gates misconfigured: {result.misconfigured}", "misconfigured")
         classification = self._classify(repo, f"main...loop/{slug}",
                                         gates.gates_json(result))
         return result, classification
@@ -4348,6 +4354,10 @@ class Broker:
                 return {"tests": "n/a — nothing was gated",
                         "tier": "n/a — nothing to classify",
                         "next": f"{exc.message}, then /merge {slug}"}
+            if exc.reason == "misconfigured":
+                return {"tests": exc.message,
+                        "tier": "n/a — nothing to classify",
+                        "next": merge_next_step(exc.reason, slug=slug)}
             return {"tests": f"fail — {exc.message}",
                     "tier": "unknown — the gates did not run",
                     "next": "fix the red gate, then /build again"}

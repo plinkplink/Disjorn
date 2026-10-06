@@ -424,7 +424,11 @@ the message DB.
   own seq), `/merge <slug>` (Tier 1), `PASS from <owner> in #custodian, then
   /merge <slug> pass <seq>` (Tier 2), `fix the red gate, then /build again`,
   or `Tier 0 budget spent today; /merge <slug>`. When a self-merge happened the
-  `deployed` detail also carries `tier` and `merged_sha`.
+  `deployed` detail also carries `tier` and `merged_sha`. A gate run that
+  printed `GATE misconfigured <reason>` (its toolchain was missing, so it said
+  nothing about the branch) is not classified: the banner says
+  `tests: gates misconfigured: <reason>`, `tier: n/a — nothing to classify`,
+  `next: fix at the keyboard`.
 - A branch that fell behind main while it was building is FOLDED before the
   gates run (`merge`, below), under the same gate claim, and the whole banner
   then describes the folded tip; the `diffstat` line, which is read before the
@@ -472,7 +476,7 @@ branch's own suite, so the wall is the classifier plus a human on Tier 1 and 2.
   or `merge: refused <slug> — <plain reason>` with `next:` the human's own next
   step (`fold main into the branch, then /merge again`, `PASS from <owner> in
   #custodian, then /merge <slug> pass <seq>`, `fix the red gate, then /build
-  again`, or `merge it at the keyboard`).
+  again`, `fix at the keyboard`, or `merge it at the keyboard`).
 - Every refusal — before the answer or after it — is `merge-refused` with a
   plain message, an audit line whose summary starts `denied: ` and ends with
   its reason in brackets, and a `reason` from this closed set. A refusal
@@ -486,6 +490,7 @@ branch's own suite, so the wall is the classifier plus a human on Tier 1 and 2.
 | `busy`           | a gate run for this slug is already in flight            |
 | `moved`          | a conflict with main, or main or the branch moved        |
 | `gates`          | the gate run could not be launched at all                |
+| `misconfigured`  | the gate run printed `GATE misconfigured <reason>`       |
 | `tier`           | the classifier answered with no tier                     |
 | `pass-missing`   | Tier 2 and no `pass_seq`                                 |
 | `pass-invalid`   | the PASS does not hold (below)                           |

@@ -36,7 +36,8 @@ def earlier(seconds: int = 3600) -> str:
 def arm(h, *, slug: str = SLUG, author: str = "plink",
         author_type: str = "user", flags: str = "{}", content: str | None = None,
         path: str = "docs/new.md", branch: bool = True, tier: int = 1,
-        gate_exit: int = 0, message: bool = True, on_gates=None):
+        gate_exit: int = 0, message: bool = True, on_gates=None,
+        misconfigured: str | None = None):
     """A `server` caller, the verb on, a real gatehouse, and the gates stubbed."""
     h.become_server()
     h.set_verbs("server", merge=True, build=True)
@@ -50,7 +51,7 @@ def arm(h, *, slug: str = SLUG, author: str = "plink",
     return h.stub_gates(exit_code=gate_exit,
                         tests=(gate_exit == 0),
                         summary="server 12 passed; harness 4 passed",
-                        on_run=on_gates)
+                        on_run=on_gates, misconfigured=misconfigured)
 
 
 def call(h, *, slug: str = SLUG, seq: int = SEQ, channel: int = CHANNEL,
@@ -210,6 +211,21 @@ def test_a_red_gate_is_tier_two_and_refuses_without_a_pass(harness):
     assert "Tier 2" in message and f"/merge {SLUG} pass <seq>" in message
     assert post[0] == f"merge: refused {SLUG} — {message}"
     assert post[1] == "next: fix the red gate, then /build again"
+    assert harness.main_subjects() == ["init"]
+
+
+TOOLCHAIN = "/opt/node_modules has no toolchain (expected .bin/tsc)"
+
+
+def test_a_misconfigured_gate_refuses_as_a_keyboard_fix(harness):
+    """A gate whose toolchain is missing said nothing about the branch, so the
+    refusal names the gate rather than a red typecheck."""
+    arm(harness, gate_exit=1, tier=2, misconfigured=TOOLCHAIN)
+    reason, message, post = late_refusal(harness)
+    assert reason == "misconfigured"
+    assert message == f"gates misconfigured: {TOOLCHAIN}"
+    assert post == [f"merge: refused {SLUG} — gates misconfigured: {TOOLCHAIN}",
+                    "next: fix at the keyboard"]
     assert harness.main_subjects() == ["init"]
 
 
@@ -710,6 +726,15 @@ def test_a_red_gate_sends_the_build_back(harness):
     assert lines[0].startswith("tests: fail — ")
     assert lines[1].startswith("tier: 2 — gate failed: tests")
     assert lines[3] == "next: fix the red gate, then /build again"
+    assert harness.main_subjects() == ["init"]
+
+
+def test_a_misconfigured_gate_banner_says_so_instead_of_the_gate_list(harness):
+    arm(harness, tier=0, gate_exit=1, misconfigured=TOOLCHAIN)
+    lines = outcome(harness)
+    assert lines[0] == f"tests: gates misconfigured: {TOOLCHAIN}"
+    assert lines[1] == "tier: n/a — nothing to classify"
+    assert lines[3] == "next: fix at the keyboard"
     assert harness.main_subjects() == ["init"]
 
 
