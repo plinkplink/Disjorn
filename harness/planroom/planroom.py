@@ -11,12 +11,8 @@ because it is not a copy of it. The mirror itself CAN lag, so staleness here is
 DECLARED, never denied: `face()` carries the derivation time and the mirror
 head it derived from, and every renderer shows both.
 
-WHY DERIVED, ON THE RECORD. The night these specs were reviewed, four
-hand-written status lines outlived their truth in a few hours — a memory index,
-a memory corpus, the deploy docs, and BUILD-LOOP.md's own lanes section (seqs
-1405/1414/1419/1428). Any layer written by hand and read as fact lies
-eventually. Cards derive from artifacts so the board has a rebuild path instead
-of a memory.
+WHY DERIVED. Any layer written by hand and read as fact lies eventually. Cards
+derive from artifacts so the board has a rebuild path instead of a memory.
 
 WHAT THE BOARD OWNS NATIVELY, AND ONLY THIS: comments, card order, the blocked
 flag + reason, archived. None of it is in this module and none of it is in the
@@ -31,14 +27,9 @@ teaches git anything. Delete the file and the next rebuild restores it whole.
 The server reads this file and nothing else; it never derives.
 
 ONE PARSER FOR THE GATE'S OWN FIELDS. Status and confirm-record parsing come
-from `brokerd`'s parsers, always, including in the index builder (seq 1428 P3).
-`harness/keyboard/board.py`'s docstring carries the incident verbatim, and it
-is carried again here because this module is the one that will be copied next:
-the board's first two days it read the Status word itself, saw `confirmed`, and
-reported "nothing waiting on you" while the broker's gate was refusing the same
-spec for a confirm record whose bold was one word off. Two parsers of one file
-will disagree exactly when it matters. So this module asks the gate what the
-gate would say, and never re-implements the answer.
+from `brokerd`'s parsers, always, including in the index builder: two parsers
+of one file disagree exactly when it matters (`harness/keyboard/board.py`
+carries the incident). This module asks the gate what the gate would say.
 
 WHERE IT RUNS. Broker-side, and only broker-side (seq 1428 P2). Derivation
 needs gatehouse access (`sudo git --git-dir`) and `brokerd` imports; the Disjorn
@@ -60,6 +51,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -446,7 +438,8 @@ def derive_cards(config: Optional[dict] = None, *, repo: Optional[Path] = None,
                  message_db: Optional[str] = None,
                  drift: Optional[dict] = None,
                  lane_owners: Optional[dict] = None,
-                 date: Optional[str] = None) -> dict:
+                 date: Optional[str] = None,
+                 build_ledger: Optional[str] = None) -> dict:
     """Every card, plus the board's face. Derives; owns nothing; never raises.
 
     `config` is the parsed broker.toml. Everything else is an override for
@@ -608,7 +601,19 @@ def derive_cards(config: Optional[dict] = None, *, repo: Optional[Path] = None,
             body=row["body"],
         ))
 
-    # -- 3. Review auto-cards: the drift report wearing a UI.
+    # -- 3. chat builds: a /build branch has no SPECS file to carry its card.
+    build_cfg = cfg.get("build") if isinstance(cfg.get("build"), dict) else {}
+    ledger_path = build_ledger or build_cfg.get("ledger")
+    try:
+        ledger = read_build_ledger(ledger_path)
+    except OSError as exc:
+        ledger = {}
+        notes.append(f"build ledger unreadable: {exc}")
+    cards.extend(_build_cards(ledger, by_slug=by_slug, merged=merged,
+                              specs_dir=specs_dir, gatehouse=gatehouse,
+                              message_db=message_db, lane_owners=lane_owners))
+
+    # -- 4. Review auto-cards: the drift report wearing a UI.
     cards.extend(_keyboard_cards(drift, lane_owners, reviewed))
 
     face = {
@@ -640,10 +645,148 @@ def _lane_owner(hits: list, lane_owners: dict) -> Optional[str]:
     guess compiled into a harness module is exactly the hand-written layer this
     build exists to delete. Unmapped reads `unassigned`, which is true."""
     for path in hits:
-        for prefix, owner in lane_owners.items():
-            if path.lower().startswith(prefix):
-                return owner
+        if (owner := _path_owner(path, lane_owners)) is not None:
+            return owner
     return None
+
+
+def _path_owner(path: str, lane_owners: dict) -> Optional[str]:
+    # First match in config order, as the broker's PASS check reads the map.
+    for prefix, owner in lane_owners.items():
+        if path.lower().startswith(prefix):
+            return owner
+    return None
+
+
+def read_build_ledger(path: Optional[str]) -> dict:
+    """slug -> its `/build` line, its last `tier` line, and whether a merge
+    line names it. A missing ledger is a broker that has taken no builds."""
+    out: dict = {}
+    if not path or not os.path.exists(path):
+        return out
+    with open(path, encoding="utf-8") as fh:
+        for raw in fh:
+            try:
+                rec = json.loads(raw)
+            except ValueError:
+                continue
+            if not isinstance(rec, dict) or not rec.get("slug"):
+                continue
+            ent = out.setdefault(str(rec["slug"]), {})
+            kind = rec.get("kind")
+            if kind is None and "seq" in rec:
+                ent.setdefault("build", rec)
+            elif kind == "tier":
+                ent["tier"] = rec
+            elif kind == "merge":
+                ent["merged"] = True
+    return out
+
+
+def _build_request(message_db: Optional[str], channel_id: int, seq: int,
+                   text_sha256: str) -> tuple[Optional[str], str]:
+    """The `/build` text and the channel's name, or None for the text when the
+    message is gone, edited, private or hidden from bots."""
+    label = f"channel {channel_id}"
+    db = _sqlite_ro(message_db)
+    if db is None:
+        return None, label
+    try:
+        row = db.execute(
+            "select m.content, m.author_type, m.privacy_flags, m.deleted_at, "
+            "c.name, c.type, c.visibility from messages m "
+            "join channels c on c.id = m.channel_id "
+            "where m.channel_id = ? and m.seq = ?", (channel_id, seq)).fetchone()
+    except sqlite3.Error:
+        return None, label
+    finally:
+        db.close()
+    if row is None:
+        return None, label
+    public = row["visibility"] == "public" and row["type"] != "dm_1to1"
+    if public and row["name"]:
+        label = f"#{row['name']}"
+    try:
+        flags = json.loads(row["privacy_flags"] or "{}")
+    except ValueError:
+        flags = {"unreadable": True}
+    text = brokerd().strip_build_command(row["content"] or "")
+    if (not public or row["deleted_at"] or row["author_type"] != "user"
+            or brokerd().hidden_from_bots(flags)
+            or hashlib.sha256(text.encode("utf-8")).hexdigest() != text_sha256):
+        return None, label
+    return text, label
+
+
+def _build_cards(ledger: dict, *, by_slug: dict, merged: dict, specs_dir: Path,
+                 gatehouse: Path, message_db: Optional[str],
+                 lane_owners: dict) -> list:
+    """Review cards for chat builds whose `loop/<slug>` is on the shelf and
+    unmerged; the branch going, by merge or deletion, drops the card."""
+    b = board()
+    out: list[dict] = []
+    for slug, ent in sorted(ledger.items()):
+        build = ent.get("build")
+        if (build is None or ent.get("merged") or slug in merged
+                or (specs_dir / f"{slug}.md").exists()):
+            continue
+        parts = [p for p in by_slug.get(slug, []) if not p["merged"]]
+        if not parts:
+            continue
+        paths: list[str] = []
+        for p in parts:
+            paths += b._git_bare(Path(gatehouse) / f"{p['repo']}.git", "diff",
+                                 "--name-only", f"main...{p['branch']}").split()
+        owners = list(dict.fromkeys(
+            o for o in (_path_owner(x, lane_owners) for x in paths) if o))
+        flags = ["chat-build"]
+        if any(_path_owner(x, lane_owners) is None for x in paths):
+            flags.append("no-lane-owner")
+
+        rec = ent.get("tier") or {}
+        tier_n = rec.get("tier")
+        tip = parts[0]["tip"]
+        fresh = bool(tip) and str(rec.get("tip") or "").startswith(tip)
+        tier_note = None
+        if tier_n is not None and not fresh:
+            tier_note = (f"Tier {tier_n} at {str(rec.get('tip'))[:12]}; the "
+                         f"branch has moved since, so it is unclassified")
+            tier_n = None
+        owner_txt = " or ".join(owners) or "a reviewer"
+        whose = "plink"
+        if tier_n is not None and rec.get("gates_green") is False:
+            flags.append("gates-red")
+            note = "The build's gates were red. /build again."
+        elif tier_n == 2:
+            whose = "residents"
+            note = (f"Tier 2: waiting on a PASS from {owner_txt} in "
+                    f"#custodian, then `/merge {slug} pass <seq>`.")
+        elif tier_n is not None:
+            note = f"Tier {tier_n}: waiting on `/merge {slug}`."
+        else:
+            note = (f"No tier recorded for this tip; `/merge {slug}` gates and "
+                    "classifies it.")
+
+        channel_id, seq = int(build.get("channel_id") or 0), build.get("seq")
+        text, chan = _build_request(message_db, channel_id, int(seq or 0),
+                                    str(build.get("text_sha256") or ""))
+        title = next((ln.strip() for ln in (text or "").splitlines()
+                      if ln.strip()), slug)
+        out.append(_card(
+            slug=slug, kind="build", title=clip_title(title), column="Review",
+            tier=f"Tier {tier_n}" if tier_n is not None else "Tier pending",
+            tier_note=tier_note, review_owner=" or ".join(owners) or None,
+            requester=build.get("author"), branch=f"loop/{slug}", flags=flags,
+            whose_move=whose, opened_at=build.get("ts"),
+            updated_at=rec.get("ts") or build.get("ts"), note=note,
+            where=f"/build in {chan} seq {seq} · "
+                  + ", ".join(f"{p['repo']} repo, {p['tip']}" for p in parts),
+            origin={"channel_id": channel_id, "channel": chan, "seq": seq},
+            shortstat="; ".join(p["shortstat"] for p in parts
+                                if p.get("shortstat")),
+            guarded_paths=paths, body=text,
+        ))
+    return out
 
 
 _HEX_TOKEN = re.compile(r"\b(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b")

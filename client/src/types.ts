@@ -726,7 +726,7 @@ export interface PlanFace {
    and are the only things anything in this client can change. */
 export interface PlanCard {
   slug: string;
-  kind: "spec" | "backlog" | "keyboard";
+  kind: "spec" | "backlog" | "keyboard" | "build";
   title: string;
   column: string;
   spec_path: string | null;
@@ -752,6 +752,7 @@ export interface PlanCard {
   merge_commit?: string | null;
   shortstat?: string;
   guarded_paths?: string[];
+  origin?: { channel_id: number; channel: string; seq: number };
   body?: string;
   position?: number;
   /* board-native — the complete list of what the board owns */
