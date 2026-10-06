@@ -48,6 +48,7 @@ import {
   planOrder,
 } from "../api";
 import { useSession } from "../stores/session";
+import { ApprovalsPanel, PlanRoomTabs, usePlanRoomRoute } from "./ApprovalsPanel";
 import {
   PLAN_COLUMNS,
   type PlanBoard,
@@ -561,6 +562,7 @@ export default function PlanRoomView({ onClose }: { onClose: () => void }) {
   const [open, setOpen] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
+  const [route, go] = usePlanRoomRoute();
 
   const load = useCallback(() => {
     void planBoard()
@@ -613,23 +615,51 @@ export default function PlanRoomView({ onClose }: { onClose: () => void }) {
 
   const archived = byColumn[ARCHIVED] ?? [];
 
+  const head = (
+    <header className="plan-head">
+      <button className="icon-btn" onClick={onClose} aria-label="Back">
+        ←
+      </button>
+      <h1>Plan Room</h1>
+      <PlanRoomTabs tab={route.tab} onSelect={(tab) => go({ tab, slug: null })} />
+      {route.tab === "board" && (
+        <>
+          <input
+            className="plan-input plan-search"
+            placeholder="Search the board"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+          <button className="icon-btn" onClick={load} title="Reload the board">
+            ⟳
+          </button>
+        </>
+      )}
+    </header>
+  );
+
+  if (route.tab === "approvals") {
+    return (
+      <div className="plan-room">
+        {head}
+        <ApprovalsPanel
+          slug={route.slug}
+          onOpen={(slug) => go({ tab: "approvals", slug })}
+          hasSpecCard={(slug) =>
+            (board?.cards ?? []).some((c) => c.kind === "spec" && c.slug === slug)
+          }
+          onOpenCard={(slug) => {
+            go({ tab: "board", slug: null });
+            setOpen(slug);
+          }}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="plan-room">
-      <header className="plan-head">
-        <button className="icon-btn" onClick={onClose} aria-label="Back">
-          ←
-        </button>
-        <h1>Plan Room</h1>
-        <input
-          className="plan-input plan-search"
-          placeholder="Search the board"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-        />
-        <button className="icon-btn" onClick={load} title="Reload the board">
-          ⟳
-        </button>
-      </header>
+      {head}
 
       {error !== null && <p className="plan-error">{error}</p>}
       {board !== null && <Face face={board.face} />}

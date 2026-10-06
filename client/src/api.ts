@@ -11,6 +11,9 @@ import type {
   AppsConfig,
   AppStage,
   AppStatus,
+  ApprovalAction,
+  ApprovalList,
+  ApprovalProposal,
   AvatarUploadResponse,
   BackfillItem,
   BacklogItem,
@@ -1010,4 +1013,25 @@ export async function uploadAvatar(file: File): Promise<AvatarUploadResponse> {
     );
   }
   return (await res.json()) as AvatarUploadResponse;
+}
+
+/* ---- approval object ---- */
+
+/** Every read answers 503 while the server has APPROVAL_ENABLED off; the
+    detail says so and must be shown, never read as an empty list. */
+export function approvalList(limit = 200): Promise<ApprovalList> {
+  return request<ApprovalList>("GET", `/approval/proposals?limit=${limit}`);
+}
+
+export function approvalGet(id: number): Promise<{ proposal: ApprovalProposal }> {
+  return request("GET", `/approval/proposals/${id}`);
+}
+
+/** Answers as the signed-in person: the server derives the principal. */
+export function approvalAct(
+  id: number,
+  action: ApprovalAction,
+  remarks: string | null,
+): Promise<{ proposal: ApprovalProposal }> {
+  return request("POST", `/approval/proposals/${id}/act`, { action, remarks });
 }

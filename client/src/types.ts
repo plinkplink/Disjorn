@@ -628,6 +628,13 @@ export interface AppUpdateFrame {
   app: App;
 }
 
+/** A proposal was filed or answered. Every connected person's sockets, no
+    bot's; `proposal` is the whole record as GET returns it, so it replaces. */
+export interface ApprovalUpdateFrame {
+  type: "approval_update";
+  proposal: ApprovalProposal;
+}
+
 export type ServerFrame =
   | ReadyFrame
   | MessageCreateFrame
@@ -641,7 +648,8 @@ export type ServerFrame =
   | MemberRemoveFrame
   | AppStageFrame
   | AppUpdateFrame
-  | PongFrame;
+  | PongFrame
+  | ApprovalUpdateFrame;
 
 export interface PongFrame {
   type: "pong";
@@ -801,4 +809,43 @@ export interface PlanCardDetail {
   comments: PlanComment[];
   face: PlanFace;
   note?: string;
+}
+
+/* ---- approval object (server/app/routers/approval.py) ---- */
+
+export type ApprovalAction = "approve" | "deny" | "rework";
+export type ApprovalState = "pending" | ApprovalAction;
+/** Derived by the server on every read; "pending" is what the UI calls open. */
+export type ApprovalDecision = "pending" | "approved" | "denied" | "rework";
+
+export interface ApprovalAttribution {
+  type: MemberType;
+  id: number | null;
+  label: string;
+}
+
+export interface ApprovalPrincipalState {
+  principal: string;
+  state: ApprovalState;
+  remarks: string | null;
+  acted_by: ApprovalAttribution | null;
+  acted_at: string | null;
+}
+
+export interface ApprovalProposal {
+  id: number;
+  slug: string;
+  title: string;
+  text: string;
+  created_by: ApprovalAttribution;
+  created_at: string;
+  closed_at: string | null;
+  decision: ApprovalDecision;
+  states: ApprovalPrincipalState[];
+}
+
+export interface ApprovalList {
+  proposals: ApprovalProposal[];
+  count: number;
+  truncated: boolean;
 }

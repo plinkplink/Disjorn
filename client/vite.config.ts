@@ -27,6 +27,7 @@ const API_PREFIXES = [
   "/healthz",
   "/planroom",
   "/apps",
+  "/approval",
 ];
 
 const proxy: Record<string, object> = Object.fromEntries(

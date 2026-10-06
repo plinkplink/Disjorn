@@ -3571,6 +3571,327 @@
   color: var(--accent);
 }
 
+/* ---- approvals: the Plan Room's second tab ---- */
+
+.plan-room-dot {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: var(--radius-round);
+  background: var(--danger);
+}
+
+.plan-tabs {
+  display: flex;
+  gap: var(--space-1);
+}
+
+.plan-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-m);
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: var(--space-1) var(--space-2);
+  cursor: pointer;
+}
+
+.plan-tab:hover {
+  color: var(--text-0);
+}
+
+.plan-tab.active {
+  color: var(--text-0);
+  border-color: var(--border);
+  background: var(--bg-3);
+}
+
+.plan-tab-badge {
+  letter-spacing: 0;
+}
+
+.approvals {
+  margin: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* Disarmed reads as disarmed: the server's sentence, muted, never "empty". */
+.approvals-off {
+  margin: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--text-2);
+  border-radius: var(--radius-m);
+  background: var(--bg-1);
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}
+
+.approvals-error {
+  border-left-color: var(--danger);
+}
+
+.approvals-head {
+  margin: 0;
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-1);
+}
+
+.approvals-empty {
+  margin: 0;
+  color: var(--text-2);
+  font-size: var(--text-xs);
+}
+
+.approvals-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.approval-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  width: 100%;
+  text-align: left;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  padding: var(--space-2);
+  color: var(--text-0);
+  font: inherit;
+  cursor: pointer;
+}
+
+.approval-row:hover {
+  background: var(--bg-4);
+}
+
+.approval-row-title {
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.approval-row-meta,
+.approval-row-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--text-2);
+}
+
+.approval-row-meta code {
+  overflow-wrap: anywhere;
+}
+
+.approval-chip,
+.approval-decision {
+  font-size: var(--text-xs);
+  font-family: var(--font-mono);
+  border-radius: var(--radius-round);
+  padding: 0 var(--space-2);
+  background: var(--bg-2);
+  color: var(--text-2);
+  border: 1px solid var(--border-subtle);
+}
+
+.approval-chip-approve,
+.approval-decision-approved {
+  background: rgba(61, 214, 140, 0.16);
+  color: var(--presence-online);
+}
+
+.approval-chip-rework,
+.approval-decision-rework {
+  background: rgba(240, 178, 50, 0.16);
+  color: var(--presence-idle);
+}
+
+.approval-chip-deny,
+.approval-decision-denied {
+  background: rgba(240, 84, 108, 0.18);
+  color: var(--danger);
+}
+
+.approval-decision-pending {
+  color: var(--accent);
+}
+
+.approval-modal {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  width: min(760px, 94vw);
+}
+
+.approval-modal:focus {
+  outline: none;
+}
+
+.approval-byline {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.approval-spec-link {
+  align-self: flex-start;
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--text-xs);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.approval-text {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-m);
+  background: var(--bg-1);
+  overflow-wrap: anywhere;
+}
+
+.approval-states {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-xs);
+}
+
+.approval-states th,
+.approval-states td {
+  text-align: left;
+  vertical-align: top;
+  padding: var(--space-1) var(--space-2);
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-1);
+}
+
+.approval-states th {
+  color: var(--text-2);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.approval-principal {
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+.approval-remarks {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.approval-acted {
+  display: flex;
+  flex-direction: column;
+}
+
+.approval-when {
+  color: var(--text-2);
+  font-family: var(--font-mono);
+}
+
+.approval-answer {
+  margin-top: var(--space-2);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.approval-answer-label {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-2);
+}
+
+.approval-textarea {
+  resize: vertical;
+  min-height: 5em;
+}
+
+.approval-answer-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.approval-counter {
+  margin-right: auto;
+  font-size: var(--text-xs);
+  font-family: var(--font-mono);
+  color: var(--text-2);
+}
+
+.approval-reason {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--text-2);
+}
+
+.approval-error {
+  margin: 0;
+}
+
+/* Phones: the modal is the whole screen, so the answer box is never cramped. */
+@media (max-width: 640px) {
+  .plan-head {
+    flex-wrap: wrap;
+  }
+  .approval-backdrop {
+    padding: 0;
+  }
+  .approval-modal {
+    width: 100vw;
+    height: 100dvh;
+    max-height: none;
+    border-radius: 0;
+    border: none;
+    padding-top: calc(var(--space-3) + env(safe-area-inset-top));
+    padding-bottom: calc(var(--space-3) + env(safe-area-inset-bottom));
+  }
+  .approval-states thead {
+    display: none;
+  }
+  .approval-states tr {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: var(--space-1) var(--space-2);
+    padding: var(--space-2) 0;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .approval-states td {
+    border: none;
+    padding: 0;
+  }
+  .approval-states .approval-remarks,
+  .approval-states .approval-acted {
+    grid-column: 1 / -1;
+  }
+}
+
 @media (max-width: 640px) {
   .plan-column {
     flex-basis: 84vw;
