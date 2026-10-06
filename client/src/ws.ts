@@ -3,8 +3,8 @@
    - Cookie auth on the handshake (browser sends `__Host-disjorn_session`
      itself). The server 403s that handshake unless its Origin is a house
      origin, so this only connects when served from the house itself.
-   - Server has no heartbeat: liveness = the socket staying open. On close we
-     reconnect with exponential backoff (1s -> 30s, +/- jitter).
+   - Liveness: a resume pings and replaces a socket that does not pong in 4 s;
+     on close we reconnect with exponential backoff (1s -> 30s, +/- jitter).
    - On RECONNECT (any ready after the first): refetch GET /channels and, for
      every channel with local messages, backfill `?from_seq=lastSeq+1`
      (current-state semantics — edits applied, tombstones drop deletions).
@@ -77,9 +77,9 @@ export class DisjornSocket {
    * The app came back (foreground, network, bfcache). A pending backoff is
    * cut short so a resumed phone does not sit out a 30 s timer. When `stale`
    * says we were away long enough, the existing socket is not trusted: iOS
-   * resumes sockets that still read OPEN but are dead, and the server sends
-   * no heartbeat that would expose them. A replacement opens instead, and its
-   * ready resyncs whatever was missed.
+   * resumes sockets that still read OPEN but are dead. A replacement opens
+   * instead, and its ready resyncs whatever was missed. A shorter absence
+   * is probed with a ping instead.
    */
   wake(stale: boolean): void {
     if (this.stopped) return;

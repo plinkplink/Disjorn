@@ -12,7 +12,7 @@ Auth:
     Anything else -> close 4401.
     On success the server sends `{"type": "ready", "user_id"|"bot_id": N}`.
 
-Client -> server ops (JSON frames; invalid/unknown frames are ignored):
+Client -> server ops (JSON; invalid/unknown frames are ignored):
     {"op": "auth", "api_key": str}          bots only, first frame
     {"op": "typing", "channel_id": N}       users + bots; membership-checked;
                                             rate-limited to 1 per 3s per
@@ -20,8 +20,8 @@ Client -> server ops (JSON frames; invalid/unknown frames are ignored):
     {"op": "status", "status": "online"|"idle"|"dnd"}
                                             users only; persists users.status
                                             and broadcasts presence
-    {"op": "focus", "channel_id": N|null}   users only; tracked per connection
-                                            for WP7 notification suppression
+    {"op": "focus", "channel_id": N|null}   users only; per connection, for push
+    {"op": "ping"}                          users only; answered {"type": "pong"}
 
 Server -> client frames (Architecture §8.2; ephemeral events carry no seq):
     {"type": "message_create"|"message_edit", "channel_id", "seq", "message"}
