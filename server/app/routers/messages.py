@@ -357,21 +357,23 @@ class TraceStep(BaseModel):
                              "permission", "too-large", "other"]] = None
     ms: int = Field(ge=0)
 
+    @model_validator(mode="after")
+    def _reason_only_off_ok(self) -> "TraceStep":
+        if self.outcome == "ok" and self.reason is not None:
+            raise ValueError("a trace step with outcome ok carries no reason")
+        return self
+
 
 class Trace(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     steps: list[TraceStep] = Field(max_length=MAX_TRACE_STEPS)
-    total: int
+    total: int = Field(le=100_000)
 
     @model_validator(mode="after")
     def _bounded(self) -> "Trace":
         if self.total < len(self.steps):
             raise ValueError("trace total is less than its number of steps")
-        if len(json.dumps(self.model_dump())) > MAX_TRACE_CHARS:
-            raise ValueError(
-                f"trace exceeds {MAX_TRACE_CHARS} serialized characters"
-            )
         return self
 
 
@@ -464,6 +466,8 @@ async def create_message(
             attribution = body.attribution.model_dump()
         if body.trace is not None and body.trace.total > 0:
             trace = body.trace.model_dump()
+            if len(json.dumps(trace)) > MAX_TRACE_CHARS:
+                trace = {}
         if body.emote_refs:
             emote_refs = list(body.emote_refs)
         if body.emotion:

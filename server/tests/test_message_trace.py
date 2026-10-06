@@ -132,8 +132,8 @@ async def test_the_trace_has_its_own_budget(client):
     over = {"steps": [step] * MAX_TRACE_STEPS, "total": MAX_TRACE_STEPS}
     assert len(json.dumps(over)) > MAX_TRACE_CHARS
     r = await _post(client, main, hdrs, over)
-    assert r.status_code == 422
-    assert f"trace exceeds {MAX_TRACE_CHARS}" in r.text
+    assert r.status_code == 200, r.text
+    assert r.json()["trace"] is None and r.json()["content"]
 
 
 async def test_migration_020_gives_existing_rows_no_trace(tmp_path, monkeypatch):
@@ -169,3 +169,12 @@ async def test_migration_020_gives_existing_rows_no_trace(tmp_path, monkeypatch)
     finally:
         await db.close()
         reset_settings_cache()
+
+
+async def test_a_reason_on_an_ok_step_and_an_absurd_total_are_refused(client):
+    main, hdrs = await _bot_in_main(client)
+    ok_with_reason = {"kind": "read", "label": "a", "outcome": "ok", "reason": "timeout", "ms": 1}
+    for trace in ({"steps": [ok_with_reason], "total": 1},
+                  {"steps": [], "total": 10**9}):
+        r = await _post(client, main, hdrs, trace)
+        assert r.status_code == 422, trace
