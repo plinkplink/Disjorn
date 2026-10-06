@@ -19,6 +19,8 @@ kernel/CLAUDE.md inside the container.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 CHAT_OPEN = "[[CHAT]]"
@@ -224,6 +226,7 @@ def assemble_prompt(
     how: str = "",
     context: Optional[dict[str, Any]] = None,
     posts: Optional[list[dict[str, Any]]] = None,
+    restart: str = "",
 ) -> str:
     """Build the session prompt.
 
@@ -258,6 +261,7 @@ def assemble_prompt(
     return (
         f"You have been summoned in {room} by {summoner}.\n"
         + (f"How you were woken: {how}.\n" if how else "")
+        + (f"{restart}\n" if restart else "")
         + (f"{app_line}\n" if app_line else "")
         + (f"{posts_line}\n" if posts_line else "")
         + "Below is the recent conversation, ending with the message that "
@@ -267,6 +271,16 @@ def assemble_prompt(
         f"{CHAT_OPEN}\n{transcript}\n{CHAT_CLOSE}\n"
         f"{flow}\n"
     )
+
+
+def restart_note(cursor_path: Path, now: datetime) -> str:
+    try:
+        last = datetime.fromtimestamp(cursor_path.stat().st_mtime, timezone.utc)
+    except OSError:
+        return f"Your summon adapter started at {now:%Y-%m-%d %H:%M} UTC with no saved state."
+    return (f"Your summon adapter restarted at {now:%Y-%m-%d %H:%M} UTC; it last saw chat "
+            f"at {last:%Y-%m-%d %H:%M} UTC. Live events in that gap were missed; "
+            "the transcript below is the record.")
 
 
 def _room_type(context: Optional[dict[str, Any]]) -> str:
