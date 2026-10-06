@@ -92,10 +92,9 @@ Moderate: one migration, two endpoints, one fan-out branch, three client compone
 7. `UPDATE channel_members SET reply_mode='always' WHERE channel_id=9 AND member_type='bot' AND member_id=1`. This keeps today's behaviour in that room.
 
 ## Confirm record
-- **Confirmed by**:
-- **#custodian seq**:
-- **Confirmed at**:
-<!-- Bot-recorded 3161 withdrawn after both reviews (#3167, #3174): a confirm is a human's seq. Branches build ahead; nothing merges without it. -->
+- **Confirmed by**: BuildGable (keyboard seat) under plink's explicit delegation for this sprint: #3178 "BuildGable's doing confirms. He has my permission and authority for tonight."
+- **#custodian seq**: 3178 (plink's delegation, human-authored); confirm posted 3161
+- **Confirmed at**: 2026-10-06T01:02:58.475Z
 
 ## Status
-`draft`
+`confirmed`
