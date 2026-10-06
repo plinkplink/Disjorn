@@ -1,6 +1,7 @@
 """WP8 tests: chibi resolve + serving, unfurl parse/cache/TTL, summarize
 endpoint with mocked engines, STT 501 degradation + engine factory selection."""
 
+import asyncio
 import importlib.util
 import shutil
 from pathlib import Path
@@ -574,3 +575,26 @@ def test_get_transcriber_factory_selection(monkeypatch, tmp_db_path):
     first = stt_service.get_transcriber()
     assert isinstance(first, FakeTranscriber)
     assert stt_service.get_transcriber() is first
+
+
+@pytest.mark.parametrize("url", [
+    "http://127.0.0.1:8399/", "http://localhost/", "http://10.0.0.5/", "http://192.168.1.1/",
+    "http://169.254.169.254/latest/meta-data/", "http://[::1]/", "http://[::ffff:127.0.0.1]/",
+    "http://0.0.0.0/", "ftp://example.com/", "http:///nohost",
+])
+def test_unfurl_never_fetches_a_private_or_non_http_address(url):
+    with pytest.raises(ValueError):
+        asyncio.run(unfurl_service.require_public(url))
+
+
+def test_a_public_literal_address_is_allowed():
+    asyncio.run(unfurl_service.require_public("https://93.184.215.14/"))
+
+
+def test_a_redirect_into_the_lan_is_refused_at_the_hop():
+    def handler(request):
+        return httpx.Response(302, headers={"location": "http://192.168.1.1/admin"})
+
+    with pytest.raises(ValueError, match="non-public"):
+        asyncio.run(unfurl_service.fetch_head(
+            "https://93.184.215.14/", transport=httpx.MockTransport(handler)))

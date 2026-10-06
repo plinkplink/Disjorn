@@ -16,10 +16,13 @@
 Tests monkeypatch `fetch_head` to avoid real network I/O.
 """
 
+import asyncio
 import datetime
+import ipaddress
 import json
 import logging
 import re
+import socket
 from html.parser import HTMLParser
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
@@ -34,6 +37,7 @@ UNFURL_MAX_BYTES = 256 * 1024
 FETCH_TIMEOUT = 10.0
 CACHE_TTL = datetime.timedelta(days=7)
 USER_AGENT = "Mozilla/5.0 (compatible; Disjorn/1.0; link unfurler)"
+MAX_REDIRECTS = 5
 
 YOUTUBE_HOSTS = frozenset(
     {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com"}
@@ -99,7 +103,24 @@ def parse_meta(html: str, base_url: str) -> dict[str, Optional[str]]:
     return {"title": title, "description": description, "image_url": image}
 
 
-async def fetch_head(url: str) -> tuple[str, str]:
+async def require_public(url: str) -> None:
+    """Every address the host resolves to must be globally routable."""
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise ValueError("unfurl fetches only http(s) URLs with a host")
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    infos = await asyncio.get_running_loop().getaddrinfo(
+        parts.hostname, port, type=socket.SOCK_STREAM)
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0].split("%")[0])
+        if ip.version == 6 and ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+        if not ip.is_global:
+            raise ValueError("unfurl refuses a non-public address")
+
+
+async def fetch_head(url: str, transport: Optional[httpx.AsyncBaseTransport] = None
+                     ) -> tuple[str, str]:
     """GET the first UNFURL_MAX_BYTES of a page. Returns (final_url, html).
 
     Raises httpx errors / ValueError on failure — unfurl() catches them.
@@ -107,21 +128,28 @@ async def fetch_head(url: str) -> tuple[str, str]:
     """
     async with httpx.AsyncClient(
         timeout=FETCH_TIMEOUT,
-        follow_redirects=True,
+        follow_redirects=False,
         headers={"User-Agent": USER_AGENT},
+        transport=transport,
     ) as client:
-        async with client.stream("GET", url) as resp:
-            resp.raise_for_status()
-            chunks: list[bytes] = []
-            total = 0
-            async for chunk in resp.aiter_bytes():
-                chunks.append(chunk)
-                total += len(chunk)
-                if total >= UNFURL_MAX_BYTES:
-                    break
-            body = b"".join(chunks)[:UNFURL_MAX_BYTES]
-            encoding = resp.charset_encoding or "utf-8"
-            return str(resp.url), body.decode(encoding, errors="replace")
+        for _ in range(MAX_REDIRECTS + 1):
+            await require_public(url)
+            async with client.stream("GET", url) as resp:
+                if resp.is_redirect:
+                    url = urljoin(url, resp.headers.get("location", ""))
+                    continue
+                resp.raise_for_status()
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in resp.aiter_bytes():
+                    chunks.append(chunk)
+                    total += len(chunk)
+                    if total >= UNFURL_MAX_BYTES:
+                        break
+                body = b"".join(chunks)[:UNFURL_MAX_BYTES]
+                encoding = resp.charset_encoding or "utf-8"
+                return str(resp.url), body.decode(encoding, errors="replace")
+    raise ValueError("unfurl: too many redirects")
 
 
 def _start_seconds(raw: str) -> Optional[int]:
