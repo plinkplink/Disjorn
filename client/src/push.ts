@@ -198,6 +198,9 @@ export const usePush = create<PushState>()((set, get) => ({
       const sub = await reg.pushManager.getSubscription();
       if (sub === null && !wanted()) return;
       await subscribeAndUpload(reg, await vapidPublicKey());
+      // Adopts subscriptions made before the flag existed, so a later
+      // browser-side drop is repaired for them too.
+      setWanted(true);
       set({ status: "enabled", detail: null, subscribed: true });
     } catch {
       /* the next load tries again; Settings shows the live state */
