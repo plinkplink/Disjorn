@@ -79,17 +79,17 @@ after(() => { if (scratch) rmSync(scratch, { recursive: true, force: true }); })
 const DISARMED = 'The approval surface is not enabled on this server: '
   + 'APPROVAL_ENABLED is false.';
 
-function proposal(id, { closed = false, states = {}, decision = 'pending' } = {}) {
+function proposal(id, { closed = false, states = {}, decision = 'pending', acted = {} } = {}) {
   const principals = ['plink', 'res-claudette', 'res-gable'];
   return {
     id, slug: `p-${id}`, title: `Proposal ${id}`, text: '**bold** body',
     created_by: { type: 'bot', id: 1, label: 'Gable (via broker)' },
     created_at: '2026-10-05T10:00:00Z',
-    closed_at: closed ? '2026-10-05T11:00:00Z' : null,
+    closed_at: closed === true ? '2026-10-05T11:00:00Z' : closed || null,
     decision,
     states: principals.map((principal) => ({
       principal, state: states[principal] ?? 'pending', remarks: null,
-      acted_by: null, acted_at: null,
+      acted_by: null, acted_at: acted[principal] ?? null,
     })),
   };
 }
@@ -121,6 +121,40 @@ test('an update replaces its proposal and keeps the newest first', () => {
   const got = store.getState().proposals;
   assert.deepEqual(got.map((p) => p.id), [3, 2, 1]);
   assert.equal(got[2].states[0].state, 'approve');
+});
+
+test('my older act reply cannot overwrite a newer answer that arrived as a frame', async () => {
+  const T1 = '2026-10-05T10:30:00.000Z';
+  const T2 = '2026-10-05T10:30:01.000Z';
+  const mine = proposal(1, { states: { plink: 'approve' }, acted: { plink: T1 } });
+  const theirs = proposal(1, { closed: T2, decision: 'denied',
+    states: { plink: 'approve', 'res-gable': 'deny' },
+    acted: { plink: T1, 'res-gable': T2 } });
+  const store = m.useApprovals;
+  store.setState({ status: 'ready', proposals: [proposal(1)] });
+
+  let reply;
+  const real = globalThis.fetch;
+  globalThis.fetch = () => new Promise((resolve) => { reply = resolve; });
+  try {
+    const acting = store.getState().act(1, 'approve', '');
+    await new Promise((r) => setImmediate(r));
+    store.getState().onUpdate({ type: 'approval_update', proposal: theirs });
+    reply(new Response(JSON.stringify({ proposal: mine }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    await acting;
+  } finally {
+    globalThis.fetch = real;
+  }
+  const got = store.getState().proposals[0];
+  assert.equal(got.decision, 'denied');
+  assert.equal(got.closed_at, T2);
+  assert.equal(got.states[2].state, 'deny');
+
+  // In order, the newer copy still replaces the older one.
+  store.setState({ proposals: [mine] });
+  store.getState().onUpdate({ type: 'approval_update', proposal: theirs });
+  assert.equal(store.getState().proposals[0].decision, 'denied');
 });
 
 test('a disarmed server is unavailable with its own sentence, not an empty list', async () => {
