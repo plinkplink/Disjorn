@@ -8,6 +8,7 @@ Endpoints:
     DELETE /channels/{id}                 (user)  — delete a `text` channel; OWNER or ADMIN;
                                                     hard delete (content included);
                                                     publishes channel_delete
+    GET    /channels/deletions            (ADMIN) — deletion records, newest first
     POST   /dms {user_id}                 (user)  — idempotent get-or-create of the 1:1 DM channel
     PUT    /channels/{id}/read {seq}      (user)  — monotonic last_read_seq upsert (no event published)
     GET    /channels/{id}/members         (actor) — member listing, membership-gated
@@ -54,8 +55,8 @@ Membership semantics (Architecture §4.1 + SPECS/2026-08-08-per-channel-membersh
   verb here (invite, leave, kick, add-bot, remove-bot) refuses them via
   `require_not_app_build` — the owner is `created_by` on the room, and
   without that refusal the private-channel owner rule would let them add any
-  bot in the house to a room where ws.py summons bots without a name match
-  (Claudette's review block, #custodian 2026-09-06). GET /channels lists them for
+  bot in the house to a room where ws.py summons bots without a name match.
+  GET /channels lists them for
   their member (so resync and unread math keep working); the client filters
   them out of the visible groups and renders APPS from GET /apps instead.
 - Bots are explicit-members-only EVERYWHERE — main_feed (cli.py create-bot
@@ -78,12 +79,12 @@ import re
 import sqlite3
 from typing import Annotated, Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from .. import db, events
 from ..models import ChannelType, ChannelVisibility, MemberType, User, UserStatus
-from .auth import Actor, get_actor, get_current_user
+from .auth import Actor, get_actor, get_admin_user, get_current_user
 
 router = APIRouter()
 
@@ -549,6 +550,43 @@ def _require_owner_or_admin(channel: dict[str, Any], user: User) -> None:
         )
 
 
+async def _record_deletion(
+    conn: Any, channel: dict[str, Any], actor_type: str, actor_id: int
+) -> None:
+    # A dm_1to1 record keeps no name, so it cannot say who talked to whom.
+    implicit = (
+        channel["type"] in IMPLICIT_MEMBER_TYPES and channel["visibility"] == "public"
+    )
+    member_sql = (
+        """(SELECT COUNT(*) FROM users)
+           + (SELECT COUNT(*) FROM channel_members
+               WHERE channel_id = :cid AND member_type = 'bot')"""
+        if implicit
+        else "(SELECT COUNT(*) FROM channel_members WHERE channel_id = :cid)"
+    )
+    await conn.execute(
+        f"""INSERT INTO channel_deletions
+                (channel_id, channel_type, channel_name, visibility, created_by,
+                 channel_created_at, deleted_by_type, deleted_by_id,
+                 message_count, member_count)
+            VALUES (:cid, :type, :name, :visibility, :created_by, :created_at,
+                    :actor_type, :actor_id,
+                    (SELECT COUNT(*) FROM messages
+                      WHERE channel_id = :cid AND deleted_at IS NULL),
+                    {member_sql})""",
+        {
+            "cid": channel["id"],
+            "type": channel["type"],
+            "name": None if channel["type"] == "dm_1to1" else channel["name"],
+            "visibility": channel["visibility"],
+            "created_by": channel["created_by"],
+            "created_at": channel["created_at"],
+            "actor_type": actor_type,
+            "actor_id": actor_id,
+        },
+    )
+
+
 @router.delete("/channels/{channel_id}")
 async def delete_channel(channel_id: int, user: CurrentUser) -> dict[str, bool]:
     """Delete a `text` channel, its membership rows and all of its messages.
@@ -565,13 +603,11 @@ async def delete_channel(channel_id: int, user: CurrentUser) -> dict[str, bool]:
     the shared connection — see db.connect), and on through messages to
     attachments. The messages_fts AFTER DELETE trigger fires on the cascaded
     row deletions too, so a deleted channel's content stops being searchable
-    rather than lingering in the index (test_channel_delete asserts this, plus
-    an FTS integrity-check).
+    rather than lingering in the index. A content-free channel_deletions row
+    is written in the same transaction, so the deletion itself stays on record.
 
-    ORPHANS: attachment FILES under DATA_DIR are deliberately left on disk. The
-    rows that name them are gone, so nothing serves them; reclaiming the bytes
-    is a housekeeping job for whoever owns the box, not something this request
-    should be doing inline with a user waiting on it.
+    ORPHANS: attachment FILES under DATA_DIR are deliberately left on disk;
+    nothing serves them once their rows are gone.
 
     Publishes `channel_delete` on the bus. The recipient list is computed HERE,
     before the row disappears — after the delete `is_member` answers False for
@@ -619,6 +655,7 @@ async def delete_channel(channel_id: int, user: CurrentUser) -> dict[str, bool]:
         recipients = [[t, i] for t, i in sorted(pairs)]
 
     async with db.transaction() as conn:
+        await _record_deletion(conn, channel, "user", user.id)
         await conn.execute("DELETE FROM channels WHERE id = ?", (channel_id,))
 
     await events.publish(
@@ -638,6 +675,26 @@ async def delete_channel(channel_id: int, user: CurrentUser) -> dict[str, bool]:
         }
     )
     return {"ok": True}
+
+
+@router.get("/channels/deletions")
+async def list_channel_deletions(
+    admin: Annotated[User, Depends(get_admin_user)],
+    before_id: Optional[int] = Query(default=None, ge=1),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> list[dict[str, Any]]:
+    sql = """SELECT d.*, CASE d.deleted_by_type
+                    WHEN 'user' THEN u.display_name ELSE b.name END AS deleted_by_name
+               FROM channel_deletions d
+               LEFT JOIN users u ON d.deleted_by_type = 'user' AND u.id = d.deleted_by_id
+               LEFT JOIN bots b ON d.deleted_by_type = 'bot' AND b.id = d.deleted_by_id"""
+    params: list[Any] = []
+    if before_id is not None:
+        sql += " WHERE d.id < ?"
+        params.append(before_id)
+    sql += " ORDER BY d.id DESC LIMIT ?"
+    params.append(limit)
+    return await db.fetch_all(sql, params)
 
 
 # ---------------------------------------------------------------------------
