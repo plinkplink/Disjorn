@@ -292,7 +292,6 @@ def make_config(tmp_path: Path, *, use_stub: bool = True, **overrides) -> Adapte
             "trigger_on_context": True,
             "trigger_channels": [],
             "extra_patterns": [],
-            "typing_interval_sec": 2.5,
         },
         "backfill": {"count": 30},
         "container": {

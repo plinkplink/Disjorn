@@ -157,3 +157,8 @@ def test_session_error_falls_back_to_error_line(tmp_path):
     assert client.replies_to(7)[0].content == "something broke on my end."
     # summary still posted, marked error
     assert any("| error |" in s.content for s in client.replies_to(4))
+
+
+def test_the_typing_ping_outpaces_the_server_limit_and_the_client_decay(tmp_path):
+    interval = make_config(tmp_path).summon.typing_interval_sec
+    assert 3.0 < interval <= 6.0 - 2.0

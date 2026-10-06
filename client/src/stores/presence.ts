@@ -9,7 +9,8 @@ export interface Typist {
   expiresAt: number;
 }
 
-export const TYPING_TTL_MS = 4000;
+/** Longer than the slowest sender's ping, which the server holds to at least 3 s apart. */
+export const TYPING_TTL_MS = 6000;
 
 interface PresenceState {
   /** Live user statuses from presence frames (fallback: channel/member data). */
@@ -20,6 +21,12 @@ interface PresenceState {
   setStatus: (userId: number, status: UserStatus) => void;
   /** Record a typing_start; entry decays after TYPING_TTL_MS. */
   typingStarted: (
+    channelId: number,
+    authorType: MemberType,
+    authorId: number,
+  ) => void;
+  /** A posted message ends its author's typing at once instead of at decay. */
+  typingStopped: (
     channelId: number,
     authorType: MemberType,
     authorId: number,
@@ -70,6 +77,16 @@ export const usePresence = create<PresenceState>()((set, get) => {
       if (pruneTimer === null) {
         pruneTimer = setTimeout(prune, TYPING_TTL_MS + 50);
       }
+    },
+
+    typingStopped: (channelId, authorType, authorId) => {
+      const current = get().typing[channelId];
+      if (current === undefined) return;
+      const rest = current.filter(
+        (t) => !(t.authorType === authorType && t.authorId === authorId),
+      );
+      if (rest.length === current.length) return;
+      set({ typing: { ...get().typing, [channelId]: rest } });
     },
 
     statusOf: (userId) => get().statuses[userId] ?? "offline",

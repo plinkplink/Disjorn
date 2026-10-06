@@ -72,7 +72,7 @@ class SummonConfig:
     trigger_channels: list[int] = field(default_factory=list)
     # Extra regex patterns; any search-match on message content summons.
     extra_patterns: list[str] = field(default_factory=list)
-    typing_interval_sec: float = 2.5
+    typing_interval_sec: float = 4.0
     # Optional pretty names for #custodian summary legibility.
     channel_names: dict[int, str] = field(default_factory=dict)
     # 2026-08-24: #custodian wakes a bot ONLY on an explicit @name that the

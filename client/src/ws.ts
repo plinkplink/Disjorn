@@ -148,6 +148,9 @@ export class DisjornSocket {
       case "message_create": {
         const { message } = frame;
         useMessages.getState().applyCreate(message);
+        usePresence
+          .getState()
+          .typingStopped(message.channel_id, message.author_type, message.author_id);
         // Viewing the channel with the window focused => instantly read.
         const isRead =
           useChannels.getState().activeChannelId === message.channel_id &&
