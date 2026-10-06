@@ -3802,8 +3802,9 @@ class Broker:
         repo = self._gatehouse_or_refuse()
         result = self._gate_branch(slug)
         if result.misconfigured:
+            said = f" (the gates still said: {result.summary})" if result.summary else ""
             raise self._merge_refused(
-                f"gates misconfigured: {result.misconfigured}", "misconfigured")
+                f"gates misconfigured: {result.misconfigured}{said}", "misconfigured")
         classification = self._classify(repo, f"main...loop/{slug}",
                                         gates.gates_json(result))
         return result, classification

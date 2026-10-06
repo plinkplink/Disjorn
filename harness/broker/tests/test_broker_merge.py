@@ -223,9 +223,9 @@ def test_a_misconfigured_gate_refuses_as_a_keyboard_fix(harness):
     arm(harness, gate_exit=1, tier=2, misconfigured=TOOLCHAIN)
     reason, message, post = late_refusal(harness)
     assert reason == "misconfigured"
-    assert message == f"gates misconfigured: {TOOLCHAIN}"
-    assert post == [f"merge: refused {SLUG} — gates misconfigured: {TOOLCHAIN}",
-                    "next: fix at the keyboard"]
+    assert message.startswith(f"gates misconfigured: {TOOLCHAIN} (the gates still said: ")
+    assert "passed" in message
+    assert post == [f"merge: refused {SLUG} — {message}", "next: fix at the keyboard"]
     assert harness.main_subjects() == ["init"]
 
 
@@ -732,7 +732,7 @@ def test_a_red_gate_sends_the_build_back(harness):
 def test_a_misconfigured_gate_banner_says_so_instead_of_the_gate_list(harness):
     arm(harness, tier=0, gate_exit=1, misconfigured=TOOLCHAIN)
     lines = outcome(harness)
-    assert lines[0] == f"tests: gates misconfigured: {TOOLCHAIN}"
+    assert lines[0].startswith(f"tests: gates misconfigured: {TOOLCHAIN} (the gates still said: ")
     assert lines[1] == "tier: n/a — nothing to classify"
     assert lines[3] == "next: fix at the keyboard"
     assert harness.main_subjects() == ["init"]
