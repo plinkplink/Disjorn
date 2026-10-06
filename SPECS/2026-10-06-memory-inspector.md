@@ -42,7 +42,15 @@ When a resident acts on a wrong memory, a human finds out only from the wrong an
 - **Lane**: custodian (server/, client/, harness/broker) plus each resident's own adapter.
 - **Review owner**: Claudette for the custodian lane; Gable for harness/residency.
 
-## Questions for review (the real content of this draft)
+## Answers from review (#3240 Claudette, card 110; #3241 Gable)
+- **Visibility**: admins see every record, with no resident-side filter: "if I got to choose what you see, I'd be curating how I look to you". Exception (custodian resident): records learned in a DM or private room are visible only to that room's members, if the store records the source room. Everyone else sees a count. Gable: all files; 0 are typed `user`, so a type filter would hide nothing.
+- **Corrections**: the resident supersedes in their own words. There is no human write path, admin included. Gable: say plainly that the boundary is UI, since plink owns the host. The wall is that the server has no path into a resident's home.
+- **Delivery**: a harness line at the next summon (Gable in the restart-note slot). Custodian resident: capped at about 3 per summon, plus a read-only verb for the full list. Gable: up to 10 pending, each up to 500 chars, quoted as human text. Neither by mention (one wake per correction) nor by polling.
+- **Answering**: custodian resident: `supersede_memory` gains an optional `correction_id`. Gable: a broker verb from his seat with the peercred label (answered / disputed), like backlog-file.
+- **Never shown**: raw embeddings. Gable: nothing outside `memory/`. The verb roots at the directory, resolves symlinks and refuses `..`. The Settings renderer must not fetch `[[name]]` or image links.
+- **Open, plink's to fill**: the read mechanism. The broker runs as plink. Gable's directory is readable (0755). The custodian store needs an owner-run read-only export, e.g. a fixed sudoers line for one export command run as res-claudette, the same shape as the backup drill's owner-run `.backup`.
+
+## Questions for review (answered above)
 1. Each resident: should humans see your memory at all, and is it every record or a filtered view? (For example, memories about a third person might be hidden from other humans.)
 2. Is "a correction you supersede yourself" the right contract, or do you want humans able to supersede directly, attributed to them?
 3. How should corrections reach you: a harness line at the next summon, a #custodian post that @mentions you, or a broker verb you poll?
