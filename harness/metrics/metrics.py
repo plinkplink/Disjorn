@@ -1389,7 +1389,8 @@ _CLAUDE_PY = [":(glob)**/*.py", ":(exclude)scripts", _NO_TESTS]
 # Every long-running process whose code can go stale after a merge. Keys:
 # unit, user (a user unit of that account), repo (default: the deploy tree),
 # watch (pathspecs whose change needs a restart), copy + source (a deployed
-# copy installed from repo/source), upstream + ref (a clone that must match).
+# copy installed from repo/source), upstream + ref (a clone that must match),
+# label (what the board calls it, default the name).
 # `[deploy.processes.<name>]` in broker.toml overrides or adds by name;
 # `enabled = false` drops one. client/ is absent: it is served from a built dist.
 DEPLOY_PROCESSES = {
@@ -1408,9 +1409,11 @@ DEPLOY_PROCESSES = {
         "upstream": "/home/plink/bots/claudette", "ref": "disjorn-port",
         "watch": _CLAUDE_PY},
     "custodian-discord": {"unit": "claudette",
+                          "label": "custodian-discord (Discord bot)",
                           "repo": "/home/plink/bots/claudette",
                           "watch": _CLAUDE_PY},
 }
+# A file in a deployed copy but not in the repo reads "differs" until removed.
 COPY_IGNORED = frozenset({"tests", "__pycache__", ".pytest_cache"})
 CGROUP_ROOT = "/sys/fs/cgroup"
 PROC_ROOT = "/proc"
@@ -1596,8 +1599,8 @@ def _probe(spec: dict, deploy_tree: str) -> dict:
 def process_state(name: str, spec: dict, deploy_tree: str) -> dict:
     """One process's running fact. `ok` is None when it cannot be told, and
     one unreadable process never takes the others down with it."""
-    out = {"name": name, "unit": spec.get("unit"), "started_at": None,
-           "started_head": None}
+    out = {"name": name, "label": spec.get("label") or name,
+           "unit": spec.get("unit"), "started_at": None, "started_head": None}
     try:
         out.update(_probe(spec, deploy_tree))
     except Exception as exc:  # noqa: BLE001
@@ -1608,7 +1611,7 @@ def process_state(name: str, spec: dict, deploy_tree: str) -> dict:
 
 def running_summary(processes: list) -> dict:
     """Green needs every process current; the names say which are not."""
-    by = {s: [p["name"] for p in processes if p["state"] == s]
+    by = {s: [p.get("label") or p["name"] for p in processes if p["state"] == s]
           for s in ("stale", "differs", "unknown")}
     ok = (False if by["stale"] or by["differs"]
           else None if by["unknown"] or not processes else True)
@@ -1657,9 +1660,7 @@ def deploy_state(config: Optional[dict] = None, *, mirror: Optional[str] = None,
     out["dirty"] = None if status is None else bool(status.strip())
     # Paths only, never contents: enough to tell an unmerged fix from an edit.
     out["dirty_paths"] = _dirty_paths(status)
-    # Ask whichever repo can resolve BOTH commits. The mirror usually can (prod
-    # deploys from it); prod cannot, the moment the mirror moves ahead — which
-    # is precisely the case this line exists to describe.
+    # Ask whichever repo resolves BOTH commits: prod cannot once the mirror is ahead.
     counts = (_git(mirror, "rev-list", "--left-right", "--count",
                    f"{out['mirror_head']}...{out['deployed_head']}")
               or _git(deploy_tree, "rev-list", "--left-right", "--count",
@@ -1697,9 +1698,7 @@ MIRROR_HEAD_LINE_RE = re.compile(r"^mirror head:\s+(\S+)", re.MULTILINE)
 # posts build banners that mention the header MID-sentence ("the digest's GATE
 # DRIFT block"); those are not digests and must never become the baseline.
 DRIFT_BLOCK_RE = re.compile(rf"^{re.escape(DRIFT_HEADER)} — ", re.MULTILINE)
-# Newest-first scan bound for the baseline query. The baseline is normally the
-# first or second row; the cap only exists so a pathological channel cannot
-# turn this read into a full-table walk.
+# Newest-first scan bound, so a pathological channel cannot make this a full-table walk.
 BASELINE_SCAN_CAP = 50
 
 

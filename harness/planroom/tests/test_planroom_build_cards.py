@@ -220,10 +220,38 @@ def test_a_request_the_board_may_not_quote_titles_the_card_by_slug(
     assert c["body"] is None
 
 
+@pytest.mark.parametrize("channel", [7, 99])
+def test_a_build_from_a_room_not_confirmed_public_hides_its_origin(
+        shelf, channel):
+    shelf.push_branch()
+    shelf.message(1563, f"/build {REQUEST}", channel=channel)
+    shelf.build(channel=channel)
+    c = shelf.cards()[SLUG]
+    assert c["origin"] is None
+    assert c["where"].startswith("/build in a private room · disjorn repo, ")
+    assert "1563" not in c["where"] and "channel" not in c["where"]
+
+
+def test_a_build_whose_message_is_gone_still_names_its_public_room(shelf):
+    shelf.push_branch()
+    shelf.build()
+    c = shelf.cards()[SLUG]
+    assert c["origin"] == {"channel_id": 1, "channel": "#general", "seq": 1563}
+    assert c["body"] is None
+
+
 def test_an_unreadable_ledger_is_declared_not_a_crash(shelf):
     shelf.ledger.mkdir()
     assert shelf.cards() == {}
     assert any("build ledger unreadable" in n for n in shelf.face["notes"])
+
+
+def test_a_ledger_with_an_invalid_byte_still_derives_its_good_lines(shelf):
+    shelf.push_branch()
+    with open(shelf.ledger, "wb") as fh:
+        fh.write(b'{"slug": "x", "seq": 1, "note": "\xff"}\n{not json\n')
+    shelf.build()
+    assert list(shelf.cards()) == [SLUG]
 
 
 def test_the_ledger_path_comes_from_the_build_block(shelf):

@@ -67,7 +67,7 @@
 "harness/keyboard/tests/test_prose_sweep.py" = 4415
 "harness/keyboard/tests/test_wake_cli.py" = 1338
 "harness/keyboard/wake.py" = 1390
-"harness/metrics/metrics.py" = 30738
+"harness/metrics/metrics.py" = 30630
 "harness/metrics/tests/test_gate_drift.py" = 13670
 "harness/planroom/planroom.py" = 13311
 "harness/residency/adapter.py" = 7516
@@ -109,7 +109,7 @@
 "server/app/services/push.py" = 1356
 "server/app/services/summarize.py" = 1546
 "server/app/ws.py" = 13275
-"server/tests/conftest.py" = 1113
+"server/tests/conftest.py" = 1111
 "server/tests/test_apps.py" = 18646
 "server/tests/test_apps_serving.py" = 10700
 "server/tests/test_backlog_status.py" = 5046

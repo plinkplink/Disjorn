@@ -293,6 +293,18 @@ def test_tier_two_without_a_pass_is_refused(harness):
     assert harness.main_subjects() == ["init"]
 
 
+def test_a_merge_refused_after_classifying_still_records_the_tier(harness):
+    arm(harness, tier=2)
+    harness.move_main(path="docs/elsewhere.md")
+    late_refusal(harness)
+    line = harness.build_ledger_lines()[-1]
+    assert (line["kind"], line["slug"], line["tier"], line["gates_green"]) == (
+        "tier", SLUG, 2, True)
+    assert line["tip"] == harness.branch_tip(SLUG)
+    assert [ln["kind"] for ln in harness.build_ledger_lines()][-2:] == [
+        "fold", "tier"]
+
+
 def test_a_valid_pass_merges_with_review_seq_after_merge_seq(harness):
     arm(harness, tier=2)
     harness.add_custodian_post(PASS_SEQ, f"PASS {SLUG} — read it, it is fine",

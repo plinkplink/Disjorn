@@ -396,7 +396,9 @@ def deploy_badge(deploy: Optional[dict]) -> dict:
            "staged_detail": deploy.get("detail") or "deploy state not configured",
            "running": run.get("ok"),
            "running_detail": run.get("detail") or "running: unknown",
-           "processes": [{"name": p.get("name"), "running": p.get("ok"),
+           "processes": [{"name": p.get("name"),
+                          "label": p.get("label") or p.get("name"),
+                          "running": p.get("ok"),
                           "state": p.get("state") or "unknown",
                           "detail": p.get("detail") or ""}
                          for p in deploy.get("processes") or []]}
@@ -671,7 +673,7 @@ def read_build_ledger(path: Optional[str]) -> dict:
     out: dict = {}
     if not path or not os.path.exists(path):
         return out
-    with open(path, encoding="utf-8") as fh:
+    with open(path, encoding="utf-8", errors="replace") as fh:
         for raw in fh:
             try:
                 rec = json.loads(raw)
@@ -691,19 +693,19 @@ def read_build_ledger(path: Optional[str]) -> dict:
 
 
 def _build_request(message_db: Optional[str], channel_id: int, seq: int,
-                   text_sha256: str) -> tuple[Optional[str], str]:
-    """The `/build` text and the channel's name, or None for the text when the
-    message is gone, edited, private or hidden from bots."""
-    label = f"channel {channel_id}"
+                   text_sha256: str) -> tuple[Optional[str], Optional[str]]:
+    """The `/build` text and the room's label, each None when the board may not
+    show it; a room not confirmed public is never named."""
+    label = None
     db = _sqlite_ro(message_db)
     if db is None:
         return None, label
     try:
         row = db.execute(
             "select m.content, m.author_type, m.privacy_flags, m.deleted_at, "
-            "c.name, c.type, c.visibility from messages m "
-            "join channels c on c.id = m.channel_id "
-            "where m.channel_id = ? and m.seq = ?", (channel_id, seq)).fetchone()
+            "c.name, c.type, c.visibility from channels c "
+            "left join messages m on m.channel_id = c.id and m.seq = ? "
+            "where c.id = ?", (seq, channel_id)).fetchone()
     except sqlite3.Error:
         return None, label
     finally:
@@ -711,8 +713,8 @@ def _build_request(message_db: Optional[str], channel_id: int, seq: int,
     if row is None:
         return None, label
     public = row["visibility"] == "public" and row["type"] != "dm_1to1"
-    if public and row["name"]:
-        label = f"#{row['name']}"
+    if public:
+        label = f"#{row['name']}" if row["name"] else f"channel {channel_id}"
     try:
         flags = json.loads(row["privacy_flags"] or "{}")
     except ValueError:
@@ -786,9 +788,11 @@ def _build_cards(ledger: dict, *, by_slug: dict, merged: dict, specs_dir: Path,
             requester=build.get("author"), branch=f"loop/{slug}", flags=flags,
             whose_move=whose, opened_at=build.get("ts"),
             updated_at=rec.get("ts") or build.get("ts"), note=note,
-            where=f"/build in {chan} seq {seq} · "
+            where=(f"/build in {chan} seq {seq} · " if chan
+                   else "/build in a private room · ")
                   + ", ".join(f"{p['repo']} repo, {p['tip']}" for p in parts),
-            origin={"channel_id": channel_id, "channel": chan, "seq": seq},
+            origin=({"channel_id": channel_id, "channel": chan, "seq": seq}
+                    if chan else None),
             shortstat="; ".join(p["shortstat"] for p in parts
                                 if p.get("shortstat")),
             guarded_paths=paths, body=text,

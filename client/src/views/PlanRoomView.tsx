@@ -116,7 +116,7 @@ function DeployFacts({ deploy }: { deploy: PlanDeploy }) {
               className={`plan-proc plan-fact-${factWord(p.running)}`}
               title={p.detail}
             >
-              {p.name}: {processWord(p)}
+              {p.label ?? p.name}: {processWord(p)}
             </span>
           ))}
         </span>
@@ -134,7 +134,7 @@ function ProcessReasons({ deploy }: { deploy: PlanDeploy }) {
     <ul className="plan-proc-reasons">
       {procs.map((p) => (
         <li key={p.name}>
-          {p.name}: {p.detail}
+          {p.label ?? p.name}: {p.detail}
         </li>
       ))}
     </ul>

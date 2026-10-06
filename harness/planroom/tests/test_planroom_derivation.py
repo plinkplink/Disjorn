@@ -522,11 +522,22 @@ def test_the_amber_label_names_every_process_that_is_not_current():
         "amber", "restart pending: broker, adapter; copy differs: gable")
 
 
+def test_the_amber_label_says_the_discord_bot_is_the_discord_bot():
+    ps = procs(server="current", **{"custodian-discord": "stale"})
+    ps[1]["label"] = "custodian-discord (Discord bot)"
+    b = P.deploy_badge({"state": "in-sync", "detail": "clean", "ahead": 0,
+                        "behind": 0, "processes": ps,
+                        "running": P.metrics().running_summary(ps)})
+    assert b["label"] == "restart pending: custodian-discord (Discord bot)"
+    assert b["processes"][1]["label"] == "custodian-discord (Discord bot)"
+
+
 def test_one_unknown_process_keeps_the_badge_off_green_and_is_listed():
     b = P.deploy_badge(staged_with(server="current", gable="unknown"))
     assert (b["badge"], b["label"]) == ("unknown", "running unknown")
-    assert b["processes"][1] == {"name": "gable", "running": None,
-                                 "state": "unknown", "detail": "gable is unknown"}
+    assert b["processes"][1] == {"name": "gable", "label": "gable",
+                                 "running": None, "state": "unknown",
+                                 "detail": "gable is unknown"}
     assert b["detail"] == "clean; running: unknown: gable"
 
 

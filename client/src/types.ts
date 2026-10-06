@@ -694,6 +694,7 @@ export type DeployBadge = "green" | "amber" | "red" | "unknown";
 /* One process's running fact; null is unknown and never renders as yes. */
 export interface PlanProcess {
   name: string;
+  label?: string;
   running: boolean | null;
   state: "current" | "stale" | "differs" | "unknown";
   detail: string;

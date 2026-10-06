@@ -24,6 +24,7 @@ WS_RECEIVE_TIMEOUT = 30
 def _receive_with_deadline(self):
     async def receive():
         with anyio.fail_after(WS_RECEIVE_TIMEOUT):
+            # A starlette rename of this private stream fails every ws test loudly.
             return await self._send_rx.receive()
 
     return self.portal.call(receive)
@@ -31,12 +32,11 @@ def _receive_with_deadline(self):
 
 WebSocketTestSession.receive = _receive_with_deadline
 
-# The house origin for the whole suite. It is also the client's base_url, so
-# every test request is same-origin: Secure cookies flow (httpx returns them
-# only over https), and the Origin wall sees an allowed Origin. Both are
-# required — startup refuses COOKIE_SECURE=false and an empty HOUSE_ORIGINS,
-# and the wall 403s a cookie-bearing unsafe request whose Origin is absent or
-# foreign.
+# Also the client's base_url, so every test request is same-origin: Secure
+# cookies flow (httpx returns them only over https) and the Origin wall sees an
+# allowed Origin. Startup refuses COOKIE_SECURE=false and an empty
+# HOUSE_ORIGINS; the wall 403s a cookied unsafe request with a foreign or no
+# Origin.
 HOUSE_ORIGIN = "https://test"
 
 
