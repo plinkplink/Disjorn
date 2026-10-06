@@ -1,5 +1,6 @@
 /* Every write and every approval_update frame carries the whole composed
-   proposal, so this store replaces its copy and never merges. */
+   proposal, so this store replaces its copy and never merges; an HTTP reply
+   and a frame race, so a copy older than the stored one is dropped. */
 
 import { create } from "zustand";
 
@@ -36,11 +37,29 @@ interface ApprovalsState {
   onUpdate: (frame: ApprovalUpdateFrame) => void;
 }
 
-/** Replace-or-insert by id, newest (highest id) first. */
+/** Every act stamps its row's acted_at and any closure with the same instant,
+    and both are fixed-width UTC strings, so they order as text. */
+function freshness(p: ApprovalProposal): [string, string] {
+  let acted = "";
+  for (const s of p.states) {
+    if (s.acted_at !== null && s.acted_at > acted) acted = s.acted_at;
+  }
+  return [acted, p.closed_at ?? ""];
+}
+
+export function isOlder(next: ApprovalProposal, stored: ApprovalProposal): boolean {
+  const [a, c] = freshness(next);
+  const [b, d] = freshness(stored);
+  return a < b || (a === b && c < d);
+}
+
+/** Replace-or-insert by id, newest (highest id) first; an older copy is ignored. */
 export function upsertProposal(
   list: ApprovalProposal[],
   next: ApprovalProposal,
 ): ApprovalProposal[] {
+  const stored = list.find((p) => p.id === next.id);
+  if (stored !== undefined && isOlder(next, stored)) return list;
   const rest = list.filter((p) => p.id !== next.id);
   return [...rest, next].sort((a, b) => b.id - a.id);
 }
@@ -52,6 +71,23 @@ export function isOpen(p: ApprovalProposal): boolean {
 /** The viewer's principal is their username; a proposal names its own. */
 export function isPrincipalOn(p: ApprovalProposal, me: string): boolean {
   return p.states.some((s) => s.principal === me);
+}
+
+// The server's resident principal pattern: a resident answers only by relay.
+const RESIDENT_PRINCIPAL_RE = /^res-[a-z][a-z0-9-]*$/;
+
+/** The act endpoint's rule for a person: an admin, answering as a principal
+    the proposal names, who is not a resident seat. */
+export function canAnswer(
+  p: ApprovalProposal,
+  me: { username: string; is_admin: boolean } | null,
+): boolean {
+  return (
+    me !== null &&
+    me.is_admin &&
+    !RESIDENT_PRINCIPAL_RE.test(me.username) &&
+    isPrincipalOn(p, me.username)
+  );
 }
 
 export function pendingForMe(
@@ -92,10 +128,16 @@ export const useApprovals = create<ApprovalsState>()((set, get) => ({
     if (get().status === "idle") set({ status: "loading" });
     try {
       const body = await approvalList();
+      const held = new Map(get().proposals.map((p) => [p.id, p]));
       set({
         status: "ready",
         detail: null,
-        proposals: [...body.proposals].sort((a, b) => b.id - a.id),
+        proposals: body.proposals
+          .map((p) => {
+            const stored = held.get(p.id);
+            return stored !== undefined && isOlder(p, stored) ? stored : p;
+          })
+          .sort((a, b) => b.id - a.id),
         truncated: body.truncated,
       });
     } catch (e) {

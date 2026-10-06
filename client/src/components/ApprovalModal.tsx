@@ -9,15 +9,18 @@ import { ApiError } from "../api";
 import {
   MAX_REMARKS_CHARS,
   actBlockReason,
+  canAnswer,
   isOpen,
   isPrincipalOn,
   useApprovals,
+  type ApprovalsStatus,
 } from "../stores/approvals";
 import type {
   ApprovalAction,
   ApprovalDecision,
   ApprovalProposal,
   ApprovalState,
+  User,
 } from "../types";
 import { Markdown } from "./Markdown";
 
@@ -197,8 +200,35 @@ export function AnswerBox({ proposal }: { proposal: ApprovalProposal }) {
   );
 }
 
+/** Why a slug has no proposal to show: the list may not have answered yet. */
+function Absent({
+  slug,
+  status,
+  detail,
+}: {
+  slug: string;
+  status: ApprovalsStatus;
+  detail: string | null;
+}) {
+  if (status === "unavailable" || status === "error") {
+    return (
+      <p className={`approvals-off${status === "error" ? " approvals-error" : ""}`}>
+        {detail}
+      </p>
+    );
+  }
+  if (status !== "ready") return <p className="approvals-empty">Loading…</p>;
+  return (
+    <p className="plan-modal-note">
+      No approval proposal has the slug <code>{slug}</code>.
+    </p>
+  );
+}
+
 export function ApprovalModal({
   slug,
+  status,
+  detail,
   proposal,
   me,
   hasSpecCard,
@@ -206,8 +236,10 @@ export function ApprovalModal({
   onClose,
 }: {
   slug: string;
+  status: ApprovalsStatus;
+  detail: string | null;
   proposal: ApprovalProposal | null;
-  me: string | null;
+  me: Pick<User, "username" | "is_admin"> | null;
   hasSpecCard: boolean;
   onOpenCard: () => void;
   onClose: () => void;
@@ -216,7 +248,8 @@ export function ApprovalModal({
   useDialogFocus(dialogRef, onClose);
 
   const open = proposal !== null && isOpen(proposal);
-  const mine = proposal !== null && me !== null && isPrincipalOn(proposal, me);
+  const mine = proposal !== null && me !== null && isPrincipalOn(proposal, me.username);
+  const answerable = proposal !== null && canAnswer(proposal, me);
 
   return (
     <div className="modal-backdrop approval-backdrop" onClick={onClose}>
@@ -237,9 +270,7 @@ export function ApprovalModal({
         </header>
 
         {proposal === null ? (
-          <p className="plan-modal-note">
-            No approval proposal has the slug <code>{slug}</code>.
-          </p>
+          <Absent slug={slug} status={status} detail={detail} />
         ) : (
           <>
             <p className="approval-byline">
@@ -264,7 +295,13 @@ export function ApprovalModal({
             <h3 className="plan-modal-sub">Answers</h3>
             <StateTable proposal={proposal} />
 
-            {open && mine && <AnswerBox key={proposal.id} proposal={proposal} />}
+            {open && answerable && <AnswerBox key={proposal.id} proposal={proposal} />}
+            {open && mine && !answerable && (
+              <p className="plan-modal-hint">
+                Only admins can answer approval proposals here, so this record is
+                read-only for you.
+              </p>
+            )}
             {open && !mine && (
               <p className="plan-modal-hint">
                 You are not a principal on this proposal, so there is nothing for
