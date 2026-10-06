@@ -327,10 +327,7 @@ def collect_backlog(message_db: Optional[str], limit: int = 200) -> list:
 
 
 def clip_title(title: str, limit: int = 180) -> str:
-    if len(title) <= limit:
-        return title
-    words = re.match(r"(.*\S)\s", title[:limit + 1])
-    return (words.group(1) if words else title[:limit]) + "…"
+    return board().clip_title(title, limit)
 
 
 def spec_dates(repo: Path, specs_rel: str = "SPECS") -> dict:

@@ -218,6 +218,19 @@ def collect_branches(gatehouse: Path = None) -> list:
     return out
 
 
+def clip_title(title: str, limit: int = 180) -> str:
+    if len(title) <= limit:
+        return title
+    words = re.match(r"(.*\S)\s", title[:limit + 1])
+    return (words.group(1) if words else title[:limit]) + "…"
+
+
+_SLUG = r"20\d\d-\d\d-\d\d-[a-z0-9][a-z0-9-]{0,50}"
+_MERGE_WITNESS_RE = re.compile(
+    rf"^merge:\s+({_SLUG})(?![\w-])|(?<![\w-])(?:loop|fix)/({_SLUG})(?![\w-])"
+    rf"|SPECS/({_SLUG})\.md")
+
+
 def merged_slugs(repo: Path = None, gatehouse: Path = None) -> dict:
     """slug -> merge commit (short) for every spec whose build has landed on
     main. Two witnesses, either suffices:
@@ -238,8 +251,8 @@ def merged_slugs(repo: Path = None, gatehouse: Path = None) -> dict:
     for ln in _run("git", "-C", str(repo_path), "log", "--merges",
                    "--format=%h %s", "main").splitlines():
         sha, _, msg = ln.partition(" ")
-        for m in re.findall(r"(20\d\d-\d\d-\d\d-[a-z0-9][a-z0-9-]{0,50})", msg):
-            out.setdefault(m, sha)
+        for groups in _MERGE_WITNESS_RE.findall(msg):
+            out.setdefault(next(g for g in groups if g), sha)
     for bare in sorted(gatehouse.glob("*.git")):
         head = (_git_bare(bare, "symbolic-ref", "--quiet", "--short", "HEAD").strip()
                 or "main")
@@ -351,7 +364,7 @@ def collect_proposals(window_days: int = PROPOSAL_WINDOW_DAYS) -> list:
             "date": rec["ts"][:10],
             "recent": ts >= cutoff,
             "resident": rec.get("resident", "?").removeprefix("res-"),
-            "title": title[:180],
+            "title": clip_title(title),
             "body": text,
         })
     out.sort(key=lambda r: r["ts"], reverse=True)
