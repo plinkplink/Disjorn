@@ -17,6 +17,7 @@ import type {
   BacklogStatus,
   Bot,
   Builder,
+  ChannelDeletion,
   ChannelListItem,
   ChannelMemberOut,
   ChannelVisibility,
@@ -180,6 +181,16 @@ export function listUsers(): Promise<AdminUserRow[]> {
  * good for exactly one login. There is no self-service "forgot password"
  * route on purpose: the house has no email, so an admin is the identity check.
  */
+/** ADMIN: deletion records newest first; pass the last id as `beforeId` for the next page. */
+export function listChannelDeletions(
+  beforeId?: number,
+  limit = 50,
+): Promise<ChannelDeletion[]> {
+  const q = new URLSearchParams({ limit: String(limit) });
+  if (beforeId !== undefined) q.set("before_id", String(beforeId));
+  return request<ChannelDeletion[]>("GET", `/channels/deletions?${q.toString()}`);
+}
+
 export function adminResetPassword(
   userId: number,
   newPassword: string,
