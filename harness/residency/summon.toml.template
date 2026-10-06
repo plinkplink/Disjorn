@@ -31,7 +31,7 @@ trigger_channels = []             # channel ids where every user msg summons
 # message: Claudette's TRIGGER_PHRASES (claudette.git disjorn_bot.py) with this
 # seat's name. Change one list, change both.
 extra_patterns = ['(?i)^\s*(?:(?:hey,?|yo|ok,?|thanks,?|thank you,?|yeah,?|sure,?|alright,?|jesus|hi,?|damn it,) gable|gable(?=[, ])|(?:hey )?bots)(?!\w)']
-typing_interval_sec = 3.5         # above the server's 1-per-3s limit, under the client's 6s decay
+typing_interval_sec = 4.0         # above the server's 1-per-3s limit, under the client's 6s decay
 # 2026-08-24: in #custodian ONLY, a bare name is inert data — the message must
 # carry an explicit @gable AND the server's own mention context. trigger_channels
 # and extra_patterns do not apply there. Other channels are unchanged. This is
