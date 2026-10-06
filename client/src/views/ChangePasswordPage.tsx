@@ -20,6 +20,7 @@ export function ChangePasswordPage() {
   const changePassword = useSession((s) => s.changePassword);
   const serverError = useSession((s) => s.changePasswordError);
   const busy = useSession((s) => s.changingPassword);
+  const resetNotice = useSession((s) => s.resetNotice);
 
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
@@ -50,6 +51,15 @@ export function ChangePasswordPage() {
             ? "Your password needs replacing before you can carry on."
             : `Hi ${user.display_name} — your current password was set by an admin, so it needs replacing before you can carry on.`}
         </p>
+        {resetNotice !== null && (
+          <p className="login-notice" role="status">
+            Your password was reset by {resetNotice.by} on{" "}
+            <time dateTime={resetNotice.at}>
+              {new Date(resetNotice.at).toLocaleDateString(undefined, { dateStyle: "long" })}
+            </time>
+            .
+          </p>
+        )}
 
         <div className="field">
           <label htmlFor="pw-current">Current password</label>

@@ -36,6 +36,14 @@
   display: contents;
 }
 
+.login-notice {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-m);
+  font-size: var(--text-sm);
+}
+
 .login-help-title {
   margin: 0;
   font-size: var(--text-md);

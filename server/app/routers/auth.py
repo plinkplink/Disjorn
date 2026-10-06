@@ -40,7 +40,7 @@ from .. import db
 from ..config import get_settings
 from ..models import Bot, MemberType, User, UserStatus
 from ..services import throttle
-from ..services.accounts import note_password_reset
+from ..services.accounts import note_password_reset, take_reset_notice
 
 router = APIRouter()
 
@@ -319,12 +319,21 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class PasswordResetNotice(BaseModel):
+    by: str
+    at: str
+
+
+class LoginResult(User):
+    password_reset: Optional[PasswordResetNotice] = None
+
+
 _failed_logins_by_ip = throttle.Limiter(10, 15 * 60)
 _failed_logins_by_name = throttle.Limiter(5, 15 * 60)
 
 
 @router.post("/auth/login")
-async def login(body: LoginRequest, request: Request, response: Response) -> User:
+async def login(body: LoginRequest, request: Request, response: Response) -> LoginResult:
     ip = throttle.client_ip(request)
     name = body.username.casefold()
     wait = max(_failed_logins_by_ip.retry_after(ip), _failed_logins_by_name.retry_after(name))
@@ -353,7 +362,8 @@ async def login(body: LoginRequest, request: Request, response: Response) -> Use
         (token, row["id"], db.utc_now(), session_expiry()),
     )
     _set_session_cookie(response, token)
-    return _user_from_row(row)
+    notice = await take_reset_notice(row["id"])
+    return LoginResult(**_user_from_row(row).model_dump(), password_reset=notice)
 
 
 @router.post("/auth/logout")
@@ -498,7 +508,7 @@ async def admin_reset_password(
             commit=False,
         )
         await db.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,), commit=False)
-        await note_password_reset(user_id, admin.id)
+        await note_password_reset(user_id, admin.id, admin.display_name)
     return {"ok": True}
 
 

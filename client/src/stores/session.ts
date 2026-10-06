@@ -9,7 +9,7 @@ import {
   setRotationHandler,
   updateMe,
 } from "../api";
-import type { SettableStatus, User } from "../types";
+import type { PasswordResetNotice, SettableStatus, User } from "../types";
 
 /** Backoff between boot probes when the server cannot be reached at all. */
 const BOOT_RETRY_DELAYS_MS = [400, 1200];
@@ -38,6 +38,8 @@ interface SessionState {
    * 2026-08-14: every route 403ing with no screen that could clear it.
    */
   mustChangePassword: boolean;
+  /** An admin reset this account; shown once, on the login that follows it. */
+  resetNotice: PasswordResetNotice | null;
   changePasswordError: string | null;
   changingPassword: boolean;
   changePassword: (currentPassword: string, newPassword: string) => Promise<boolean>;
@@ -58,6 +60,7 @@ export const useSession = create<SessionState>()((set, get) => ({
   loginError: null,
   loggingIn: false,
   mustChangePassword: false,
+  resetNotice: null,
   changePasswordError: null,
   changingPassword: false,
 
@@ -121,7 +124,7 @@ export const useSession = create<SessionState>()((set, get) => ({
     }
     // Clear the wall BEFORE re-reading the user: fetchMe goes through the same
     // request path, and a stale flag would just re-arm on the next 403.
-    set({ mustChangePassword: false, changingPassword: false });
+    set({ mustChangePassword: false, changingPassword: false, resetNotice: null });
     try {
       set({ user: await fetchMe() });
     } catch {
@@ -133,8 +136,13 @@ export const useSession = create<SessionState>()((set, get) => ({
   login: async (username, password) => {
     set({ loggingIn: true, loginError: null });
     try {
-      const user = await apiLogin(username, password);
-      set({ user, loggingIn: false, mustChangePassword: false });
+      const { password_reset: notice, ...user } = await apiLogin(username, password);
+      set({
+        user,
+        loggingIn: false,
+        mustChangePassword: false,
+        resetNotice: notice ?? null,
+      });
       return true;
     } catch (err) {
       set({
@@ -151,7 +159,12 @@ export const useSession = create<SessionState>()((set, get) => ({
     } catch {
       /* clearing local state matters more than the server ack */
     }
-    set({ user: null, mustChangePassword: false, changePasswordError: null });
+    set({
+      user: null,
+      mustChangePassword: false,
+      changePasswordError: null,
+      resetNotice: null,
+    });
   },
 
   setStatus: async (status) => {

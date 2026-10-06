@@ -27,6 +27,7 @@ import type {
   ChannelMemberOut,
   ChannelVisibility,
   DmResponse,
+  LoginResult,
   Message,
   NotifyPrefs,
   PickerItem,
@@ -227,8 +228,8 @@ export function dismissResetRequest(id: number): Promise<{ ok: boolean }> {
   return request<{ ok: boolean }>("POST", `/auth/reset-requests/${id}/dismiss`);
 }
 
-export function login(username: string, password: string): Promise<User> {
-  return request<User>("POST", "/auth/login", { username, password });
+export function login(username: string, password: string): Promise<LoginResult> {
+  return request<LoginResult>("POST", "/auth/login", { username, password });
 }
 
 export function logout(): Promise<{ ok: boolean }> {

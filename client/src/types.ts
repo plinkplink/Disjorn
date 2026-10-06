@@ -37,6 +37,16 @@ export interface User {
   created_at: string;
 }
 
+/** POST /auth/login: the user, plus an admin reset not yet shown to them. */
+export interface LoginResult extends User {
+  password_reset?: PasswordResetNotice | null;
+}
+
+export interface PasswordResetNotice {
+  by: string;
+  at: string;
+}
+
 /** GET /auth/users (admin only): enough to pick an account to reset. */
 export interface AdminUserRow {
   id: number;
