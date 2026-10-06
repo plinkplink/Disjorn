@@ -425,9 +425,10 @@ def test_unit_template_keeps_the_dead_mount_fix():
 
 
 def test_no_shell_true_anywhere_in_brokerd():
-    src = (TEMPLATE_DIR / "brokerd.py").read_text()
-    assert "shell=True" not in src
-    assert "os.system" not in src
+    for path in [TEMPLATE_DIR / "brokerd.py", *sorted(TEMPLATE_DIR.glob("broker_*.py"))]:
+        src = path.read_text()
+        assert "shell=True" not in src, path.name
+        assert "os.system" not in src, path.name
 
 
 # --- WP-H13 red-team regressions ---
