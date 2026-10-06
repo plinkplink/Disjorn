@@ -383,10 +383,10 @@ def column_for_status(word: str) -> Optional[str]:
 def deploy_badge(deploy: Optional[dict]) -> dict:
     """Two facts from `metrics.deploy_state()`, and one colour for both.
 
-    staged: prod's checkout is mirror head and clean. running: the live server
-    started after the server code on disk landed. Green needs both; staged but
-    not running is amber, restart pending; running unknown is never green.
-    Red is code running that the mirror has never seen: prod ahead, or dirty."""
+    staged: prod's checkout is mirror head and clean. running: every measured
+    process started after the code it loads landed. Green needs both; a stale
+    process is amber and named; running unknown is never green. Red is code
+    running that the mirror has never seen: prod ahead, or dirty."""
     deploy = deploy or {}
     run = deploy.get("running") or {}
     state = deploy.get("state") or "unknown"
@@ -395,7 +395,11 @@ def deploy_badge(deploy: Optional[dict]) -> dict:
            "staged": None if state == "unknown" else state == "in-sync",
            "staged_detail": deploy.get("detail") or "deploy state not configured",
            "running": run.get("ok"),
-           "running_detail": run.get("detail") or "running: unknown"}
+           "running_detail": run.get("detail") or "running: unknown",
+           "processes": [{"name": p.get("name"), "running": p.get("ok"),
+                          "state": p.get("state") or "unknown",
+                          "detail": p.get("detail") or ""}
+                         for p in deploy.get("processes") or []]}
     out["detail"] = out["staged_detail"]
     if state == "unknown":
         return {**out, "badge": "unknown", "label": "unknown"}
@@ -407,7 +411,10 @@ def deploy_badge(deploy: Optional[dict]) -> dict:
     if out["running"] is True:
         return {**out, "badge": "green", "label": "live"}
     if out["running"] is False:
-        return {**out, "badge": "amber", "label": "restart pending"}
+        label = "; ".join(f"{word}: {', '.join(run[key])}" for key, word in
+                          (("stale", "restart pending"), ("differs", "copy differs"))
+                          if run.get(key))
+        return {**out, "badge": "amber", "label": label or "restart pending"}
     return {**out, "badge": "unknown", "label": "running unknown"}
 
 
@@ -481,7 +488,8 @@ def derive_cards(config: Optional[dict] = None, *, repo: Optional[Path] = None,
         deploy = m.deploy_state(mirror=paths["mirror"],
                                 deploy_tree=paths["deploy_tree"],
                                 branch=paths.get("branch", "main"),
-                                service=paths.get("deploy_service"))
+                                service=paths.get("deploy_service"),
+                                processes=paths.get("deploy_processes"))
     badge = deploy_badge(deploy)
 
     specs_dir = repo / "SPECS"
