@@ -16,10 +16,12 @@ import { SearchBar } from "../components/SearchBar";
 import { UserPanel } from "../components/UserPanel";
 import {
   channelIdFromHash,
+  planRoomRouteFromHash,
   writeChannelHash,
 } from "../hashRoute";
 import { POPUP_BLOCKED_NOTE, openMinted } from "../lib/openMinted";
 import { usePush } from "../push";
+import { useApprovals } from "../stores/approvals";
 import { useApps } from "../stores/apps";
 import { useChannels } from "../stores/channels";
 import { useMembers } from "../stores/members";
@@ -36,6 +38,7 @@ import type {
 } from "../types";
 import { isChannelMember, isPrivateChannel } from "../types";
 import { socket } from "../ws";
+import { usePendingForMe } from "./ApprovalsPanel";
 import { ChatView } from "./ChatView";
 import PlanRoomView from "./PlanRoomView";
 import { SettingsView } from "./SettingsView";
@@ -57,7 +60,7 @@ type Overlay = "none" | "settings" | "planroom";
 
 function overlayFromHash(hash: string = location.hash): Overlay {
   if (hash === SETTINGS_HASH) return "settings";
-  if (hash === PLANROOM_HASH) return "planroom";
+  if (planRoomRouteFromHash(hash) !== null) return "planroom";
   return "none";
 }
 
@@ -513,6 +516,7 @@ export function AppShell() {
   const builders = useApps((s) => s.builders);
   const pendingSessionId = useApps((s) => s.pendingSessionId);
   const me = useSession((s) => s.user);
+  const approvalsPending = usePendingForMe();
   const overlayRef = useRef(overlay);
   overlayRef.current = overlay;
 
@@ -530,6 +534,7 @@ export function AppShell() {
        feed needs it to tell an app link from any other link, and a feed that
        learned the origin late would repaint cards under the reader. */
     void useApps.getState().loadConfig();
+    void useApprovals.getState().refresh();
     if (overlayFromHash() === "none") st.setActive(channelIdFromHash());
     socket.connect();
     void usePush.getState().sync();
@@ -734,6 +739,8 @@ export function AppShell() {
   const openOverlay = (next: Exclude<Overlay, "none">) => {
     setSidebarOpen(false);
     setOverlay(next);
+    // An open Plan Room keeps its own route; its tab owns the hash.
+    if (next === "planroom" && planRoomRouteFromHash() !== null) return;
     // replaceState, not pushState: this app deliberately never grows history
     // entries for its own navigation.
     history.replaceState(
@@ -865,6 +872,15 @@ export function AppShell() {
             <span className="channel-item-text">
               <span className="name">Plan Room</span>
             </span>
+            {approvalsPending > 0 && (
+              <span
+                className="plan-room-dot"
+                title={`${approvalsPending} approval${
+                  approvalsPending === 1 ? "" : "s"
+                } waiting on your answer`}
+                aria-label="Approvals waiting on your answer"
+              />
+            )}
           </button>
           <div className="channel-section channel-section-row">
             <span>Channels</span>

@@ -19,6 +19,7 @@
 import { soundFor } from "./lib/messageSound";
 import { usePush } from "./push";
 import { playSound, useSoundSettings } from "./sounds";
+import { useApprovals } from "./stores/approvals";
 import { useApps } from "./stores/apps";
 import { useChannelDelete } from "./stores/channelDelete";
 import { useChannels } from "./stores/channels";
@@ -283,6 +284,9 @@ export class DisjornSocket {
       case "app_update":
         useApps.getState().onAppUpdate(frame);
         return;
+      case "approval_update":
+        useApprovals.getState().onUpdate(frame);
+        return;
     }
   }
 
@@ -313,6 +317,7 @@ export class DisjornSocket {
         .getState()
         .refresh()
         .catch(() => {});
+      void useApprovals.getState().refresh();
       await useChannels.getState().refresh();
       // Membership may have changed while we were away: drop anything the
       // fresh list says we can no longer read BEFORE backfilling, so the

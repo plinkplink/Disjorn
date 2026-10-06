@@ -18,7 +18,7 @@ Three claims are on trial and the rest is detail:
 import httpx
 import pytest
 
-from app import db
+from app import db, events, ws
 from app.config import reset_settings_cache
 from app.routers import approval, auth
 
@@ -508,3 +508,85 @@ async def test_the_list_declares_when_it_truncates(client, app, armed):
                              headers=key())).json()
     assert body["count"] == 2
     assert body["truncated"] is True
+
+
+# ── live updates ────────────────────────────────────────────────────────────
+
+def updates() -> list[dict]:
+    seen: list[dict] = []
+    events.subscribe(
+        lambda e: seen.append(e) if e["type"] == "approval_update" else None)
+    return seen
+
+
+async def current(client, proposal_id: int) -> dict:
+    r = await client.get(f"/approval/proposals/{proposal_id}", headers=key())
+    return r.json()["proposal"]
+
+
+async def test_filing_publishes_the_proposal_as_a_read_returns_it(
+        client, app, armed):
+    await make_bot()
+    seen = updates()
+    proposal = await file_proposal(client)
+    assert seen == [{"type": "approval_update",
+                     "proposal": await current(client, proposal["id"])}]
+
+
+async def test_an_answer_publishes_the_proposal_as_a_read_returns_it(
+        client, app, armed, plink):
+    await make_bot()
+    proposal = await file_proposal(client)
+    seen = updates()
+    r = await act(client, proposal["id"], "res-gable", "rework",
+                  remarks="Split it.")
+    assert r.status_code == 200, r.text
+    await answer(client, plink, proposal["id"], "plink", "deny")
+    after = await current(client, proposal["id"])
+    assert [e["proposal"]["decision"] for e in seen] == ["rework", "denied"]
+    assert seen[-1] == {"type": "approval_update", "proposal": after}
+
+
+async def test_a_refused_filing_or_answer_publishes_nothing(
+        client, app, armed, plink):
+    await make_bot()
+    proposal = await file_proposal(client)
+    seen = updates()
+    dup = await client.post("/approval/proposals", headers=key(),
+                            json={"slug": proposal["slug"], "title": "t",
+                                  "text": "b"})
+    assert dup.status_code == 409
+    forged = await act(plink, proposal["id"], "res-gable", "approve",
+                       headers={})
+    assert forged.status_code == 403
+    await answer(client, plink, proposal["id"], "plink", "deny")
+    seen.clear()
+    closed = await act(client, proposal["id"], "res-gable", "approve")
+    assert closed.status_code == 409
+    assert seen == []
+
+
+class FakeSocket:
+    def __init__(self) -> None:
+        self.frames: list[dict] = []
+
+    async def send_json(self, frame: dict) -> None:
+        self.frames.append(frame)
+
+
+async def test_the_update_reaches_every_connected_user_and_no_bot(
+        client, app, armed):
+    """Bots read proposals through the broker verbs, never off the socket."""
+    bot_id = await make_bot()
+    alice = await make_user("alice")
+    bob = await make_user("bob")
+    alice_ws, bob_ws, bot_ws = FakeSocket(), FakeSocket(), FakeSocket()
+    ws.manager.connect_user(alice_ws, alice, "online")
+    ws.manager.connect_user(bob_ws, bob, "online")
+    ws.manager.connect_bot(bot_ws, bot_id)
+    proposal = await file_proposal(client)
+    frame = {"type": "approval_update",
+             "proposal": await current(client, proposal["id"])}
+    assert alice_ws.frames == [frame]
+    assert bob_ws.frames == [frame]
+    assert bot_ws.frames == []
