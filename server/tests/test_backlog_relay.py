@@ -72,7 +72,9 @@ async def test_the_relay_files_a_row_authored_by_the_resident(client):
     assert row["author"] == "res-gable"
 
 
-async def test_the_filing_is_announced_in_custodian_naming_the_resident(client):
+async def test_the_filing_is_announced_in_custodian_without_waking_anyone(client):
+    from app.ws import _mentions_bot
+
     await make_bot()
     custodian = await make_custodian()
     r = await relay(client, on_behalf_of="res-claudette")
@@ -80,9 +82,12 @@ async def test_the_filing_is_announced_in_custodian_naming_the_resident(client):
     (post,) = await channel_posts(custodian)
     assert post["name"] == "system"
     assert post["content"] == (
-        f"Filed backlog #{r.json()['id']} (open) by res-claudette. "
+        f"Filed backlog #{r.json()['id']} (open) from a resident seat. "
         "Residents triage in #custodian.")
-    assert "@" not in post["content"]
+    for name in ("claudette", "Gable"):
+        assert not _mentions_bot(post["content"], name)
+    row = await db.fetch_one("SELECT author FROM backlog WHERE id = ?", (r.json()["id"],))
+    assert row["author"] == "res-claudette"
 
 
 async def test_a_human_is_refused_the_relay(client):

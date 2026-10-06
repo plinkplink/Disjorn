@@ -504,9 +504,9 @@ async def _insert_item(text: str, author: str) -> int:
     return cur.lastrowid
 
 
-def _filed_ack(item_id: int, resident: Optional[str] = None) -> str:
-    # Never `@resident`: an at-mention in #custodian is a summon.
-    by = f" by {resident}" if resident else ""
+def _filed_ack(item_id: int, relayed: bool = False) -> str:
+    # Unnamed: the mention test matches res-<name>.
+    by = " from a resident seat" if relayed else ""
     return f"Filed backlog #{item_id} (open){by}. Residents triage in #custodian."
 
 
@@ -572,7 +572,7 @@ async def file_for_resident(actor: CurrentActor,
         raise HTTPException(status_code=400, detail=refusal)
     channel_id = await _custodian_id()
     item_id = await _insert_item(body.text, label)
-    await _post_system_reply(channel_id, _filed_ack(item_id, label))
+    await _post_system_reply(channel_id, _filed_ack(item_id, relayed=True))
     rows = await _items_page(item_id, 1)
     return BacklogItem(**rows[0])
 
