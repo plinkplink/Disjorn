@@ -626,3 +626,12 @@ def test_focus_tracking_and_manager_exports(wsc):
 
     assert ws_module.manager.is_user_connected(a) is False
     assert ws_module.manager.is_user_connected(b) is False
+
+
+def test_a_ping_is_answered_with_a_pong_on_the_same_socket(wsc):
+    a = make_user(wsc, "alice")
+    ta = login(wsc, "alice")
+    with ExitStack() as stack:
+        wa = open_user(stack, wsc, ta, a)
+        wa.send_json({"op": "ping"})
+        assert wa.receive_json() == {"type": "pong"}

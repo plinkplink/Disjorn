@@ -3,8 +3,8 @@
    - Cookie auth on the handshake (browser sends `__Host-disjorn_session`
      itself). The server 403s that handshake unless its Origin is a house
      origin, so this only connects when served from the house itself.
-   - Server has no heartbeat: liveness = the socket staying open. On close we
-     reconnect with exponential backoff (1s -> 30s, +/- jitter).
+   - Liveness: a resume pings and replaces a socket that does not pong in 4 s;
+     on close we reconnect with exponential backoff (1s -> 30s, +/- jitter).
    - On RECONNECT (any ready after the first): refetch GET /channels and, for
      every channel with local messages, backfill `?from_seq=lastSeq+1`
      (current-state semantics — edits applied, tombstones drop deletions).
@@ -32,6 +32,7 @@ const BACKOFF_MIN_MS = 1000;
 const BACKOFF_MAX_MS = 30000;
 /** A socket younger than this is a replacement already in flight, not a suspect. */
 const REPLACE_MIN_AGE_MS = 5000;
+const PONG_TIMEOUT_MS = 4000;
 
 type SocketState = "idle" | "connecting" | "open" | "ready";
 
@@ -46,6 +47,7 @@ export class DisjornSocket {
   private openedAt = 0;
   /** The socket a replacement superseded, closed once the new one is ready. */
   private retiring: WebSocket | null = null;
+  private pongTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** Open the socket (and keep it open until disconnect()). Idempotent. */
   connect(): void {
@@ -64,6 +66,7 @@ export class DisjornSocket {
     this.attempt = 0;
     this.hadReady = false;
     this.state = "idle";
+    this.clearPong();
     this.closeRetiring();
     const ws = this.ws;
     this.ws = null;
@@ -74,9 +77,9 @@ export class DisjornSocket {
    * The app came back (foreground, network, bfcache). A pending backoff is
    * cut short so a resumed phone does not sit out a 30 s timer. When `stale`
    * says we were away long enough, the existing socket is not trusted: iOS
-   * resumes sockets that still read OPEN but are dead, and the server sends
-   * no heartbeat that would expose them. A replacement opens instead, and its
-   * ready resyncs whatever was missed.
+   * resumes sockets that still read OPEN but are dead. A replacement opens
+   * instead, and its ready resyncs whatever was missed. A shorter absence
+   * is probed with a ping instead.
    */
   wake(stale: boolean): void {
     if (this.stopped) return;
@@ -93,7 +96,20 @@ export class DisjornSocket {
     }
     if (stale && Date.now() - this.openedAt >= REPLACE_MIN_AGE_MS) {
       this.replace();
+    } else {
+      this.probe();
     }
+  }
+
+  /** A socket that cannot answer a ping in time is dead even if it reads OPEN. */
+  private probe(): void {
+    if (this.pongTimer !== null || this.state !== "ready") return;
+    const probed = this.ws;
+    this.send({ op: "ping" });
+    this.pongTimer = setTimeout(() => {
+      this.pongTimer = null;
+      if (this.ws === probed && !this.stopped) this.replace();
+    }, PONG_TIMEOUT_MS);
   }
 
   /* ---- client ops ---- */
@@ -127,11 +143,17 @@ export class DisjornSocket {
      would make the server broadcast us offline and then online again. Its
      frames are ignored from here on; the new ready's resync covers them. */
   private replace(): void {
+    this.clearPong();
     this.closeRetiring();
     this.retiring = this.ws;
     this.ws = null;
     this.state = "idle";
     this.open();
+  }
+
+  private clearPong(): void {
+    if (this.pongTimer !== null) clearTimeout(this.pongTimer);
+    this.pongTimer = null;
   }
 
   private closeRetiring(): void {
@@ -183,6 +205,10 @@ export class DisjornSocket {
   }
 
   private dispatch(frame: ServerFrame): void {
+    if (frame.type === "pong") {
+      this.clearPong();
+      return;
+    }
     switch (frame.type) {
       case "ready": {
         this.state = "ready";
