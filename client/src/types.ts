@@ -203,11 +203,19 @@ export interface PickerItem {
   url: string;
 }
 
+export interface UnfurlEmbed {
+  provider: "youtube";
+  video_id: string;
+  start_seconds: number | null;
+}
+
 export interface UnfurlData {
   url: string;
   title: string | null;
   description: string | null;
   image_url: string | null;
+  /** Present only for links the server recognised as a playable video. */
+  embed?: UnfurlEmbed;
 }
 
 export interface SummarizeResponse {

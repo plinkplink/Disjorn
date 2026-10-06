@@ -248,6 +248,126 @@ async def test_unfurl_rejects_non_http_schemes(client):
     assert r.json()["title"] is None
 
 
+VIDEO = "dQw4w9WgXcQ"
+OEMBED_JSON = (
+    '{"title": "Never Gonna Give You Up", "author_name": "Rick Astley",'
+    ' "thumbnail_url": "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg"}'
+)
+
+
+@pytest.mark.parametrize(
+    ("url", "start"),
+    [
+        (f"https://youtu.be/{VIDEO}", None),
+        (f"https://youtu.be/{VIDEO}?si=AbCdEf123&t=1896", 1896),
+        (f"https://www.youtube.com/watch?v={VIDEO}", None),
+        (f"https://www.youtube.com/watch?v={VIDEO}&t=1h2m3s", 3723),
+        (f"https://www.youtube.com/watch?t=90s&v={VIDEO}&list=PL123", 90),
+        (f"http://youtube.com/watch?v={VIDEO}", None),
+        (f"https://m.youtube.com/watch?v={VIDEO}&feature=share", None),
+        (f"https://music.youtube.com/watch?v={VIDEO}&si=xyz", None),
+        (f"https://www.youtube.com/shorts/{VIDEO}?si=xyz", None),
+        (f"https://www.youtube.com/live/{VIDEO}?t=2m", 120),
+        (f"https://WWW.YOUTUBE.COM/watch?v={VIDEO}", None),
+    ],
+)
+def test_youtube_video_urls_are_recognised_with_their_start_time(url, start):
+    assert unfurl_service.youtube_embed(url) == {
+        "provider": "youtube",
+        "video_id": VIDEO,
+        "start_seconds": start,
+    }
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        f"https://notyoutube.com/watch?v={VIDEO}",
+        f"https://youtube.com.evil.example/watch?v={VIDEO}",
+        f"https://evil.example/youtu.be/{VIDEO}",
+        f"https://youtu.be.evil.example/{VIDEO}",
+        f"https://www.youtube.com/watch?v={VIDEO}x",
+        "https://www.youtube.com/watch?v=short",
+        "https://www.youtube.com/watch",
+        "https://www.youtube.com/playlist?list=PL1234567890",
+        "https://www.youtube.com/@SomeChannel",
+        f"ftp://youtu.be/{VIDEO}",
+        f"https://youtu.be/{VIDEO}/extra",
+    ],
+)
+def test_youtube_look_alikes_are_not_recognised(url):
+    assert unfurl_service.youtube_embed(url) is None
+
+
+async def test_a_youtube_link_unfurls_from_oembed_with_an_embed(client, monkeypatch):
+    await make_user()
+    await login(client)
+    calls = []
+
+    async def fake_fetch(url):
+        calls.append(url)
+        return url, OEMBED_JSON
+
+    monkeypatch.setattr(unfurl_service, "fetch_head", fake_fetch)
+    link = f"https://youtu.be/{VIDEO}?si=abc&t=42"
+    r = await client.get("/unfurl", params={"url": link})
+    assert r.json() == {
+        "url": link,
+        "title": "Never Gonna Give You Up",
+        "description": "Rick Astley",
+        "image_url": f"https://i.ytimg.com/vi/{VIDEO}/hqdefault.jpg",
+        "embed": {"provider": "youtube", "video_id": VIDEO, "start_seconds": 42},
+    }
+    assert calls == [
+        "https://www.youtube.com/oembed?url=https%3A%2F%2Fwww.youtube.com"
+        f"%2Fwatch%3Fv%3D{VIDEO}&format=json"
+    ]
+
+    r2 = await client.get("/unfurl", params={"url": link})
+    assert r2.json() == r.json()
+    assert len(calls) == 1
+
+
+async def test_an_empty_cached_youtube_row_is_refetched(client, monkeypatch):
+    await make_user()
+    await login(client)
+    link = f"https://www.youtube.com/watch?v={VIDEO}"
+    await db.execute(
+        "INSERT INTO unfurl_cache (url, title, description, image_url, fetched_at)"
+        " VALUES (?, NULL, NULL, NULL, ?)",
+        (link, db.utc_now()),
+    )
+
+    async def fake_fetch(url):
+        return url, OEMBED_JSON
+
+    monkeypatch.setattr(unfurl_service, "fetch_head", fake_fetch)
+    r = await client.get("/unfurl", params={"url": link})
+    assert r.json()["title"] == "Never Gonna Give You Up"
+    row = await db.fetch_one("SELECT title FROM unfurl_cache WHERE url = ?", (link,))
+    assert row["title"] == "Never Gonna Give You Up"
+
+
+async def test_a_failed_oembed_falls_back_to_the_page_scrape(client, monkeypatch):
+    await make_user()
+    await login(client)
+    calls = []
+
+    async def fake_fetch(url):
+        calls.append(url)
+        if url.startswith(unfurl_service.YOUTUBE_OEMBED):
+            raise httpx.ConnectError("oEmbed unreachable")
+        return url, CANNED_HTML
+
+    monkeypatch.setattr(unfurl_service, "fetch_head", fake_fetch)
+    link = f"https://www.youtube.com/shorts/{VIDEO}"
+    r = await client.get("/unfurl", params={"url": link})
+    body = r.json()
+    assert body["title"] == "OG Title"
+    assert body["embed"]["video_id"] == VIDEO
+    assert calls[-1] == link
+
+
 # ---------------------------------------------------------------------------
 # Summarize
 # ---------------------------------------------------------------------------
