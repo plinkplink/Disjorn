@@ -63,6 +63,8 @@
 "approval-show" = false
 "approval-act" = false
 "apply-posted-write" = false
+"backlog-list" = false
+"backlog-file" = false
 
 # NOTE there is no `wake` line in either seat section, and adding one grants
 # nothing: the broker refuses `wake` to every resident identity in code, before
@@ -98,6 +100,8 @@
 # capability appears only where all three agree — which is what makes arming a
 # witnessed change rather than one flipped bit.
 "apply-posted-write" = false
+"backlog-list" = false
+"backlog-file" = false
 
 # THE WAKE CALLER (SPECS/2026-08-25-agentic-residents.md). plink, at the
 # keyboard, from his own uid — the section name is the identity his uid maps to

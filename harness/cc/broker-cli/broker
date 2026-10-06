@@ -523,6 +523,40 @@ VERB_SURFACE = {
             },
         },
     },
+    "backlog-list": {
+        "help": "list backlog rows of one status, newest first",
+        "args": {
+            "status": {
+                "flag": "--status",
+                "type": "string",
+                "required": False,
+                "help": "'open' (the default), 'built', 'rejected', 'duplicate' or 'spec'd'.",
+                "pattern": "^(open|built|rejected|duplicate|spec'd)$",
+            },
+            "limit": {
+                "flag": "--limit",
+                "type": "integer",
+                "required": False,
+                "help": "Max rows, 1-50 (newest first). Default 20.",
+                "minimum": 1,
+                "maximum": 50,
+            },
+        },
+    },
+    "backlog-file": {
+        "help": "file one open backlog row as yourself",
+        "args": {
+            "text": {
+                "flag": "--text",
+                "type": "string",
+                "required": True,
+                "help": "The request, 1-2000 chars, verbatim. One paragraph; link the detail.",
+                "min_len": 1,
+                "max_len": 2000,
+                "no_nul": True,
+            },
+        },
+    },
 }
 # ── END GENERATED VERB SURFACE ──────────────────────────────────────────
 

@@ -334,6 +334,13 @@ _REPO_PATH_COMPONENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 MAX_APPROVAL_ROWS = 200
 MAX_APPROVAL_REMARKS_CHARS = 4000
 APPROVAL_ACTIONS = ("approve", "deny", "rework")
+# The resident backlog verbs. The text cap is the server's `/backlog` cap and is
+# not restated here: the server's refusal reaches the seat verbatim.
+BACKLOG_STATUSES = ("open", "built", "rejected", "duplicate", "spec'd")
+MAX_BACKLOG_LIST_ROWS = 50
+BACKLOG_TEXT_CLIP = 300
+BACKLOG_PAGE = 200
+BACKLOG_DAILY_FILE_CAP = 10
 
 
 def build_unit_name(slug: str) -> str:
@@ -859,6 +866,8 @@ def _api_label(path: str) -> str:
         return "apps API"
     if path.startswith("/approval"):
         return "approval API"
+    if path.startswith("/backlog"):
+        return "backlog API"
     return "plan room API"
 
 
@@ -1904,6 +1913,9 @@ class Broker:
         self._builds: dict[str, tuple[Optional[str], int]] = {}
         # Same shape for the action budget: resident -> (utc_date, count).
         self._actions: dict[str, tuple[Optional[str], int]] = {}
+        # Backlog filings per seat for the day, under the same reservation rule.
+        self._backlog_lock = threading.Lock()
+        self._backlog_files: dict[str, tuple[Optional[str], int]] = {}
         # BL-D4: slugs of builds currently in flight.
         self._active_builds: set[str] = set()
         # Detached build reaper threads, kept ONLY so tests can join them;
@@ -1944,6 +1956,8 @@ class Broker:
             "approval-list": self._verb_approval_list,
             "approval-show": self._verb_approval_show,
             "approval-act": self._verb_approval_act,
+            "backlog-list": self._verb_backlog_list,
+            "backlog-file": self._verb_backlog_file,
             # The fails-closed Tier-1 wall: the only verb here that writes
             # outside the resident's own volume, and only on a #custodian record
             # the broker read itself.
@@ -2444,9 +2458,7 @@ class Broker:
 
         try:
             out = self.verbs[verb](resident, args)
-            # Verbs return (result, summary) or (result, summary, audit_extra); only
-            # start-build uses the third slot today (BL-D3's `build_started`
-            # marker), so no other handler had to change.
+            # A third slot is audit extras: the markers a daily count reads back.
             result, summary, extra = out if len(out) == 3 else (*out, None)
         except VerbError as exc:
             allowed = exc.code not in ("bad-args", "over-budget", "verb-disabled",
@@ -5926,6 +5938,100 @@ class Broker:
                  "line": format_approval_line(proposal) if proposal else None},
                 f"{resident} {action} on proposal #{proposal_id} "
                 f"-> {proposal.get('decision', '?')}")
+
+    # ------------------------------------------------------------ backlog
+
+    def _verb_backlog_list(self, resident: str, args: dict) -> tuple[dict, str]:
+        """One status, newest first; `open` unless another is named."""
+        _reject_unknown(args, {"status", "limit"})
+        status = _check_str(args, "status", max_len=12) or "open"
+        if status not in BACKLOG_STATUSES:
+            raise _bad(f"status must be one of {', '.join(BACKLOG_STATUSES)}")
+        limit = _check_int(args, "limit", 20, 1, MAX_BACKLOG_LIST_ROWS)
+        matched: list[dict] = []
+        from_id = 0
+        while True:
+            page = self.planroom_api(
+                self.disjorn, "GET",
+                f"/backlog?from_id={from_id}&limit={BACKLOG_PAGE}")
+            if not isinstance(page, list):
+                raise VerbError("exec-failure", "backlog API answered a non-list")
+            matched += [r for r in page if r.get("status") == status]
+            if len(page) < BACKLOG_PAGE:
+                break
+            from_id = int(page[-1]["id"]) + 1
+        rows = []
+        for r in matched[::-1][:limit]:
+            text = str(r.get("text") or "")
+            if len(text) > BACKLOG_TEXT_CLIP:
+                text = text[:BACKLOG_TEXT_CLIP - 1] + "…"
+            rows.append({"id": r.get("id"), "text": text,
+                         "author": r.get("author"),
+                         "created_at": r.get("created_at"),
+                         "status": r.get("status"),
+                         "spec_ref": r.get("spec_ref")})
+        return ({"status": status, "rows": rows, "count": len(rows),
+                 "truncated": len(matched) > limit},
+                f"{len(rows)} {status} backlog row(s)")
+
+    def _verb_backlog_file(self, resident: str, args: dict) -> tuple:
+        """One `open` row whose author is the calling seat's peer identity,
+        never a name from `args`."""
+        _reject_unknown(args, {"text"})
+        text = _check_str(args, "text", required=True, max_len=MAX_REQUEST_BYTES)
+        self._reserve_backlog_file(resident)
+        try:
+            row = self.planroom_api(self.disjorn, "POST", "/backlog",
+                                    {"text": text, "on_behalf_of": resident})
+        except VerbError:
+            self._release_backlog_file(resident)
+            raise
+        return ({"row": row},
+                f"filed backlog #{row.get('id')} for {resident}",
+                {"backlog_filed": True})
+
+    def _count_backlog_filed(self, resident: str, today: str) -> int:
+        n = 0
+        try:
+            with open(self.audit_path, "r", encoding="utf-8") as fh:
+                for raw in fh:
+                    if "backlog_filed" not in raw or resident not in raw:
+                        continue
+                    try:
+                        rec = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    if (rec.get("resident") == resident
+                            and rec.get("verb") == "backlog-file"
+                            and rec.get("backlog_filed") is True
+                            and str(rec.get("ts", ""))[:10] == today):
+                        n += 1
+        except OSError:
+            return 0
+        return n
+
+    def _reserve_backlog_file(self, resident: str) -> None:
+        """The audit log is the count after a restart, so the cap outlives one."""
+        cap = BACKLOG_DAILY_FILE_CAP
+        with self._backlog_lock:
+            today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
+            date, count = self._backlog_files.get(resident, (None, 0))
+            if date != today:
+                count = self._count_backlog_filed(resident, today)
+            if count >= cap:
+                self._backlog_files[resident] = (today, count)
+                raise VerbError(
+                    "over-budget",
+                    f"{resident} has filed {count} backlog rows today, the "
+                    f"daily cap of {cap}; nothing was filed. The count resets "
+                    "at 00:00 UTC.")
+            self._backlog_files[resident] = (today, count + 1)
+
+    def _release_backlog_file(self, resident: str) -> None:
+        with self._backlog_lock:
+            date, count = self._backlog_files.get(resident, (None, 0))
+            if count > 0:
+                self._backlog_files[resident] = (date, count - 1)
 
     # --------------------------------------- the fails-closed Tier-1 wall
 

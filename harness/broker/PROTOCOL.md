@@ -901,6 +901,30 @@ allowlist, and the server refuses every `/approval` call with a 503 naming
 `APPROVAL_ENABLED` until plink arms it. A disarmed surface and an empty one do
 not read alike.
 
+### The backlog verbs — `backlog-list`, `backlog-file`
+
+SPECS/2026-10-05-backlog-from-resident-seats.md. Both go to the server's
+`/backlog` as the broker's own bot.
+
+- **`backlog-list`** — args `{"status": str, "limit": int}`, both optional.
+  `status` is one of `open` (the default), `built`, `rejected`, `duplicate`,
+  `spec'd`; `limit` 1..50, default 20. Result `{"status": str, "rows": [{id,
+  text, author, created_at, status, spec_ref}], "count": int, "truncated":
+  bool}`, newest first, `text` clipped to 300 chars.
+- **`backlog-file`** — args `{"text": str}`. The server's `POST /backlog`
+  takes `on_behalf_of` only from a bot on `BACKLOG_RELAY_BOT_NAMES` (default
+  `["broker"]`) and only as a `res-*` label; **the broker stamps it** from the
+  caller's SO_PEERCRED seat name. The row's author is that label, the text cap
+  is the `/backlog` slash command's, and the server announces the filing in
+  #custodian. Result `{"row": {...}}`; a server refusal comes back verbatim.
+  **At most 10 filings per seat per UTC day**: the 11th is `over-budget` and
+  audited. The count is read back from the audit log (`backlog_filed: true`
+  lines), so a broker restart does not reset it, and a refused filing spends
+  nothing.
+
+No triage verb exists here: a status change is a person's act
+(`services/backlog.py`). Both verbs ship OFF.
+
 ### `apply-posted-write` — the fails-closed Tier-1 wall
 
 Same spec, item 2. The tiers spec's target state — "an unposted write fails
