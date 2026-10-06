@@ -35,6 +35,7 @@ fake in tests): ``events()``, ``send()``, ``get_messages()``, ``typing()``,
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import re
 from datetime import datetime, timezone
@@ -93,6 +94,10 @@ class SummonAdapter:
         self._restart_note = ""
         self.hops = hops or HopArbiter(config.hops)
         self.posts = posts or PostLedger(config.posts.state_path)
+        self._sends_trace = _accepts(getattr(client, "send", None), "trace")
+        if not self._sends_trace:
+            logger.warning("this SDK's send() takes no trace=; replies go "
+                           "out without their steps")
 
     # --------------------------------------------------------------- run loop
 
@@ -326,7 +331,7 @@ class SummonAdapter:
                 self.config.summon.custodian_channel_id,
                 format_summary(
                     summoner=summoner, where=where,
-                    action_count=result.action_count,
+                    action_count=_audit_actions(result),
                     duration_sec=result.duration_sec, ok=False,
                     model=result.gate_actual,
                     posted_seq=posted[0], posted_chars=posted[1],
@@ -376,9 +381,10 @@ class SummonAdapter:
             logger.warning("hand-signed reply: its last line signs as %s "
                            "(summon by %s in %s)", self.config.summon.bot_name,
                            summoner, where)
+        trace = result.trace if result.trace and result.trace["total"] else None
         posted = await self._post_reply(channel_id, text, where,
                                         reply_to=trigger_id,
-                                        attribution=attribution)
+                                        attribution=attribution, trace=trace)
 
         # Fail-loud, never fail-over: on drift the reply still went out above;
         # here the house gets a loud alert naming expected vs actual.
@@ -394,7 +400,7 @@ class SummonAdapter:
             self.config.summon.custodian_channel_id,
             format_summary(
                 summoner=summoner, where=where,
-                action_count=result.action_count,
+                action_count=_audit_actions(result),
                 duration_sec=result.duration_sec, ok=result.ok,
                 model=display_model,
                 posted_seq=posted[0], posted_chars=posted[1],
@@ -403,15 +409,13 @@ class SummonAdapter:
         )
 
     async def _post_reply(self, channel_id: int, text: str, where: str, *,
-                          reply_to=None, attribution=None
+                          reply_to=None, attribution=None, trace=None
                           ) -> tuple[Optional[int], Optional[int]]:
-        """Post this summon's reply and return (seq, chars) as the SERVER
-        answered — the evidence the audit line carries and the ledger keeps.
-        (None, None) when the send failed: nothing is recorded, and the audit
-        line says `posted none`, because a post that did not happen must not
-        leave a trace that reads as if it did."""
+        """Post this summon's reply; (seq, chars) as the server answered, or
+        (None, None) when the send failed, so the audit line says `posted
+        none` instead of claiming a post that did not happen."""
         sent = await self._safe_send(channel_id, text, reply_to=reply_to,
-                                     attribution=attribution)
+                                     attribution=attribution, trace=trace)
         if not sent:
             return None, None
         seq = sent.get("seq") if isinstance(sent, dict) else None
@@ -495,16 +499,41 @@ class SummonAdapter:
             logger.debug("typing failed for channel %s", channel_id, exc_info=True)
 
     async def _safe_send(self, channel_id: int, content: str, *, reply_to=None,
-                         attribution=None):
+                         attribution=None, trace=None):
         """Send, never raise. Returns the server's message dict (seq included)
         so a caller that needs evidence of the post has it; None on failure."""
         extra = {} if attribution is None else {"attribution": attribution}
+        if trace is not None and self._sends_trace:
+            extra["trace"] = trace
         try:
             return await self.client.send(channel_id, content, reply_to=reply_to,
                                           **extra)
-        except Exception:  # noqa: BLE001 — a failed post never crashes the daemon
+        except Exception as exc:  # noqa: BLE001 — a failed post never crashes the daemon
+            if "trace" in extra and _status(exc) == 422:
+                logger.warning("server refused the trace; sending without it")
+                return await self._safe_send(channel_id, content,
+                                             reply_to=reply_to,
+                                             attribution=attribution)
             logger.warning("send to channel %s failed", channel_id, exc_info=True)
             return None
+
+
+def _accepts(send, name: str) -> bool:
+    try:
+        params = inspect.signature(send).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(p.name == name or p.kind is p.VAR_KEYWORD for p in params)
+
+
+def _status(exc: Exception) -> Optional[int]:
+    return getattr(getattr(exc, "response", None), "status_code", None)
+
+
+def _audit_actions(result) -> Optional[int]:
+    """The steps chip and the audit line both count top-level tool calls."""
+    trace = getattr(result, "trace", None)
+    return trace["total"] if trace is not None else result.action_count
 
 
 def _hand_signed(text: str, bot_name: str) -> bool:

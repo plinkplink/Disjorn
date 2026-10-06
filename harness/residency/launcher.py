@@ -72,6 +72,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
 from config import MODEL_GATE_ALERT, MODEL_GATE_OFF, MODEL_GATE_REFUSE
+from tool_trace import TraceRecorder
 
 if TYPE_CHECKING:  # pragma: no cover
     from config import ContainerConfig
@@ -166,6 +167,7 @@ class SessionResult:
     # actions THIS session took out of a log every session in the seat appends
     # to. None when the output named none (the session never got that far).
     session_id: Optional[str] = None
+    trace: Optional[dict] = None
 
 
 def _first_int(data: dict) -> Optional[int]:
@@ -324,6 +326,7 @@ class StreamGate:
         # Recorded for the caller/logs in alert mode (refuse mode returns a
         # verdict instead of recording).
         self.mismatch: Optional[GateVerdict] = None
+        self.trace = TraceRecorder()
 
     # ------------------------------------------------------------- properties
 
@@ -363,7 +366,7 @@ class StreamGate:
 
     # ----------------------------------------------------------------- intake
 
-    def feed_line(self, line: str) -> Optional[GateVerdict]:
+    def feed_line(self, line: str, at: Optional[float] = None) -> Optional[GateVerdict]:
         """Consume one stdout line. Returns a verdict iff the session must die."""
         line = line.strip()
         if not line:
@@ -379,6 +382,7 @@ class StreamGate:
             sid = event.get("session_id")
             if isinstance(sid, str) and sid.strip():
                 self.session_id = sid.strip()
+        self.trace.observe(event, at)
 
         etype = event["type"]
         if etype == "result":
@@ -563,6 +567,7 @@ class ContainerLauncher:
 
         stdout, stderr, verdict, timed_out = await self._pump(proc, prompt, gate, started)
         duration = time.monotonic() - started
+        trace = gate.trace.payload() if gate.saw_events else None
 
         if verdict is not None:
             logger.error(
@@ -581,6 +586,7 @@ class ContainerLauncher:
                 model=verdict.actual,
                 models_seen=list(gate.models_seen),
                 session_id=gate.session_id,
+                trace=trace,
             )
 
         if timed_out:
@@ -600,6 +606,7 @@ class ContainerLauncher:
                 models_seen=list(gate.models_seen),
                 session_id=gate.session_id,
                 timed_out=True,
+                trace=trace,
             )
 
         exit_code = proc.returncode
@@ -611,6 +618,7 @@ class ContainerLauncher:
                 error=f"session exit {exit_code}: {stderr.strip()[:500]}",
                 models_seen=list(gate.models_seen),
                 session_id=gate.session_id,
+                trace=trace,
             )
 
         # End-of-stream rule (missing/model-less init). Only reachable when the
@@ -628,6 +636,7 @@ class ContainerLauncher:
                 gate_actual=verdict.actual,
                 models_seen=list(gate.models_seen),
                 session_id=gate.session_id,
+                trace=trace,
             )
 
         if gate.saw_events:
@@ -659,6 +668,7 @@ class ContainerLauncher:
             duration_sec=duration,
             models_seen=list(gate.models_seen),
             session_id=session_id,
+            trace=trace,
         )
 
     # ------------------------------------------------------------------ pump
@@ -729,14 +739,16 @@ class ContainerLauncher:
                         break
                     line = bytes(buf[:nl])
                     del buf[: nl + 1]
-                    verdict = gate.feed_line(line.decode("utf-8", "replace"))
+                    verdict = gate.feed_line(line.decode("utf-8", "replace"),
+                                             time.monotonic())
                     if verdict is not None:
                         break
                 if verdict is not None:
                     break
             if verdict is None and not timed_out and buf:
                 # Trailing line with no newline (the single-object json shape).
-                verdict = gate.feed_line(bytes(buf).decode("utf-8", "replace"))
+                verdict = gate.feed_line(bytes(buf).decode("utf-8", "replace"),
+                                         time.monotonic())
         finally:
             if not feeder.done():
                 feeder.cancel()
