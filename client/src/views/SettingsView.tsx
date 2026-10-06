@@ -534,7 +534,12 @@ function ResetPasswordSection() {
                 </span>
               </div>
               {req.note !== null && (
-                <p className="settings-reset-request-note">{req.note}</p>
+                <div className="settings-reset-request-note">
+                  <span className="settings-hint">
+                    Unverified — anyone can file this. The first request&apos;s note:
+                  </span>
+                  <p>{req.note}</p>
+                </div>
               )}
               <div className="settings-inline">
                 <button type="button" className="btn btn-primary" onClick={() => resetNow(req)}>
