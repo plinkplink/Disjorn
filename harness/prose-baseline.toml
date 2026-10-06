@@ -88,7 +88,7 @@
 "server/app/config.py" = 7724
 "server/app/db.py" = 5989
 "server/app/gate.py" = 9627
-"server/app/main.py" = 6433
+"server/app/main.py" = 6402
 "server/app/models.py" = 7494
 "server/app/origin_wall.py" = 1497
 "server/app/privacy.py" = 2353

@@ -8,6 +8,7 @@
    - On RECONNECT (any ready after the first): refetch GET /channels and, for
      every channel with local messages, backfill `?from_seq=lastSeq+1`
      (current-state semantics — edits applied, tombstones drop deletions).
+     The FIRST ready retries the channel list if the boot fetch lost it.
    - Focus protocol: sendFocus on every channel switch and on window
      blur/focus — the server suppresses push notifications for focused
      channels, so this must stay accurate. The last focus is re-sent after
@@ -29,6 +30,8 @@ import type { Message, ServerFrame, SettableStatus } from "./types";
 
 const BACKOFF_MIN_MS = 1000;
 const BACKOFF_MAX_MS = 30000;
+/** A socket younger than this is a replacement already in flight, not a suspect. */
+const REPLACE_MIN_AGE_MS = 5000;
 
 type SocketState = "idle" | "connecting" | "open" | "ready";
 
@@ -40,6 +43,9 @@ export class DisjornSocket {
   private stopped = true;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private focusedChannelId: number | null = null;
+  private openedAt = 0;
+  /** The socket a replacement superseded, closed once the new one is ready. */
+  private retiring: WebSocket | null = null;
 
   /** Open the socket (and keep it open until disconnect()). Idempotent. */
   connect(): void {
@@ -58,9 +64,36 @@ export class DisjornSocket {
     this.attempt = 0;
     this.hadReady = false;
     this.state = "idle";
+    this.closeRetiring();
     const ws = this.ws;
     this.ws = null;
     ws?.close();
+  }
+
+  /**
+   * The app came back (foreground, network, bfcache). A pending backoff is
+   * cut short so a resumed phone does not sit out a 30 s timer. When `stale`
+   * says we were away long enough, the existing socket is not trusted: iOS
+   * resumes sockets that still read OPEN but are dead, and the server sends
+   * no heartbeat that would expose them. A replacement opens instead, and its
+   * ready resyncs whatever was missed.
+   */
+  wake(stale: boolean): void {
+    if (this.stopped) return;
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+      this.attempt = 0;
+      this.open();
+      return;
+    }
+    if (this.ws === null) {
+      this.open();
+      return;
+    }
+    if (stale && Date.now() - this.openedAt >= REPLACE_MIN_AGE_MS) {
+      this.replace();
+    }
   }
 
   /* ---- client ops ---- */
@@ -90,11 +123,29 @@ export class DisjornSocket {
     }
   }
 
+  /* The old socket stays open until the new one is ready: closing it first
+     would make the server broadcast us offline and then online again. Its
+     frames are ignored from here on; the new ready's resync covers them. */
+  private replace(): void {
+    this.closeRetiring();
+    this.retiring = this.ws;
+    this.ws = null;
+    this.state = "idle";
+    this.open();
+  }
+
+  private closeRetiring(): void {
+    const old = this.retiring;
+    this.retiring = null;
+    old?.close();
+  }
+
   private open(): void {
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     const ws = new WebSocket(`${proto}//${location.host}/ws`);
     this.ws = ws;
     this.state = "connecting";
+    this.openedAt = Date.now();
 
     ws.onopen = () => {
       if (ws !== this.ws) return;
@@ -114,6 +165,7 @@ export class DisjornSocket {
       if (ws !== this.ws) return;
       this.ws = null;
       this.state = "idle";
+      this.closeRetiring();
       this.scheduleReconnect();
     };
     // onerror always precedes onclose; close handling is enough.
@@ -135,6 +187,7 @@ export class DisjornSocket {
       case "ready": {
         this.state = "ready";
         this.attempt = 0;
+        this.closeRetiring();
         const isReconnect = this.hadReady;
         this.hadReady = true;
         // Focus is per-connection server state — restore it first so push
@@ -143,6 +196,7 @@ export class DisjornSocket {
           this.send({ op: "focus", channel_id: this.focusedChannelId });
         }
         if (isReconnect) void this.resync();
+        else void useChannels.getState().ensureLoaded();
         return;
       }
       case "message_create": {

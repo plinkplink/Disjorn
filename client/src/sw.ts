@@ -39,8 +39,16 @@ const precachePaths = new Set(
    (see src/pwa.ts). On a first install there is no controller to wait behind,
    so activation still happens immediately. */
 self.addEventListener("install", (event) => {
+  // Bypass the HTTP cache: a heuristically cached index.html from the last
+  // build would otherwise be precached under this one's asset names.
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(precacheUrls)),
+    caches
+      .open(CACHE_NAME)
+      .then((cache) =>
+        cache.addAll(
+          precacheUrls.map((url) => new Request(url, { cache: "reload" })),
+        ),
+      ),
   );
 });
 

@@ -19,6 +19,7 @@ import {
   writeChannelHash,
 } from "../hashRoute";
 import { POPUP_BLOCKED_NOTE, openMinted } from "../lib/openMinted";
+import { usePush } from "../push";
 import { useApps } from "../stores/apps";
 import { useChannels } from "../stores/channels";
 import { useMembers } from "../stores/members";
@@ -38,6 +39,9 @@ import { socket } from "../ws";
 import { ChatView } from "./ChatView";
 import PlanRoomView from "./PlanRoomView";
 import { SettingsView } from "./SettingsView";
+
+/** Hidden at least this long, a resumed page replaces its socket and resyncs. */
+const RESUME_STALE_AFTER_MS = 30_000;
 
 const SETTINGS_HASH = "#/settings";
 const PLANROOM_HASH = "#/planroom";
@@ -489,6 +493,7 @@ export function AppShell() {
   const channels = useChannels((s) => s.channels);
   const activeChannelId = useChannels((s) => s.activeChannelId);
   const loaded = useChannels((s) => s.loaded);
+  const loadFailed = useChannels((s) => s.loadFailed);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [overlay, setOverlay] = useState<Overlay>(() => overlayFromHash());
   const showSettings = overlay === "settings";
@@ -514,7 +519,7 @@ export function AppShell() {
   // Boot: load the sidebar, open the socket, adopt a deep-linked route.
   useEffect(() => {
     const st = useChannels.getState();
-    void st.refresh();
+    void st.ensureLoaded();
     /* The apps menu is its own list — GET /apps, not GET /channels (brief
        D9) — so it loads alongside, and resyncs alongside on reconnect (ws.ts).
        Builders come with it because every app row wears its builder's face,
@@ -527,6 +532,7 @@ export function AppShell() {
     void useApps.getState().loadConfig();
     if (overlayFromHash() === "none") st.setActive(channelIdFromHash());
     socket.connect();
+    void usePush.getState().sync();
     // Route changes from outside (notification deep-links, back button).
     const onHash = () => {
       const next = overlayFromHash();
@@ -671,11 +677,51 @@ export function AppShell() {
         if (seq > 0) void st.markRead(channel.id, seq);
       }
     };
+    // A phone backgrounding the app hides the page without always blurring
+    // the window, and the socket can outlive that by minutes.
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") onBlur();
+      else onFocus();
+    };
     window.addEventListener("blur", onBlur);
     window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       window.removeEventListener("blur", onBlur);
       window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, []);
+
+  // Resume (foreground, back online, restored from bfcache): reconnect now
+  // instead of after the backoff, replace a socket that may have died while
+  // we were away, and retry a channel list that never landed.
+  useEffect(() => {
+    let hiddenAt: number | null = null;
+    const resume = (stale: boolean) => {
+      socket.wake(stale);
+      void useChannels.getState().ensureLoaded();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") {
+        hiddenAt = Date.now();
+        return;
+      }
+      const away = hiddenAt === null ? 0 : Date.now() - hiddenAt;
+      hiddenAt = null;
+      resume(away >= RESUME_STALE_AFTER_MS);
+    };
+    const onPageShow = (e: PageTransitionEvent) => {
+      if (e.persisted) resume(true);
+    };
+    const onOnline = () => resume(true);
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("pageshow", onPageShow);
+    window.addEventListener("online", onOnline);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("pageshow", onPageShow);
+      window.removeEventListener("online", onOnline);
     };
   }, []);
 
@@ -831,6 +877,24 @@ export function AppShell() {
               +
             </button>
           </div>
+          {!loaded && (
+            <span className="channel-section" style={{ textTransform: "none" }}>
+              {loadFailed ? (
+                <>
+                  Couldn&rsquo;t load.{" "}
+                  <button
+                    className="link-btn"
+                    type="button"
+                    onClick={() => void useChannels.getState().ensureLoaded()}
+                  >
+                    Retry
+                  </button>
+                </>
+              ) : (
+                "Loading…"
+              )}
+            </span>
+          )}
           {mains.map((c) => (
             <ChannelRow
               key={c.id}
@@ -864,7 +928,7 @@ export function AppShell() {
             />
           ))}
           <div className="channel-section">Direct messages</div>
-          {dms.length === 0 && (
+          {loaded && dms.length === 0 && (
             <span className="channel-section" style={{ textTransform: "none" }}>
               No DMs yet
             </span>

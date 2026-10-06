@@ -274,18 +274,20 @@ async def validation_exception_handler(
     return JSONResponse(status_code=422, content=validation_error_body(exc.errors()))
 
 
+REVALIDATE = {"Cache-Control": "no-cache"}
+
+
 def mount_client(app: FastAPI) -> None:
     """Serve the built client (client/dist) with an SPA fallback.
 
     /assets and /icons are mounted as static directories. Everything else is
     handled by a 404 exception handler: unmatched GETs outside API_PREFIXES
     serve a root-level dist file if one exists (sw.js, manifest.webmanifest,
-    favicons) and fall back to index.html for SPA deep links. API paths keep
-    their JSON 404s. A handler (rather than a catch-all route) is used so it
-    never shadows API routes — including ones registered after startup.
+    favicons) and fall back to index.html for SPA deep links, always
+    revalidated since their names outlive a build. API paths keep their JSON
+    404s. A handler, not a catch-all route, so it never shadows API routes.
 
-    No-op when the build output is missing, keeping dev servers and tests
-    unaffected.
+    No-op when the build output is missing (dev servers, tests).
     """
     index_html = CLIENT_DIST / "index.html"
     if not index_html.is_file():
@@ -308,8 +310,8 @@ def mount_client(app: FastAPI) -> None:
                     media_type = (
                         "application/manifest+json" if candidate.suffix == ".webmanifest" else None
                     )
-                    return FileResponse(candidate, media_type=media_type)
-            return FileResponse(index_html)
+                    return FileResponse(candidate, media_type=media_type, headers=REVALIDATE)
+            return FileResponse(index_html, headers=REVALIDATE)
         return await http_exception_handler(request, exc)
 
 
