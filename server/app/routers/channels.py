@@ -581,6 +581,7 @@ async def create_channel(body: ChannelCreateRequest, user: CurrentUser) -> Chann
         name=name,
         visibility=body.visibility,
         created_by=user.id,
+        mention_only=is_mention_only(channel_id),
     )
 
 

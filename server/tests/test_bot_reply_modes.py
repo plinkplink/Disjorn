@@ -180,6 +180,10 @@ async def test_every_message_is_refused_in_a_mention_only_room(client, mention_o
     assert rows[main]["mention_only"] is True
     assert rows[shed]["mention_only"] is False
 
+    mention_only(main, shed + 1)
+    yard = (await client.post("/channels", json={"name": "yard"})).json()
+    assert yard["id"] == shed + 1 and yard["mention_only"] is True
+
 
 async def test_a_real_mode_change_publishes_member_update_and_a_repeat_does_not(client, bus):
     await make_user("alice")
