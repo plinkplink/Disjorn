@@ -103,6 +103,28 @@ async def test_a_new_membership_row_replies_on_mention_and_a_new_bot_takes_no_dm
         )
 
 
+async def test_reply_modes_apply_to_a_database_that_already_has_later_migrations(
+    tmp_path, tmp_db_path, monkeypatch
+):
+    without = tmp_path / "migrations"
+    without.mkdir()
+    for path in db.MIGRATIONS_DIR.glob("*.sql"):
+        if path.name != "018_bot_reply_modes.sql":
+            (without / path.name).write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    real = db.MIGRATIONS_DIR
+    await db.close()
+    await db.connect()
+    try:
+        monkeypatch.setattr(db, "MIGRATIONS_DIR", without)
+        assert "019_channel_deletions.sql" in await db.run_migrations()
+        monkeypatch.setattr(db, "MIGRATIONS_DIR", real)
+        assert await db.run_migrations() == ["018_bot_reply_modes.sql"]
+        columns = {r["name"] for r in await db.fetch_all("PRAGMA table_info(channel_members)")}
+        assert "reply_mode" in columns
+    finally:
+        await db.close()
+
+
 # ---------------------------------------------------------------------------
 # Adding and changing a mode
 # ---------------------------------------------------------------------------
@@ -354,6 +376,10 @@ async def test_leaving_a_bot_dm_deletes_the_room_and_tells_its_members(client, b
     [deleted] = [e for e in bus if e["type"] == "channel_delete"]
     assert deleted["channel_id"] == dm and deleted["by_user_id"] == alice
     assert deleted["recipients"] == [["bot", bot_id], ["user", alice]]
+    record = await db.fetch_one("SELECT * FROM channel_deletions WHERE channel_id = ?", (dm,))
+    assert record["channel_type"] == "dm_1to1" and record["channel_name"] is None
+    assert (record["deleted_by_type"], record["deleted_by_id"]) == ("user", alice)
+    assert record["message_count"] == 1 and record["member_count"] == 2
 
     assert (await client.post(f"/channels/{dm}/leave")).status_code == 404
     fresh = (await client.post("/dms", json={"bot_id": bot_id})).json()
