@@ -671,7 +671,7 @@ def read_build_ledger(path: Optional[str]) -> dict:
     out: dict = {}
     if not path or not os.path.exists(path):
         return out
-    with open(path, encoding="utf-8") as fh:
+    with open(path, encoding="utf-8", errors="replace") as fh:
         for raw in fh:
             try:
                 rec = json.loads(raw)

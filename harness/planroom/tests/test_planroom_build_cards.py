@@ -226,6 +226,14 @@ def test_an_unreadable_ledger_is_declared_not_a_crash(shelf):
     assert any("build ledger unreadable" in n for n in shelf.face["notes"])
 
 
+def test_a_ledger_with_an_invalid_byte_still_derives_its_good_lines(shelf):
+    shelf.push_branch()
+    with open(shelf.ledger, "wb") as fh:
+        fh.write(b'{"slug": "x", "seq": 1, "note": "\xff"}\n{not json\n')
+    shelf.build()
+    assert list(shelf.cards()) == [SLUG]
+
+
 def test_the_ledger_path_comes_from_the_build_block(shelf):
     shelf.push_branch()
     shelf.build()
