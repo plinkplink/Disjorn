@@ -1,6 +1,7 @@
 /* Settings (WP11) — hash #/settings. Sections:
      Profile        display-name edit + avatar upload with local preview
      Notifications  per-device Web Push enable/disable + notify_all_main pref
+     Sounds         per-device in-app chimes: on/off, mentions only, volume
      Reset password admin only: hand another account a temporary password
      Account        username + log out
    Push permission is requested HERE and only here (spec §10). */
@@ -19,6 +20,7 @@ import {
 } from "../api";
 import { isIos, isStandalone, useInstall } from "../install";
 import { usePush } from "../push";
+import { previewSound, useSoundSettings } from "../sounds";
 import { useSession } from "../stores/session";
 import type { AdminUserRow } from "../types";
 import { socket } from "../ws";
@@ -278,6 +280,81 @@ function NotificationsSection() {
   );
 }
 
+/* ----------------------------------------------------------------- sounds */
+
+function SoundsSection() {
+  const enabled = useSoundSettings((s) => s.enabled);
+  const mentionsOnly = useSoundSettings((s) => s.mentionsOnly);
+  const volume = useSoundSettings((s) => s.volume);
+  const update = useSoundSettings((s) => s.update);
+  const percent = Math.round(volume * 100);
+
+  return (
+    <section className="settings-section">
+      <h2>Sounds</h2>
+      <label className="settings-toggle">
+        <input
+          type="checkbox"
+          checked={enabled}
+          onChange={(e) => update({ enabled: e.target.checked })}
+        />
+        <span>
+          Play a sound when a message arrives
+          <span className="settings-hint">
+            A soft chime for messages in other channels or while Disjorn is in
+            the background, a brighter one for DMs and @mentions of you. This
+            device only.
+          </span>
+        </span>
+      </label>
+      <label className="settings-toggle">
+        <input
+          type="checkbox"
+          checked={mentionsOnly}
+          disabled={!enabled}
+          onChange={(e) => update({ mentionsOnly: e.target.checked })}
+        />
+        <span>Only for DMs and @mentions</span>
+      </label>
+      <div className="field">
+        <label htmlFor="settings-sound-volume">Volume</label>
+        <div className="settings-inline">
+          <input
+            id="settings-sound-volume"
+            type="range"
+            min={0}
+            max={100}
+            step={5}
+            value={percent}
+            disabled={!enabled}
+            aria-valuetext={`${percent}%`}
+            onChange={(e) => update({ volume: Number(e.target.value) / 100 })}
+          />
+          <span className="settings-note settings-volume-value" aria-hidden>
+            {percent}%
+          </span>
+          <button
+            type="button"
+            className="btn"
+            disabled={!enabled}
+            onClick={() => previewSound("message", volume)}
+          >
+            Test message
+          </button>
+          <button
+            type="button"
+            className="btn"
+            disabled={!enabled}
+            onClick={() => previewSound("mention", volume)}
+          >
+            Test mention
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 /* ------------------------------------------------------------------- app */
 
 /** Install hint (WP12): renders only when there is something to say —
@@ -495,6 +572,7 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
       <div className="settings-body">
         <ProfileSection />
         <NotificationsSection />
+        <SoundsSection />
         <InstallSection />
         <ResetPasswordSection />
         <section className="settings-section">

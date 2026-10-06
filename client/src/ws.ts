@@ -11,15 +11,20 @@
    - Focus protocol: sendFocus on every channel switch and on window
      blur/focus — the server suppresses push notifications for focused
      channels, so this must stay accurate. The last focus is re-sent after
-     every (re)connect because focus is per-connection server state. */
+     every (re)connect because focus is per-connection server state.
+   - Sounds: only live message_create frames can chime. History, backfill
+     and reconnect catch-up arrive over HTTP and never pass through here. */
 
+import { soundFor } from "./lib/messageSound";
+import { playSound, useSoundSettings } from "./sounds";
 import { useApps } from "./stores/apps";
 import { useChannelDelete } from "./stores/channelDelete";
 import { useChannels } from "./stores/channels";
 import { useMembership } from "./stores/membership";
 import { useMessages } from "./stores/messages";
 import { usePresence } from "./stores/presence";
-import type { ServerFrame, SettableStatus } from "./types";
+import { useSession } from "./stores/session";
+import type { Message, ServerFrame, SettableStatus } from "./types";
 
 const BACKOFF_MIN_MS = 1000;
 const BACKOFF_MAX_MS = 30000;
@@ -146,6 +151,7 @@ export class DisjornSocket {
         const isRead =
           useChannels.getState().activeChannelId === message.channel_id &&
           document.hasFocus();
+        this.chime(message, isRead);
         useChannels.getState().onMessageCreate(message, isRead);
         if (isRead) {
           void useChannels.getState().markRead(message.channel_id, message.seq);
@@ -194,6 +200,21 @@ export class DisjornSocket {
         useApps.getState().onAppUpdate(frame);
         return;
     }
+  }
+
+  private chime(message: Message, isRead: boolean): void {
+    const me = useSession.getState().user;
+    if (me === null) return;
+    const kind = soundFor(message, {
+      myUserId: me.id,
+      myNames: [me.username, me.display_name],
+      channelType: useChannels
+        .getState()
+        .channels.find((c) => c.id === message.channel_id)?.type,
+      readOnArrival: isRead,
+      mentionsOnly: useSoundSettings.getState().mentionsOnly,
+    });
+    if (kind !== null) playSound(kind);
   }
 
   /** After a reconnect: refresh the sidebar and close local message gaps. */

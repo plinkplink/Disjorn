@@ -2435,6 +2435,19 @@
   cursor: default;
 }
 
+.settings-toggle input:disabled + span {
+  color: var(--text-2);
+}
+
+.settings-inline input[type="range"] {
+  accent-color: var(--accent);
+}
+
+.settings-volume-value {
+  min-width: 4ch;
+  font-variant-numeric: tabular-nums;
+}
+
 .settings-logout {
   align-self: flex-start;
   color: var(--danger);

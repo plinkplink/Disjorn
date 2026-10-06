@@ -6,6 +6,9 @@ import "./app.css";
 import "./install"; // captures beforeinstallprompt at load (Settings uses it)
 import "./pwa"; // registers the service worker + update polling at load
 import { App } from "./App";
+import { installSoundUnlock } from "./sounds";
+
+installSoundUnlock();
 
 const rootEl = document.getElementById("root");
 if (rootEl === null) throw new Error("missing #root");
