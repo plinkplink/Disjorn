@@ -513,6 +513,12 @@ async def handle_bus_event(event: dict[str, Any]) -> None:
             event.get("owner_user_id"), {"type": "app_update", "app": event["app"]}
         )
         return
+    if etype == "approval_update":
+        frame = {"type": "approval_update", "proposal": event["proposal"]}
+        for uid in manager.connected_user_ids():
+            for ws in manager.user_sockets(uid):
+                await _send(ws, frame)
+        return
     if etype in _MEMBER_EVENT_TYPES:
         frame = {
             "type": etype,

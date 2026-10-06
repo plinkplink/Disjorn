@@ -20,7 +20,7 @@ from typing import Annotated, Literal, Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from .. import db
+from .. import db, events
 from ..config import get_settings
 from .auth import Actor, get_actor
 
@@ -144,6 +144,12 @@ async def _require_proposal(proposal_id: int) -> dict:
     return row
 
 
+async def _published(proposal_id: int) -> dict:
+    proposal = await _compose(await _require_proposal(proposal_id))
+    await events.publish({"type": "approval_update", "proposal": proposal})
+    return {"proposal": proposal}
+
+
 # ── reads ───────────────────────────────────────────────────────────────────
 
 @router.get("/approval/proposals")
@@ -220,7 +226,7 @@ async def create_proposal(actor: CurrentActor,
             await conn.execute(
                 "INSERT INTO approval_state (proposal_id, principal) "
                 "VALUES (?, ?)", (proposal_id, principal))
-    return {"proposal": await _compose(await _require_proposal(proposal_id))}
+    return await _published(proposal_id)
 
 
 def _acting_principal(actor: Actor, named: Optional[str]) -> str:
@@ -307,4 +313,4 @@ async def act_on_proposal(proposal_id: int, actor: CurrentActor,
             await conn.execute(
                 "UPDATE approval_proposal SET closed_at = ? WHERE id = ?",
                 (now, proposal_id))
-    return {"proposal": await _compose(await _require_proposal(proposal_id))}
+    return await _published(proposal_id)
