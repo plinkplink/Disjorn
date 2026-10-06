@@ -1,0 +1,78 @@
+"""Failed logins are throttled per client address and per username."""
+
+import time
+
+import httpx
+import pytest
+
+from app.services import throttle
+
+from .test_password import PASSWORD, login, make_user
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    now = [time.monotonic()]
+    monkeypatch.setattr(throttle, "_clock", lambda: now[0])
+    return now
+
+
+def client_from(app, house_origin, ip):
+    transport = httpx.ASGITransport(app=app, client=(ip, 4242))
+    return httpx.AsyncClient(
+        transport=transport, base_url=house_origin, headers={"Origin": house_origin}
+    )
+
+
+async def fail(client, username="alice", times=1):
+    for _ in range(times):
+        r = await login(client, username, "not the password")
+        assert r.status_code == 401
+
+
+async def test_five_failures_lock_the_username_even_for_the_right_password(client):
+    await make_user("alice")
+    await fail(client, times=5)
+    r = await login(client, "alice", PASSWORD)
+    assert r.status_code == 429
+    assert int(r.headers["retry-after"]) > 0
+
+
+async def test_the_username_lock_follows_the_name_across_addresses(app, house_origin):
+    await make_user("alice")
+    for n in range(5):
+        async with client_from(app, house_origin, f"10.1.0.{n}") as c:
+            await fail(c)
+    async with client_from(app, house_origin, "10.1.0.99") as c:
+        assert (await login(c, "Alice", PASSWORD)).status_code == 429
+
+
+async def test_unknown_usernames_are_counted_like_real_ones(client):
+    await fail(client, "ghost", times=5)
+    assert (await login(client, "ghost", "anything")).status_code == 429
+
+
+async def test_ten_failures_lock_the_address_but_not_another(app, house_origin):
+    await make_user("alice")
+    async with client_from(app, house_origin, "10.2.0.1") as c:
+        for n in range(10):
+            await fail(c, f"guess{n}")
+        assert (await login(c, "alice", PASSWORD)).status_code == 429
+    async with client_from(app, house_origin, "10.2.0.2") as other:
+        assert (await login(other, "alice", PASSWORD)).status_code == 200
+
+
+async def test_a_success_resets_the_username_count(client):
+    await make_user("alice")
+    await fail(client, times=4)
+    assert (await login(client, "alice", PASSWORD)).status_code == 200
+    await fail(client, times=4)
+    assert (await login(client, "alice", PASSWORD)).status_code == 200
+
+
+async def test_the_lock_lifts_after_fifteen_minutes(client, clock):
+    await make_user("alice")
+    await fail(client, times=5)
+    assert (await login(client, "alice", PASSWORD)).status_code == 429
+    clock[0] += 15 * 60
+    assert (await login(client, "alice", PASSWORD)).status_code == 200

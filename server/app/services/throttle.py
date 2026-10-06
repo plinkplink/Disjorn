@@ -13,6 +13,8 @@ _SWEEP_AT = 10_000
 
 _limiters: list["Limiter"] = []
 
+_clock = time.monotonic
+
 
 class Limiter:
     def __init__(self, limit: int, window_seconds: float) -> None:
@@ -31,14 +33,14 @@ class Limiter:
 
     def retry_after(self, key: str) -> int:
         """Whole seconds until `key` may act again; 0 while it is under the limit."""
-        now = time.monotonic()
+        now = _clock()
         hits = self._expire(key, now)
         if len(hits) < self.limit:
             return 0
         return max(1, math.ceil(hits[0] + self.window - now))
 
     def hit(self, key: str) -> None:
-        now = time.monotonic()
+        now = _clock()
         if len(self._hits) >= _SWEEP_AT:
             for stale in list(self._hits):
                 self._expire(stale, now)

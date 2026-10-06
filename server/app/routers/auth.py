@@ -39,6 +39,7 @@ from pydantic import BaseModel, Field
 from .. import db
 from ..config import get_settings
 from ..models import Bot, MemberType, User, UserStatus
+from ..services import throttle
 from ..services.accounts import note_password_reset
 
 router = APIRouter()
@@ -318,14 +319,29 @@ class LoginRequest(BaseModel):
     password: str
 
 
+_failed_logins_by_ip = throttle.Limiter(10, 15 * 60)
+_failed_logins_by_name = throttle.Limiter(5, 15 * 60)
+
+
 @router.post("/auth/login")
-async def login(body: LoginRequest, response: Response) -> User:
+async def login(body: LoginRequest, request: Request, response: Response) -> User:
+    ip = throttle.client_ip(request)
+    name = body.username.casefold()
+    wait = max(_failed_logins_by_ip.retry_after(ip), _failed_logins_by_name.retry_after(name))
+    if wait:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many failed logins. Try again later.",
+            headers={"Retry-After": str(wait)},
+        )
     row = await db.fetch_one("SELECT * FROM users WHERE username = ?", (body.username,))
     if row is None:
         _dummy_verify(body.password)
+    if row is None or not verify_password(row["password_hash"], body.password):
+        _failed_logins_by_ip.hit(ip)
+        _failed_logins_by_name.hit(name)
         raise HTTPException(status_code=401, detail="Invalid username or password")
-    if not verify_password(row["password_hash"], body.password):
-        raise HTTPException(status_code=401, detail="Invalid username or password")
+    _failed_logins_by_name.clear(name)
     if _ph.check_needs_rehash(row["password_hash"]):
         await db.execute(
             "UPDATE users SET password_hash = ? WHERE id = ?",
