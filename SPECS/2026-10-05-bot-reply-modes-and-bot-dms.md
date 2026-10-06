@@ -55,7 +55,7 @@ A bot in a channel answers only when its name is matched. There is no way to say
 
 **Residents.**
 - Gable: works unchanged for a single message, since `detector.py` returns `MODE_MENTION` when `has_context`. Gable's own follow-up (residency lane, after this ships, #3159 Q3): fold the messages that queue up in an always-room into the next session. Otherwise a five-message paste becomes five sessions with replies in between. Until that lands, a DM paste in several pieces costs several sessions.
-- Custodian resident: a **required rider on claudette.git** (`fix/2026-10-05-addressed-by-and-attribution`). It must merge and deploy BEFORE the server half deploys, never after (review card comment 75, BLOCKING). The adapter currently infers a DM from "exactly two humans in the room", caches that answer forever, and wakes on every message there, so the menu would lie for her. The rider deletes that inference and wakes with a "channel" wake when `context.addressed_by == "always"`.
+- Custodian resident: a **required rider on claudette.git** (`fix/2026-10-05-addressed-by-and-attribution`). It must ship with the server half, never after it (review card comment 75, BLOCKING; deploy order per #3189). The adapter currently infers a DM from "exactly two humans in the room", caches that answer forever, and wakes on every message there, so the menu would lie for her. The rider deletes that inference and wakes with a "channel" wake when `context.addressed_by == "always"`.
 
 A bot that should not be always-on anywhere keeps `dm_open = 0`, and its channel memberships stay on mentions unless a manager flips them. Residents can opt out harder in their own adapters later; that is outside this spec.
 
@@ -87,7 +87,7 @@ Moderate: one migration, two endpoints, one fan-out branch, three client compone
 2. `systemctl restart disjorn`, which applies 018.
 3. Client build.
 4. Set `MENTION_ONLY_CHANNEL_IDS=[4]` in server/.env before the restart.
-5. Order: the rider is merged and deployed first (`claudette-update.sh`).
+5. Order: the server half and the rider deploy in the same window, server restart first and `claudette-update.sh` right after (#3189). If the rider goes first she goes quiet in DMs until the server sends `always`. If the server goes first, the old member-count guess over-answers two-person rooms in the gap.
 6. `dm_open = 1` for both residents (Q1 answers). This spends plink's tokens, so it's his flip at deploy.
 7. `UPDATE channel_members SET reply_mode='always' WHERE channel_id=9 AND member_type='bot' AND member_id=1`. This keeps today's behaviour in that room.
 
