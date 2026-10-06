@@ -1,4 +1,4 @@
-// MessageList's attribution span, rendered from a store fixture:
+// MessageList's attribution span and trace chip, rendered from a store fixture:
 //
 //     node --test client/tests/message_list.test.mjs
 //
@@ -29,6 +29,7 @@ const ENTRY = `
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MessageList } from "../src/components/MessageList";
+import { TracePanel } from "../src/components/TracePanel";
 import { useMessages } from "../src/stores/messages";
 import { useSession } from "../src/stores/session";
 
@@ -43,9 +44,14 @@ export function render(list, me = null) {
     onSummarize: noop,
   }));
 }
+
+export function renderPanel(trace, model = null) {
+  return renderToStaticMarkup(createElement(TracePanel, { id: "trace-1", trace, model }));
+}
 `;
 
 let render;
+let renderPanel;
 let scratch;
 
 before(async () => {
@@ -66,14 +72,14 @@ before(async () => {
   scratch = mkdtempSync(join(tmpdir(), 'msglist-'));
   const file = join(scratch, 'bundle.mjs');
   writeFileSync(file, out.outputFiles[0].text);
-  ({ render } = await import(pathToFileURL(file).href));
+  ({ render, renderPanel } = await import(pathToFileURL(file).href));
 });
 
 after(() => { if (scratch) rmSync(scratch, { recursive: true, force: true }); });
 
 const T0 = Date.parse('2026-09-23T18:31:00Z');
 
-function botMessage(id, { minutes = 0, attribution, content, emote_refs = [] } = {}) {
+function botMessage(id, { minutes = 0, attribution, trace, content, emote_refs = [] } = {}) {
   const m = {
     id, channel_id: 1, seq: id, author_type: 'bot', author_id: 2,
     author: { type: 'bot', id: 2, name: 'Gable', avatar_path: null, avatar_url: null },
@@ -83,6 +89,7 @@ function botMessage(id, { minutes = 0, attribution, content, emote_refs = [] } =
     privacy_flags: {}, emote_refs, attachments: [],
   };
   if (attribution !== undefined) m.attribution = attribution;
+  if (trace !== undefined) m.trace = trace;
   return m;
 }
 
@@ -148,4 +155,48 @@ test('everyone else sees the chibi alone', () => {
   { ...ADMIN, is_admin: false });
   assert.ok(html.includes('class="chibi chibi-inline"'), html);
   assert.ok(!html.includes('chibi-fix'), html);
+});
+
+const STEP = { kind: 'read', label: 'read_repo_file server/app/ws.py',
+  outcome: 'ok', reason: null, ms: 41 };
+const REFUSED = { kind: 'broker', label: 'broker changed-files main...loop/x',
+  outcome: 'refused', reason: 'refused-by-broker', ms: 1500 };
+
+test('a traced message shows a collapsed step chip after the attribution', () => {
+  const html = render([botMessage(1, {
+    attribution: { model: 'claude-fable-5-1', verified: true, summoner: 'plink' },
+    trace: { steps: [STEP, REFUSED], total: 7 } })]);
+  const chip = html.match(/<button type="button" class="msg-trace-chip"[^>]*>([^<]*)<\/button>/);
+  assert.ok(chip, html);
+  assert.equal(chip[1], '7 steps');
+  assert.ok(chip[0].includes('aria-expanded="false"'));
+  assert.ok(chip[0].includes('aria-controls="trace-1"'));
+  assert.ok(html.indexOf('msg-attrib') < html.indexOf('msg-trace-chip'));
+  assert.ok(!html.includes('class="msg-trace"'), html);
+});
+
+test('no trace, or an empty one, shows no chip, and a trace forces the header', () => {
+  for (const trace of [undefined, null, { steps: [], total: 0 }]) {
+    assert.ok(!render([botMessage(1, { trace })]).includes('msg-trace'));
+  }
+  const traced = render([botMessage(1), botMessage(2, { minutes: 1,
+    trace: { steps: [STEP], total: 1 } })]);
+  assert.deepEqual(rows(traced), [{ id: 1, head: true }, { id: 2, head: true }]);
+  assert.ok(traced.includes('>1 step</button>'), traced);
+});
+
+test('the panel lists each step, the cut, and says who wrote it', () => {
+  const html = renderPanel({ steps: [STEP, REFUSED], total: 5 }, 'claude-fable-5-1');
+  const steps = [...html.matchAll(/<li class="msg-trace-step trace-(\w+)">(.*?)<\/li>/g)];
+  assert.deepEqual(steps.map((s) => s[1]), ['ok', 'refused']);
+  assert.ok(steps[0][2].includes('<span class="trace-kind trace-kind-read">read</span>'));
+  assert.ok(steps[0][2].includes('<code class="trace-label">read_repo_file server/app/ws.py</code>'));
+  assert.ok(steps[0][2].includes('<span class="trace-ms">41 ms</span>'));
+  assert.ok(steps[1][2].includes(' · refused-by-broker'), steps[1][2]);
+  assert.ok(steps[1][2].includes('1.5 s'));
+  assert.ok(html.includes('…3 more'), html);
+  assert.ok(html.includes('listed steps 1.5 s · claude-fable-5-1'), html);
+  assert.ok(html.includes("This is the bot&#x27;s own account, written by its adapter; "
+    + 'the server does not verify it.'), html);
+  assert.ok(!renderPanel({ steps: [STEP], total: 1 }).includes('more'));
 });

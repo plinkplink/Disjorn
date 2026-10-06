@@ -101,6 +101,9 @@ export interface Message {
   emote_refs: unknown[];
   /** Set by the posting bot, beside the body; `{}` on every other message. */
   attribution?: MessageAttribution;
+  /** The bot's own account of the steps behind the message, written by its
+      adapter and not verified by the server; null on every other message. */
+  trace?: MessageTrace | null;
   attachments: Attachment[];
 }
 
@@ -108,6 +111,24 @@ export interface MessageAttribution {
   model?: string | null;
   verified?: boolean;
   summoner?: string | null;
+}
+
+export type TraceKind =
+  | "read" | "search" | "memory" | "broker" | "web" | "write" | "shell"
+  | "agent" | "other";
+
+export interface TraceStep {
+  kind: TraceKind;
+  label: string;
+  outcome: "ok" | "refused" | "error";
+  reason?: string | null;
+  ms: number;
+}
+
+/** `total` is the true step count; `steps` may be cut short of it. */
+export interface MessageTrace {
+  steps: TraceStep[];
+  total: number;
 }
 
 /** Backfill (`?from_seq=`) returns deleted messages as tombstones. */

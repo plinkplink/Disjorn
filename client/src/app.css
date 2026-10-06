@@ -645,6 +645,120 @@
   color: var(--text-2);
 }
 
+.msg-trace-chip {
+  font-size: var(--text-xs);
+  color: var(--text-1);
+  background: var(--bg-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-round);
+  padding: 0 var(--space-2);
+  cursor: pointer;
+  align-self: center;
+}
+
+.msg-trace-chip:hover,
+.msg-trace-chip[aria-expanded="true"] {
+  background: var(--accent-muted);
+  color: var(--text-0);
+}
+
+.msg-trace-chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.msg-trace {
+  margin-top: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: var(--bg-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-m);
+  font-size: var(--text-xs);
+  max-width: 100%;
+}
+
+.msg-trace-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.msg-trace-step {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px var(--space-2);
+  padding: 3px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.trace-kind {
+  flex: 0 0 auto;
+  min-width: 4.5em;
+  text-align: center;
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-1);
+  background: var(--bg-3);
+  border-radius: var(--radius-s);
+  padding: 0 4px;
+}
+
+.trace-kind-memory,
+.trace-kind-broker {
+  color: var(--accent-hover);
+  background: var(--accent-muted);
+}
+
+.trace-label {
+  flex: 1 1 12em;
+  min-width: 0;
+  font-family: var(--font-mono);
+  color: var(--text-0);
+  overflow-wrap: anywhere;
+}
+
+.trace-outcome {
+  font-weight: 600;
+}
+
+.trace-ok .trace-outcome {
+  color: var(--presence-online);
+}
+
+.trace-refused .trace-outcome {
+  color: var(--presence-idle);
+}
+
+.trace-error .trace-outcome {
+  color: var(--danger);
+}
+
+.trace-reason {
+  font-weight: 400;
+  color: var(--text-1);
+}
+
+.trace-ms {
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.msg-trace-more {
+  padding: 3px 0;
+  color: var(--text-1);
+}
+
+.msg-trace-foot {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: var(--space-1);
+  color: var(--text-2);
+}
+
 .msg-edited {
   font-size: var(--text-xs);
   color: var(--text-2);
