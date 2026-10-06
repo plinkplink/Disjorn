@@ -76,6 +76,13 @@ def refusal(resp) -> tuple[str, str]:
     return resp["error"]["reason"], resp["error"]["message"]
 
 
+def early_refusal(h, **kw) -> tuple[str, str]:
+    """A `/merge` refused on the wire, before any gate ran."""
+    reason, message = refusal(call(h, **kw))
+    assert h.gate_calls == [] and h.merge_outcomes() == []
+    return reason, message
+
+
 def late_refusal(h, **kw) -> tuple[str, str, list[str]]:
     """A `/merge` that is taken and then refused: (reason, message, post)."""
     assert call(h, **kw)["ok"] is True
@@ -287,7 +294,7 @@ def test_a_pass_from_the_wrong_reviewer_is_refused(harness):
     arm(harness, tier=2)
     harness.add_custodian_post(PASS_SEQ, f"PASS {SLUG}", author="Gable",
                                created_at=later())
-    reason, message, _post = late_refusal(harness, pass_seq=PASS_SEQ)
+    reason, message = early_refusal(harness, pass_seq=PASS_SEQ)
     assert reason == "pass-invalid"
     assert "Gable's" in message and "Claudette" in message
     assert harness.main_subjects() == ["init"]
@@ -297,7 +304,7 @@ def test_a_pass_from_a_person_is_not_a_reviewers_post(harness):
     arm(harness, tier=2)
     harness.add_custodian_post(PASS_SEQ, f"PASS {SLUG}", author="plink",
                                author_type="user", created_at=later())
-    reason, message, _post = late_refusal(harness, pass_seq=PASS_SEQ)
+    reason, message = early_refusal(harness, pass_seq=PASS_SEQ)
     assert reason == "pass-invalid" and "reviewer's post" in message
 
 
@@ -305,7 +312,7 @@ def test_a_post_that_never_says_pass_is_refused(harness):
     arm(harness, tier=2)
     harness.add_custodian_post(PASS_SEQ, f"{SLUG} looks fine to me",
                                author="Claudette", created_at=later())
-    reason, message, _post = late_refusal(harness, pass_seq=PASS_SEQ)
+    reason, message = early_refusal(harness, pass_seq=PASS_SEQ)
     assert reason == "pass-invalid" and "does not say PASS" in message
 
 
@@ -315,7 +322,7 @@ def test_a_pass_that_also_blocks_is_not_a_pass(harness):
     harness.add_custodian_post(
         PASS_SEQ, f"PASS on the docs, BLOCK on the schema change in {SLUG}",
         author="Claudette", created_at=later())
-    reason, message, _post = late_refusal(harness, pass_seq=PASS_SEQ)
+    reason, message = early_refusal(harness, pass_seq=PASS_SEQ)
     assert reason == "pass-invalid"
     assert message == (f"seq {PASS_SEQ} says BLOCK as well as PASS, so it is "
                        "not a PASS")
@@ -333,7 +340,7 @@ def test_a_pass_that_names_another_slug_is_refused(harness):
     arm(harness, tier=2)
     harness.add_custodian_post(PASS_SEQ, "PASS 2026-09-20-something-else",
                                author="Claudette", created_at=later())
-    assert late_refusal(harness, pass_seq=PASS_SEQ)[0] == "pass-invalid"
+    assert early_refusal(harness, pass_seq=PASS_SEQ)[0] == "pass-invalid"
 
 
 def test_a_pass_posted_before_the_tip_is_refused(harness):
@@ -341,7 +348,7 @@ def test_a_pass_posted_before_the_tip_is_refused(harness):
     arm(harness, tier=2)
     harness.add_custodian_post(PASS_SEQ, f"PASS {SLUG}", author="Claudette",
                                created_at=earlier())
-    reason, message, _post = late_refusal(harness, pass_seq=PASS_SEQ)
+    reason, message = early_refusal(harness, pass_seq=PASS_SEQ)
     assert reason == "pass-invalid" and "before the tip" in message
 
 
@@ -349,7 +356,7 @@ def test_a_pass_in_another_channel_is_refused(harness):
     arm(harness, tier=2)
     harness.add_custodian_post(PASS_SEQ, f"PASS {SLUG}", author="Claudette",
                                created_at=later(), channel_id=CHANNEL + 50)
-    reason, message, _post = late_refusal(harness, pass_seq=PASS_SEQ)
+    reason, message = early_refusal(harness, pass_seq=PASS_SEQ)
     assert reason == "pass-invalid"
     assert f"no message {PASS_SEQ} in #custodian" in message
 
@@ -358,18 +365,53 @@ def test_a_changed_path_with_no_lane_owner_is_a_keyboard_merge(harness):
     arm(harness, tier=2, path="harness/broker/brokerd.py")
     harness.add_custodian_post(PASS_SEQ, f"PASS {SLUG}", author="Claudette",
                                created_at=later())
-    reason, message, post = late_refusal(harness, pass_seq=PASS_SEQ)
+    reason, message = early_refusal(harness, pass_seq=PASS_SEQ)
     assert reason == "pass-invalid"
     assert message == ("no lane owner for harness/broker/brokerd.py; "
                        "keyboard merge")
-    assert post[1] == "next: merge it at the keyboard"
 
 
-def test_a_pass_is_ignored_below_tier_two(harness):
+def test_a_pass_that_cannot_hold_is_refused_before_the_gates_run(harness):
+    """The PASS is read from the message, not the gate run, so a bad one costs
+    nothing but the answer."""
+    arm(harness, tier=2)
+    harness.add_custodian_post(PASS_SEQ, f"PASS {SLUG}", author="Gable",
+                               created_at=later())
+    resp = call(harness, pass_seq=PASS_SEQ)
+    assert resp["error"]["code"] == "merge-refused"
+    assert harness.gate_calls == [] and fold_lines(harness) == []
+    entry = harness.audit_lines()[-1]
+    assert entry["allowed"] is False
+    assert entry["result_summary"].endswith("(pass-invalid)")
+
+
+def test_a_pass_refused_on_the_wire_gives_the_gate_claim_back(harness):
     arm(harness, tier=1)
     harness.add_custodian_post(PASS_SEQ, "nothing to do with it",
                                author="Gable", created_at=earlier())
+    assert early_refusal(harness, pass_seq=PASS_SEQ)[0] == "pass-invalid"
+    assert merge(harness)[0].startswith("merge: merged ")
+
+
+def test_a_valid_pass_still_runs_the_gates(harness):
+    calls = arm(harness, tier=2)
+    harness.add_custodian_post(PASS_SEQ, f"PASS {SLUG}", author="Claudette",
+                               created_at=later())
     assert merge(harness, pass_seq=PASS_SEQ)[0].startswith("merge: merged ")
+    assert len(calls) == 1
+
+
+def test_a_cited_pass_below_tier_two_is_checked_and_not_stamped(harness):
+    """Nobody can know the tier before the gates, so a PASS that is named is a
+    PASS that has to hold; below Tier 2 it is not recorded as a review."""
+    arm(harness, tier=1)
+    harness.add_custodian_post(PASS_SEQ, "nothing to do with it",
+                               author="Gable", created_at=earlier())
+    assert early_refusal(harness, pass_seq=PASS_SEQ)[0] == "pass-invalid"
+    harness.add_custodian_post(PASS_SEQ + 1, f"PASS {SLUG}",
+                               author="Claudette", created_at=later())
+    assert merge(harness, pass_seq=PASS_SEQ + 1)[0].startswith(
+        "merge: merged ")
     assert "review-seq" not in harness.commit_message()
 
 
@@ -522,6 +564,7 @@ def test_a_pass_posted_before_the_fold_no_longer_holds(harness):
     time.sleep(1.1)
     reason, message, _post = late_refusal(harness, pass_seq=PASS_SEQ)
     folded = harness.branch_tip(SLUG)
+    assert len(harness.gate_calls) == 1
     assert reason == "pass-invalid"
     assert message == (f"loop/{SLUG} was folded onto main as {folded[:7]}, so "
                        f"PASS {PASS_SEQ} no longer names the gated tree; ask "

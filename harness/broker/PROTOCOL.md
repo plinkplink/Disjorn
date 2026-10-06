@@ -452,8 +452,10 @@ branch's own suite, so the wall is the classifier plus a human on Tier 1 and 2.
   the first three required and positive, `pass_seq` optional, nothing else.
 - IT IS ASYNCHRONOUS, in `build`'s shape. The CALL does only what is cheap:
   the message, the author, the slug being a build slug, the branch existing,
-  the message naming it, and the gate claim. **Nothing that reads or writes
-  `loop/<slug>`'s history runs on the socket thread.** It then returns
+  the message naming it, the gate claim, and — when `pass_seq` is given — the
+  PASS check (below), which only reads the branch's changed paths and tip
+  time. **Nothing that writes `loop/<slug>` runs on the socket thread.** It
+  then returns
   `{"started": true, "slug": str, "branch": str}` and runs the ancestry check,
   the fold, the gates, the classifier, the PASS check, the merge and the push
   in a background thread. The outcome is ONE post to the origin channel, by the
@@ -495,7 +497,8 @@ branch's own suite, so the wall is the classifier plus a human on Tier 1 and 2.
   `[build].humans`); `loop/<slug>` must exist in the gatehouse; the message
   must name the slug as a whole token; CLAIM THE GATE RUN — a slug already
   being gated is `busy` on the wire, and nothing after this point runs for a
-  slug someone else holds. Then, in the thread: `refs/heads/main` must be an
+  slug someone else holds; a given `pass_seq` must hold, or it is
+  `pass-invalid` on the wire and the claim is given back. Then, in the thread: `refs/heads/main` must be an
   ancestor of the branch (or it is folded, below) and `main..<tip>` must not be
   empty — a branch with nothing of its own is `branch-missing`, "`loop/<slug>`
   has no commits of its own to merge". Then the gates, then
@@ -531,7 +534,9 @@ branch's own suite, so the wall is the classifier plus a human on Tier 1 and 2.
 - One gate run per slug at a time, whether a `/merge` or a build's own end
   started it; a second `/merge` for that slug is refused `busy` on the spot.
 - Tier 0 and Tier 1 merge on this call: it IS the human step. Tier 2 needs
-  `pass_seq`, and that PASS holds only when the message is in
+  `pass_seq`; a `pass_seq` given at any tier is checked before the gates, on
+  Tier 2 again after them (a fold can stale it), and is stamped only on Tier
+  2. That PASS holds only when the message is in
   `[disjorn].custodian_channel_id`, authored by a BOT whose name is the review
   owner for the changed paths (`[planroom].lane_owners`, prefix map, first
   match wins), posted AFTER the branch tip's commit time, and says the word

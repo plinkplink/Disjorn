@@ -3984,11 +3984,13 @@ class Broker:
         return {"author": str(bot_name), "content": str(content or ""),
                 "created_at": created_at}
 
-    def _check_pass(self, *, pass_seq: int, slug: str, paths: list[str],
-                    tip_at: Optional[_dt.datetime],
+    def _check_pass(self, *, pass_seq: int, slug: str,
                     folded: Optional[str] = None) -> str:
         """The four things that make a PASS hold: the right reviewer, after the
         tip, in #custodian, saying PASS for this slug."""
+        repo = self._gatehouse_or_refuse()
+        paths = self._changed_paths(repo, slug)
+        tip_at = self._branch_tip_time(repo, slug)
         if not paths:
             raise self._merge_refused(
                 f"loop/{slug} changes no files", "pass-invalid")
@@ -4167,12 +4169,12 @@ class Broker:
         return sha, self._refresh_after_merge()
 
     def _verb_merge(self, caller: str, args: dict) -> tuple[dict, str, dict]:
-        """Take a human's `/merge`: everything the message itself decides is
-        settled here; the gates and the merge run in a thread, like `/build`.
+        """Take a human's `/merge`: the message and its PASS are settled here;
+        the gates and the merge run in a thread, like `/build`.
 
-        NOTHING THAT TOUCHES THE BRANCH RUNS ON THE SOCKET THREAD: the caller
-        is acknowledged first, and the claim is taken before the thread so a
-        second `/merge` is `busy` before any git runs for this slug."""
+        NOTHING THAT WRITES THE BRANCH RUNS ON THE SOCKET THREAD: the caller
+        is acknowledged first, and the claim is taken before the PASS is read
+        so a second `/merge` is `busy` before any git reads this slug."""
         _reject_unknown(args, {"seq", "channel_id", "slug", "pass_seq"})
         for key in ("seq", "channel_id", "slug"):
             if key not in args:
@@ -4209,6 +4211,12 @@ class Broker:
         if not self._claim_gate_run(slug):
             raise self._merge_refused(
                 f"a gate run for {slug} is already in flight", "busy")
+        if pass_seq is not None:
+            try:
+                self._check_pass(pass_seq=pass_seq, slug=slug)
+            except BaseException:
+                self._release_gate_run(slug)
+                raise
 
         thread = threading.Thread(
             target=self._merge_in_background, args=(dict(args),),
@@ -4286,11 +4294,8 @@ class Broker:
                     f"loop/{slug} is Tier 2: it needs a reviewer's PASS in "
                     f"#custodian, then `/merge {slug} pass <seq>`",
                     "pass-missing")
-            reviewer = self._check_pass(
-                pass_seq=pass_seq, slug=slug,
-                paths=self._changed_paths(self._gatehouse_or_refuse(), slug),
-                tip_at=self._branch_tip_time(self._gatehouse_or_refuse(), slug),
-                folded=folded)
+            reviewer = self._check_pass(pass_seq=pass_seq, slug=slug,
+                                        folded=folded)
         stamped = pass_seq if tier == 2 else None
         sha, mirror = self._merge_now(slug=slug, author=author, tier=tier,
                                       channel_id=channel_id, seq=seq,
