@@ -138,34 +138,34 @@ async def fetch_head(url: str, transport: Optional[httpx.AsyncBaseTransport] = N
     Raises httpx errors / ValueError on failure — unfurl() catches them.
     Monkeypatched in tests.
     """
-    async with httpx.AsyncClient(
-        timeout=FETCH_TIMEOUT,
-        follow_redirects=False,
-        headers={"User-Agent": USER_AGENT},
-        transport=transport,
-    ) as client:
-        for _ in range(MAX_REDIRECTS + 1):
-            ip = await require_public(url)
-            host = urlsplit(url).hostname
-            async with client.stream(
-                "GET", _pinned(url, ip),
-                headers={"Host": urlsplit(url).netloc.rsplit("@", 1)[-1]},
-                extensions={"sni_hostname": host},
-            ) as resp:
-                if resp.is_redirect:
-                    url = urljoin(url, resp.headers.get("location", ""))
-                    continue
-                resp.raise_for_status()
-                chunks: list[bytes] = []
-                total = 0
-                async for chunk in resp.aiter_bytes():
-                    chunks.append(chunk)
-                    total += len(chunk)
-                    if total >= UNFURL_MAX_BYTES:
-                        break
-                body = b"".join(chunks)[:UNFURL_MAX_BYTES]
-                encoding = resp.charset_encoding or "utf-8"
-                return url, body.decode(encoding, errors="replace")
+    for _ in range(MAX_REDIRECTS + 1):
+        ip = await require_public(url)
+        host = urlsplit(url).hostname
+        # One client per hop: a pooled connection to a shared IP would skip the next host's cert check.
+        async with httpx.AsyncClient(
+            timeout=FETCH_TIMEOUT,
+            follow_redirects=False,
+            headers={"User-Agent": USER_AGENT},
+            transport=transport,
+        ) as client, client.stream(
+            "GET", _pinned(url, ip),
+            headers={"Host": urlsplit(url).netloc.rsplit("@", 1)[-1]},
+            extensions={"sni_hostname": host},
+        ) as resp:
+            if resp.is_redirect:
+                url = urljoin(url, resp.headers.get("location", ""))
+                continue
+            resp.raise_for_status()
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in resp.aiter_bytes():
+                chunks.append(chunk)
+                total += len(chunk)
+                if total >= UNFURL_MAX_BYTES:
+                    break
+            body = b"".join(chunks)[:UNFURL_MAX_BYTES]
+            encoding = resp.charset_encoding or "utf-8"
+            return url, body.decode(encoding, errors="replace")
     raise ValueError("unfurl: too many redirects")
 
 
