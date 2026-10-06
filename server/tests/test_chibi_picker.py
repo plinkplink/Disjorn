@@ -322,3 +322,18 @@ async def test_repointing_refuses_a_non_admin_a_user_message_and_a_missing_tag(c
 
 def test_a_tag_inside_code_is_not_a_tag():
     assert chibi_aliases.tags_in("`[emotion: no]` [emotion: Yes ] ```\n[emotion: no]\n```") == ["Yes"]
+
+
+async def test_a_multi_tag_message_with_a_faceless_tag_refuses_rather_than_guess(admin):
+    bot_id = await make_resident()
+    sent = await bot_message(admin, bot_id, "[emotion: zzzq] then [emotion: happy]", "happy")
+    await db.execute(
+        "UPDATE messages SET emote_refs = ? WHERE id = ?",
+        (json.dumps(["chibi:claudette/Happy_and_Confident/Happy.png"]), sent["id"]),
+    )
+    for tag, index in (("zzzq", 0), ("happy", 1)):
+        r = await admin.patch(f"/messages/{sent['id']}/emote",
+                              json={"tag": tag, "target": "Curious", "index": index})
+        assert r.status_code == 409, r.text
+    row = await db.fetch_one("SELECT emote_refs FROM messages WHERE id = ?", (sent["id"],))
+    assert json.loads(row["emote_refs"]) == ["chibi:claudette/Happy_and_Confident/Happy.png"]
