@@ -183,6 +183,13 @@ async def repoint_emote(message_id: int, body: EmoteBody, admin: AdminUser) -> d
         raise _bad(err) from None
 
     refs = json.loads(row["emote_refs"] or "[]")
+    shown = sum(1 for r in refs if isinstance(r, str) and r.startswith("chibi:"))
+    if len(tags) > 1 and shown < len(tags):
+        raise HTTPException(
+            status_code=409,
+            detail="Some tags in this message found no face, so which chibi belongs to "
+                   "which tag is unknown; the alias still applies to new messages",
+        )
     updated = aliases.repoint(refs, index, face.ref(aliases.pack_dir(pack).name))
     if updated is None:
         raise HTTPException(
