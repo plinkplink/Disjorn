@@ -41,8 +41,8 @@ public, bot-readable table:
 Replies are authored by the seeded 'system' bot via messages.deliver_message,
 so they take the normal message path and are ordinary public chat.
 
-GET /backlog: paginated JSON read of the table (``from_id`` cursor + ``limit``)
-so residents can triage via the SDK without scraping chat.
+GET /backlog reads the table as JSON; POST /backlog is the broker filing for a
+resident seat, through the same cap and insert as `/backlog <text>`.
 
 Dispatch is rate limited per actor (SLASH_RATE_MAX per SLASH_RATE_WINDOW
 seconds), in-process — this is a 5-user house, not a public service.
@@ -52,11 +52,14 @@ import logging
 import time
 from typing import Annotated, Any, Awaitable, Callable, Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from pydantic import BaseModel
 
 from .. import db, privacy
+from ..config import get_settings
 from ..models import BacklogItem
 from ..services import backlog as backlog_service, broker_client
+from .approval import RESIDENT_PRINCIPAL_RE
 from .auth import Actor, get_actor
 from .messages import deliver_message
 
@@ -475,20 +478,36 @@ async def _backlog(ctx: Ctx) -> str:
         )
     # 3. Size (BL-D6). Verbatim storage means an unbounded arg becomes an
     #    unbounded row and an unbounded chat listing.
-    if len(ctx.args) > MAX_BACKLOG_CHARS:
-        return (
-            f"Can't file that: backlog items are capped at {MAX_BACKLOG_CHARS} "
-            f"characters (that one was {len(ctx.args)}). Nothing was filed — "
-            "post a one-paragraph summary and link the detail."
-        )
+    refusal = _oversize(ctx.args)
+    if refusal:
+        return refusal
 
-    # File verbatim. Use the raw args (leading separator already stripped by the
-    # parser); do not otherwise normalize the text.
+    # The raw args, verbatim: the parser already stripped the separator.
+    item_id = await _insert_item(ctx.args, ctx.poster)
+    return _filed_ack(item_id)
+
+
+def _oversize(text: str) -> Optional[str]:
+    if len(text) <= MAX_BACKLOG_CHARS:
+        return None
+    return (f"Can't file that: backlog items are capped at {MAX_BACKLOG_CHARS} "
+            f"characters (that one was {len(text)}). Nothing was filed — "
+            "post a one-paragraph summary and link the detail.")
+
+
+async def _insert_item(text: str, author: str) -> int:
     cur = await db.execute(
         "INSERT INTO backlog (text, author, created_at) VALUES (?, ?, ?)",
-        (ctx.args, ctx.poster, db.utc_now()),
+        (text, author, db.utc_now()),
     )
-    return f"Filed backlog #{cur.lastrowid} (open). Residents triage in #custodian."
+    assert cur.lastrowid is not None
+    return cur.lastrowid
+
+
+def _filed_ack(item_id: int, relayed: bool = False) -> str:
+    # Unnamed: the mention test matches res-<name>.
+    by = " from a resident seat" if relayed else ""
+    return f"Filed backlog #{item_id} (open){by}. Residents triage in #custodian."
 
 
 # ---------------------------------------------------------------------------
@@ -501,17 +520,61 @@ async def list_backlog(
     from_id: int = Query(default=0, ge=0),
     limit: int = Query(default=BACKLOG_PAGE_DEFAULT, ge=1, le=BACKLOG_PAGE_MAX),
 ) -> list[BacklogItem]:
-    """Backlog table as JSON, oldest first. Any authenticated actor may read it.
+    """Backlog table as JSON, oldest first, for any authenticated actor. Page
+    forward with ``from_id = last_id + 1`` (inclusive) until a short page.
 
-    ``from_id`` is an inclusive lower bound on the item id, as in GET
-    /channels/{id}/messages; page forward with ``from_id = last_id + 1`` until
-    a short page comes back.
-
-    No read-side privacy filtering: the filing path refuses bot-hidden content,
-    DM-filed items and oversized text at intake, so no row can carry secret or
-    off-the-record text.
+    No read-side privacy filtering: every filing path refuses bot-hidden text
+    at intake.
     """
     return [BacklogItem(**it) for it in await _items_page(from_id, limit)]
+
+
+class RelayedFiling(BaseModel):
+    text: str
+    on_behalf_of: str
+
+
+async def _custodian_id() -> int:
+    row = await db.fetch_one(
+        "SELECT id FROM channels WHERE name = 'custodian' AND type = 'text'")
+    if row is None:
+        raise HTTPException(
+            status_code=503,
+            detail="There is no #custodian channel to announce the filing in, "
+                   "so nothing was filed.")
+    return row["id"]
+
+
+@router.post("/backlog")
+async def file_for_resident(actor: CurrentActor,
+                            body: RelayedFiling = Body(...)) -> BacklogItem:
+    """A resident's row, filed by the broker that stamped `on_behalf_of` from
+    the seat's peer credentials; the server cannot see the seat itself."""
+    bot_name = actor.bot.name if actor.type == "bot" and actor.bot else ""
+    if bot_name not in get_settings().BACKLOG_RELAY_BOT_NAMES:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the backlog relay (BACKLOG_RELAY_BOT_NAMES) files for "
+                   "a resident. A person or a bot files with `/backlog <text>`.")
+    label = body.on_behalf_of
+    if len(label) > 64 or not RESIDENT_PRINCIPAL_RE.fullmatch(label):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{label!r} is not a resident seat label (res-<name>).")
+    if not body.text.strip():
+        raise HTTPException(status_code=400,
+                            detail="A backlog row needs some text.")
+    refusal = _oversize(body.text)
+    if refusal is None and privacy.hidden_from_bots(privacy.detect_flags(body.text)):
+        refusal = ("Can't file that: the text reads as private (secret / "
+                   "off-the-record) and the backlog is readable by bots.")
+    if refusal:
+        raise HTTPException(status_code=400, detail=refusal)
+    channel_id = await _custodian_id()
+    item_id = await _insert_item(body.text, label)
+    await _post_system_reply(channel_id, _filed_ack(item_id, relayed=True))
+    rows = await _items_page(item_id, 1)
+    return BacklogItem(**rows[0])
 
 
 BUILD_NOT_A_PERSON = "Only a person can start a build."

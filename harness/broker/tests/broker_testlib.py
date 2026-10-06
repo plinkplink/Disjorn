@@ -35,6 +35,7 @@ ALL_VERBS = [
     "board-list", "board-card", "board-search", "board-flag", "board-comment",
     "summon-hop", "apps-build", "build", "merge",
     "approval-list", "approval-show", "approval-act", "apply-posted-write",
+    "backlog-list", "backlog-file",
 ]
 
 RECORD_STUB = textwrap.dedent("""\
@@ -824,6 +825,24 @@ def _stub_approval(state: dict, method: str, path: str,
     return {"proposal": row}
 
 
+def _stub_backlog(state: dict, method: str, path: str,
+                  payload: dict | None) -> object:
+    """GET /backlog and the relay's POST /backlog, as far as the broker sees."""
+    rows = state.setdefault("backlog", [])
+    if method == "POST":
+        assert payload is not None
+        if state.get("backlog_refusal"):
+            raise VerbError("exec-failure", state["backlog_refusal"], status=400)
+        row = {"id": len(rows) + 1, "text": payload["text"],
+               "author": payload["on_behalf_of"], "created_at": _utc_now(),
+               "status": "open", "spec_ref": None}
+        rows.append(row)
+        return row
+    query = dict(kv.split("=", 1) for kv in path.split("?", 1)[1].split("&"))
+    page = [r for r in rows if r["id"] >= int(query["from_id"])]
+    return page[:int(query["limit"])]
+
+
 @pytest.fixture()
 def harness(tmp_path: Path):
     """A running broker on a scratch socket, current uid mapped to res-test."""
@@ -1046,6 +1065,8 @@ def harness(tmp_path: Path):
                     "comments": planroom_state["comments"].get(slug, [])}
         if path.startswith("/approval/proposals"):
             return _stub_approval(approval_state, method, path, payload)
+        if path.startswith("/backlog"):
+            return _stub_backlog(planroom_state, method, path, payload)
         raise VerbError("exec-failure", f"unstubbed plan room path {path}")
 
     channel_posts: list = []

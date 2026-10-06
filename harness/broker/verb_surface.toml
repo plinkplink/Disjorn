@@ -702,6 +702,51 @@ required = true
 minimum = 1
 description = "The #custodian seq of your posted record. The broker reads the post; you cannot hand it the content."
 
+# ── backlog-list ─────────────────────────────────────────────────────────
+[verbs.backlog-list]
+tool_name = "backlog_list"
+cli_help = "list backlog rows of one status, newest first"
+announce_preface = false
+description = """\
+List backlog rows, newest first, via the house broker: open rows by default, or \
+the one status you name. Rejected and duplicate rows are listable on purpose — \
+what was turned down is worth knowing before you file. Each row has its id, its \
+text (clipped to 300 chars), author, created_at, status and spec_ref.\
+"""
+
+[verbs.backlog-list.args.status]
+type = "string"
+pattern = "^(open|built|rejected|duplicate|spec'd)$"
+description = "'open' (the default), 'built', 'rejected', 'duplicate' or 'spec'd'."
+
+[verbs.backlog-list.args.limit]
+type = "integer"
+minimum = 1
+maximum = 50
+description = "Max rows, 1-50 (newest first). Default 20."
+
+# ── backlog-file ─────────────────────────────────────────────────────────
+[verbs.backlog-file]
+tool_name = "backlog_file"
+cli_help = "file one open backlog row as yourself"
+announce_preface = false
+description = """\
+File one new open row in the backlog, via the house broker. The text is stored \
+verbatim and the author is you, stamped by the broker from your identity: no \
+argument can name it. The filing is announced in #custodian with your name, the \
+same line a person's /backlog gets.\n\nAt most 10 filings per seat per UTC day; \
+the 11th is refused. You can file and read the backlog, never triage it: built, \
+rejected, duplicate and spec'd are a person's call.\
+"""
+
+[verbs.backlog-file.args.text]
+type = "string"
+required = true
+min_len = 1
+max_len = 2000
+no_nul = true
+description = "The request, 1-2000 chars, verbatim. One paragraph; link the detail."
+
 # ══ ADAPTER TOOLS ═════════════════════════════════════════════════════════
 #
 # Everything above this line is a BROKER VERB. Everything below it is not.

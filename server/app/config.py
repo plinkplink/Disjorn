@@ -68,6 +68,7 @@ class Settings(BaseSettings):
     APPROVAL_ENABLED: bool = False
     APPROVAL_PRINCIPALS: str = "plink,res-claudette,res-gable"
     APPROVAL_RELAY_BOT_NAMES: list[str] = ["broker"]
+    BACKLOG_RELAY_BOT_NAMES: list[str] = ["broker"]
 
     CUSTODIAN_CHANNEL_ID: int = 4
 
