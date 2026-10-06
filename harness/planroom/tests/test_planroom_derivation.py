@@ -404,10 +404,16 @@ def test_an_unmapped_lane_reads_unassigned_rather_than_guessing(repo, gatehouse)
     assert c["review_owner"] is None
 
 
-# ── the tri-state deploy badge is ONE computation (P6) ──────────────────────
+# ── the deploy badge is ONE computation (P6) ────────────────────────────────
+
+RUNNING = {"ok": True, "detail": "running: server started on abc"}
+STALE = {"ok": False, "detail": "running: restart pending"}
+UNTOLD = {"ok": None, "detail": "running: unknown (cannot ask systemd)"}
+
 
 @pytest.mark.parametrize("state,badge", [
-    ({"state": "in-sync", "detail": "", "ahead": 0, "behind": 0}, "green"),
+    ({"state": "in-sync", "detail": "", "ahead": 0, "behind": 0,
+      "running": RUNNING}, "green"),
     ({"state": "drift", "detail": "", "ahead": 0, "behind": 3}, "amber"),
     ({"state": "drift", "detail": "", "ahead": 2, "behind": 0}, "red"),
     ({"state": "drift", "detail": "", "ahead": 0, "behind": 0, "dirty": True}, "red"),
@@ -426,14 +432,67 @@ def test_a_dirty_prod_tree_is_red_not_amber():
                            "behind": 5, "detail": ""})["badge"] == "red"
 
 
+@pytest.mark.parametrize("running,badge,label", [
+    (RUNNING, "green", "live"),
+    (STALE, "amber", "restart pending"),
+    (UNTOLD, "unknown", "running unknown"),
+    (None, "unknown", "running unknown"),
+])
+def test_a_staged_deploy_is_green_only_when_the_server_restarted_since(
+        running, badge, label):
+    b = P.deploy_badge({"state": "in-sync", "detail": "clean", "ahead": 0,
+                        "behind": 0, "running": running})
+    assert (b["badge"], b["label"], b["staged"]) == (badge, label, True)
+    assert b["running"] is (running or {}).get("ok")
+
+
+def test_the_badge_carries_both_facts_in_its_detail():
+    b = P.deploy_badge({"state": "in-sync", "detail": "clean", "running": STALE})
+    assert b["detail"] == "clean; running: restart pending"
+    assert b["staged_detail"] == "clean"
+    assert b["running_detail"] == "running: restart pending"
+
+
+def test_a_running_server_does_not_soften_the_red_or_the_not_deployed_cases():
+    dirty = {"state": "drift", "dirty": True, "ahead": 0, "behind": 0,
+             "detail": "", "running": RUNNING}
+    behind = {"state": "drift", "ahead": 0, "behind": 2, "detail": "",
+              "running": RUNNING}
+    assert P.deploy_badge(dirty)["badge"] == "red"
+    assert P.deploy_badge(behind)["label"] == "not deployed"
+    assert P.deploy_badge(behind)["staged"] is False
+
+
+def test_an_unconfigured_deploy_reads_unknown_on_both_facts():
+    b = P.deploy_badge(None)
+    assert (b["badge"], b["staged"], b["running"]) == ("unknown", None, None)
+
+
 def test_the_badge_comes_from_metrics_deploy_state(repo, gatehouse, monkeypatch):
     """Proven the only way it can be: make Phase 0's function say something
     absurd and watch the badge repeat it."""
     m = P.metrics()
     monkeypatch.setattr(m, "deploy_state", lambda *a, **k: {
-        "state": "in-sync", "detail": "invented", "ahead": 0, "behind": 0})
+        "state": "in-sync", "detail": "invented", "ahead": 0, "behind": 0,
+        "running": RUNNING})
     assert m.deploy_state()["detail"] == "invented"
     assert P.deploy_badge(m.deploy_state())["badge"] == "green"
+
+
+def test_the_face_asks_the_configured_unit_when_the_server_started(
+        repo, gatehouse, tmp_path, monkeypatch):
+    prod = tmp_path / "prod"
+    git(tmp_path, "clone", "-q", str(repo), str(prod))
+    m = P.metrics()
+    asked = []
+    monkeypatch.setattr(m, "gate_paths", lambda cfg: {
+        "configured": False, "mirror": str(repo), "message_db": None,
+        "deploy_tree": str(prod), "branch": "main", "deploy_service": "unit-x"})
+    monkeypatch.setattr(m, "service_started_at",
+                        lambda unit: asked.append(unit) or (2 ** 40, ""))
+    face = P.derive_cards({}, repo=repo, gatehouse=gatehouse)["face"]
+    assert asked == ["unit-x"]
+    assert (face["deploy"]["badge"], face["deploy"]["running"]) == ("green", True)
 
 
 def test_only_merged_cards_carry_the_badge(repo, gatehouse):

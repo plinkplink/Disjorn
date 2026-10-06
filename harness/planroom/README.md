@@ -104,14 +104,26 @@ not say. Recorded here as a derivation decision, not as a ruling.
 
 ## The deploy badge (ruled seq 1391, one computation per seq 1428 P6)
 
-Computed from `metrics.deploy_state()` and from nothing else:
+Computed from `metrics.deploy_state()` and from nothing else. It shows two
+facts and one colour:
 
-| Badge | Means | From `deploy_state()` |
+- **staged**: prod's checkout is at mirror head and its working tree is clean.
+- **running**: the live `disjorn` server started after the server code on disk
+  landed. The start time is systemd's `ActiveEnterTimestamp`; the landing time
+  is prod's reflog, so a commit made days earlier still counts from when it
+  arrived. Only a change under `server/` (outside `server/tests`) needs a
+  restart; a client-only landing does not.
+
+| Badge | Label | Means |
 |---|---|---|
-| green | prod matches the mirror | `state == "in-sync"` |
-| amber | merged, not deployed | drift, prod only `behind` |
-| red | **live, not merged** | drift with prod `ahead`, or a dirty prod tree |
-| unknown | the gate is not configured | `state == "unknown"` |
+| green | live | staged and running |
+| amber | restart pending | staged, but the server predates the server code on disk |
+| amber | not deployed | merged, prod only `behind` |
+| red | live, not merged | prod `ahead`, or a dirty prod tree |
+| unknown | unknown / running unknown | the gate is not configured, or systemd or the reflog could not be read |
+
+A fact that cannot be read is `unknown`, and an unknown fact never renders
+green.
 
 Red is the dangerous one and it has two shapes, both meaning code is *running*
 that the mirror has never seen. That is the ship-by-not-publishing case

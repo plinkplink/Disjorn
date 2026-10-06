@@ -292,6 +292,15 @@ def test_every_read_says_when_it_was_derived_and_from_what(board):
         assert "2026-08-23" in face, verb
 
 
+def test_a_restart_pending_face_says_so_in_words_not_only_a_colour():
+    face = brokerd.format_board_face({"derived_at": "x", "mirror_head": "abc",
+                                      "deploy": {"badge": "amber",
+                                                 "label": "restart pending"}})
+    assert face.endswith("deploy amber (restart pending)")
+    assert brokerd.format_board_face({"deploy": {"badge": "green"}}).endswith(
+        "deploy green")
+
+
 def test_an_unavailable_board_says_so_rather_than_looking_empty(board):
     board.planroom_state["face"] = {"available": False,
                                     "unavailable_reason": "index never written"}
