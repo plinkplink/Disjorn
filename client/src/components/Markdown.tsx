@@ -34,6 +34,28 @@ export interface ChibiEmote {
   emotion: string;
 }
 
+/** One `[emotion: X]` tag as the renderer meets it: its place among the
+    message's tags, the words inside the brackets, and the art it claimed. */
+export interface ChibiSlot {
+  index: number;
+  tag: string;
+  chibi: ChibiEmote | undefined;
+}
+
+export type ChibiSlotRenderer = (slot: ChibiSlot, key: number) => ReactNode;
+
+export function ChibiImg({ chibi }: { chibi: ChibiEmote }) {
+  return (
+    <img
+      className="chibi chibi-inline"
+      src={chibi.url}
+      title={chibi.emotion}
+      alt={chibi.emotion}
+      loading="lazy"
+    />
+  );
+}
+
 /** How many `[emotion: X]` tags the text carries — i.e. how many chibi refs
     the inline renderer will consume before the message body is done. */
 export function countEmotionTags(content: string): number {
@@ -142,6 +164,8 @@ interface Ctx {
       met hands out refs in the order they appear. */
   chibis: ChibiEmote[];
   taken: { n: number };
+  /** Replaces the plain chibi at each tag (the admin face button wraps it). */
+  chibiSlot: ChibiSlotRenderer | undefined;
 }
 
 interface PatternDef {
@@ -185,20 +209,15 @@ const PATTERNS: PatternDef[] = [
     // Ahead of the emphasis rules: emotion names carry _ and - ("Eye-Roll",
     // "Heart_Eyes"), which italic/underline would otherwise chew into.
     re: EMOTION_RE,
-    render: (_m, ctx, key) => {
-      const chibi = ctx.chibis[ctx.taken.n];
+    render: (m, ctx, key) => {
+      const index = ctx.taken.n;
+      const chibi = ctx.chibis[index];
       ctx.taken.n += 1;
+      if (ctx.chibiSlot !== undefined) {
+        return ctx.chibiSlot({ index, tag: inner(m).trim(), chibi }, key);
+      }
       if (chibi === undefined) return null; // unresolved emotion: show nothing
-      return (
-        <img
-          key={key}
-          className="chibi chibi-inline"
-          src={chibi.url}
-          title={chibi.emotion}
-          alt={chibi.emotion}
-          loading="lazy"
-        />
-      );
+      return <ChibiImg key={key} chibi={chibi} />;
     },
     // A one-line preview has no room for art, and "[emotion: Smug]" as text is
     // exactly the leak this feature exists to close.
@@ -436,6 +455,7 @@ interface MarkdownProps {
   mentionNames?: string[];
   /** Chibi art available to this message's `[emotion: X]` tags, in order. */
   chibis?: ChibiEmote[];
+  chibiSlot?: ChibiSlotRenderer;
 }
 
 const NO_CHIBIS: ChibiEmote[] = [];
@@ -444,11 +464,13 @@ export const Markdown = memo(function Markdown({
   content,
   mentionNames,
   chibis = NO_CHIBIS,
+  chibiSlot,
 }: MarkdownProps) {
   const ctx: Ctx = {
     mentionRe: buildMentionRe(mentionNames),
     chibis,
     taken: { n: 0 },
+    chibiSlot,
   };
   return <div className="md">{parseBlocks(content, ctx)}</div>;
 });

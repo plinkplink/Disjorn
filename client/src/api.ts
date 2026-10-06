@@ -15,6 +15,8 @@ import type {
   BackfillItem,
   BacklogItem,
   BacklogStatus,
+  ChibiAliasState,
+  ChibiFace,
   Bot,
   Builder,
   ChannelListItem,
@@ -305,6 +307,55 @@ export function removeChannelBot(
   botId: number,
 ): Promise<{ ok: boolean; removed: boolean }> {
   return request("DELETE", `/channels/${channelId}/bots/${botId}`);
+}
+
+/* ---- chibi picker (admin) ---- */
+
+/** A tag as a path segment: the server keys aliases on letters and digits
+    only, and a "/" would split the route. */
+function aliasPath(pack: string, tag: string): string {
+  const safe = tag.replace(/[^A-Za-z0-9 '_-]+/g, " ").trim();
+  return `/chibi/${encodeURIComponent(pack)}/aliases/${encodeURIComponent(safe)}`;
+}
+
+export function chibiFaces(pack: string): Promise<ChibiFace[]> {
+  return request<ChibiFace[]>("GET", `/chibi/${encodeURIComponent(pack)}/faces`);
+}
+
+export function chibiAlias(pack: string, tag: string): Promise<ChibiAliasState> {
+  return request<ChibiAliasState>(
+    "GET",
+    `/chibi/${encodeURIComponent(pack)}/aliases?tag=${encodeURIComponent(tag)}`,
+  );
+}
+
+export function setChibiAlias(
+  pack: string,
+  tag: string,
+  target: string,
+): Promise<{ tag: string; target: string; previous: string; changed: boolean }> {
+  return request("PUT", aliasPath(pack, tag), { target });
+}
+
+export function removeChibiAlias(
+  pack: string,
+  tag: string,
+): Promise<{ tag: string; face: string | null }> {
+  return request("DELETE", aliasPath(pack, tag));
+}
+
+/** Point one bot message's chibi for `tag` (the `index`th tag) at a face. */
+export function repointEmote(
+  messageId: number,
+  tag: string,
+  index: number,
+  target: string,
+): Promise<Message> {
+  return request<Message>("PATCH", `/messages/${messageId}/emote`, {
+    tag,
+    index,
+    target,
+  });
 }
 
 /* ---- messages ---- */
