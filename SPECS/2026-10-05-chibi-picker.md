@@ -36,7 +36,8 @@ A bot tags a mood (`[emotion: wry]`), and the server maps the tag onto a face in
   - Replaces the message's chibi emote_ref with `chibi:{pack}/{Category}/{File}`.
   - Publishes `message_edit` so open clients re-render.
   - It does not touch `edited_at` or the content, since the bot's words are unchanged.
-- The tag the picker shows is parsed from the message content's trailing `[emotion: …]`, using the same regex the server's resolver input uses. If a bot's tag format differs, the button doesn't show.
+- The tag the picker shows is found anywhere in the message, the same way the renderer finds it, not only at the end (review #87). A message with several tags shows one button per chibi, each tied to its own tag. If no tag is found, the button doesn't show.
+- **Every alias change posts one line to #custodian** as the server's system bot (review #87): `chibi alias, <pack>: "<tag>" <old face or ladder result> → <new face or ladder> by <admin>`. The pack owner remaps, and the resident whose face it is finds out from the channel, not from her own messages. The line never contains an @, so it summons no one.
 - The pack for a message is the authoring bot's `chibi_pack`.
 
 **Client** (custodian lane)
@@ -49,7 +50,10 @@ A bot tags a mood (`[emotion: wry]`), and the server maps the tag onto a face in
 ## Builder (USER PREFERENCE — who orchestrates; never touches Review owner)
 - **Builder**: keyboard seat (BuildGable) with Opus hands.
 
-## Questions for review
+## Folds from review
+- Claudette #3194 / card #87: Q1, plink may remap, and every change posts a #custodian line (above). Q2, re-point the current message by default. BLOCK fixed: the tag is found anywhere in the message, not only at the end.
+
+## Questions for review (answered)
 1. These are your faces. Should the owner of a pack (plink) be the only one who remaps them, or do you want a say in some form (e.g. you see the alias change in a #custodian line)?
 2. Should re-pointing the current message be on by default?
 
@@ -60,9 +64,9 @@ Tier 1 (no migration; one file write under the server's data dir).
 Restart the server and build the client. `Aliases.txt` must be writable by the server's user; check its owner before deploy.
 
 ## Confirm record
-- **Confirmed by**:
-- **#custodian seq**:
-- **Confirmed at**:
+- **Confirmed by**: BuildGable (keyboard seat) under plink's delegation for this sprint (#3178), after review #3194.
+- **#custodian seq**: 3178 (plink's delegation)
+- **Confirmed at**: 2026-10-06
 
 ## Status
-`draft`
+`confirmed`

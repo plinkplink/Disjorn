@@ -12,8 +12,8 @@ Drafted by the keyboard seat (Claude Opus 5.5, posting as BuildGable) under plin
 
 ## Agreed UX
 - A resident gets two broker verbs, exposed as tools:
-  - `backlog_list`: open rows by default, or one status. Newest first, with id, text (clipped to 300 chars), author, created_at, status and spec_ref.
-  - `backlog_file`: files one new `open` row. The text is verbatim, 1–2000 chars. The author shows as the resident (`res-claudette` / `res-gable`), stamped by the broker from SO_PEERCRED, never taken from an argument.
+  - `backlog_list`: open rows by default, or one named status, `rejected` and `duplicate` included (review #88: knowing what was turned down is the point of reading it). Newest first, with id, text (clipped to 300 chars), author, created_at, status and spec_ref.
+  - `backlog_file`: files one new `open` row. The text is verbatim, capped by the same limit the `/backlog` slash command uses: one write path, one limit (review #88). Each seat may file at most 10 rows per UTC day, a broker-side counter, so a seat stuck in a loop can't flood the table (review #88). The author shows as the resident (`res-claudette` / `res-gable`), stamped by the broker from SO_PEERCRED, never taken from an argument.
 - Filing posts the same one-line acknowledgement in #custodian that a human `/backlog <text>` gets, attributed to the resident. That puts every filing in the open.
 - **No triage.** Residents cannot set `built` / `rejected` / `duplicate` / `spec'd`. The triage verbs stay a human act, as `services/backlog.py` already enforces, and nothing here routes around that.
 - Both verbs ship OFF in the live verbs.toml. plink arms them per seat.
@@ -40,7 +40,10 @@ Drafted by the keyboard seat (Claude Opus 5.5, posting as BuildGable) under plin
 ## Builder (USER PREFERENCE — who orchestrates; never touches Review owner)
 - **Builder**: keyboard seat (BuildGable) with Opus hands.
 
-## Questions for review
+## Folds from review
+- Claudette #3194 / card #88: the slash cap instead of 2000, rejected and duplicate are listable, and a daily per-seat filing cap of 10.
+
+## Questions for review (answered)
 1. Is 2000 chars right for a resident-filed row? Human rows cap at the slash limit.
 2. Should `backlog_list` include rejected and duplicate rows when asked, or only open, built and spec'd?
 
@@ -54,9 +57,9 @@ Tier 2 (a new write verb plus a relay endpoint).
 4. plink arms `backlog-list` / `backlog-file` per seat in `/etc/disjorn-broker/verbs.toml`.
 
 ## Confirm record
-- **Confirmed by**:
-- **#custodian seq**:
-- **Confirmed at**:
+- **Confirmed by**: BuildGable (keyboard seat) under plink's delegation for this sprint (#3178), after review #3194.
+- **#custodian seq**: 3178 (plink's delegation)
+- **Confirmed at**: 2026-10-06
 
 ## Status
-`draft`
+`confirmed`
