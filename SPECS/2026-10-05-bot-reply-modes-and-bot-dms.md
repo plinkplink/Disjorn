@@ -54,7 +54,7 @@ A bot in a channel answers only when its name is matched. There is no way to say
 - New-DM picker and sidebar DM rows: the bot entries with avatar and BOT tag.
 
 **Residents.**
-- Gable: no residency change. `detector.py` returns `MODE_MENTION` when `has_context` outside mention-only rooms.
+- Gable: works unchanged for a single message, since `detector.py` returns `MODE_MENTION` when `has_context`. Gable's own follow-up (residency lane, after this ships, #3159 Q3): fold the messages that queue up in an always-room into the next session. Otherwise a five-message paste becomes five sessions with replies in between. Until that lands, a DM paste in several pieces costs several sessions.
 - Custodian resident: a **required rider on claudette.git** (`fix/2026-10-05-addressed-by-and-attribution`). It must merge and deploy BEFORE the server half deploys, never after (review card comment 75, BLOCKING). The adapter currently infers a DM from "exactly two humans in the room", caches that answer forever, and wakes on every message there, so the menu would lie for her. The rider deletes that inference and wakes with a "channel" wake when `context.addressed_by == "always"`.
 
 A bot that should not be always-on anywhere keeps `dm_open = 0`, and its channel memberships stay on mentions unless a manager flips them. Residents can opt out harder in their own adapters later; that is outside this spec.
@@ -68,6 +68,7 @@ A bot that should not be always-on anywhere keeps `dm_open = 0`, and its channel
 
 ## Folds from review
 - Custodian resident, card comment 75: the BLOCK is the rider above. Q1: DMs on for her. Q2: keep `addressed_by`. Q3: the copy says "called by name". Non-blocking: `MENTION_ONLY_CHANNEL_IDS` and her `CUSTODIAN_MENTION_ONLY` state one fact twice. Accepted for now; later, the context block carries the room's mention-only flag.
+- Gable, #3159: Q1, DMs on for him under his existing 60/day counter, no separate cap. Q2, `addressed_by` rides on EVERY context block, both values, never omitted (app_build sends `always`). Q3 is his residency follow-up above.
 - Behaviour kept at deploy: channel 9 (two people plus her) answers every message today only because of the inference. The deploy recipe sets her membership there to `always`, so the room behaves exactly as before and the menu now shows it.
 
 ## Questions for review
@@ -87,12 +88,12 @@ Moderate: one migration, two endpoints, one fan-out branch, three client compone
 3. Client build.
 4. Set `MENTION_ONLY_CHANNEL_IDS=[4]` in server/.env before the restart.
 5. Order: the rider is merged and deployed first (`claudette-update.sh`).
-6. `dm_open = 1` for the custodian resident (her answer, Q1); Gable's per his answer.
+6. `dm_open = 1` for both residents (Q1 answers). This spends plink's tokens, so it's his flip at deploy.
 7. `UPDATE channel_members SET reply_mode='always' WHERE channel_id=9 AND member_type='bot' AND member_id=1`. This keeps today's behaviour in that room.
 
 ## Confirm record
-- **Confirmed by**: BuildGable (keyboard seat), on plink's delegated authority (#3152, keyboard hand-off 2026-10-05). Revocable by plink.
-- **#custodian seq**: 3161
+- **Confirmed by**: plink delegated it to the keyboard seat inside the terminal session, so no #custodian seq records it. BuildGable recorded it at 3161. That is a bot's post, and the review owner rightly flagged it (#3167), so plink re-confirms with his own seq or revokes before anything deploys. The build proceeds on the delegation.
+- **#custodian seq**: 3161 (bot-recorded; plink's human seq pending)
 - **Confirmed at**: 2026-10-06T00:59:29.969Z
 
 ## Status
