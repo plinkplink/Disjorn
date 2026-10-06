@@ -32,10 +32,10 @@ interface SessionState {
   /**
    * The account must rotate its password before it can do anything else.
    *
-   * Learned from a 403, never from GET /me — the public User shape does not
-   * carry the flag. Any walled-off request sets this (see setRotationHandler
-   * in api.ts), so the app cannot end up in the state that shipped on
-   * 2026-08-14: every route 403ing with no screen that could clear it.
+   * Learned from the login response, a 403, or a socket closed with 4403;
+   * GET /me does not carry it. Any walled-off request sets this (see
+   * setRotationHandler in api.ts), so there is always a screen that can
+   * clear it.
    */
   mustChangePassword: boolean;
   /** An admin reset this account; shown once, on the login that follows it. */
@@ -136,11 +136,17 @@ export const useSession = create<SessionState>()((set, get) => ({
   login: async (username, password) => {
     set({ loggingIn: true, loginError: null });
     try {
-      const { password_reset: notice, ...user } = await apiLogin(username, password);
+      const {
+        password_reset: notice,
+        must_change_password: owesRotation,
+        ...user
+      } = await apiLogin(username, password);
+      // Setting the wall here keeps the shell, and so the socket, from
+      // mounting at all for a handed-over password.
       set({
         user,
         loggingIn: false,
-        mustChangePassword: false,
+        mustChangePassword: owesRotation === true,
         resetNotice: notice ?? null,
       });
       return true;

@@ -9,7 +9,7 @@ Auth:
              a house origin (app/origin_wall.py).
     Bots   — first frame `{"op": "auth", "api_key": "..."}` within AUTH_TIMEOUT
              seconds.
-    Anything else -> close 4401.
+    Anything else -> 4401; a rotation-pending session -> 4403.
     On success the server sends `{"type": "ready", "user_id"|"bot_id": N}`.
 
 Client -> server ops (JSON; invalid/unknown frames are ignored):
@@ -102,7 +102,12 @@ from typing import Any, Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from . import db, events, privacy
-from .routers.auth import COOKIE_NAME, _bot_for_key, _user_for_token
+from .routers.auth import (
+    COOKIE_NAME,
+    PASSWORD_CHANGE_REQUIRED,
+    _bot_for_key,
+    _session_user,
+)
 from .routers.channels import is_member, is_mention_only
 
 logger = logging.getLogger(__name__)
@@ -112,6 +117,7 @@ router = APIRouter()
 AUTH_TIMEOUT = 5.0          # seconds for a bot's first auth frame
 TYPING_INTERVAL = 3.0       # min seconds between typing_start per sender+channel
 CLOSE_UNAUTHENTICATED = 4401
+CLOSE_PASSWORD_CHANGE_REQUIRED = 4403
 
 _MESSAGE_EVENT_TYPES = ("message_create", "message_edit", "message_delete")
 _MEMBER_EVENT_TYPES = ("member_add", "member_remove", "member_update")
@@ -702,7 +708,6 @@ async def _receive_op(ws: WebSocket) -> Optional[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 async def _run_user(ws: WebSocket, user_id: int, stored_status: str) -> None:
-    # Connect -> online, unless the user's stored status is idle/dnd.
     status = stored_status if stored_status in ("idle", "dnd") else "online"
     first = manager.connect_user(ws, user_id, status)
     await _send(ws, {"type": "ready", "user_id": user_id})
@@ -718,6 +723,14 @@ async def _run_user(ws: WebSocket, user_id: int, stored_status: str) -> None:
     finally:
         if manager.disconnect_user(ws, user_id):
             await _broadcast_presence(user_id, "offline")
+
+
+async def close_user_sockets(user_id: int) -> None:
+    for ws in manager.user_sockets(user_id):
+        try:
+            await ws.close(code=CLOSE_UNAUTHENTICATED)
+        except Exception:  # noqa: BLE001 — socket already closing/closed
+            logger.debug("ws close failed", exc_info=True)
 
 
 async def _run_bot(ws: WebSocket, bot_id: int) -> None:
@@ -739,8 +752,14 @@ async def ws_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
 
     # Humans: session cookie on the handshake (sliding-expiry refresh included).
-    user = await _user_for_token(websocket.cookies.get(COOKIE_NAME))
-    if user is not None:
+    found = await _session_user(websocket.cookies.get(COOKIE_NAME))
+    if found is not None:
+        user, must_change_password = found
+        if must_change_password:
+            await websocket.close(
+                code=CLOSE_PASSWORD_CHANGE_REQUIRED, reason=PASSWORD_CHANGE_REQUIRED
+            )
+            return
         await _run_user(websocket, user.id, user.status)
         return
 

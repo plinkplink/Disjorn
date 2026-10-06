@@ -202,18 +202,6 @@ async def _session_user(token: Optional[str]) -> Optional[tuple[User, bool]]:
     return _user_from_row(row), bool(row["must_change_password"])
 
 
-async def _user_for_token(token: Optional[str]) -> Optional[User]:
-    """Session token -> User, with no rotation gate applied.
-
-    The WebSocket handshake (ws.py) authenticates through here. The gate is
-    HTTP-shaped — it answers 403 with a detail string a client can branch on —
-    and a socket has no way to say that, so rotation state is not enforced on
-    the WS surface. See ROTATION_EXEMPT_ROUTES.
-    """
-    found = await _session_user(token)
-    return found[0] if found is not None else None
-
-
 def _route_key(request: Request) -> tuple[str, str]:
     """(METHOD, path) for the current request, with any ASGI root_path stripped."""
     path = request.url.path
@@ -325,6 +313,7 @@ class PasswordResetNotice(BaseModel):
 
 
 class LoginResult(User):
+    must_change_password: bool = False
     password_reset: Optional[PasswordResetNotice] = None
 
 
@@ -363,7 +352,11 @@ async def login(body: LoginRequest, request: Request, response: Response) -> Log
     )
     _set_session_cookie(response, token)
     notice = await take_reset_notice(row["id"])
-    return LoginResult(**_user_from_row(row).model_dump(), password_reset=notice)
+    return LoginResult(
+        **_user_from_row(row).model_dump(),
+        must_change_password=bool(row["must_change_password"]),
+        password_reset=notice,
+    )
 
 
 @router.post("/auth/logout")
@@ -509,6 +502,9 @@ async def admin_reset_password(
         )
         await db.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,), commit=False)
         await note_password_reset(user_id, admin.id, admin.display_name)
+    from ..ws import close_user_sockets  # ws.py imports this module
+
+    await close_user_sockets(user_id)
     return {"ok": True}
 
 

@@ -39,6 +39,7 @@ export interface User {
 
 /** POST /auth/login: the user, plus an admin reset not yet shown to them. */
 export interface LoginResult extends User {
+  must_change_password?: boolean;
   password_reset?: PasswordResetNotice | null;
 }
 
