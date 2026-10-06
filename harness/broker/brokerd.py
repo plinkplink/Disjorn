@@ -123,7 +123,8 @@ MERGE_REFUSED = "merge-refused"
 # The closed set of refusal reasons; the wire carries one of these verbatim.
 MERGE_REASONS = frozenset({
     "human", "branch-missing", "slug-mismatch", "busy", "moved", "gates",
-    "tier", "pass-missing", "pass-invalid", "budget", "conflict", "push"})
+    "tier", "pass-missing", "pass-invalid", "budget", "conflict", "push",
+    "misconfigured"})
 # The gate unit's own RuntimeMaxSec; the broker has to outwait the kill that works.
 GATE_UNIT_RUNTIME_CAP_SEC = 1200
 DEFAULT_GATE_TIMEOUT_SEC = 1320
@@ -1036,6 +1037,8 @@ def format_merge_refused(*, slug: str, reason_text: str, next_line: str) -> str:
 def merge_next_step(reason: str, *, slug: str, owner: Optional[str] = None,
                     gates_red: bool = False) -> str:
     """What the human does about a refusal, in their own hands."""
+    if reason == "misconfigured":
+        return "fix at the keyboard"
     if gates_red:
         return "fix the red gate, then /build again"
     if reason in ("moved", "conflict"):
@@ -3782,10 +3785,13 @@ class Broker:
     def _gate_and_classify(self, slug: str) -> tuple[Any, dict]:
         """The gates, then the classifier over the same range with their result.
 
-        A red gate is NOT special-cased here: the classifier answers Tier 2 on
-        a failed gate, and that fail-closed answer is the only one used."""
+        A red gate is NOT special-cased: the classifier answers Tier 2 on it
+        and that is the answer used. A misconfigured gate is no answer."""
         repo = self._gatehouse_or_refuse()
         result = self._gate_branch(slug)
+        if result.misconfigured:
+            raise self._merge_refused(
+                f"gates misconfigured: {result.misconfigured}", "misconfigured")
         classification = self._classify(repo, f"main...loop/{slug}",
                                         gates.gates_json(result))
         return result, classification
@@ -3984,11 +3990,13 @@ class Broker:
         return {"author": str(bot_name), "content": str(content or ""),
                 "created_at": created_at}
 
-    def _check_pass(self, *, pass_seq: int, slug: str, paths: list[str],
-                    tip_at: Optional[_dt.datetime],
+    def _check_pass(self, *, pass_seq: int, slug: str,
                     folded: Optional[str] = None) -> str:
         """The four things that make a PASS hold: the right reviewer, after the
         tip, in #custodian, saying PASS for this slug."""
+        repo = self._gatehouse_or_refuse()
+        paths = self._changed_paths(repo, slug)
+        tip_at = self._branch_tip_time(repo, slug)
         if not paths:
             raise self._merge_refused(
                 f"loop/{slug} changes no files", "pass-invalid")
@@ -3997,7 +4005,8 @@ class Broker:
             owner = self._lane_owner(path)
             if owner is None:
                 raise self._merge_refused(
-                    f"no lane owner for {path}; keyboard merge", "pass-invalid")
+                    f"no lane owner for {path}; keyboard merge, or /merge {slug} "
+                    "without a pass", "pass-invalid")
             if owner not in owners:
                 owners.append(owner)
         message = self._pass_message(pass_seq)
@@ -4167,12 +4176,12 @@ class Broker:
         return sha, self._refresh_after_merge()
 
     def _verb_merge(self, caller: str, args: dict) -> tuple[dict, str, dict]:
-        """Take a human's `/merge`: everything the message itself decides is
-        settled here; the gates and the merge run in a thread, like `/build`.
+        """Take a human's `/merge`: the message and its PASS are settled here;
+        the gates and the merge run in a thread, like `/build`.
 
-        NOTHING THAT TOUCHES THE BRANCH RUNS ON THE SOCKET THREAD: the caller
-        is acknowledged first, and the claim is taken before the thread so a
-        second `/merge` is `busy` before any git runs for this slug."""
+        NOTHING THAT WRITES THE BRANCH RUNS ON THE SOCKET THREAD: the caller
+        is acknowledged first, and the claim is taken before the PASS is read
+        so a second `/merge` is `busy` before the PASS check reads the branch."""
         _reject_unknown(args, {"seq", "channel_id", "slug", "pass_seq"})
         for key in ("seq", "channel_id", "slug"):
             if key not in args:
@@ -4209,6 +4218,12 @@ class Broker:
         if not self._claim_gate_run(slug):
             raise self._merge_refused(
                 f"a gate run for {slug} is already in flight", "busy")
+        if pass_seq is not None:
+            try:
+                self._check_pass(pass_seq=pass_seq, slug=slug)
+            except BaseException:
+                self._release_gate_run(slug)
+                raise
 
         thread = threading.Thread(
             target=self._merge_in_background, args=(dict(args),),
@@ -4286,11 +4301,8 @@ class Broker:
                     f"loop/{slug} is Tier 2: it needs a reviewer's PASS in "
                     f"#custodian, then `/merge {slug} pass <seq>`",
                     "pass-missing")
-            reviewer = self._check_pass(
-                pass_seq=pass_seq, slug=slug,
-                paths=self._changed_paths(self._gatehouse_or_refuse(), slug),
-                tip_at=self._branch_tip_time(self._gatehouse_or_refuse(), slug),
-                folded=folded)
+            reviewer = self._check_pass(pass_seq=pass_seq, slug=slug,
+                                        folded=folded)
         stamped = pass_seq if tier == 2 else None
         sha, mirror = self._merge_now(slug=slug, author=author, tier=tier,
                                       channel_id=channel_id, seq=seq,
@@ -4343,6 +4355,10 @@ class Broker:
                 return {"tests": "n/a — nothing was gated",
                         "tier": "n/a — nothing to classify",
                         "next": f"{exc.message}, then /merge {slug}"}
+            if exc.reason == "misconfigured":
+                return {"tests": exc.message,
+                        "tier": "n/a — nothing to classify",
+                        "next": merge_next_step(exc.reason, slug=slug)}
             return {"tests": f"fail — {exc.message}",
                     "tier": "unknown — the gates did not run",
                     "next": "fix the red gate, then /build again"}

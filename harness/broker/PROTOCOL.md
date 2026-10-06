@@ -424,7 +424,11 @@ the message DB.
   own seq), `/merge <slug>` (Tier 1), `PASS from <owner> in #custodian, then
   /merge <slug> pass <seq>` (Tier 2), `fix the red gate, then /build again`,
   or `Tier 0 budget spent today; /merge <slug>`. When a self-merge happened the
-  `deployed` detail also carries `tier` and `merged_sha`.
+  `deployed` detail also carries `tier` and `merged_sha`. A gate run that
+  printed `GATE misconfigured <reason>` (its toolchain was missing, so it said
+  nothing about the branch) is not classified: the banner says
+  `tests: gates misconfigured: <reason>`, `tier: n/a — nothing to classify`,
+  `next: fix at the keyboard`.
 - A branch that fell behind main while it was building is FOLDED before the
   gates run (`merge`, below), under the same gate claim, and the whole banner
   then describes the folded tip; the `diffstat` line, which is read before the
@@ -452,8 +456,10 @@ branch's own suite, so the wall is the classifier plus a human on Tier 1 and 2.
   the first three required and positive, `pass_seq` optional, nothing else.
 - IT IS ASYNCHRONOUS, in `build`'s shape. The CALL does only what is cheap:
   the message, the author, the slug being a build slug, the branch existing,
-  the message naming it, and the gate claim. **Nothing that reads or writes
-  `loop/<slug>`'s history runs on the socket thread.** It then returns
+  the message naming it, the gate claim, and — when `pass_seq` is given — the
+  PASS check (below), which only reads the branch's changed paths and tip
+  time. **Nothing that writes `loop/<slug>` runs on the socket thread.** It
+  then returns
   `{"started": true, "slug": str, "branch": str}` and runs the ancestry check,
   the fold, the gates, the classifier, the PASS check, the merge and the push
   in a background thread. The outcome is ONE post to the origin channel, by the
@@ -470,7 +476,7 @@ branch's own suite, so the wall is the classifier plus a human on Tier 1 and 2.
   or `merge: refused <slug> — <plain reason>` with `next:` the human's own next
   step (`fold main into the branch, then /merge again`, `PASS from <owner> in
   #custodian, then /merge <slug> pass <seq>`, `fix the red gate, then /build
-  again`, or `merge it at the keyboard`).
+  again`, `fix at the keyboard`, or `merge it at the keyboard`).
 - Every refusal — before the answer or after it — is `merge-refused` with a
   plain message, an audit line whose summary starts `denied: ` and ends with
   its reason in brackets, and a `reason` from this closed set. A refusal
@@ -484,6 +490,7 @@ branch's own suite, so the wall is the classifier plus a human on Tier 1 and 2.
 | `busy`           | a gate run for this slug is already in flight            |
 | `moved`          | a conflict with main, or main or the branch moved        |
 | `gates`          | the gate run could not be launched at all                |
+| `misconfigured`  | the gate run printed `GATE misconfigured <reason>`       |
 | `tier`           | the classifier answered with no tier                     |
 | `pass-missing`   | Tier 2 and no `pass_seq`                                 |
 | `pass-invalid`   | the PASS does not hold (below)                           |
@@ -495,7 +502,8 @@ branch's own suite, so the wall is the classifier plus a human on Tier 1 and 2.
   `[build].humans`); `loop/<slug>` must exist in the gatehouse; the message
   must name the slug as a whole token; CLAIM THE GATE RUN — a slug already
   being gated is `busy` on the wire, and nothing after this point runs for a
-  slug someone else holds. Then, in the thread: `refs/heads/main` must be an
+  slug someone else holds; a given `pass_seq` must hold, or it is
+  `pass-invalid` on the wire and the claim is given back. Then, in the thread: `refs/heads/main` must be an
   ancestor of the branch (or it is folded, below) and `main..<tip>` must not be
   empty — a branch with nothing of its own is `branch-missing`, "`loop/<slug>`
   has no commits of its own to merge". Then the gates, then
@@ -531,7 +539,9 @@ branch's own suite, so the wall is the classifier plus a human on Tier 1 and 2.
 - One gate run per slug at a time, whether a `/merge` or a build's own end
   started it; a second `/merge` for that slug is refused `busy` on the spot.
 - Tier 0 and Tier 1 merge on this call: it IS the human step. Tier 2 needs
-  `pass_seq`, and that PASS holds only when the message is in
+  `pass_seq`; a `pass_seq` given at any tier is checked before the gates, on
+  Tier 2 again after them (a fold can stale it), and is stamped only on Tier
+  2. That PASS holds only when the message is in
   `[disjorn].custodian_channel_id`, authored by a BOT whose name is the review
   owner for the changed paths (`[planroom].lane_owners`, prefix map, first
   match wins), posted AFTER the branch tip's commit time, and says the word

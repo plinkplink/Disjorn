@@ -457,7 +457,7 @@ class BrokerHarness:
                    typecheck: bool | None = None, build: bool | None = None,
                    exit_code: int = 0, summary: str = "server 12 passed",
                    log_path: str = "/var/lib/disjorn-broker/gate-logs/x.log",
-                   on_run=None) -> list[dict]:
+                   on_run=None, misconfigured: str | None = None) -> list[dict]:
         """Answer gates.run_gates without launching anything. Returns the list
         every call lands in, so a test can assert the argv prefix and the
         timeout the broker asked for. `on_run` runs WHILE the gates are up —
@@ -470,7 +470,7 @@ class BrokerHarness:
             if on_run is not None:
                 on_run()
             return gates.GateResult(tests, typecheck, build, exit_code,
-                                    log_path, summary)
+                                    log_path, summary, misconfigured)
 
         gates.run_gates = fake
         self.gate_calls = calls

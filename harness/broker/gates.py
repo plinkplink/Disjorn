@@ -1,7 +1,7 @@
 """The broker's own gate run for a loop/<slug> branch.
 
 A green gate proves the run happened and was not skipped; it runs the branch's
-own suite, so it is not a review. Only the four GATE lines decide anything —
+own suite, so it is not a review. Only the GATE lines decide anything —
 everything else the run prints is log, kept at 0600 and never parsed.
 `node_modules` is mounted read-only from the deployed tree, so a branch that
 adds a dependency is typechecked and built without it and will read red until
@@ -18,6 +18,7 @@ from dataclasses import dataclass
 
 GATE_LINE_RE = re.compile(r"^GATE (tests|typecheck|build) (pass|fail|skipped)$")
 GATE_EXIT_RE = re.compile(r"^GATE exit (\d+)$")
+GATE_MISCONFIGURED_RE = re.compile(r"^GATE misconfigured (\S.{0,199})")
 # Only pytest's own final summary line may move a count; a suite that prints
 # "3 passed" in its own output is not a result. The whole line must be the
 # summary, with or without the `=` rule that `-q` leaves off.
@@ -34,6 +35,7 @@ class GateResult:
     exit_code: int
     log_path: str
     summary: str
+    misconfigured: "str | None" = None
 
 
 def gates_json(r: GateResult) -> dict:
@@ -70,6 +72,10 @@ def _parse(stdout: str) -> "tuple[dict, int | None]":
         m = GATE_EXIT_RE.match(line)
         if m:
             exit_code = int(m.group(1))
+            continue
+        m = GATE_MISCONFIGURED_RE.match(line)
+        if m:
+            seen["misconfigured"] = m.group(1)
     return seen, exit_code
 
 
@@ -130,6 +136,7 @@ def run_gates(argv_prefix: "list[str]", seat: str, slug: str, *,
         exit_code=exit_code,
         log_path=log_path,
         summary=_summary(seen, output),
+        misconfigured=seen.get("misconfigured"),
     )
 
 

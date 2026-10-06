@@ -8,6 +8,7 @@
 #   GATE tests pass|fail
 #   GATE typecheck pass|fail|skipped
 #   GATE build pass|fail|skipped
+#   GATE misconfigured <reason>
 #   GATE exit <n>
 #
 # node_modules is mounted read-only, so a branch that adds a dependency is
@@ -69,12 +70,14 @@ else
   echo "$TAG: adapter repo missing: $ADAPTER_REPO — the adapter-drift tests will be red" >&2
 fi
 client_gate=1
+misconfigured=
 if [ -n "$CLIENT_CHANGED" ]; then
   if [ -d "$NODE_MODULES" ]; then
     mounts+=( -v "$NODE_MODULES:/opt/node_modules:ro" )
   else
     # Unreadable is not skipped: a gate that did not run is red.
     echo "$TAG: client/ changed but $NODE_MODULES is not a directory this uid ($(id -un)) can see — the client gates cannot run" >&2
+    misconfigured="$NODE_MODULES is not a directory $(id -un) can see"
     client_gate=0
   fi
 fi
@@ -93,9 +96,8 @@ else
   echo "GATE tests fail"
 fi
 if [ "${GATE_CLIENT:-0}" = "1" ]; then
-  # An unmounted toolchain is a misconfigured gate, never a red branch.
   if [ ! -x /opt/node_modules/.bin/tsc ]; then
-    echo "gate misconfigured: /opt/node_modules has no toolchain (expected .bin/tsc)" >&2
+    echo "GATE misconfigured /opt/node_modules has no toolchain (expected .bin/tsc)"
     echo "GATE typecheck fail"
     echo "GATE build fail"
   else
@@ -141,6 +143,7 @@ while IFS= read -r line; do
     "GATE typecheck fail") typecheck=fail ;;
     "GATE build pass") build=pass ;;
     "GATE build fail") build=fail ;;
+    "GATE misconfigured "?*) misconfigured="${line#GATE misconfigured }" ;;
   esac
 done <<< "$out"
 
@@ -151,6 +154,7 @@ fi
 echo "GATE tests $tests"
 echo "GATE typecheck $typecheck"
 echo "GATE build $build"
+[ -n "$misconfigured" ] && echo "GATE misconfigured $misconfigured"
 
 rc=0
 for g in "$tests" "$typecheck" "$build"; do

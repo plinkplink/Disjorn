@@ -95,6 +95,32 @@ def test_no_exit_line_falls_back_to_the_process_status(tmp_path):
     assert r.exit_code == 3
 
 
+def test_a_misconfigured_line_is_carried_with_its_reason(tmp_path):
+    r = gate(tmp_path, "GATE tests pass\nGATE typecheck fail\nGATE build fail\n"
+                       "GATE misconfigured /opt/node_modules has no toolchain "
+                       "(expected .bin/tsc)\nGATE exit 1", rc=1)
+    assert r.misconfigured == ("/opt/node_modules has no toolchain "
+                               "(expected .bin/tsc)")
+    assert (r.typecheck, r.build, r.exit_code) == (False, False, 1)
+
+
+def test_a_red_run_is_not_misconfigured(tmp_path):
+    r = gate(tmp_path, "GATE tests pass\nGATE typecheck fail\n"
+                       "GATE build fail\nGATE exit 1", rc=1)
+    assert r.misconfigured is None
+
+
+def test_only_a_whole_misconfigured_line_counts(tmp_path):
+    """The reason is posted to chat, so it is one bounded line from stdout and
+    never an echo of the word inside other output."""
+    r = gate(tmp_path, "note: GATE misconfigured elsewhere\nGATE misconfigured\n"
+                       "GATE tests fail\nGATE exit 1",
+             stderr="GATE misconfigured on stderr", rc=1)
+    assert r.misconfigured is None
+    r = gate(tmp_path, "GATE misconfigured " + "x" * 500 + "\nGATE exit 1", rc=1)
+    assert r.misconfigured == "x" * 200
+
+
 def test_a_timeout_is_a_fail(tmp_path):
     r = run_gates(fake_gate(tmp_path, "GATE tests pass", sleep=5), "gable",
                   SLUG, timeout=1, log_dir=str(tmp_path / "logs"))
