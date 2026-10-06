@@ -147,6 +147,7 @@ class SummonDetector:
         self._mention = _mention_re(config.bot_name)
         self._digest = (re.compile(config.digest_pattern)
                         if config.digest_pattern else None)
+        self.own_bot_id: Optional[int] = None
 
     # ----------------------------------------------------------- classify
 
@@ -172,6 +173,8 @@ class SummonDetector:
 
         if author_type != "user":
             if author_type != "bot":
+                return None
+            if self.own_bot_id is not None and msg.get("author_id") == self.own_bot_id:
                 return None
             if self._is_digest(msg):
                 return Trigger(mode=MODE_DIGEST, summoner=summoner,
