@@ -11,7 +11,10 @@ import httpx
 import pytest
 
 from app import db, events
-from app.config import reset_settings_cache
+from app.config import Settings, reset_settings_cache
+
+# A deploy's server/.env must never decide a test result.
+Settings.model_config["env_file"] = None
 
 # The house origin for the whole suite. It is also the client's base_url, so
 # every test request is same-origin: Secure cookies flow (httpx returns them
@@ -28,9 +31,7 @@ def tmp_db_path(tmp_path, monkeypatch):
     db_path = tmp_path / "disjorn.db"
     monkeypatch.setenv("DB_PATH", str(db_path))
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
-    # Settings also read server/.env (production deployment values). Env vars
-    # take priority in pydantic-settings, so pin the test-critical ones here:
-    # the two boot-required security values, and the keyless VAPID default the
+    # The boot-required security values, and the keyless VAPID default the
     # notification tests assume.
     monkeypatch.setenv("COOKIE_SECURE", "true")
     monkeypatch.setenv("HOUSE_ORIGINS", json.dumps([HOUSE_ORIGIN]))
