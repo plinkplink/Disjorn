@@ -1,0 +1,309 @@
+"""Bot reply modes per channel membership, and direct messages with a bot."""
+
+import json
+
+import pytest
+
+from app import db, events
+from app.config import reset_settings_cache
+from app.routers import auth
+
+PASSWORD = "correct horse battery staple"
+
+
+async def make_user(username: str, *, is_admin: bool = False) -> int:
+    cur = await db.execute(
+        """INSERT INTO users (username, password_hash, display_name, is_admin)
+           VALUES (?, ?, ?, ?)""",
+        (username, auth.hash_password(PASSWORD), username.capitalize(), int(is_admin)),
+    )
+    return cur.lastrowid
+
+
+async def make_bot(name: str, api_key: str = "k1", *, dm_open: bool = False) -> int:
+    cur = await db.execute(
+        "INSERT INTO bots (name, api_key_hash, dm_open) VALUES (?, ?, ?)",
+        (name, auth.hash_api_key(api_key), int(dm_open)),
+    )
+    return cur.lastrowid
+
+
+async def login(client, username: str) -> None:
+    client.cookies.clear()
+    r = await client.post("/auth/login", json={"username": username, "password": PASSWORD})
+    assert r.status_code == 200, r.text
+
+
+async def main_feed_id() -> int:
+    row = await db.fetch_one("SELECT id FROM channels WHERE type = 'main_feed'")
+    return row["id"]
+
+
+async def bot_row(channel_id: int, bot_id: int):
+    return await db.fetch_one(
+        """SELECT * FROM channel_members
+           WHERE channel_id = ? AND member_type = 'bot' AND member_id = ?""",
+        (channel_id, bot_id),
+    )
+
+
+@pytest.fixture
+def mention_only(monkeypatch):
+    def apply(*channel_ids: int) -> None:
+        monkeypatch.setenv("MENTION_ONLY_CHANNEL_IDS", json.dumps(list(channel_ids)))
+        reset_settings_cache()
+
+    return apply
+
+
+@pytest.fixture
+def bus():
+    seen: list[dict] = []
+    events.subscribe(seen.append)
+    yield seen
+    events.unsubscribe(seen.append)
+
+
+# ---------------------------------------------------------------------------
+# Schema
+# ---------------------------------------------------------------------------
+
+async def test_a_new_membership_row_replies_on_mention_and_a_new_bot_takes_no_dms(app):
+    applied = {r["filename"] for r in await db.fetch_all("SELECT filename FROM schema_migrations")}
+    assert "018_bot_reply_modes.sql" in applied
+    cur = await db.execute(
+        "INSERT INTO bots (name, api_key_hash) VALUES ('plain', 'x')"
+    )
+    bot_id = cur.lastrowid
+    main = await main_feed_id()
+    add = "INSERT INTO channel_members (channel_id, member_type, member_id) VALUES (?, 'bot', ?)"
+    await db.execute(add, (main, bot_id))
+    assert (await bot_row(main, bot_id))["reply_mode"] == "mention"
+    assert (await db.fetch_one("SELECT dm_open FROM bots WHERE id = ?", (bot_id,)))["dm_open"] == 0
+    with pytest.raises(Exception):
+        await db.execute(
+            "UPDATE channel_members SET reply_mode = 'sometimes' WHERE member_id = ?", (bot_id,)
+        )
+
+
+# ---------------------------------------------------------------------------
+# Adding and changing a mode
+# ---------------------------------------------------------------------------
+
+async def test_a_bot_added_for_every_message_shows_that_mode_in_the_member_list(client):
+    await make_user("alice")
+    always = await make_bot("otto", "k1")
+    plain = await make_bot("claw", "k2")
+    await login(client, "alice")
+    main = await main_feed_id()
+
+    r = await client.post(f"/channels/{main}/bots", json={"bot_id": always, "reply_mode": "always"})
+    assert r.json() == {"ok": True, "added": True}
+    r = await client.post(f"/channels/{main}/bots", json={"bot_id": plain})
+    assert r.json() == {"ok": True, "added": True}
+
+    members = (await client.get(f"/channels/{main}/members")).json()
+    modes = {(m["type"], m["id"]): m["reply_mode"] for m in members}
+    assert modes[("bot", always)] == "always"
+    assert modes[("bot", plain)] == "mention"
+    assert all(mode is None for (kind, _), mode in modes.items() if kind == "user")
+
+    bad = await client.post(f"/channels/{main}/bots", json={"bot_id": plain, "reply_mode": "loud"})
+    assert bad.status_code == 422
+
+
+async def test_only_a_bot_manager_may_change_a_bots_reply_mode(client):
+    await make_user("alice")
+    await make_user("bob")
+    bot_id = await make_bot("otto")
+    await login(client, "alice")
+    room = (await client.post("/channels", json={"name": "den", "visibility": "private"})).json()["id"]
+    bob_id = (await db.fetch_one("SELECT id FROM users WHERE username = 'bob'"))["id"]
+    await client.post(f"/channels/{room}/invite", json={"user_id": bob_id})
+    await client.post(f"/channels/{room}/bots", json={"bot_id": bot_id})
+
+    await login(client, "bob")
+    r = await client.patch(f"/channels/{room}/bots/{bot_id}", json={"reply_mode": "always"})
+    assert r.status_code == 403
+    assert (await bot_row(room, bot_id))["reply_mode"] == "mention"
+
+    await login(client, "alice")
+    r = await client.patch(f"/channels/{room}/bots/{bot_id}", json={"reply_mode": "always"})
+    assert r.json() == {"ok": True, "reply_mode": "always", "changed": True}
+    assert (await bot_row(room, bot_id))["reply_mode"] == "always"
+
+    stranger = await make_bot("claw", "k2")
+    r = await client.patch(f"/channels/{room}/bots/{stranger}", json={"reply_mode": "always"})
+    assert r.status_code == 404
+
+    client.cookies.clear()
+    r = await client.patch(f"/channels/{room}/bots/{bot_id}", json={"reply_mode": "mention"})
+    assert r.status_code == 401
+
+
+async def test_every_message_is_refused_in_a_mention_only_room(client, mention_only):
+    await make_user("alice")
+    bot_id = await make_bot("otto")
+    await login(client, "alice")
+    main = await main_feed_id()
+    shed = (await client.post("/channels", json={"name": "shed"})).json()["id"]
+    mention_only(main)
+
+    r = await client.post(f"/channels/{main}/bots", json={"bot_id": bot_id, "reply_mode": "always"})
+    assert r.status_code == 400
+    assert r.json()["detail"] == "This room is mention-only"
+    assert await bot_row(main, bot_id) is None
+
+    assert (await client.post(f"/channels/{main}/bots", json={"bot_id": bot_id})).status_code == 200
+    r = await client.patch(f"/channels/{main}/bots/{bot_id}", json={"reply_mode": "always"})
+    assert r.status_code == 400
+    assert r.json()["detail"] == "This room is mention-only"
+
+    rows = {c["id"]: c for c in (await client.get("/channels")).json()}
+    assert rows[main]["mention_only"] is True
+    assert rows[shed]["mention_only"] is False
+
+
+async def test_a_real_mode_change_publishes_member_update_and_a_repeat_does_not(client, bus):
+    await make_user("alice")
+    bot_id = await make_bot("otto")
+    await login(client, "alice")
+    main = await main_feed_id()
+    await client.post(f"/channels/{main}/bots", json={"bot_id": bot_id})
+    bus.clear()
+
+    await client.patch(f"/channels/{main}/bots/{bot_id}", json={"reply_mode": "always"})
+    r = await client.patch(f"/channels/{main}/bots/{bot_id}", json={"reply_mode": "always"})
+    assert r.json()["changed"] is False
+
+    updates = [e for e in bus if e["type"] == "member_update"]
+    assert len(updates) == 1
+    assert updates[0]["channel_id"] == main
+    assert updates[0]["member_type"] == "bot"
+    assert updates[0]["member_id"] == bot_id
+    assert updates[0]["reply_mode"] == "always"
+
+
+# ---------------------------------------------------------------------------
+# DMs with a bot
+# ---------------------------------------------------------------------------
+
+async def test_a_bot_takes_dms_only_once_an_admin_opens_them(client):
+    await make_user("root", is_admin=True)
+    await make_user("alice")
+    bot_id = await make_bot("otto")
+    await login(client, "alice")
+
+    assert (await client.post("/dms", json={"bot_id": bot_id})).status_code == 404
+    assert (await client.post("/dms", json={"bot_id": 999})).status_code == 404
+    assert (await client.patch(f"/bots/{bot_id}", json={"dm_open": True})).status_code == 403
+
+    await login(client, "root")
+    r = await client.patch(f"/bots/{bot_id}", json={"dm_open": True})
+    assert r.status_code == 200 and r.json()["dm_open"] is True
+    listed = {b["id"]: b for b in (await client.get("/bots")).json()}
+    assert listed[bot_id]["dm_open"] is True
+
+    await login(client, "alice")
+    first = (await client.post("/dms", json={"bot_id": bot_id})).json()
+    assert first["created"] is True
+    assert first["name"] == "otto"
+    assert first["dm_bot_id"] == bot_id and first["dm_user_id"] is None
+    again = (await client.post("/dms", json={"bot_id": bot_id})).json()
+    assert again["id"] == first["id"] and again["created"] is False
+
+    members = await db.fetch_all(
+        "SELECT member_type, member_id, reply_mode FROM channel_members WHERE channel_id = ?",
+        (first["id"],),
+    )
+    alice_id = (await db.fetch_one("SELECT id FROM users WHERE username = 'alice'"))["id"]
+    assert {(m["member_type"], m["member_id"]) for m in members} == {
+        ("user", alice_id), ("bot", bot_id),
+    }
+    assert (await bot_row(first["id"], bot_id))["reply_mode"] == "always"
+
+    row = next(c for c in (await client.get("/channels")).json() if c["id"] == first["id"])
+    assert row["name"] == "otto"
+    assert row["dm_bot_id"] == bot_id and row["dm_user_id"] is None
+    assert row["dm_bot_avatar_url"] is None
+
+
+async def test_a_bot_dm_is_invisible_to_everyone_but_its_person(client):
+    await make_user("root", is_admin=True)
+    await make_user("alice")
+    bot_id = await make_bot("otto", dm_open=True)
+    await login(client, "alice")
+    dm = (await client.post("/dms", json={"bot_id": bot_id})).json()["id"]
+
+    await login(client, "root")
+    assert dm not in {c["id"] for c in (await client.get("/channels")).json()}
+    assert (await client.get(f"/channels/{dm}/members")).status_code == 403
+    assert (await client.get(f"/channels/{dm}/messages")).status_code == 403
+
+
+async def test_a_dm_request_names_exactly_one_of_a_person_or_a_bot(client):
+    await make_user("alice")
+    bob = await make_user("bob")
+    bot_id = await make_bot("otto", dm_open=True)
+    await login(client, "alice")
+    both = await client.post("/dms", json={"user_id": bob, "bot_id": bot_id})
+    assert both.status_code == 422
+    assert "exactly one" in both.json()["detail"]
+    assert (await client.post("/dms", json={})).status_code == 422
+
+
+async def test_person_and_bot_dm_lookups_never_find_each_others_rooms(client):
+    await make_user("alice")
+    bob = await make_user("bob")
+    bot_id = await make_bot("otto", dm_open=True)
+    await login(client, "alice")
+
+    people = (await client.post("/dms", json={"user_id": bob})).json()
+    r = await client.post(f"/channels/{people['id']}/bots", json={"bot_id": bot_id, "reply_mode": "always"})
+    assert r.status_code == 200
+
+    bot_dm = (await client.post("/dms", json={"bot_id": bot_id})).json()
+    assert bot_dm["created"] is True and bot_dm["id"] != people["id"]
+    again = (await client.post("/dms", json={"user_id": bob})).json()
+    assert again["id"] == people["id"] and again["dm_bot_id"] is None
+
+    rows = {c["id"]: c for c in (await client.get("/channels")).json()}
+    assert rows[people["id"]]["dm_user_id"] == bob
+    assert rows[people["id"]]["dm_bot_id"] is None
+    assert rows[bot_dm["id"]]["dm_bot_id"] == bot_id
+
+    await login(client, "bob")
+    bob_dm = (await client.post("/dms", json={"bot_id": bot_id})).json()
+    assert bob_dm["id"] not in (people["id"], bot_dm["id"])
+
+
+async def test_a_bot_dm_keeps_its_bot_and_its_mode_and_lets_its_person_leave(client):
+    alice = await make_user("alice")
+    bot_id = await make_bot("otto", dm_open=True)
+    other = await make_bot("claw", "k2")
+    await login(client, "alice")
+    dm = (await client.post("/dms", json={"bot_id": bot_id})).json()["id"]
+
+    r = await client.patch(f"/channels/{dm}/bots/{bot_id}", json={"reply_mode": "mention"})
+    assert r.status_code == 403 and r.json()["detail"] == "A bot DM always replies"
+    assert (await client.delete(f"/channels/{dm}/bots/{bot_id}")).status_code == 403
+    assert (await client.post(f"/channels/{dm}/bots", json={"bot_id": other})).status_code == 403
+    assert (await bot_row(dm, bot_id))["reply_mode"] == "always"
+
+    r = await client.post(f"/channels/{dm}/leave")
+    assert r.json() == {"ok": True, "left": True}
+    assert await bot_row(dm, bot_id) is not None
+    assert await db.fetch_one(
+        "SELECT 1 FROM channel_members WHERE channel_id = ? AND member_type = 'user' AND member_id = ?",
+        (dm, alice),
+    ) is None
+    fresh = (await client.post("/dms", json={"bot_id": bot_id})).json()
+    assert fresh["created"] is True and fresh["id"] != dm
+
+
+async def test_a_person_to_person_dm_still_cannot_be_left(client):
+    await make_user("alice")
+    bob = await make_user("bob")
+    await login(client, "alice")
+    dm = (await client.post("/dms", json={"user_id": bob})).json()["id"]
+    assert (await client.post(f"/channels/{dm}/leave")).status_code == 400

@@ -9,7 +9,7 @@ Endpoints:
                                                     hard delete (content included);
                                                     publishes channel_delete
     GET    /channels/deletions            (ADMIN) — deletion records, newest first
-    POST   /dms {user_id}                 (user)  — idempotent get-or-create of the 1:1 DM channel
+    POST   /dms {user_id} | {bot_id}      (user)  — idempotent get-or-create of the 1:1 DM channel
     PUT    /channels/{id}/read {seq}      (user)  — monotonic last_read_seq upsert (no event published)
     GET    /channels/{id}/members         (actor) — member listing, membership-gated
     POST   /channels/{id}/invite {user_id}(user)  — private channels; OWNER ONLY; member_add
@@ -19,6 +19,7 @@ Endpoints:
     POST   /channels/{id}/bots {bot_id}   (user)  — add a bot to a channel; member_add
                                                     (DMs: participants only;
                                                      private channels: owner only)
+    PATCH  /channels/{id}/bots/{bot_id}   (user)  — set a bot's reply_mode; member_update
     DELETE /channels/{id}/bots/{bot_id}   (user)  — remove a bot from a channel; member_remove
                                                     (same access rule as adding)
 
@@ -47,7 +48,8 @@ Membership semantics (Architecture §4.1 + SPECS/2026-08-08-per-channel-membersh
   that is ALL — no read access, ever, which is rule 5 (no silent god-view)
   intact. The listing is still derived from membership (user_channel_ids), not
   from a second visibility rule, so there is only ever one wall to reason about.
-- DM channels have exactly two user members.
+- DM channels have exactly two user members, or one user and one bot (a bot
+  DM, whose bot always replies and cannot be removed or re-moded).
 - `app_build` channels (SPECS/2026-08-30-apps-tab-v1.md) are the modal build
   chat for one app. Explicit-membership-only, always `private`, and created
   with exactly two members: the app's owner and the builder bot. They are
@@ -80,10 +82,18 @@ import sqlite3
 from typing import Annotated, Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from .. import db, events
-from ..models import ChannelType, ChannelVisibility, MemberType, User, UserStatus
+from ..config import get_settings
+from ..models import (
+    ChannelType,
+    ChannelVisibility,
+    MemberType,
+    ReplyMode,
+    User,
+    UserStatus,
+)
 from .auth import Actor, get_actor, get_admin_user, get_current_user
 
 router = APIRouter()
@@ -218,20 +228,21 @@ class ChannelListItem(BaseModel):
     content — `unread` is 0 and `last_message` is None, because the snippet is
     content and content is exactly what the wall is for.
 
-    `created_by` is the channel's owner, so the client can render owner-only
-    affordances (invite / kick) without a second round trip. It is None for
-    main_feed and DMs, which have no creator.
+    `created_by` is the channel's owner; None for main_feed and DMs.
     """
 
     id: int
     type: ChannelType
     name: Optional[str] = None          # DMs: the OTHER participant's display name
     dm_user_id: Optional[int] = None    # DMs: the OTHER participant's user id
+    dm_bot_id: Optional[int] = None     # bot DMs: the bot's id (dm_user_id is None)
+    dm_bot_avatar_url: Optional[str] = None
     unread: int = 0
     last_message: Optional[LastMessage] = None
     visibility: ChannelVisibility = "public"
     member: bool = True
     created_by: Optional[int] = None
+    mention_only: bool = False
 
 
 class ChannelCreateRequest(BaseModel):
@@ -248,14 +259,22 @@ class MemberRef(BaseModel):
 
 
 class DmCreateRequest(BaseModel):
-    user_id: int
+    user_id: Optional[int] = None
+    bot_id: Optional[int] = None
+
+    @model_validator(mode="after")
+    def _exactly_one(self) -> "DmCreateRequest":
+        if (self.user_id is None) == (self.bot_id is None):
+            raise ValueError("give exactly one of user_id or bot_id")
+        return self
 
 
 class DmResponse(BaseModel):
     id: int
     type: ChannelType = "dm_1to1"
     name: str
-    dm_user_id: int
+    dm_user_id: Optional[int] = None
+    dm_bot_id: Optional[int] = None
     created: bool
 
 
@@ -281,10 +300,16 @@ class MemberOut(BaseModel):
     status: Optional[UserStatus] = None  # users only
     avatar_path: Optional[str] = None
     avatar_url: Optional[str] = None
+    reply_mode: Optional[ReplyMode] = None  # bots only
 
 
 class BotRef(BaseModel):
     bot_id: int
+    reply_mode: ReplyMode = "mention"
+
+
+class BotModeUpdate(BaseModel):
+    reply_mode: ReplyMode
 
 
 def _snippet(content: str) -> str:
@@ -298,6 +323,22 @@ async def _get_channel(channel_id: int) -> dict[str, Any]:
     if channel is None:
         raise HTTPException(status_code=404, detail="Channel not found")
     return channel
+
+
+def is_mention_only(channel_id: int) -> bool:
+    return channel_id in get_settings().MENTION_ONLY_CHANNEL_IDS
+
+
+async def is_bot_dm(channel: dict[str, Any]) -> bool:
+    """A person-to-person DM always holds two user rows; a bot DM holds one or none."""
+    if channel["type"] != "dm_1to1":
+        return False
+    row = await db.fetch_one(
+        """SELECT COUNT(*) AS n FROM channel_members
+           WHERE channel_id = ? AND member_type = 'user'""",
+        (channel["id"],),
+    )
+    return row is not None and row["n"] < 2
 
 
 # ---------------------------------------------------------------------------
@@ -395,6 +436,7 @@ async def list_channels(user: CurrentUser) -> list[ChannelListItem]:
             )
         }
     partners: dict[int, dict[str, Any]] = {}
+    bot_partners: dict[int, dict[str, Any]] = {}
     dm_ids = [c["id"] for c in dms]
     if dm_ids:
         dph = ",".join("?" * len(dm_ids))
@@ -408,18 +450,39 @@ async def list_channels(user: CurrentUser) -> list[ChannelListItem]:
                 [user.id, *dm_ids],
             )
         }
+        bot_partners = {
+            r["channel_id"]: r
+            for r in await db.fetch_all(
+                f"""SELECT cm.channel_id, b.id AS bot_id, b.name, b.avatar_path
+                    FROM channel_members cm JOIN bots b ON b.id = cm.member_id
+                    WHERE cm.member_type = 'bot' AND cm.channel_id IN ({dph})""",
+                dm_ids,
+            )
+        }
+    from .media import bot_avatar_url
 
     def build(c: dict[str, Any]) -> ChannelListItem:
         lm = last_msgs.get(c["id"])
         partner = partners.get(c["id"])
+        bot = bot_partners.get(c["id"]) if partner is None else None
+        name = c["name"]
+        if partner is not None:
+            name = partner["display_name"]
+        elif bot is not None:
+            name = bot["name"]
         return ChannelListItem(
             id=c["id"],
             type=c["type"],
-            name=partner["display_name"] if partner is not None else c["name"],
+            name=name,
             dm_user_id=partner["user_id"] if partner is not None else None,
+            dm_bot_id=bot["bot_id"] if bot is not None else None,
+            dm_bot_avatar_url=(
+                bot_avatar_url(bot["bot_id"], bot["avatar_path"]) if bot is not None else None
+            ),
             visibility=c["visibility"],
             member=c["id"] in member_ids,
             created_by=c["created_by"],
+            mention_only=is_mention_only(c["id"]),
             unread=max(0, (max_seqs.get(c["id"]) or 0) - reads.get(c["id"], 0)),
             last_message=LastMessage(
                 seq=lm["seq"],
@@ -703,6 +766,8 @@ async def list_channel_deletions(
 
 @router.post("/dms")
 async def create_or_get_dm(body: DmCreateRequest, user: CurrentUser) -> DmResponse:
+    if body.bot_id is not None:
+        return await _create_or_get_bot_dm(body.bot_id, user)
     if body.user_id == user.id:
         raise HTTPException(status_code=400, detail="Cannot DM yourself")
     target = await db.fetch_one(
@@ -711,8 +776,7 @@ async def create_or_get_dm(body: DmCreateRequest, user: CurrentUser) -> DmRespon
     if target is None:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Canonical pair lookup: the dm_1to1 channel where BOTH users are members,
-    # regardless of who created it (order-independent by construction).
+    # Both users must hold a row, so a bot DM (one user row) can never match.
     existing = await db.fetch_one(
         """SELECT c.id FROM channels c
            JOIN channel_members a ON a.channel_id = c.id
@@ -743,6 +807,46 @@ async def create_or_get_dm(body: DmCreateRequest, user: CurrentUser) -> DmRespon
         id=channel_id, name=target["display_name"],
         dm_user_id=target["id"], created=True,
     )
+
+
+async def _create_or_get_bot_dm(bot_id: int, user: User) -> DmResponse:
+    bot = await db.fetch_one("SELECT id, name, dm_open FROM bots WHERE id = ?", (bot_id,))
+    if bot is None or not bot["dm_open"]:
+        raise HTTPException(status_code=404, detail="No such bot takes direct messages")
+
+    # Exactly these two members, so a person-to-person DM with this bot added
+    # never matches.
+    existing = await db.fetch_one(
+        """SELECT c.id FROM channels c
+           JOIN channel_members a ON a.channel_id = c.id
+                AND a.member_type = 'user' AND a.member_id = ?
+           JOIN channel_members b ON b.channel_id = c.id
+                AND b.member_type = 'bot' AND b.member_id = ?
+           WHERE c.type = 'dm_1to1'
+             AND (SELECT COUNT(*) FROM channel_members m WHERE m.channel_id = c.id) = 2""",
+        (user.id, bot_id),
+    )
+    if existing is not None:
+        return DmResponse(
+            id=existing["id"], name=bot["name"], dm_bot_id=bot_id, created=False
+        )
+
+    async with db.transaction() as conn:
+        cur = await conn.execute(
+            "INSERT INTO channels (type, name) VALUES ('dm_1to1', NULL)"
+        )
+        channel_id = cur.lastrowid
+        await conn.execute(
+            """INSERT INTO channel_members (channel_id, member_type, member_id)
+               VALUES (?, 'user', ?)""",
+            (channel_id, user.id),
+        )
+        await conn.execute(
+            """INSERT INTO channel_members (channel_id, member_type, member_id, reply_mode)
+               VALUES (?, 'bot', ?, 'always')""",
+            (channel_id, bot_id),
+        )
+    return DmResponse(id=channel_id, name=bot["name"], dm_bot_id=bot_id, created=True)
 
 
 # ---------------------------------------------------------------------------
@@ -803,7 +907,7 @@ async def list_members(channel_id: int, actor: CurrentActor) -> list[MemberOut]:
             (channel_id,),
         )
     bots = await db.fetch_all(
-        """SELECT b.id, b.name, b.avatar_path
+        """SELECT b.id, b.name, b.avatar_path, cm.reply_mode
            FROM channel_members cm JOIN bots b ON b.id = cm.member_id
            WHERE cm.channel_id = ? AND cm.member_type = 'bot'
            ORDER BY b.id""",
@@ -830,6 +934,7 @@ async def list_members(channel_id: int, actor: CurrentActor) -> list[MemberOut]:
             name=b["name"],
             avatar_path=b["avatar_path"],
             avatar_url=bot_avatar_url(b["id"], b["avatar_path"]),
+            reply_mode=b["reply_mode"],
         )
         for b in bots
     ]
@@ -876,8 +981,9 @@ async def _publish_member_event(
     member_type: MemberType,
     member_id: int,
     by_user_id: Optional[int],
+    reply_mode: Optional[ReplyMode] = None,
 ) -> None:
-    """member_add / member_remove on the bus (WS fans it out to the channel's
+    """member_add / member_update / member_remove on the bus (WS fans it out to the channel's
     members plus the affected member — see ws.handle_bus_event).
 
     Used for humans (invite / leave / kick) and for bots (POST/DELETE
@@ -888,24 +994,24 @@ async def _publish_member_event(
     `by_user_id` is WHO did it, which the subject and the room both need in
     order to say "alice added bob" rather than "bob appeared". On /leave the
     actor and the subject are the same person — that is the honest answer, not
-    a missing one, so it is filled in. It is Optional only because a future
-    system-initiated membership change would genuinely have no acting user.
+    a missing one, so it is filled in.
     """
-    await events.publish(
-        {
-            "type": kind,
-            "channel_id": channel["id"],
-            "member_type": member_type,
-            "member_id": member_id,
-            "by_user_id": by_user_id,
-            "channel": {
-                "id": channel["id"],
-                "type": channel["type"],
-                "name": channel["name"],
-                "visibility": channel["visibility"],
-            },
-        }
-    )
+    event: dict[str, Any] = {
+        "type": kind,
+        "channel_id": channel["id"],
+        "member_type": member_type,
+        "member_id": member_id,
+        "by_user_id": by_user_id,
+        "channel": {
+            "id": channel["id"],
+            "type": channel["type"],
+            "name": channel["name"],
+            "visibility": channel["visibility"],
+        },
+    }
+    if reply_mode is not None:
+        event["reply_mode"] = reply_mode
+    await events.publish(event)
 
 
 @router.post("/channels/{channel_id}/invite")
@@ -960,7 +1066,8 @@ async def leave_channel(channel_id: int, user: CurrentUser) -> dict[str, bool]:
     """
     channel = await _get_channel(channel_id)
     require_not_app_build(channel)
-    _require_private(channel)
+    if not await is_bot_dm(channel):
+        _require_private(channel)
     cur = await db.execute(
         """DELETE FROM channel_members
            WHERE channel_id = ? AND member_type = 'user' AND member_id = ?""",
@@ -1009,12 +1116,9 @@ async def kick_from_channel(
 # is an invite by another name, so it is the owner's call alone — the wall is
 # the same for bots, with no carve in either direction.)
 #
-# Both endpoints publish member_add / member_remove, in the same frame shape a
-# human invite or kick produces, with member_type "bot". This is the FIRST time
-# a bot's arrival in (or departure from) a channel is visible live: before it,
-# a bot simply started talking one day and clients only learned it was a member
-# by refetching. Fan-out is the ordinary members-only rule, so a DM's bot events
-# reach exactly its two participants (plus the bot itself, as the subject).
+# They publish member_add / member_update / member_remove in the frame shape a
+# human invite or kick produces, with member_type "bot", to the channel's
+# members plus the bot itself.
 # ---------------------------------------------------------------------------
 
 def require_not_app_build(channel: dict[str, Any]) -> None:
@@ -1048,18 +1152,29 @@ async def _require_bot_manage_access(channel_id: int, user: User) -> dict[str, A
     return channel
 
 
+def _refuse_always_if_mention_only(channel: dict[str, Any], mode: ReplyMode) -> None:
+    if mode == "always" and is_mention_only(channel["id"]):
+        raise HTTPException(status_code=400, detail="This room is mention-only")
+
+
 @router.post("/channels/{channel_id}/bots")
 async def add_bot_to_channel(
     channel_id: int, body: BotRef, user: CurrentUser
 ) -> dict[str, bool]:
     channel = await _require_bot_manage_access(channel_id, user)
+    if await is_bot_dm(channel):
+        raise HTTPException(
+            status_code=403, detail="A bot DM holds one person and one bot"
+        )
+    _refuse_always_if_mention_only(channel, body.reply_mode)
     bot = await db.fetch_one("SELECT id FROM bots WHERE id = ?", (body.bot_id,))
     if bot is None:
         raise HTTPException(status_code=404, detail="Bot not found")
     cur = await db.execute(
-        """INSERT OR IGNORE INTO channel_members (channel_id, member_type, member_id)
-           VALUES (?, 'bot', ?)""",
-        (channel_id, body.bot_id),
+        """INSERT OR IGNORE INTO channel_members
+               (channel_id, member_type, member_id, reply_mode)
+           VALUES (?, 'bot', ?, ?)""",
+        (channel_id, body.bot_id, body.reply_mode),
     )
     added = cur.rowcount > 0
     if added:
@@ -1069,11 +1184,44 @@ async def add_bot_to_channel(
     return {"ok": True, "added": added}
 
 
+@router.patch("/channels/{channel_id}/bots/{bot_id}")
+async def set_bot_reply_mode(
+    channel_id: int, bot_id: int, body: BotModeUpdate, user: CurrentUser
+) -> dict[str, Any]:
+    channel = await _require_bot_manage_access(channel_id, user)
+    if await is_bot_dm(channel):
+        raise HTTPException(status_code=403, detail="A bot DM always replies")
+    _refuse_always_if_mention_only(channel, body.reply_mode)
+    row = await db.fetch_one(
+        """SELECT reply_mode FROM channel_members
+           WHERE channel_id = ? AND member_type = 'bot' AND member_id = ?""",
+        (channel_id, bot_id),
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="That bot is not in this channel")
+    changed = row["reply_mode"] != body.reply_mode
+    if changed:
+        await db.execute(
+            """UPDATE channel_members SET reply_mode = ?
+               WHERE channel_id = ? AND member_type = 'bot' AND member_id = ?""",
+            (body.reply_mode, channel_id, bot_id),
+        )
+        await _publish_member_event(
+            "member_update", channel, "bot", bot_id, user.id, body.reply_mode
+        )
+    return {"ok": True, "reply_mode": body.reply_mode, "changed": changed}
+
+
 @router.delete("/channels/{channel_id}/bots/{bot_id}")
 async def remove_bot_from_channel(
     channel_id: int, bot_id: int, user: CurrentUser
 ) -> dict[str, bool]:
     channel = await _require_bot_manage_access(channel_id, user)
+    if await is_bot_dm(channel):
+        raise HTTPException(
+            status_code=403,
+            detail="A bot can't be removed from its own DM; leave the DM instead",
+        )
     cur = await db.execute(
         """DELETE FROM channel_members
            WHERE channel_id = ? AND member_type = 'bot' AND member_id = ?""",

@@ -20,6 +20,7 @@ ChannelType = Literal["main_feed", "dm_1to1", "text", "app_build"]
 # 'private': channel_members is the wall — non-members read nothing.
 ChannelVisibility = Literal["public", "private"]
 UserStatus = Literal["online", "idle", "dnd", "offline"]
+ReplyMode = Literal["mention", "always"]
 # 'duplicate' is the honest word for a row filed twice by UI error — distinct
 # from 'rejected', which is a decision about the request rather than about the
 # row. Row 3 took 'rejected' on 2026-08-23 for want of it (migration 010).
@@ -144,6 +145,7 @@ class Bot(BaseModel):
     avatar_url: Optional[str] = None
     chibi_pack: Optional[str] = None
     created_at: str
+    dm_open: bool = False
 
 
 class OpenSessionRef(BaseModel):
@@ -270,8 +272,8 @@ class ChannelDeleteEvent(BaseModel):
     channel they are not in as a bare row, which now has to go). That audience
     has to be computed before the row is deleted, because afterwards
     `is_member` answers False for everybody; the router carries it on the bus
-    event and the WS hub delivers to exactly that list. The recipient list itself is internal and
-    never reaches the wire.
+    event and the WS hub delivers to exactly that list, which never reaches
+    the wire.
 
     `channel` describes the channel that just stopped existing, so a client can
     say "#backroom was deleted" without having kept its own copy of the name.
@@ -289,8 +291,7 @@ class MemberAddEvent(BaseModel):
     Fanned out to the channel's members plus the affected member themselves.
 
     `by_user_id` is the user who performed the action — the difference between
-    "alice added you to #backroom" and a room that silently changed shape. None
-    only if a membership change ever has no acting user behind it.
+    "alice added you to #backroom" and a room that silently changed shape.
     """
 
     type: Literal["member_add"] = "member_add"
@@ -316,6 +317,18 @@ class MemberRemoveEvent(BaseModel):
     member_type: MemberType
     member_id: int
     by_user_id: Optional[int] = None
+    channel: ChannelCreateRef
+
+
+class MemberUpdateEvent(BaseModel):
+    """A bot's reply mode in a channel changed; same audience as member_add."""
+
+    type: Literal["member_update"] = "member_update"
+    channel_id: int
+    member_type: MemberType
+    member_id: int
+    by_user_id: Optional[int] = None
+    reply_mode: ReplyMode
     channel: ChannelCreateRef
 
 
@@ -375,6 +388,7 @@ Event = Union[
     ChannelDeleteEvent,
     MemberAddEvent,
     MemberRemoveEvent,
+    MemberUpdateEvent,
     AppStageEvent,
     AppUpdateEvent,
 ]

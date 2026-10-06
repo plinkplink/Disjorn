@@ -1,12 +1,10 @@
-"""Bot cosmetics admin surface (chibi pack + avatar).
+"""Bot admin surface (chibi pack, avatar, DM gate).
 
-Closes the DEFERRED item "No admin surface for bot cosmetics": assigning a
-`bots.chibi_pack` or a bot avatar used to mean hand-editing the DB. The same
-knobs are also available offline via `cli.py create-bot --chibi-pack`.
+The chibi pack is also settable offline via `cli.py create-bot --chibi-pack`.
 
     GET   /bots                     (any actor)  list bots (public Bot shape)
     GET   /bots/{id}                (any actor)  one bot (public Bot shape)
-    PATCH /bots/{id}                (ADMIN)      set/clear chibi_pack
+    PATCH /bots/{id}                (ADMIN)      set/clear chibi_pack, set dm_open
     POST  /bots/{id}/avatar         (ADMIN)      upload -> 256px WebP avatar
     DELETE /bots/{id}/avatar        (ADMIN)      clear the avatar
     GET   /bots/{id}/avatar         (open)       serve it, mirrors /avatars/{user_id}
@@ -58,6 +56,7 @@ def _bot_out(row: dict[str, Any]) -> Bot:
         avatar_url=bot_avatar_url(row["id"], row["avatar_path"]),
         chibi_pack=row["chibi_pack"],
         created_at=row["created_at"],
+        dm_open=bool(row["dm_open"]),
     )
 
 
@@ -85,6 +84,7 @@ class BotUpdate(BaseModel):
     """
 
     chibi_pack: Optional[str] = None
+    dm_open: Optional[bool] = None
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +112,10 @@ async def get_bot(bot_id: int, actor: CurrentActor) -> Bot:
 async def update_bot(bot_id: int, body: BotUpdate, admin: AdminUser) -> Bot:
     """Set or clear a bot's chibi pack. 400 if the pack does not resolve."""
     await _require_editable_bot(bot_id)
+    if body.dm_open is not None:
+        await db.execute(
+            "UPDATE bots SET dm_open = ? WHERE id = ?", (int(body.dm_open), bot_id)
+        )
     if "chibi_pack" not in body.model_fields_set:
         return _bot_out(await _require_bot(bot_id))
 

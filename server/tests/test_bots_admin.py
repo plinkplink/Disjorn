@@ -87,6 +87,7 @@ async def test_list_and_get_bots_public_shape(client):
     for bot in listed:
         assert set(bot) == {
             "id", "name", "avatar_path", "avatar_url", "chibi_pack", "created_at",
+            "dm_open",
         }
         # No avatar -> no URL, so a member panel never fires a doomed request.
         assert bot["avatar_url"] is None
