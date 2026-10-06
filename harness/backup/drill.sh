@@ -56,7 +56,7 @@ verify_store() {
 }
 c_count="$(mget "$m" claudette.count)"
 verify_store claudette ""
-d_note=""
+d_note=", discord-side absent"
 if [[ "$(mget "$m" claudette_discord 2>/dev/null)" =~ ^[0-9] ]]; then
     verify_store claudette_discord discord-
     d_note=", discord-side $(mget "$m" claudette_discord.count)"

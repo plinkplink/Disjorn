@@ -51,7 +51,8 @@ def export(data_dir: Path, out: Path) -> dict:
         raise SystemExit(f"memory_export: {data_dir} exported zero records")
     out.write_bytes(dumps(records))
     return {"count": len(records), "export_sha256": sha256(out),
-            "store_count": store.count(), "ids_sha256": ids_sha256(r["id"] for r in records)}
+            "store_count": store.count(),
+            "ids_sha256": ids_sha256(store._collection.get(include=[])["ids"])}
 
 
 def verify(export_file: Path, count: int, sha: str, scratch: Path,

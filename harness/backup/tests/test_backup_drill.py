@@ -175,8 +175,8 @@ def test_drill_passes_on_an_untouched_snapshot(house):
     assert r.returncode == 0, r.stderr + "\n".join(posts(house))
     [post] = posts(house)
     assert post.startswith("backup drill PASS")
-    for bit in ("3 messages", "migration 10", "claudette 3 memories", "gable 3 memory files",
-                "3 bundles verified"):
+    for bit in ("3 messages", "migration 10", "claudette 3 memories round-trip, discord-side absent;",
+                "gable 3 memory files", "3 bundles verified"):
         assert bit in post
     assert list((house["tmp"] / "t").iterdir()) == []
 
@@ -223,6 +223,16 @@ def test_the_discord_side_store_is_snapshotted_and_drilled(house):
     export.write_text(export.read_text().replace("bass", "drums"))
     assert run(house, "drill.sh").returncode == 1
     assert "claudette_discord: export sha" in posts(house)[1]
+
+
+def test_the_ids_hash_is_the_source_store_s_not_the_export_s(house):
+    assert run(house, "snapshot.sh").returncode == 0
+    mf = restored(house, only_snapshot(house), house["stage"]) / "manifest.json"
+    m = json.loads(mf.read_text())
+    m["claudette"]["ids_sha256"] = "0" * 64
+    mf.write_text(json.dumps(m))
+    assert run(house, "drill.sh").returncode == 1
+    assert "export ids differ from the source store's ids" in posts(house)[0]
 
 
 def test_drill_red_when_the_export_dropped_records_the_source_store_held(house):
