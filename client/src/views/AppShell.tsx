@@ -19,6 +19,7 @@ import {
   writeChannelHash,
 } from "../hashRoute";
 import { POPUP_BLOCKED_NOTE, openMinted } from "../lib/openMinted";
+import { usePush } from "../push";
 import { useApps } from "../stores/apps";
 import { useChannels } from "../stores/channels";
 import { useMembers } from "../stores/members";
@@ -531,6 +532,7 @@ export function AppShell() {
     void useApps.getState().loadConfig();
     if (overlayFromHash() === "none") st.setActive(channelIdFromHash());
     socket.connect();
+    void usePush.getState().sync();
     // Route changes from outside (notification deep-links, back button).
     const onHash = () => {
       const next = overlayFromHash();
