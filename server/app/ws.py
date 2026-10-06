@@ -588,7 +588,7 @@ async def handle_bus_event(event: dict[str, Any]) -> None:
         }
         # Read per message, uncached: a mode set by hand in the DB must take
         # effect on the next message, with no event to invalidate a cache.
-        if channel["type"] != "app_build" and not is_mention_only(channel_id):
+        if channel["type"] != "app_build" and not is_mention_only(channel):
             always_bots = {
                 r["member_id"]
                 for r in await db.fetch_all(

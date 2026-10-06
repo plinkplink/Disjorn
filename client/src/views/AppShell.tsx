@@ -849,8 +849,8 @@ export function AppShell() {
     setChannelMenuOpen(false);
     const label = `#${active.name ?? ""}`;
     const warning = activeBotDm
-      ? `Leave your DM with ${active.name ?? "this bot"}? It leaves your ` +
-        `sidebar with its history; a new DM with it starts empty.`
+      ? `Leave your DM with ${active.name ?? "this bot"}? The conversation ` +
+        `is deleted; a new DM with it starts empty.`
       : isOwner
       ? `Leave ${label}? You stay its owner, but you lose access to it — ` +
         `including everything already posted — until you add yourself back.`

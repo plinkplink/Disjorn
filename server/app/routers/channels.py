@@ -325,8 +325,13 @@ async def _get_channel(channel_id: int) -> dict[str, Any]:
     return channel
 
 
-def is_mention_only(channel_id: int) -> bool:
-    return channel_id in get_settings().MENTION_ONLY_CHANNEL_IDS
+def is_mention_only(channel: dict[str, Any]) -> bool:
+    """Listed by id or by name, so #custodian stays closed without an .env line."""
+    settings = get_settings()
+    return (
+        channel["id"] in settings.MENTION_ONLY_CHANNEL_IDS
+        or (channel["type"] == "text" and channel["name"] in settings.MENTION_ONLY_CHANNEL_NAMES)
+    )
 
 
 async def is_bot_dm(channel: dict[str, Any]) -> bool:
@@ -482,7 +487,7 @@ async def list_channels(user: CurrentUser) -> list[ChannelListItem]:
             visibility=c["visibility"],
             member=c["id"] in member_ids,
             created_by=c["created_by"],
-            mention_only=is_mention_only(c["id"]),
+            mention_only=is_mention_only(c),
             unread=max(0, (max_seqs.get(c["id"]) or 0) - reads.get(c["id"], 0)),
             last_message=LastMessage(
                 seq=lm["seq"],
@@ -581,7 +586,7 @@ async def create_channel(body: ChannelCreateRequest, user: CurrentUser) -> Chann
         name=name,
         visibility=body.visibility,
         created_by=user.id,
-        mention_only=is_mention_only(channel_id),
+        mention_only=is_mention_only({"id": channel_id, "type": "text", "name": name}),
     )
 
 
@@ -673,16 +678,7 @@ async def delete_channel(channel_id: int, user: CurrentUser) -> dict[str, bool]:
     ORPHANS: attachment FILES under DATA_DIR are deliberately left on disk;
     nothing serves them once their rows are gone.
 
-    Publishes `channel_delete` on the bus. The recipient list is computed HERE,
-    before the row disappears — after the delete `is_member` answers False for
-    everyone, so the WS hub could not work out who used to be able to see the
-    channel. A public channel carries `recipients: None` (= everyone, the same
-    audience channel_create had). A private one carries its explicit member
-    list, plus the acting user, plus EVERY admin: an admin's sidebar shows a
-    private channel they are not in as a bare row (RULED 2026-08-17), so an
-    admin needs this frame to drop a ghost row for a room that no longer
-    exists. It tells them nothing they could not already see — the row was
-    already on their screen, and the frame carries no content.
+    Publishes `channel_delete` (see _destroy_channel for its audience).
     """
     channel = await _get_channel(channel_id)
     if channel["type"] != "text":
@@ -699,46 +695,57 @@ async def delete_channel(channel_id: int, user: CurrentUser) -> dict[str, bool]:
             detail=f"#{channel['name']} is protected and cannot be deleted",
         )
     _require_owner_or_admin(channel, user)
+    await _destroy_channel(channel, user.id)
+    return {"ok": True}
 
+
+async def _destroy_channel(channel: dict[str, Any], by_user_id: int) -> None:
+    """Hard-delete a channel and publish `channel_delete`.
+
+    The audience is computed before the row goes, because afterwards
+    `is_member` answers False for everyone. A public main_feed/text channel
+    carries `recipients: None` (everyone). Any other room carries its explicit
+    members plus the actor, and a private text channel also every admin, whose
+    sidebar shows it as a bare row that would otherwise point at nothing.
+    """
     recipients: Optional[list[list[Any]]] = None
-    if channel["visibility"] == "private":
+    if not (
+        channel["type"] in IMPLICIT_MEMBER_TYPES and channel["visibility"] == "public"
+    ):
         rows = await db.fetch_all(
             "SELECT member_type, member_id FROM channel_members WHERE channel_id = ?",
-            (channel_id,),
+            (channel["id"],),
         )
         pairs: set[tuple[str, int]] = {
             (r["member_type"], r["member_id"]) for r in rows
         }
-        pairs.add(("user", user.id))
-        # Admins had the channel in their sidebar as a bare, contentless row;
-        # without this frame it would sit there pointing at nothing.
-        pairs.update(
-            ("user", r["id"])
-            for r in await db.fetch_all("SELECT id FROM users WHERE is_admin = 1")
-        )
+        pairs.add(("user", by_user_id))
+        if channel["type"] == "text":
+            pairs.update(
+                ("user", r["id"])
+                for r in await db.fetch_all("SELECT id FROM users WHERE is_admin = 1")
+            )
         recipients = [[t, i] for t, i in sorted(pairs)]
 
     async with db.transaction() as conn:
-        await _record_deletion(conn, channel, "user", user.id)
-        await conn.execute("DELETE FROM channels WHERE id = ?", (channel_id,))
+        await _record_deletion(conn, channel, "user", by_user_id)
+        await conn.execute("DELETE FROM channels WHERE id = ?", (channel["id"],))
 
     await events.publish(
         {
             "type": "channel_delete",
-            "channel_id": channel_id,
-            "by_user_id": user.id,
+            "channel_id": channel["id"],
+            "by_user_id": by_user_id,
             "channel": {
-                "id": channel_id,
+                "id": channel["id"],
                 "type": channel["type"],
                 "name": channel["name"],
                 "visibility": channel["visibility"],
             },
-            # Internal to the bus: the WS frame never carries it (knowing who
-            # else was in a room you just lost is not the client's business).
+            # Routing only: the WS frame never carries it.
             "recipients": recipients,
         }
     )
-    return {"ok": True}
 
 
 @router.get("/channels/deletions")
@@ -811,6 +818,7 @@ async def create_or_get_dm(body: DmCreateRequest, user: CurrentUser) -> DmRespon
 
 
 async def _create_or_get_bot_dm(bot_id: int, user: User) -> DmResponse:
+    """dm_open gates creation only; turning it off later leaves existing DMs open."""
     bot = await db.fetch_one("SELECT id, name, dm_open FROM bots WHERE id = ?", (bot_id,))
     if bot is None or not bot["dm_open"]:
         raise HTTPException(status_code=404, detail="No such bot takes direct messages")
@@ -1064,11 +1072,16 @@ async def leave_channel(channel_id: int, user: CurrentUser) -> dict[str, bool]:
 
     Idempotent: leaving a channel you are not in reports `left: false`.
     Leaving takes your last_read_seq with it — the row IS the membership.
+    A bot DM's one person leaving deletes the room, history included.
     """
     channel = await _get_channel(channel_id)
     require_not_app_build(channel)
-    if not await is_bot_dm(channel):
-        _require_private(channel)
+    if await is_bot_dm(channel):
+        if not await is_member(channel_id, "user", user.id):
+            return {"ok": True, "left": False}
+        await _destroy_channel(channel, user.id)
+        return {"ok": True, "left": True}
+    _require_private(channel)
     cur = await db.execute(
         """DELETE FROM channel_members
            WHERE channel_id = ? AND member_type = 'user' AND member_id = ?""",
@@ -1154,7 +1167,7 @@ async def _require_bot_manage_access(channel_id: int, user: User) -> dict[str, A
 
 
 def _refuse_always_if_mention_only(channel: dict[str, Any], mode: ReplyMode) -> None:
-    if mode == "always" and is_mention_only(channel["id"]):
+    if mode == "always" and is_mention_only(channel):
         raise HTTPException(status_code=400, detail="This room is mention-only")
 
 

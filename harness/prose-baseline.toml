@@ -85,7 +85,7 @@
 "sdk/disjorn_sdk/events.py" = 3792
 "sdk/examples/echo_bot.py" = 1126
 "server/app/apps_grant.py" = 5863
-"server/app/config.py" = 7708
+"server/app/config.py" = 7632
 "server/app/db.py" = 5989
 "server/app/gate.py" = 9627
 "server/app/main.py" = 6402
@@ -95,7 +95,7 @@
 "server/app/routers/apps.py" = 51908
 "server/app/routers/auth.py" = 7904
 "server/app/routers/bots_admin.py" = 3013
-"server/app/routers/channels.py" = 22178
+"server/app/routers/channels.py" = 21931
 "server/app/routers/media.py" = 9425
 "server/app/routers/messages.py" = 10836
 "server/app/routers/notifications.py" = 4622
