@@ -384,7 +384,7 @@ def test_a_changed_path_with_no_lane_owner_is_a_keyboard_merge(harness):
     reason, message = early_refusal(harness, pass_seq=PASS_SEQ)
     assert reason == "pass-invalid"
     assert message == ("no lane owner for harness/broker/brokerd.py; "
-                       "keyboard merge")
+                       f"keyboard merge, or /merge {SLUG} without a pass")
 
 
 def test_a_pass_that_cannot_hold_is_refused_before_the_gates_run(harness):

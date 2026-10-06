@@ -4005,7 +4005,8 @@ class Broker:
             owner = self._lane_owner(path)
             if owner is None:
                 raise self._merge_refused(
-                    f"no lane owner for {path}; keyboard merge", "pass-invalid")
+                    f"no lane owner for {path}; keyboard merge, or /merge {slug} "
+                    "without a pass", "pass-invalid")
             if owner not in owners:
                 owners.append(owner)
         message = self._pass_message(pass_seq)
@@ -4180,7 +4181,7 @@ class Broker:
 
         NOTHING THAT WRITES THE BRANCH RUNS ON THE SOCKET THREAD: the caller
         is acknowledged first, and the claim is taken before the PASS is read
-        so a second `/merge` is `busy` before any git reads this slug."""
+        so a second `/merge` is `busy` before the PASS check reads the branch."""
         _reject_unknown(args, {"seq", "channel_id", "slug", "pass_seq"})
         for key in ("seq", "channel_id", "slug"):
             if key not in args:
