@@ -1049,6 +1049,61 @@
   background: var(--bg-4);
 }
 
+.unfurl-video {
+  flex-direction: column;
+  align-items: stretch;
+  width: 100%;
+  padding-right: var(--space-3);
+}
+
+.unfurl-video .unfurl-text {
+  padding-right: 28px;
+}
+
+.unfurl-channel {
+  margin: 0 0 var(--space-1);
+  font-size: var(--text-xs);
+  color: var(--text-2);
+}
+
+.unfurl-video-frame {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border: 0;
+  border-radius: var(--radius-m);
+  background: #000;
+  overflow: hidden;
+}
+
+.unfurl-video-poster {
+  position: relative;
+  padding: 0;
+  cursor: pointer;
+}
+
+.unfurl-video-poster img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.unfurl-play {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 68px;
+  height: 48px;
+  transform: translate(-50%, -50%);
+  opacity: 0.85;
+}
+
+.unfurl-video-poster:hover .unfurl-play,
+.unfurl-video-poster:focus-visible .unfurl-play {
+  opacity: 1;
+}
+
 /* ---- jump pill ---- */
 
 .jump-pill {
