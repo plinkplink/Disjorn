@@ -949,11 +949,17 @@ def format_board_line(card: dict) -> str:
     for flag in card.get("flags") or []:
         tail.append(f"!{flag}")
     if (card.get("deploy") or {}).get("badge"):
-        tail.append(f"deploy {card['deploy']['badge']}")
+        tail.append(f"deploy {_deploy_words(card['deploy'])}")
     if card.get("blocked"):
         tail.append(f"BLOCKED: {card.get('blocked_reason') or 'no reason given'}")
     line = " ".join(bits)
     return f"{line}  ·  {' · '.join(tail)}" if tail else line
+
+
+def _deploy_words(deploy: dict) -> str:
+    badge = deploy.get("badge", "unknown")
+    label = deploy.get("label")
+    return f"{badge} ({label})" if label and label != badge else badge
 
 
 def format_board_face(face: dict) -> str:
@@ -961,9 +967,8 @@ def format_board_face(face: dict) -> str:
     if face.get("available") is False:
         return f"UNAVAILABLE — {face.get('unavailable_reason', 'no reason given')}"
     head = str(face.get("mirror_head") or "?")[:12]
-    badge = (face.get("deploy") or {}).get("badge", "unknown")
     out = (f"derived {face.get('derived_at', '?')} from mirror {head}; "
-           f"deploy {badge}")
+           f"deploy {_deploy_words(face.get('deploy') or {})}")
     for note in face.get("notes") or []:
         out += f"\nnote: {note}"
     return out

@@ -563,6 +563,7 @@ def gate_paths(config: dict) -> dict:
         "mirror": g.get("mirror"),
         "branch": g.get("mirror_branch", "main"),
         "deploy_tree": deploy_tree,
+        "deploy_service": g.get("deploy_service", DEPLOY_SERVICE),
         "message_db": message_db,
         "custodian_channel_id": config.get("disjorn", {}).get("custodian_channel_id"),
         # The key behind the digest's own posts (_sdk_transport reads the same
@@ -1390,28 +1391,96 @@ def _dirty_sentence(paths: list) -> str:
             f"under {where} — code is running that was never published")
 
 
+# The server's systemd unit; its start time is compared against what landed on disk.
+DEPLOY_SERVICE = "disjorn"
+# A change here needs the server restarted; client/ is served from a built dist.
+RESTART_PATHSPEC = ("server", ":(exclude)server/tests")
+REFLOG_SCAN = 500
+_REFLOG_TIME_RE = re.compile(r"HEAD@\{(\d+)\}")
+
+
+def service_started_at(unit: str) -> tuple[Optional[int], str]:
+    """When `unit` last became active, as epoch seconds, or None and why.
+    Unprivileged over D-Bus; no /proc clock-tick arithmetic or pid reuse."""
+    try:
+        proc = subprocess.run(
+            ["systemctl", "show", "--timestamp=unix", "-p", "ActiveState",
+             "-p", "ActiveEnterTimestamp", unit],
+            capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, f"cannot ask systemd about {unit}: {type(exc).__name__}"
+    if proc.returncode != 0:
+        return None, f"cannot ask systemd about {unit}"
+    props = dict(line.split("=", 1) for line in proc.stdout.splitlines()
+                 if "=" in line)
+    if props.get("ActiveState") != "active":
+        return None, f"{unit} is {props.get('ActiveState') or 'not active'}"
+    ts = props.get("ActiveEnterTimestamp", "").lstrip("@")
+    if not ts.isdigit():
+        return None, f"systemd gave no start time for {unit}"
+    return int(ts), ""
+
+
+def head_at(deploy_tree: str, when: int) -> tuple[Optional[str], str]:
+    """Prod's HEAD at epoch `when`, by reflog time: a commit can land days
+    after it was made."""
+    log = _git(deploy_tree, "log", "-g", f"-n{REFLOG_SCAN}", "--date=unix",
+               "--format=%H %gd", "HEAD")
+    if not log:
+        return None, "cannot read prod's reflog"
+    for line in log.splitlines():
+        sha, _, selector = line.partition(" ")
+        m = _REFLOG_TIME_RE.fullmatch(selector.strip())
+        if m and int(m.group(1)) <= when:
+            return sha, ""
+    return None, "prod's reflog does not reach back to the server's start"
+
+
+def running_state(deploy_tree: str, deployed_head: str,
+                  started: tuple[Optional[int], str]) -> dict:
+    """Has the live server loaded the server code on disk? `ok` is None when
+    that cannot be told, and None must never render green."""
+    started_at, why = started
+    out = {"ok": None, "started_at": started_at, "started_head": None,
+           "detail": ""}
+    if started_at is None:
+        out["detail"] = f"running: unknown ({why})"
+        return out
+    sha, why = head_at(deploy_tree, started_at)
+    if sha is None:
+        out["detail"] = f"running: unknown ({why})"
+        return out
+    out["started_head"] = sha
+    changed = ("" if sha == deployed_head else
+               _git(deploy_tree, "diff", "--name-only", sha, deployed_head,
+                    "--", *RESTART_PATHSPEC))
+    if changed is None:
+        out["detail"] = "running: unknown (cannot compare server/ across the restart)"
+        return out
+    out["ok"] = not changed.strip()
+    out["detail"] = (f"running: server started on {_short(sha)}"
+                     + ("" if out["ok"] else ", server/ changed since; restart pending"))
+    return out
+
+
 def deploy_state(config: Optional[dict] = None, *, mirror: Optional[str] = None,
                  deploy_tree: Optional[str] = None,
-                 branch: str = "main") -> dict:
-    """Prod's running tree against mirror head. THE tri-state, one computation.
-
-    NAMED AND IMPORTABLE ON PURPOSE (seq 1428, P6): the Plan Room's tri-state
-    badge is this same question, and it calls this rather than re-implementing
-    it. Two implementations of "is prod current" would disagree on exactly the
-    day it mattered.
-
-    `state` is one of `in-sync`, `drift`, `unknown`. Since prod deploys from the
-    mirror (plink, seq 1391) the hook already sits on the deploy path, so this
-    is belt-and-braces — except for the case it uniquely catches: a DIRTY prod
-    tree is code that is running and was never published, which is the
-    ship-by-not-publishing incentive Claudette named at seq 1380."""
+                 branch: str = "main",
+                 service: Optional[str] = None) -> dict:
+    """Prod's tree against mirror head (`state`: in-sync, drift, unknown), and
+    the live server against prod's tree (`running`). The Plan Room badge and
+    the digest both call this so they cannot disagree. A dirty tree is code
+    running that was never published."""
     if config is not None:
         p = gate_paths(config)
         mirror = mirror or p["mirror"]
         deploy_tree = deploy_tree or p["deploy_tree"]
         branch = branch or p["branch"]
+        service = service or p["deploy_service"]
+    service = service or DEPLOY_SERVICE
     out = {"state": "unknown", "mirror_head": None, "deployed_head": None,
-           "dirty": None, "ahead": None, "behind": None, "detail": ""}
+           "dirty": None, "ahead": None, "behind": None, "detail": "",
+           "running": {"ok": None, "detail": "running: unknown"}}
     if not mirror or not deploy_tree:
         out["detail"] = "no [gate].mirror / [gate].deploy_tree configured"
         return out
@@ -1423,12 +1492,11 @@ def deploy_state(config: Optional[dict] = None, *, mirror: Optional[str] = None,
         return out
     out["mirror_head"] = mirror_head.strip()
     out["deployed_head"] = deployed_head.strip()
+    out["running"] = running_state(deploy_tree, out["deployed_head"],
+                                   service_started_at(service))
     status = _git(deploy_tree, "status", "--porcelain")
     out["dirty"] = None if status is None else bool(status.strip())
-    # What is dirty, not only that it is (Claudette's wording card, third
-    # data point #2502): the count and the top-level directories, so the
-    # reader can tell "an unmerged fix on the tree" from "someone edited
-    # prod" without a shell. Paths only, never contents.
+    # Paths only, never contents: enough to tell an unmerged fix from an edit.
     out["dirty_paths"] = _dirty_paths(status)
     # Ask whichever repo can resolve BOTH commits. The mirror usually can (prod
     # deploys from it); prod cannot, the moment the mirror moves ahead — which
@@ -1443,7 +1511,7 @@ def deploy_state(config: Optional[dict] = None, *, mirror: Optional[str] = None,
             out["behind"], out["ahead"] = int(parts[0]), int(parts[1])
     if out["mirror_head"] == out["deployed_head"] and out["dirty"] is False:
         out["state"] = "in-sync"
-        out["detail"] = "prod runs mirror head, working tree clean"
+        out["detail"] = "prod's checkout is at mirror head, working tree clean"
         return out
     out["state"] = "drift"
     bits = []
@@ -1918,8 +1986,10 @@ def compose_drift_block(drift: dict, *, verbose: bool = False) -> str:
 
     # 7. deploy drift
     d = drift.get("deploy", {})
+    run = (d.get("running") or {}).get("detail") if d.get("deployed_head") else None
     L.append(f"deploy: {d.get('state', 'unknown')}"
-             + (f" — {d['detail']}" if d.get("detail") else ""))
+             + (f" — {d['detail']}" if d.get("detail") else "")
+             + (f"; {run}" if run else ""))
     L.extend(_seat_line(s) for s in drift.get("seat_surfaces") or [])
 
     # 8. prose ceiling, report only; the wall is harness/tests/test_prose_ratio.py

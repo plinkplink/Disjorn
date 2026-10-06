@@ -20,3 +20,8 @@ FAKE_CC_VERSION = "2.1.259"
 @pytest.fixture(autouse=True)
 def _no_podman(monkeypatch):
     monkeypatch.setattr(_M, "_image_cc_version", lambda image: (FAKE_CC_VERSION, ""))
+
+
+@pytest.fixture(autouse=True)
+def _no_systemd(monkeypatch):
+    monkeypatch.setattr(_M, "service_started_at", lambda unit: (None, "not asked in tests"))

@@ -389,30 +389,34 @@ def column_for_status(word: str) -> Optional[str]:
 
 
 def deploy_badge(deploy: Optional[dict]) -> dict:
-    """The tri-state badge, ruled seq 1391: green = prod matches the mirror,
-    amber = merged-not-deployed, red = live-not-merged.
+    """Two facts from `metrics.deploy_state()`, and one colour for both.
 
-    Computed from `metrics.deploy_state()` and from nothing else (seq 1428 P6).
-    Red is the dangerous one and it has two shapes, both of which mean code is
-    RUNNING that the mirror has never seen: a prod tree ahead of the mirror, or
-    a dirty prod tree. That is the ship-by-not-publishing case, and it must
-    never render as merely 'behind'."""
-    if not deploy or deploy.get("state") == "unknown":
-        return {"badge": "unknown",
-                "detail": (deploy or {}).get("detail")
-                or "deploy state not configured",
-                "state": "unknown"}
-    state = deploy.get("state")
-    ahead = deploy.get("ahead") or 0
-    behind = deploy.get("behind") or 0
-    if state == "in-sync":
-        return {"badge": "green", "detail": deploy.get("detail", ""),
-                "state": state, "ahead": ahead, "behind": behind}
-    if deploy.get("dirty") or ahead > 0:
-        return {"badge": "red", "detail": deploy.get("detail", ""),
-                "state": state, "ahead": ahead, "behind": behind}
-    return {"badge": "amber", "detail": deploy.get("detail", ""),
-            "state": state, "ahead": ahead, "behind": behind}
+    staged: prod's checkout is mirror head and clean. running: the live server
+    started after the server code on disk landed. Green needs both; staged but
+    not running is amber, restart pending; running unknown is never green.
+    Red is code running that the mirror has never seen: prod ahead, or dirty."""
+    deploy = deploy or {}
+    run = deploy.get("running") or {}
+    state = deploy.get("state") or "unknown"
+    out = {"state": state, "ahead": deploy.get("ahead") or 0,
+           "behind": deploy.get("behind") or 0,
+           "staged": None if state == "unknown" else state == "in-sync",
+           "staged_detail": deploy.get("detail") or "deploy state not configured",
+           "running": run.get("ok"),
+           "running_detail": run.get("detail") or "running: unknown"}
+    out["detail"] = out["staged_detail"]
+    if state == "unknown":
+        return {**out, "badge": "unknown", "label": "unknown"}
+    out["detail"] += "; " + out["running_detail"]
+    if deploy.get("dirty") or out["ahead"] > 0:
+        return {**out, "badge": "red", "label": "live, not merged"}
+    if not out["staged"]:
+        return {**out, "badge": "amber", "label": "not deployed"}
+    if out["running"] is True:
+        return {**out, "badge": "green", "label": "live"}
+    if out["running"] is False:
+        return {**out, "badge": "amber", "label": "restart pending"}
+    return {**out, "badge": "unknown", "label": "running unknown"}
 
 
 def _card(**kw) -> dict:
@@ -483,7 +487,8 @@ def derive_cards(config: Optional[dict] = None, *, repo: Optional[Path] = None,
     if deploy is None and paths.get("mirror") and paths.get("deploy_tree"):
         deploy = m.deploy_state(mirror=paths["mirror"],
                                 deploy_tree=paths["deploy_tree"],
-                                branch=paths.get("branch", "main"))
+                                branch=paths.get("branch", "main"),
+                                service=paths.get("deploy_service"))
     badge = deploy_badge(deploy)
 
     specs_dir = repo / "SPECS"
@@ -926,8 +931,9 @@ def render_text(boarddata: dict, out=sys.stdout) -> None:
         return
     w(f"     derived {face.get('derived_at', '?')} UTC from mirror "
       f"{(face.get('mirror_head') or '?')[:12]}\n")
-    badge = (face.get("deploy") or {}).get("badge", "unknown")
-    w(f"     deploy: {badge.upper()} — {(face.get('deploy') or {}).get('detail', '')}\n")
+    dep = face.get("deploy") or {}
+    w(f"     deploy: {dep.get('label') or dep.get('badge', 'unknown')}"
+      f" — {dep.get('detail', '')}\n")
     for n in face.get("notes", []):
         w(f"     note: {n}\n")
     w("\n")

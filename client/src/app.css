@@ -2955,8 +2955,8 @@
   border: 1px solid transparent;
 }
 
-/* green = prod matches; amber = merged-not-deployed; RED = live-not-merged,
-   the dangerous one — code running that the mirror has never seen. It is the
+/* green = staged and running; amber = not deployed, or restart pending; RED =
+   live-not-merged, code running that the mirror has never seen. It is the
    only badge that borrows the danger colour, on purpose. */
 .plan-badge-green {
   background: rgba(61, 214, 140, 0.16);
@@ -2973,6 +2973,24 @@
 }
 .plan-badge-unknown {
   background: var(--bg-3);
+  color: var(--text-2);
+}
+
+.plan-fact {
+  margin-left: var(--space-2);
+  font-size: var(--text-xs);
+  font-family: var(--font-mono);
+  color: var(--text-2);
+}
+.plan-fact-yes {
+  color: var(--presence-online);
+}
+.plan-fact-no {
+  color: var(--presence-idle);
+}
+
+.plan-deploy-detail {
+  margin-top: var(--space-1);
   color: var(--text-2);
 }
 

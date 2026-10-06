@@ -53,6 +53,7 @@ import {
   type PlanBoard,
   type PlanCard,
   type PlanCardDetail,
+  type PlanDeploy,
 } from "../types";
 
 const ARCHIVED = "Archived";
@@ -77,6 +78,31 @@ function fullTime(iso: string | null | undefined): string {
 }
 
 /* ------------------------------------------------------------------ face */
+
+function factWord(v: boolean | null | undefined): string {
+  return v === true ? "yes" : v === false ? "no" : "unknown";
+}
+
+/* The two facts behind the colour. A fact the broker could not read shows
+   as unknown, never as yes. */
+function DeployFacts({ deploy }: { deploy: PlanDeploy }) {
+  return (
+    <>
+      <span
+        className={`plan-fact plan-fact-${factWord(deploy.staged)}`}
+        title={deploy.staged_detail ?? ""}
+      >
+        staged: {factWord(deploy.staged)}
+      </span>
+      <span
+        className={`plan-fact plan-fact-${factWord(deploy.running)}`}
+        title={deploy.running_detail ?? ""}
+      >
+        running: {factWord(deploy.running)}
+      </span>
+    </>
+  );
+}
 
 function Face({ face }: { face: PlanBoard["face"] }) {
   if (!face.available) {
@@ -104,8 +130,9 @@ function Face({ face }: { face: PlanBoard["face"] }) {
         className={`plan-badge plan-badge-${badge}`}
         title={face.deploy?.detail ?? ""}
       >
-        deploy: {badge}
+        deploy: {face.deploy?.label ?? badge}
       </span>
+      {face.deploy && <DeployFacts deploy={face.deploy} />}
       {(face.notes ?? []).map((n) => (
         <span className="plan-face-note" key={n}>
           {n}
@@ -152,7 +179,7 @@ function Card({
         )}
         {card.deploy !== null && (
           <span className={`plan-badge plan-badge-${card.deploy.badge}`}>
-            {card.deploy.badge}
+            {card.deploy.label ?? card.deploy.badge}
           </span>
         )}
         {card.flags.map((f) => (
@@ -348,9 +375,10 @@ function CardModal({
                 <dt>Deploy</dt>
                 <dd>
                   <span className={`plan-badge plan-badge-${card.deploy.badge}`}>
-                    {card.deploy.badge}
+                    {card.deploy.label ?? card.deploy.badge}
                   </span>{" "}
-                  {card.deploy.detail}
+                  <DeployFacts deploy={card.deploy} />
+                  <div className="plan-deploy-detail">{card.deploy.detail}</div>
                 </dd>
               </>
             )}
