@@ -1393,7 +1393,8 @@ _CLAUDE_PY = [":(glob)**/*.py", ":(exclude)scripts", _NO_TESTS]
 # `[deploy.processes.<name>]` in broker.toml overrides or adds by name;
 # `enabled = false` drops one. client/ is absent: it is served from a built dist.
 DEPLOY_PROCESSES = {
-    "server": {"unit": DEPLOY_SERVICE, "watch": ["server", _NO_TESTS]},
+    "server": {"unit": DEPLOY_SERVICE,
+               "watch": ["server", _NO_TESTS, ":(exclude)server/pytest.ini"]},
     "broker": {"unit": "disjorn-broker",
                "watch": ["harness/broker", "harness/planroom", "harness/metrics",
                          "harness/keyboard/board.py", _NO_TESTS]},
