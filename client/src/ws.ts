@@ -32,6 +32,7 @@ const BACKOFF_MIN_MS = 1000;
 const BACKOFF_MAX_MS = 30000;
 /** A socket younger than this is a replacement already in flight, not a suspect. */
 const REPLACE_MIN_AGE_MS = 5000;
+const PONG_TIMEOUT_MS = 4000;
 
 type SocketState = "idle" | "connecting" | "open" | "ready";
 
@@ -46,6 +47,7 @@ export class DisjornSocket {
   private openedAt = 0;
   /** The socket a replacement superseded, closed once the new one is ready. */
   private retiring: WebSocket | null = null;
+  private pongTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** Open the socket (and keep it open until disconnect()). Idempotent. */
   connect(): void {
@@ -64,6 +66,7 @@ export class DisjornSocket {
     this.attempt = 0;
     this.hadReady = false;
     this.state = "idle";
+    this.clearPong();
     this.closeRetiring();
     const ws = this.ws;
     this.ws = null;
@@ -93,7 +96,20 @@ export class DisjornSocket {
     }
     if (stale && Date.now() - this.openedAt >= REPLACE_MIN_AGE_MS) {
       this.replace();
+    } else {
+      this.probe();
     }
+  }
+
+  /** A socket that cannot answer a ping in time is dead even if it reads OPEN. */
+  private probe(): void {
+    if (this.pongTimer !== null || this.state !== "ready") return;
+    const probed = this.ws;
+    this.send({ op: "ping" });
+    this.pongTimer = setTimeout(() => {
+      this.pongTimer = null;
+      if (this.ws === probed && !this.stopped) this.replace();
+    }, PONG_TIMEOUT_MS);
   }
 
   /* ---- client ops ---- */
@@ -127,11 +143,17 @@ export class DisjornSocket {
      would make the server broadcast us offline and then online again. Its
      frames are ignored from here on; the new ready's resync covers them. */
   private replace(): void {
+    this.clearPong();
     this.closeRetiring();
     this.retiring = this.ws;
     this.ws = null;
     this.state = "idle";
     this.open();
+  }
+
+  private clearPong(): void {
+    if (this.pongTimer !== null) clearTimeout(this.pongTimer);
+    this.pongTimer = null;
   }
 
   private closeRetiring(): void {
@@ -183,6 +205,10 @@ export class DisjornSocket {
   }
 
   private dispatch(frame: ServerFrame): void {
+    if (frame.type === "pong") {
+      this.clearPong();
+      return;
+    }
     switch (frame.type) {
       case "ready": {
         this.state = "ready";

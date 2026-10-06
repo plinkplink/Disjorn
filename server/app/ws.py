@@ -650,6 +650,8 @@ async def _handle_user_op(ws: WebSocket, user_id: int, data: dict[str, Any]) -> 
         channel_id = data.get("channel_id")
         if channel_id is None or isinstance(channel_id, int):
             manager.set_focus(ws, channel_id)
+    elif op == "ping":
+        await _send(ws, {"type": "pong"})
     # unknown ops: ignored
 
 

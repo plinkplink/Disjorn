@@ -607,7 +607,12 @@ export type ServerFrame =
   | MemberAddFrame
   | MemberRemoveFrame
   | AppStageFrame
-  | AppUpdateFrame;
+  | AppUpdateFrame
+  | PongFrame;
+
+export interface PongFrame {
+  type: "pong";
+}
 
 /* ---- Web Push payload (WP7 shape; consumed by src/sw.ts) ---- */
 
