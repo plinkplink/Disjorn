@@ -637,14 +637,21 @@ export const PLAN_COLUMNS = [
 
 export type PlanColumn = (typeof PLAN_COLUMNS)[number];
 
-/* green = prod matches the mirror; amber = merged, not deployed; red = LIVE,
-   NOT MERGED — the dangerous one, meaning code is running that the mirror has
-   never seen. Computed once, broker-side, by metrics.deploy_state(). */
+/* Two facts, one colour. staged: prod's checkout is mirror head and clean.
+   running: the live server started after the server code on disk landed.
+   green = both; amber = not deployed, or restart pending; red = LIVE, NOT
+   MERGED, code running that the mirror has never seen; unknown = either fact
+   could not be read. Computed once, broker-side, by metrics.deploy_state(). */
 export type DeployBadge = "green" | "amber" | "red" | "unknown";
 
 export interface PlanDeploy {
   badge: DeployBadge;
   detail: string;
+  label?: string;
+  staged?: boolean | null;
+  running?: boolean | null;
+  staged_detail?: string;
+  running_detail?: string;
   state?: string;
   ahead?: number;
   behind?: number;
