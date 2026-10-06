@@ -39,6 +39,7 @@ from pydantic import BaseModel, Field
 from .. import db
 from ..config import get_settings
 from ..models import Bot, MemberType, User, UserStatus
+from ..services.accounts import note_password_reset
 
 router = APIRouter()
 
@@ -481,6 +482,7 @@ async def admin_reset_password(
             commit=False,
         )
         await db.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,), commit=False)
+        await note_password_reset(user_id, admin.id)
     return {"ok": True}
 
 

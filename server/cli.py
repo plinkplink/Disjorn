@@ -35,6 +35,7 @@ import sys
 from app import db
 from app.main import seed_main_feed
 from app.routers.auth import hash_api_key, hash_password
+from app.services.accounts import note_password_reset
 
 
 def _fail(msg: str, code: int = 1) -> "None":
@@ -103,6 +104,7 @@ async def cmd_reset_password(args: argparse.Namespace) -> None:
         cur = await db.execute(
             "DELETE FROM sessions WHERE user_id = ?", (row["id"],), commit=False
         )
+        await note_password_reset(row["id"], None)
     print(
         f"Reset password for '{args.username}' (id={row['id']}); "
         f"ended {cur.rowcount} session(s)."

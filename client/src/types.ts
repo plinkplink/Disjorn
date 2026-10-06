@@ -46,6 +46,16 @@ export interface AdminUserRow {
   must_change_password: boolean;
 }
 
+/** GET /auth/reset-requests (admin only): someone asked from the login page. */
+export interface ResetRequest {
+  id: number;
+  user_id: number;
+  username: string;
+  display_name: string;
+  note: string | null;
+  requested_at: string;
+}
+
 /** GET /channels/deletions (admin only): that a channel existed, never what was said in it. */
 export interface ChannelDeletion {
   id: number;

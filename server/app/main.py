@@ -42,6 +42,7 @@ from .routers import (
     messages,
     notifications,
     planroom,
+    reset_requests,
     slash,
     stt,
     summarize,
@@ -391,6 +392,7 @@ def create_app() -> FastAPI:
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
 
     app.include_router(auth.router)
+    app.include_router(reset_requests.router)
     app.include_router(channels.router)
     app.include_router(messages.router)
     app.include_router(media.router)

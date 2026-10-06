@@ -30,6 +30,17 @@
   text-align: center;
 }
 
+/* The card holds two forms (log in, ask for a reset); they lay out as if
+   their children sat directly in the card's column. */
+.login-form {
+  display: contents;
+}
+
+.login-help-title {
+  margin: 0;
+  font-size: var(--text-md);
+}
+
 .login-card .tagline {
   margin: 0;
   color: var(--text-2);
@@ -60,6 +71,21 @@
 }
 
 .field input:focus {
+  border-color: var(--accent);
+}
+
+.field textarea {
+  background: var(--bg-0);
+  color: inherit;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-m);
+  padding: var(--space-2) var(--space-3);
+  outline: none;
+  font: inherit;
+  resize: vertical;
+}
+
+.field textarea:focus {
   border-color: var(--accent);
 }
 
@@ -2900,6 +2926,33 @@
 
 .settings-deletion-head .settings-hint {
   display: inline;
+}
+
+.settings-reset-requests {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.settings-reset-request {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  background: var(--bg-0);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-s);
+  min-width: 0;
+}
+
+.settings-reset-request-note {
+  margin: 0;
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 /* ================= per-channel membership (private channels) ================= */

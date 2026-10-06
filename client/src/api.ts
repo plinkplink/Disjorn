@@ -35,6 +35,7 @@ import type {
   PlanCardDetail,
   Quota,
   ReplyMode,
+  ResetRequest,
   SearchResult,
   SettableStatus,
   SummarizeResponse,
@@ -181,12 +182,6 @@ export function listUsers(): Promise<AdminUserRow[]> {
   return request<AdminUserRow[]>("GET", "/auth/users");
 }
 
-/**
- * ADMIN: set another account's password. The server marks the account as
- * owing a rotation and ends all of its sessions, so what the admin knows is
- * good for exactly one login. There is no self-service "forgot password"
- * route on purpose: the house has no email, so an admin is the identity check.
- */
 /** ADMIN: deletion records newest first; pass the last id as `beforeId` for the next page. */
 export function listChannelDeletions(
   beforeId?: number,
@@ -197,6 +192,12 @@ export function listChannelDeletions(
   return request<ChannelDeletion[]>("GET", `/channels/deletions?${q.toString()}`);
 }
 
+/**
+ * ADMIN: set another account's password. The server marks the account as
+ * owing a rotation and ends all of its sessions, so what the admin knows is
+ * good for exactly one login. The house has no email, so an admin is the
+ * identity check; this also resolves the account's open reset request.
+ */
 export function adminResetPassword(
   userId: number,
   newPassword: string,
@@ -204,6 +205,26 @@ export function adminResetPassword(
   return request<{ ok: boolean }>("POST", `/auth/users/${userId}/password`, {
     new_password: newPassword,
   });
+}
+
+/** Open route: the answer is the same whether or not the account exists. */
+export function requestPasswordReset(
+  username: string,
+  note: string,
+): Promise<{ detail: string }> {
+  return request<{ detail: string }>("POST", "/auth/reset-requests", {
+    username,
+    note: note.length > 0 ? note : null,
+  });
+}
+
+/** ADMIN: open reset requests, oldest first. */
+export function listResetRequests(): Promise<ResetRequest[]> {
+  return request<ResetRequest[]>("GET", "/auth/reset-requests");
+}
+
+export function dismissResetRequest(id: number): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>("POST", `/auth/reset-requests/${id}/dismiss`);
 }
 
 export function login(username: string, password: string): Promise<User> {

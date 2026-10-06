@@ -2,7 +2,8 @@
      Profile        display-name edit + avatar upload with local preview
      Notifications  per-device Web Push enable/disable + notify_all_main pref
      Sounds         per-device in-app chimes: on/off, mentions only, volume
-     Reset password admin only: hand another account a temporary password
+     Reset password admin only: pending asks from the login page, then hand
+                    another account a temporary password
      Deleted channels admin only: the paper trail of channel deletions
      Account        username + log out
    Push permission is requested HERE and only here (spec §10). */
@@ -13,8 +14,10 @@ import {
   ApiError,
   PASSWORD_MIN_LENGTH,
   adminResetPassword,
+  dismissResetRequest,
   getNotifyPrefs,
   listChannelDeletions,
+  listResetRequests,
   listUsers,
   putNotifyPrefs,
   updateMe,
@@ -24,7 +27,7 @@ import { isIos, isStandalone, useInstall } from "../install";
 import { usePush } from "../push";
 import { previewSound, useSoundSettings } from "../sounds";
 import { useSession } from "../stores/session";
-import type { AdminUserRow, ChannelDeletion } from "../types";
+import type { AdminUserRow, ChannelDeletion, ResetRequest } from "../types";
 import { socket } from "../ws";
 
 /* ---------------------------------------------------------------- profile */
@@ -424,6 +427,27 @@ function ResetPasswordSection() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<{ username: string; password: string } | null>(null);
+  const [requests, setRequests] = useState<ResetRequest[]>([]);
+  const [requestError, setRequestError] = useState<string | null>(null);
+  const handoverRef = useRef<HTMLInputElement>(null);
+  const isAdmin = me?.is_admin === true;
+
+  useEffect(() => {
+    if (!isAdmin) return;
+    let cancelled = false;
+    listResetRequests()
+      .then((rows) => {
+        if (!cancelled) setRequests(rows);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setRequestError(err instanceof ApiError ? err.detail : "Could not load requests");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isAdmin]);
 
   useEffect(() => {
     let cancelled = false;
@@ -463,6 +487,7 @@ function ResetPasswordSection() {
           ? rows
           : rows.map((u) => (u.id === target.id ? { ...u, must_change_password: true } : u)),
       );
+      setRequests((rows) => rows.filter((r) => r.user_id !== target.id));
       setHandover("");
       setTargetId(null);
     } catch (err) {
@@ -472,9 +497,57 @@ function ResetPasswordSection() {
     }
   };
 
+  const resetNow = (req: ResetRequest) => {
+    setTargetId(req.user_id);
+    setDone(null);
+    setError(null);
+    handoverRef.current?.focus();
+  };
+
+  const dismiss = async (req: ResetRequest) => {
+    setRequestError(null);
+    try {
+      await dismissResetRequest(req.id);
+      setRequests((rows) => rows.filter((r) => r.id !== req.id));
+    } catch (err) {
+      setRequestError(err instanceof ApiError ? err.detail : "Could not dismiss");
+    }
+  };
+
   return (
     <section className="settings-section">
       <h2>Reset a password</h2>
+      {requestError !== null && <p className="form-error">{requestError}</p>}
+      {requests.length > 0 && (
+        <ul className="settings-reset-requests" aria-label="Pending reset requests">
+          {requests.map((req) => (
+            <li key={req.id} className="settings-reset-request">
+              <div className="settings-deletion-head">
+                <strong className="settings-deletion-name">
+                  {req.display_name} ({req.username})
+                </strong>
+                <span className="settings-hint">
+                  asked{" "}
+                  <time dateTime={req.requested_at}>
+                    {new Date(req.requested_at).toLocaleString()}
+                  </time>
+                </span>
+              </div>
+              {req.note !== null && (
+                <p className="settings-reset-request-note">{req.note}</p>
+              )}
+              <div className="settings-inline">
+                <button type="button" className="btn btn-primary" onClick={() => resetNow(req)}>
+                  Reset now
+                </button>
+                <button type="button" className="btn" onClick={() => void dismiss(req)}>
+                  Dismiss
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
       <p className="settings-note">
         For someone who is locked out. They log in once with the password you
         give them, then must choose their own before anything else works. All
@@ -512,6 +585,7 @@ function ResetPasswordSection() {
         <div className="settings-inline">
           <input
             id="reset-password"
+            ref={handoverRef}
             type="text"
             value={handover}
             onChange={(e) => setHandover(e.target.value)}
