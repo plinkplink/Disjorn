@@ -651,11 +651,10 @@ def _lane_owner(hits: list, lane_owners: dict) -> Optional[str]:
 
 
 def _path_owner(path: str, lane_owners: dict) -> Optional[str]:
-    # First match in config order, as the broker's PASS check reads the map.
-    for prefix, owner in lane_owners.items():
-        if path.lower().startswith(prefix):
-            return owner
-    return None
+    # Longest prefix wins, as the broker's PASS check reads the map.
+    low = path.lower()
+    hits = [(len(str(p)), str(o)) for p, o in lane_owners.items() if low.startswith(str(p).lower())]
+    return max(hits)[1] if hits else None
 
 
 def read_build_ledger(path: Optional[str]) -> dict:

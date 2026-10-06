@@ -138,12 +138,12 @@ def test_an_unmerged_tier_two_chat_build_waits_in_review_on_its_reviewer(shelf):
     assert c["requester"] == "plink"
 
 
-def test_every_owner_of_a_changed_path_is_named_first_match_per_path(shelf):
+def test_every_owner_of_a_changed_path_is_named_longest_prefix_per_path(shelf):
     shelf.push_branch(paths=("server/app/x.py", "client/src/y.ts", "notes.txt"))
     shelf.build()
     owners = {"server/": "Claudette", "server/app/": "Hob", "client/": "Gable"}
     c = shelf.cards(lane_owners=owners)[SLUG]
-    assert c["review_owner"] == "Gable or Claudette"
+    assert c["review_owner"] == "Gable or Hob"
     assert "no-lane-owner" in c["flags"]
 
 
