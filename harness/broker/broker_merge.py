@@ -46,11 +46,11 @@ MERGE_IDENTITY_EMAIL = "broker@disjorn.local"
 MAX_MERGE_PATHS = 500
 MAX_SLUG_CHARS = 100
 # A PASS cites the slug and says the word; both, or it is not a PASS.
-_PASS_WORD_RE = re.compile(r"\bPASS\b")
+_PASS_WORD_RE = re.compile(r"\bPASS(?![\w-])")
 # A verdict that also blocks is not a PASS, whatever else the post says.
 _BLOCK_WORD_RE = re.compile(r"\bBLOCK\b")
 _NEGATED_PASS_RE = re.compile(
-    r"\b(?:not|no|never|(?:is|was|did|does|do|wo|would|could|can)n[\u2019']t)\s+(?:a\s+)?PASS(?![\w-])",
+    r"\b(?:not|no|never|cannot|(?:is|was|did|does|do|wo|would|could|ca)n[\u2019']t)\s+(?:a\s+)?PASS(?![\w-])",
     re.IGNORECASE)
 _QUOTED_RE = re.compile(r"`[^`]*`|\"[^\"\n]*\"|\u201c[^\u201d\n]*\u201d")
 
