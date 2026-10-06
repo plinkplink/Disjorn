@@ -40,8 +40,8 @@ import { ChatView } from "./ChatView";
 import PlanRoomView from "./PlanRoomView";
 import { SettingsView } from "./SettingsView";
 
-/** Hidden at least this long, a resumed page refetches what it may have missed. */
-const RESUME_RESYNC_AFTER_MS = 30_000;
+/** Hidden at least this long, a resumed page replaces its socket and resyncs. */
+const RESUME_STALE_AFTER_MS = 30_000;
 
 const SETTINGS_HASH = "#/settings";
 const PLANROOM_HASH = "#/planroom";
@@ -694,11 +694,12 @@ export function AppShell() {
   }, []);
 
   // Resume (foreground, back online, restored from bfcache): reconnect now
-  // instead of after the backoff, and retry a channel list that never landed.
+  // instead of after the backoff, replace a socket that may have died while
+  // we were away, and retry a channel list that never landed.
   useEffect(() => {
     let hiddenAt: number | null = null;
-    const resume = (resync: boolean) => {
-      socket.wake(resync);
+    const resume = (stale: boolean) => {
+      socket.wake(stale);
       void useChannels.getState().ensureLoaded();
     };
     const onVisibility = () => {
@@ -708,7 +709,7 @@ export function AppShell() {
       }
       const away = hiddenAt === null ? 0 : Date.now() - hiddenAt;
       hiddenAt = null;
-      resume(away >= RESUME_RESYNC_AFTER_MS);
+      resume(away >= RESUME_STALE_AFTER_MS);
     };
     const onPageShow = (e: PageTransitionEvent) => {
       if (e.persisted) resume(true);
