@@ -7,14 +7,29 @@ db.py shared connection.
 
 import json
 
+import anyio
 import httpx
 import pytest
+from starlette.testclient import WebSocketTestSession
 
 from app import db, events
 from app.config import Settings, reset_settings_cache
 
 # A deploy's server/.env must never decide a test result.
 Settings.model_config["env_file"] = None
+
+WS_RECEIVE_TIMEOUT = 30
+
+
+def _receive_with_deadline(self):
+    async def receive():
+        with anyio.fail_after(WS_RECEIVE_TIMEOUT):
+            return await self._send_rx.receive()
+
+    return self.portal.call(receive)
+
+
+WebSocketTestSession.receive = _receive_with_deadline
 
 # The house origin for the whole suite. It is also the client's base_url, so
 # every test request is same-origin: Secure cookies flow (httpx returns them
