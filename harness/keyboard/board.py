@@ -251,8 +251,8 @@ def merged_slugs(repo: Path = None, gatehouse: Path = None) -> dict:
     for ln in _run("git", "-C", str(repo_path), "log", "--merges",
                    "--format=%h %s", "main").splitlines():
         sha, _, msg = ln.partition(" ")
-        for groups in _MERGE_WITNESS_RE.findall(msg):
-            out.setdefault(next(g for g in groups if g), sha)
+        if (m := _MERGE_WITNESS_RE.search(msg)) is not None:
+            out.setdefault(next(g for g in m.groups() if g), sha)
     for bare in sorted(gatehouse.glob("*.git")):
         head = (_git_bare(bare, "symbolic-ref", "--quiet", "--short", "HEAD").strip()
                 or "main")

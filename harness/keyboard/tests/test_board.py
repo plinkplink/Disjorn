@@ -115,6 +115,7 @@ def test_a_merge_counts_only_the_slug_it_merges_not_one_it_mentions(tmp_path):
         ("2099-02-01-ritual", "merge: 2099-02-01-ritual (SPECS/2099-02-01-ritual.md, confirmed seq 1)"),
         ("2099-02-02-fix", "merge: a fix, as asked by 2099-09-09-in-passing (fix/2099-02-02-fix)"),
         ("2099-02-03-branch", "Merge branch 'loop/2099-02-03-branch'"),
+        ("2099-02-04-amender", "merge: fix/2099-02-04-amender (amends SPECS/2099-09-08-parent.md D5)"),
     ]
     for slug, subject in subjects:
         git("checkout", "-q", "-b", slug, "main")
@@ -122,7 +123,8 @@ def test_a_merge_counts_only_the_slug_it_merges_not_one_it_mentions(tmp_path):
         git("checkout", "-q", "main")
         git("merge", "-q", "--no-ff", slug, "-m", subject)
     merged = board.merged_slugs(repo=work, gatehouse=tmp_path / "no-shelf")
-    assert set(merged) == {"2099-02-01-ritual", "2099-02-02-fix", "2099-02-03-branch"}
+    assert set(merged) == {"2099-02-01-ritual", "2099-02-02-fix", "2099-02-03-branch",
+                           "2099-02-04-amender"}
 
 
 def test_a_long_proposal_title_is_clipped_at_a_word():
