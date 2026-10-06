@@ -134,7 +134,7 @@ export function ApprovalsPanel({
   const detail = useApprovals((s) => s.detail);
   const proposals = useApprovals((s) => s.proposals);
   const truncated = useApprovals((s) => s.truncated);
-  const me = useSession((s) => s.user?.username ?? null);
+  const me = useSession((s) => s.user);
   const [showClosed, setShowClosed] = useState(false);
 
   useEffect(() => {

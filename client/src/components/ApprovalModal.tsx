@@ -9,6 +9,7 @@ import { ApiError } from "../api";
 import {
   MAX_REMARKS_CHARS,
   actBlockReason,
+  canAnswer,
   isOpen,
   isPrincipalOn,
   useApprovals,
@@ -19,6 +20,7 @@ import type {
   ApprovalDecision,
   ApprovalProposal,
   ApprovalState,
+  User,
 } from "../types";
 import { Markdown } from "./Markdown";
 
@@ -237,7 +239,7 @@ export function ApprovalModal({
   status: ApprovalsStatus;
   detail: string | null;
   proposal: ApprovalProposal | null;
-  me: string | null;
+  me: Pick<User, "username" | "is_admin"> | null;
   hasSpecCard: boolean;
   onOpenCard: () => void;
   onClose: () => void;
@@ -246,7 +248,8 @@ export function ApprovalModal({
   useDialogFocus(dialogRef, onClose);
 
   const open = proposal !== null && isOpen(proposal);
-  const mine = proposal !== null && me !== null && isPrincipalOn(proposal, me);
+  const mine = proposal !== null && me !== null && isPrincipalOn(proposal, me.username);
+  const answerable = proposal !== null && canAnswer(proposal, me);
 
   return (
     <div className="modal-backdrop approval-backdrop" onClick={onClose}>
@@ -292,7 +295,13 @@ export function ApprovalModal({
             <h3 className="plan-modal-sub">Answers</h3>
             <StateTable proposal={proposal} />
 
-            {open && mine && <AnswerBox key={proposal.id} proposal={proposal} />}
+            {open && answerable && <AnswerBox key={proposal.id} proposal={proposal} />}
+            {open && mine && !answerable && (
+              <p className="plan-modal-hint">
+                Only admins can answer approval proposals here, so this record is
+                read-only for you.
+              </p>
+            )}
             {open && !mine && (
               <p className="plan-modal-hint">
                 You are not a principal on this proposal, so there is nothing for

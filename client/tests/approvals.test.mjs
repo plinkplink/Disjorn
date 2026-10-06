@@ -37,8 +37,10 @@ export { actBlockReason, pendingForMe, planRoomHash, planRoomRouteFromHash,
 const noop = () => {};
 
 export function modal(proposal, me, list = { status: "ready", detail: null }) {
+  // A bare username is an admin; pass { username, is_admin } to say otherwise.
+  const viewer = typeof me === "string" ? { username: me, is_admin: true } : me;
   return renderToStaticMarkup(createElement(ApprovalModal, {
-    slug: proposal ? proposal.slug : "missing", proposal, me, ...list,
+    slug: proposal ? proposal.slug : "missing", proposal, me: viewer, ...list,
     hasSpecCard: false, onOpenCard: noop, onClose: noop,
   }));
 }
@@ -216,6 +218,14 @@ test('a closed proposal shows its record and no buttons', () => {
 
 test('someone who is not a principal gets the record and no buttons', () => {
   assert.deepEqual(buttons(m.modal(proposal(1), 'alice')), {});
+});
+
+test('a principal who is not an admin gets the record read-only', () => {
+  const html = m.modal(proposal(1), { username: 'plink', is_admin: false });
+  assert.deepEqual(buttons(html), {});
+  assert.ok(!html.includes('approval-textarea'), html);
+  assert.ok(html.includes('read-only for you'), html);
+  assert.ok(html.includes('approval-states'), html);
 });
 
 test('the hash route round-trips the tab and slug', () => {

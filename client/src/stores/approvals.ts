@@ -73,6 +73,23 @@ export function isPrincipalOn(p: ApprovalProposal, me: string): boolean {
   return p.states.some((s) => s.principal === me);
 }
 
+// The server's resident principal pattern: a resident answers only by relay.
+const RESIDENT_PRINCIPAL_RE = /^res-[a-z][a-z0-9-]*$/;
+
+/** The act endpoint's rule for a person: an admin, answering as a principal
+    the proposal names, who is not a resident seat. */
+export function canAnswer(
+  p: ApprovalProposal,
+  me: { username: string; is_admin: boolean } | null,
+): boolean {
+  return (
+    me !== null &&
+    me.is_admin &&
+    !RESIDENT_PRINCIPAL_RE.test(me.username) &&
+    isPrincipalOn(p, me.username)
+  );
+}
+
 export function pendingForMe(
   proposals: ApprovalProposal[],
   me: string | null | undefined,

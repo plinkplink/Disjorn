@@ -27,4 +27,4 @@ def test_the_approvals_client_answers_and_badges_as_the_spec_says(tmp_path):
     r = subprocess.run(["node", "--test", str(NODE_TEST)], capture_output=True,
                        text=True, timeout=180, env=env)
     assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]
-    assert "# pass 11" in r.stdout
+    assert "# pass 12" in r.stdout
