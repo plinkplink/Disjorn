@@ -296,6 +296,20 @@ async def test_bot_send_appears_via_user_fetch(server, alice, main_id, bot_strea
     assert {("user", "alice"), ("user", "bob"), ("bot", server.bot_name)} <= names
 
 
+async def test_a_bot_trace_reaches_a_user_fetch(server, alice, main_id, bot_stream):
+    bot, _ = bot_stream
+    trace = {"steps": [{"kind": "memory", "label": "recall backup drill",
+                        "outcome": "ok", "reason": None, "ms": 12}],
+             "total": 3}
+    sent = await bot.send(main_id, "traced reply", trace=trace)
+    assert sent["trace"] == trace
+
+    resp = await alice.get(f"/channels/{main_id}/messages", params={"limit": 10})
+    resp.raise_for_status()
+    fetched = next(m for m in resp.json() if m["id"] == sent["id"])
+    assert fetched["trace"] == trace
+
+
 async def test_mention_gets_context_with_awake_users(server, alice, main_id, bot_stream):
     bot, agen = bot_stream
     ws = await _user_ws(server, alice)  # alice is now "awake"

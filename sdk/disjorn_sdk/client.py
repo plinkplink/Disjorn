@@ -154,6 +154,7 @@ class DisjornClient:
         emote_refs: Optional[list[Any]] = None,
         privacy_flags: Optional[dict[str, Any]] = None,
         attribution: Optional[dict[str, Any]] = None,
+        trace: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Post a message; returns the server's full materialized message dict.
 
@@ -177,6 +178,8 @@ class DisjornClient:
             payload["privacy_flags"] = privacy_flags
         if attribution is not None:
             payload["attribution"] = attribution
+        if trace is not None:
+            payload["trace"] = trace
         resp = await self._http.post(f"/channels/{channel_id}/messages", json=payload)
         self._raise_for_status(resp)
         return resp.json()

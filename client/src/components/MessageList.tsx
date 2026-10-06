@@ -21,6 +21,7 @@ import type { Attachment, Message } from "../types";
 import { AppCard, appIdFromUrl } from "./AppCard";
 import { Avatar, BotAvatar } from "./Avatar";
 import { ChibiPicker } from "./ChibiPicker";
+import { TracePanel, traceTotal } from "./TracePanel";
 import type { ChibiPickRequest } from "./ChibiPicker";
 import {
   ChibiImg,
@@ -167,6 +168,7 @@ function buildFeed(list: Message[], gaps: number[]): FeedItem[] {
       prev.author_id !== m.author_id ||
       m.reply_to_id !== null ||
       attributionLabel(m) !== null ||
+      traceTotal(m) > 0 ||
       ts(m) - ts(prev) > GROUP_GAP_MS;
     out.push({ kind: "message", key: `m${m.id}`, message: m, withHeader });
     prev = m;
@@ -391,6 +393,9 @@ function MessageRow({
   );
   const hasText = message.content.trim().length > 0;
   const attribution = attributionLabel(message);
+  const steps = traceTotal(message);
+  const [traceOpen, setTraceOpen] = useState(false);
+  const traceId = `trace-${message.id}`;
   // Touch: no hover — tapping the row (not a control inside it) shows/hides
   // the action bar. Desktop keeps pure hover; this state stays false there.
   const [actionsShown, setActionsShown] = useState(false);
@@ -485,6 +490,18 @@ function MessageRow({
                   {attribution}
                 </span>
               )}
+              {steps > 0 && (
+                <button
+                  type="button"
+                  className="msg-trace-chip"
+                  title="The steps behind this message, as the bot reports them"
+                  aria-expanded={traceOpen}
+                  aria-controls={traceId}
+                  onClick={() => setTraceOpen((v) => !v)}
+                >
+                  {steps} {steps === 1 ? "step" : "steps"}
+                </button>
+              )}
               {hasReplies && (
                 <span className="msg-replied" title="Has replies in this channel">
                   ↩ replied to
@@ -518,6 +535,9 @@ function MessageRow({
           )}
           {!hasText && message.edited_at !== null && (
             <span className="msg-edited">(edited)</span>
+          )}
+          {traceOpen && message.trace != null && (
+            <TracePanel id={traceId} trace={message.trace} model={attribution} />
           )}
           {tailChibis.map(({ url, emotion }) => (
             <img
