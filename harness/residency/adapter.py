@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from datetime import datetime, timezone
 from typing import Optional
 
 from disjorn_sdk import MessageCreate, Ready
@@ -54,7 +55,7 @@ from detector import (
 from hops import HopArbiter
 from launcher import ContainerLauncher
 from posts import PostLedger
-from prompt import assemble_prompt, describe_room
+from prompt import assemble_prompt, describe_room, restart_note
 from summary import (
     format_chain_refusal_summary,
     format_drift_alert,
@@ -89,6 +90,7 @@ class SummonAdapter:
             config.budget.state_path, config.budget.daily_session_cap
         )
         self.cursor = cursor or CursorStore(config.cursor.state_path)
+        self._restart_note = ""
         self.hops = hops or HopArbiter(config.hops)
         self.posts = posts or PostLedger(config.posts.state_path)
 
@@ -107,6 +109,9 @@ class SummonAdapter:
             self._persist_cursor()
 
     def _seed_cursor(self) -> None:
+        path = getattr(self.cursor, "path", None)
+        if path is not None:
+            self._restart_note = restart_note(path, datetime.now(timezone.utc))
         saved = self.cursor.load()
         for channel_id, seq in saved.items():
             self.client.seed_seq(channel_id, seq)
@@ -460,10 +465,11 @@ class SummonAdapter:
         except Exception:  # noqa: BLE001 — a ledger is a convenience
             logger.warning("own-posts ledger unreadable", exc_info=True)
             posts = []
+        note, self._restart_note = self._restart_note, ""
         return assemble_prompt(
             backfill, event.message or {}, summoner=trigger.summoner,
             where=where, how=trigger.describe(), context=event.context,
-            posts=posts,
+            posts=posts, restart=note,
         )
 
     def _own_row_at_or_below(self, msg: dict, floor: int) -> bool:
