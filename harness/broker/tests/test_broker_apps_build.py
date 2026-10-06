@@ -637,6 +637,18 @@ def test_a_sidecar_is_written_before_the_launch(apps):
     assert "pid" not in rec          # the durable handle is the unit name
 
 
+def test_a_ticket_rewrite_swaps_the_whole_file_so_no_reader_sees_half_of_one(apps):
+    _handoff(apps)
+    (path,) = apps.sidecars()
+    rec = json.loads(path.read_text())
+    with path.open() as held:
+        apps.broker._apps_write_sidecar({**rec, "stop_sent": True})
+        assert json.loads(held.read()) == rec
+    assert json.loads(path.read_text())["stop_sent"] is True
+    assert sorted(p.name for p in path.parent.iterdir()
+                  if p.suffix == ".tmp") == []
+
+
 # ------------------------------------------------------------ the happy path
 
 def test_a_finished_turn_posts_four_stages_in_order_with_the_agreed_details(apps):

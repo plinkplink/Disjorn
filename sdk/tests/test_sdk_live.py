@@ -46,11 +46,17 @@ PNG_1PX = base64.b64decode(
 # ---------------------------------------------------------------------------
 
 async def _login(server, username: str) -> httpx.AsyncClient:
-    client = httpx.AsyncClient(base_url=server.base_url, timeout=10)
+    client = httpx.AsyncClient(
+        base_url=server.base_url, headers={"Origin": server.origin}, timeout=10
+    )
     resp = await client.post(
         "/auth/login", json={"username": username, "password": server.users[username]}
     )
     assert resp.status_code == 200, resp.text
+    # httpx withholds a Secure cookie over plain http, so the client carries it
+    # the way the TLS terminator in front of the house would deliver it.
+    cookie = server.session_cookie
+    client.headers["Cookie"] = f"{cookie}={client.cookies[cookie]}"
     return client
 
 
@@ -109,11 +115,10 @@ async def bot_stream(bot):
 
 async def _user_ws(server, http_client: httpx.AsyncClient):
     """User-authenticated WS (cookie on the handshake); ready frame consumed."""
-    token = http_client.cookies.get("disjorn_session")
-    assert token
     ws = await websockets.connect(
         server.base_url.replace("http://", "ws://") + "/ws",
-        additional_headers={"Cookie": f"disjorn_session={token}"},
+        origin=server.origin,
+        additional_headers={"Cookie": http_client.headers["Cookie"]},
     )
     ready = json.loads(await asyncio.wait_for(ws.recv(), EVENT_TIMEOUT))
     assert ready.get("type") == "ready"

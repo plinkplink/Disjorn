@@ -31,8 +31,7 @@ PRINCIPALS = ["plink", "res-claudette", "res-gable"]
 
 @pytest.fixture
 def armed(monkeypatch):
-    """The witnessed config change, in test form. Both settings are pinned
-    because server/.env is read too and would otherwise decide for us."""
+    """The witnessed config change, in test form."""
     monkeypatch.setenv("APPROVAL_ENABLED", "true")
     monkeypatch.setenv("APPROVAL_PRINCIPALS", ",".join(PRINCIPALS))
     reset_settings_cache()

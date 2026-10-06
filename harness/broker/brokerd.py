@@ -4710,9 +4710,18 @@ class Broker:
     def _apps_write_sidecar(self, rec: dict) -> None:
         """Persist what a FUTURE broker process needs to finish this turn's story."""
         path = self._apps_sidecar_path(rec["session"], rec["turn"])
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump({k: v for k, v in rec.items() if k != "started_mono"}, fh)
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path),
+                                   prefix=".apps-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump({k: v for k, v in rec.items() if k != "started_mono"}, fh)
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
     def _apps_remove_sidecar(self, session: int, turn: int) -> None:
         try:
