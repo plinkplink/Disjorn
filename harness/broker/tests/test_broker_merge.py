@@ -915,12 +915,30 @@ def test_a_pass_for_a_longer_slug_does_not_count_for_this_one(harness):
     assert reason == "pass-invalid" and "does not say PASS" in message
 
 
-@pytest.mark.parametrize("text", ["this is not a PASS for {slug}", "No PASS on {slug} yet",
-                                  "{slug}: isn't a PASS, see notes"])
-def test_a_negated_pass_is_not_a_pass(harness, text):
+@pytest.mark.parametrize("text,phrase", [
+    ("this is not a PASS for {slug}", "not a PASS"), ("No PASS on {slug} yet", "No PASS"),
+    ("{slug}: isn't a PASS, see notes", "isn't a PASS"),
+    ("{slug} didn't PASS review", "didn't PASS"), ("{slug} won\u2019t PASS as is", "won\u2019t PASS"),
+    ("{slug} can't PASS yet", "can't PASS"), ("{slug} cannot PASS yet", "cannot PASS")])
+def test_a_negated_pass_is_not_a_pass_and_the_refusal_quotes_it(harness, text, phrase):
     arm(harness, tier=2)
     harness.add_custodian_post(PASS_SEQ, text.format(slug=SLUG), author="Claudette",
                                created_at=later())
+    reason, message = early_refusal(harness, pass_seq=PASS_SEQ)
+    assert reason == "pass-invalid" and f'says "{phrase}"' in message
+
+
+def test_a_hyphenated_word_after_no_is_not_a_negated_pass(harness):
+    arm(harness, tier=2)
+    harness.add_custodian_post(PASS_SEQ, f"PASS on {SLUG}; no PASS-invalid risk here",
+                               author="Claudette", created_at=later())
+    assert call(harness, pass_seq=PASS_SEQ)["ok"] is True
+
+
+def test_a_pass_only_inside_quotes_is_not_a_pass(harness):
+    arm(harness, tier=2)
+    harness.add_custodian_post(PASS_SEQ, f'{SLUG}: the bot said "PASS" but I have not read it',
+                               author="Claudette", created_at=later())
     reason, message = early_refusal(harness, pass_seq=PASS_SEQ)
     assert reason == "pass-invalid" and "does not say PASS" in message
 
@@ -940,3 +958,11 @@ def test_a_quoted_negation_does_not_spoil_a_real_pass(harness):
         PASS_SEQ, f'PASS on {SLUG}. The old regex also matched "not a PASS".',
         author="Claudette", created_at=later())
     assert call(harness, pass_seq=PASS_SEQ)["ok"] is True
+
+
+def test_pass_inside_a_hyphenated_word_is_not_the_word_pass(harness):
+    arm(harness, tier=2)
+    harness.add_custodian_post(PASS_SEQ, f"{SLUG}: the PASS-invalid path looks fine",
+                               author="Claudette", created_at=later())
+    reason, message = early_refusal(harness, pass_seq=PASS_SEQ)
+    assert reason == "pass-invalid" and "does not say PASS" in message

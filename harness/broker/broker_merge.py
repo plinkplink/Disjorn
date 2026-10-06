@@ -46,10 +46,12 @@ MERGE_IDENTITY_EMAIL = "broker@disjorn.local"
 MAX_MERGE_PATHS = 500
 MAX_SLUG_CHARS = 100
 # A PASS cites the slug and says the word; both, or it is not a PASS.
-_PASS_WORD_RE = re.compile(r"\bPASS\b")
+_PASS_WORD_RE = re.compile(r"\bPASS(?![\w-])")
 # A verdict that also blocks is not a PASS, whatever else the post says.
 _BLOCK_WORD_RE = re.compile(r"\bBLOCK\b")
-_NEGATED_PASS_RE = re.compile(r"\b(?:not|no|isn't|never)\s+(?:a\s+)?PASS\b", re.IGNORECASE)
+_NEGATED_PASS_RE = re.compile(
+    r"\b(?:not|no|never|cannot|(?:is|was|did|does|do|wo|would|could|ca)n[\u2019']t)\s+(?:a\s+)?PASS(?![\w-])",
+    re.IGNORECASE)
 _QUOTED_RE = re.compile(r"`[^`]*`|\"[^\"\n]*\"|\u201c[^\u201d\n]*\u201d")
 
 # ------------------------------------------------ the fails-closed Tier-1 wall
@@ -250,6 +252,10 @@ def message_names_slug(content: str, slug: str) -> bool:
     parts = text.split(None, 1)
     if parts and parts[0].startswith("/"):
         text = parts[1] if len(parts) > 1 else ""
+    return names_slug(text, slug)
+
+
+def names_slug(text: str, slug: str) -> bool:
     return re.search(rf"(?<![0-9A-Za-z-]){re.escape(slug)}(?![0-9A-Za-z-])",
                      text) is not None
 
@@ -568,10 +574,14 @@ class MergeVerbs:
                 f"seq {pass_seq} was posted before the tip of loop/{slug}",
                 "pass-invalid")
         text = message["content"]
-        names = re.search(rf"(?<![0-9A-Za-z-]){re.escape(slug)}(?![0-9A-Za-z-])", text)
-        if not _PASS_WORD_RE.search(text) or names is None or _NEGATED_PASS_RE.search(_QUOTED_RE.sub(" ", text)):
+        own_words = _QUOTED_RE.sub(" ", text)
+        if not _PASS_WORD_RE.search(own_words) or not names_slug(text, slug):
             raise self._merge_refused(
                 f"seq {pass_seq} does not say PASS for {slug}", "pass-invalid")
+        if (negated := _NEGATED_PASS_RE.search(own_words)) is not None:
+            raise self._merge_refused(
+                f"seq {pass_seq} says \"{negated.group(0)}\", so it is not a PASS for {slug}",
+                "pass-invalid")
         if _BLOCK_WORD_RE.search(text):
             raise self._merge_refused(
                 f"seq {pass_seq} says BLOCK as well as PASS, so it is not a PASS",
