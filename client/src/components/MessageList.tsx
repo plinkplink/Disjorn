@@ -7,7 +7,7 @@
    AppShell already handles ensureLoaded / mark-read / sendFocus on channel
    switch — this component only renders and paginates. */
 
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useEffect } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 
@@ -20,13 +20,16 @@ import { useSession } from "../stores/session";
 import type { Attachment, Message } from "../types";
 import { AppCard, appIdFromUrl } from "./AppCard";
 import { Avatar, BotAvatar } from "./Avatar";
+import { ChibiPicker } from "./ChibiPicker";
+import type { ChibiPickRequest } from "./ChibiPicker";
 import {
+  ChibiImg,
   countEmotionTags,
   firstHttpUrl,
   Markdown,
   stripEmotionTags,
 } from "./Markdown";
-import type { ChibiEmote } from "./Markdown";
+import type { ChibiEmote, ChibiSlot } from "./Markdown";
 import { UnfurlCard } from "./UnfurlCard";
 
 const GROUP_GAP_MS = 5 * 60 * 1000;
@@ -39,6 +42,9 @@ const BOTTOM_STICK_PX = 60;
 const TOP_FETCH_PX = 250;
 const MARK_READ_THROTTLE_MS = 1500;
 const EMPTY_LIST: Message[] = [];
+const LONG_PRESS_MS = 450;
+const FIX_SHOWN_MS = 5000;
+const TOAST_MS = 4000;
 
 /* ------------------------------------------------------------- utilities */
 
@@ -246,6 +252,74 @@ function AttachmentItem({
   );
 }
 
+type FixChibi = (req: ChibiPickRequest) => void;
+
+/** A tag's chibi with the admin face button beside it. When the tag found no
+    face the button stands alone where the chibi would be. Touch has no hover,
+    so a long press on the chibi (or the row tap) shows the button. */
+function ChibiFixSlot({
+  slot,
+  message,
+  onFix,
+}: {
+  slot: ChibiSlot;
+  message: Message;
+  onFix: FixChibi;
+}) {
+  const [pressed, setPressed] = useState(false);
+  const timer = useRef<number | null>(null);
+  const spanRef = useRef<HTMLSpanElement | null>(null);
+
+  const cancel = () => {
+    if (timer.current !== null) window.clearTimeout(timer.current);
+    timer.current = null;
+  };
+  useEffect(() => cancel, []);
+  useEffect(() => {
+    if (!pressed) return;
+    const t = window.setTimeout(() => setPressed(false), FIX_SHOWN_MS);
+    return () => window.clearTimeout(t);
+  }, [pressed]);
+
+  const open = () => {
+    const rect = spanRef.current?.getBoundingClientRect();
+    if (rect === undefined) return;
+    setPressed(false);
+    onFix({
+      message,
+      index: slot.index,
+      tag: slot.tag,
+      current: slot.chibi?.emotion ?? null,
+      anchor: rect,
+    });
+  };
+
+  return (
+    <span
+      ref={spanRef}
+      className={`chibi-slot${pressed ? " pressed" : ""}`}
+      onTouchStart={() => {
+        cancel();
+        timer.current = window.setTimeout(() => setPressed(true), LONG_PRESS_MS);
+      }}
+      onTouchEnd={cancel}
+      onTouchMove={cancel}
+      onTouchCancel={cancel}
+      onContextMenu={isCoarsePointer ? (e) => e.preventDefault() : undefined}
+    >
+      {slot.chibi !== undefined && <ChibiImg chibi={slot.chibi} />}
+      <button
+        className="chibi-fix"
+        title={`Fix the face for "${slot.tag}"`}
+        aria-label={`Fix the face for "${slot.tag}"`}
+        onClick={open}
+      >
+        ☺
+      </button>
+    </span>
+  );
+}
+
 interface RowProps {
   message: Message;
   withHeader: boolean;
@@ -262,6 +336,8 @@ interface RowProps {
   onOpenImage: (att: Attachment) => void;
   onSummarize: (url: string) => void;
   onJumpTo: (id: number) => void;
+  /** Admins only: open the chibi picker for one of this message's tags. */
+  onFixChibi: FixChibi | undefined;
 }
 
 function MessageRow({
@@ -277,6 +353,7 @@ function MessageRow({
   onOpenImage,
   onSummarize,
   onJumpTo,
+  onFixChibi,
 }: RowProps) {
   const chibis = useMemo(
     () => (message.author_type === "bot" ? chibiEmotes(message) : []),
@@ -291,6 +368,15 @@ function MessageRow({
     chibis.length,
   );
   const leadChibi = inlineChibis === 0 ? chibis[0] : undefined;
+  const chibiSlot = useMemo(() => {
+    if (onFixChibi === undefined || message.author_type !== "bot") return undefined;
+    return (slot: ChibiSlot, key: number) =>
+      /[A-Za-z0-9]/.test(slot.tag) ? (
+        <ChibiFixSlot key={key} slot={slot} message={message} onFix={onFixChibi} />
+      ) : slot.chibi !== undefined ? (
+        <ChibiImg key={key} chibi={slot.chibi} />
+      ) : null;
+  }, [onFixChibi, message]);
   const tailChibis = chibis.slice(inlineChibis === 0 ? 1 : inlineChibis);
   const unfurlUrl = useMemo(
     () => firstHttpUrl(message.content),
@@ -312,7 +398,7 @@ function MessageRow({
   const onRowTap = (e: ReactMouseEvent<HTMLDivElement>) => {
     if (!isCoarsePointer) return;
     const target = e.target as HTMLElement;
-    if (target.closest("button, a, .md-spoiler") !== null) return;
+    if (target.closest("button, a, .md-spoiler, .chibi-slot") !== null) return;
     setActionsShown((v) => !v);
   };
 
@@ -421,6 +507,7 @@ function MessageRow({
                 content={message.content}
                 mentionNames={mentionNames}
                 chibis={chibis}
+                chibiSlot={chibiSlot}
               />
               {message.edited_at !== null && (
                 <span className="msg-edited" title={fullTime(message.edited_at)}>
@@ -500,6 +587,21 @@ export function MessageList({
   const lastSeqRef = useRef(0);
   const [showJump, setShowJump] = useState(false);
   const [fillingSeq, setFillingSeq] = useState<number | null>(null);
+  const [picking, setPicking] = useState<ChibiPickRequest | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const isAdmin = me?.is_admin === true;
+  const openPicker = useCallback((req: ChibiPickRequest) => setPicking(req), []);
+  const closePicker = useCallback(() => setPicking(null), []);
+  const pickerDone = useCallback((text: string) => {
+    setPicking(null);
+    setToast(text);
+  }, []);
+
+  useEffect(() => {
+    if (toast === null) return;
+    const t = setTimeout(() => setToast(null), TOAST_MS);
+    return () => clearTimeout(t);
+  }, [toast]);
 
   const items = useMemo(() => buildFeed(list, gaps), [list, gaps]);
   const byId = useMemo(() => new Map(list.map((m) => [m.id, m])), [list]);
@@ -705,6 +807,7 @@ export function MessageList({
               onOpenImage={onOpenImage}
               onSummarize={onSummarize}
               onJumpTo={jumpToMessage}
+              onFixChibi={isAdmin ? openPicker : undefined}
             />
           ),
         )}
@@ -719,6 +822,26 @@ export function MessageList({
         >
           New messages ↓
         </button>
+      )}
+      {picking !== null && (
+        <ChibiPicker
+          key={`${picking.message.id}:${picking.index}`}
+          request={picking}
+          onClose={closePicker}
+          onDone={pickerDone}
+        />
+      )}
+      {toast !== null && (
+        <div className="channel-toast" role="status" aria-live="polite">
+          <span className="channel-toast-text">{toast}</span>
+          <button
+            className="icon-btn"
+            aria-label="Dismiss notice"
+            onClick={() => setToast(null)}
+          >
+            ✕
+          </button>
+        </div>
       )}
     </div>
   );

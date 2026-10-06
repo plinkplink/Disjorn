@@ -169,6 +169,22 @@ export interface Bot {
   created_at: string;
 }
 
+/** One face in a bot's chibi pack (GET /chibi/{pack}/faces, admin). */
+export interface ChibiFace {
+  category: string;
+  name: string;
+  url: string;
+}
+
+/** Where a tag lands in a pack today: its own face name, an alias line, or
+    the resolver's ladder. */
+export interface ChibiAliasState {
+  tag: string;
+  face: string | null;
+  source: "name" | "alias" | "ladder";
+  alias: string[] | null;
+}
+
 export interface ChannelMemberOut {
   type: MemberType;
   id: number;

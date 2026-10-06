@@ -30,11 +30,13 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MessageList } from "../src/components/MessageList";
 import { useMessages } from "../src/stores/messages";
+import { useSession } from "../src/stores/session";
 
-export function render(list) {
+export function render(list, me = null) {
   // A server render reads the store's initial state, so the fixture goes there.
   useMessages.getInitialState().byChannel[1] =
     { list, loaded: true, reachedStart: true, gaps: [] };
+  useSession.getInitialState().user = me;
   const noop = () => {};
   return renderToStaticMarkup(createElement(MessageList, {
     channelId: 1, onReply: noop, onEdit: noop, onOpenImage: noop,
@@ -71,14 +73,14 @@ after(() => { if (scratch) rmSync(scratch, { recursive: true, force: true }); })
 
 const T0 = Date.parse('2026-09-23T18:31:00Z');
 
-function botMessage(id, { minutes = 0, attribution } = {}) {
+function botMessage(id, { minutes = 0, attribution, content, emote_refs = [] } = {}) {
   const m = {
     id, channel_id: 1, seq: id, author_type: 'bot', author_id: 2,
     author: { type: 'bot', id: 2, name: 'Gable', avatar_path: null, avatar_url: null },
-    content: `reply ${id}`,
+    content: content ?? `reply ${id}`,
     created_at: new Date(T0 + minutes * 60_000).toISOString(),
     edited_at: null, deleted_at: null, reply_to_id: null,
-    privacy_flags: {}, emote_refs: [], attachments: [],
+    privacy_flags: {}, emote_refs, attachments: [],
   };
   if (attribution !== undefined) m.attribution = attribution;
   return m;
@@ -124,4 +126,26 @@ test('an attributed message forces its header inside a group', () => {
     attribution: { model: 'claude-fable-5-1', verified: true, summoner: 'plink' } })]);
   assert.deepEqual(rows(attributed), [{ id: 1, head: true }, { id: 2, head: true }]);
   assert.equal(attributed.split('msg-attrib').length - 1, 1);
+});
+
+const ADMIN = { id: 1, username: 'plink', display_name: 'plink', is_admin: true };
+const SMUG = 'chibi:claudette/Happy_and_Confident/Smug.png';
+
+test('an admin gets a face button at each tag, beside its chibi or in its place', () => {
+  const html = render([botMessage(1, {
+    content: 'ha [emotion: wry] and [emotion: zzz]', emote_refs: [SMUG] })], ADMIN);
+  const slots = [...html.matchAll(/<span class="chibi-slot">(.*?)<\/span>/g)].map((m) => m[1]);
+  assert.equal(slots.length, 2, html);
+  assert.ok(slots[0].includes('src="/chibi/claudette/Happy_and_Confident/Smug.png"'));
+  assert.ok(slots[0].includes('title="Fix the face for &quot;wry&quot;"'));
+  assert.ok(!slots[1].includes('<img'));
+  assert.ok(slots[1].includes('title="Fix the face for &quot;zzz&quot;"'));
+});
+
+test('everyone else sees the chibi alone', () => {
+  const html = render([botMessage(1, {
+    content: 'ha [emotion: wry]', emote_refs: [SMUG] })],
+  { ...ADMIN, is_admin: false });
+  assert.ok(html.includes('class="chibi chibi-inline"'), html);
+  assert.ok(!html.includes('chibi-fix'), html);
 });

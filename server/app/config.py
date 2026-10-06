@@ -69,6 +69,8 @@ class Settings(BaseSettings):
     APPROVAL_PRINCIPALS: str = "plink,res-claudette,res-gable"
     APPROVAL_RELAY_BOT_NAMES: list[str] = ["broker"]
 
+    CUSTODIAN_CHANNEL_ID: int = 4
+
     # APPS tab (SPECS/2026-08-30-apps-tab-v1.md, stage 1).
     #
     # These four live HERE rather than in broker.toml's `[apps]` table because

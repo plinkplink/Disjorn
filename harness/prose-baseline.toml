@@ -103,7 +103,7 @@
 "server/app/routers/slash.py" = 10462
 "server/app/routers/summarize.py" = 1656
 "server/app/services/backlog.py" = 4599
-"server/app/services/chibi.py" = 4003
+"server/app/services/chibi.py" = 3985
 "server/app/services/emotion_match.py" = 5954
 "server/app/services/media_convert.py" = 2800
 "server/app/services/push.py" = 1356
