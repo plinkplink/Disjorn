@@ -92,9 +92,10 @@ Moderate: one migration, two endpoints, one fan-out branch, three client compone
 7. `UPDATE channel_members SET reply_mode='always' WHERE channel_id=9 AND member_type='bot' AND member_id=1`. This keeps today's behaviour in that room.
 
 ## Confirm record
-- **Confirmed by**: plink delegated it to the keyboard seat inside the terminal session, so no #custodian seq records it. BuildGable recorded it at 3161. That is a bot's post, and the review owner rightly flagged it (#3167), so plink re-confirms with his own seq or revokes before anything deploys. The build proceeds on the delegation.
-- **#custodian seq**: 3161 (bot-recorded; plink's human seq pending)
-- **Confirmed at**: 2026-10-06T00:59:29.969Z
+- **Confirmed by**:
+- **#custodian seq**:
+- **Confirmed at**:
+<!-- Bot-recorded 3161 withdrawn after both reviews (#3167, #3174): a confirm is a human's seq. Branches build ahead; nothing merges without it. -->
 
 ## Status
-`confirmed`
+`draft`
