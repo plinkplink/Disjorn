@@ -49,16 +49,9 @@ from typing import Callable, Optional
 
 DEFAULT_CONFIG_PATH = "/etc/disjorn-broker/broker.toml"
 
-# Which retrieval callers count as "referenced" (Memory v2 phase 1).
-#
-# DUPLICATED FROM house_memory.retrieval_log.HEAT_CALLERS, and duplicated on
-# purpose: this module's whole point is that it parses the logs WITHOUT
-# importing house_memory, which would drag in chromadb and ~90 packages for a
-# job that only reads JSON lines. The duplication is fenced by
-# test_heat_callers_matches_house_memory — if the two ever disagree, that test
-# fails rather than the dashboard quietly reporting a different number from the
-# walker. (A silent second copy of shared logic is what cost 75 memories their
-# tags on 2026-08-04; this one is allowed to exist only because it is pinned.)
+# Which retrieval callers count as "referenced". A copy of
+# house_memory.retrieval_log.HEAT_CALLERS so this parser never imports
+# chromadb; test_heat_callers_matches_house_memory pins the two together.
 HEAT_CALLERS = frozenset({"service"})
 DEFAULT_WINDOW_DAYS = 7
 TOP_REFERENCED = 10
@@ -213,13 +206,8 @@ def aggregate_retrieval(
     one (or with a missing file) are simply absent. Read-only — this only
     aggregates the stats WP-H8 consolidation also reads; it proposes nothing.
 
-    `top_referenced` counts SERVICE reads only (Memory v2 phase 1). This is the
-    third place the same defect turned up — after `reference_counts` and
-    `_last_seen_map` — and Claudette predicted it from the other two: "worth
-    one grep for any other field written on a retrieval path without a caller
-    filter, because the shape clearly recurs" (#custodian seq 614). It is the
-    dashboard the residents read, so a blended count here tells them a memory
-    is hot when what is actually hot is their own attention on it.
+    `top_referenced` counts SERVICE reads only: a blended count tells the
+    residents a memory is hot when what is hot is their own attention on it.
 
     `by_caller` is published alongside so the blend stays inspectable rather
     than merely excluded — the ratio is a diagnostic she asked to keep."""
@@ -564,6 +552,7 @@ def gate_paths(config: dict) -> dict:
         "branch": g.get("mirror_branch", "main"),
         "deploy_tree": deploy_tree,
         "deploy_service": g.get("deploy_service", DEPLOY_SERVICE),
+        "deploy_processes": deploy_processes(config, g.get("deploy_service")),
         "message_db": message_db,
         "custodian_channel_id": config.get("disjorn", {}).get("custodian_channel_id"),
         # The key behind the digest's own posts (_sdk_transport reads the same
@@ -1391,17 +1380,56 @@ def _dirty_sentence(paths: list) -> str:
             f"under {where} — code is running that was never published")
 
 
-# The server's systemd unit; its start time is compared against what landed on disk.
 DEPLOY_SERVICE = "disjorn"
-# A change here needs the server restarted; client/ is served from a built dist.
-RESTART_PATHSPEC = ("server", ":(exclude)server/tests")
 REFLOG_SCAN = 500
 _REFLOG_TIME_RE = re.compile(r"HEAD@\{(\d+)\}")
+_NO_TESTS = ":(exclude,glob)**/tests/**"
+_CLAUDE_PY = [":(glob)**/*.py", ":(exclude)scripts", _NO_TESTS]
+
+# Every long-running process whose code can go stale after a merge. Keys:
+# unit, user (a user unit of that account), repo (default: the deploy tree),
+# watch (pathspecs whose change needs a restart), copy + source (a deployed
+# copy installed from repo/source), upstream + ref (a clone that must match).
+# `[deploy.processes.<name>]` in broker.toml overrides or adds by name;
+# `enabled = false` drops one. client/ is absent: it is served from a built dist.
+DEPLOY_PROCESSES = {
+    "server": {"unit": DEPLOY_SERVICE, "watch": ["server", _NO_TESTS]},
+    "broker": {"unit": "disjorn-broker",
+               "watch": ["harness/broker", "harness/planroom", "harness/metrics",
+                         "harness/keyboard/board.py", _NO_TESTS]},
+    "gable-summon": {"unit": "gable-summon", "user": "res-gable",
+                     "copy": "/usr/local/lib/disjorn/residency",
+                     "source": "harness/residency",
+                     "watch": ["harness/residency", _NO_TESTS]},
+    "custodian-adapter": {
+        "unit": "resident-cc", "user": "res-claudette",
+        "repo": "/home/res-claudette/resident-home/bots/claudette",
+        "upstream": "/home/plink/bots/claudette", "ref": "disjorn-port",
+        "watch": _CLAUDE_PY},
+    "custodian-discord": {"unit": "claudette",
+                          "repo": "/home/plink/bots/claudette",
+                          "watch": _CLAUDE_PY},
+}
+COPY_IGNORED = frozenset({"tests", "__pycache__", ".pytest_cache"})
+CGROUP_ROOT = "/sys/fs/cgroup"
+PROC_ROOT = "/proc"
+
+
+def deploy_processes(config: Optional[dict] = None,
+                     service: Optional[str] = None) -> dict:
+    table = {k: dict(v) for k, v in DEPLOY_PROCESSES.items()}
+    if service:
+        table["server"]["unit"] = service
+    over = (config or {}).get("deploy")
+    over = over.get("processes") if isinstance(over, dict) else None
+    for name, spec in (over if isinstance(over, dict) else {}).items():
+        if isinstance(spec, dict):
+            table[name] = {**table.get(name, {}), **spec}
+    return {k: v for k, v in table.items() if v.get("enabled", True)}
 
 
 def service_started_at(unit: str) -> tuple[Optional[int], str]:
-    """When `unit` last became active, as epoch seconds, or None and why.
-    Unprivileged over D-Bus; no /proc clock-tick arithmetic or pid reuse."""
+    """When system `unit` last became active, as epoch seconds, or None and why."""
     try:
         proc = subprocess.run(
             ["systemctl", "show", "--timestamp=unix", "-p", "ActiveState",
@@ -1421,66 +1449,195 @@ def service_started_at(unit: str) -> tuple[Optional[int], str]:
     return int(ts), ""
 
 
-def head_at(deploy_tree: str, when: int) -> tuple[Optional[str], str]:
-    """Prod's HEAD at epoch `when`, by reflog time: a commit can land days
+def _pid_started_at(pid: str) -> Optional[int]:
+    try:
+        stat = Path(PROC_ROOT, pid, "stat").read_text()
+        btime = next(int(ln.split()[1]) for ln in
+                     Path(PROC_ROOT, "stat").read_text().splitlines()
+                     if ln.startswith("btime "))
+    except (OSError, StopIteration, ValueError, IndexError):
+        return None
+    ticks = stat.rpartition(")")[2].split()[19]
+    return btime + int(ticks) // os.sysconf("SC_CLK_TCK")
+
+
+def user_unit_started_at(user: str, unit: str) -> tuple[Optional[int], str]:
+    """Earliest process start in another account's user unit, from its cgroup.
+    `systemctl --user -M` needs privilege; the cgroup and /proc do not."""
+    import pwd
+    try:
+        uid = pwd.getpwnam(user).pw_uid
+    except KeyError:
+        return None, f"no account {user}"
+    manager = Path(CGROUP_ROOT, "user.slice", f"user-{uid}.slice", f"user@{uid}.service")
+    found = sorted(manager.glob(f"*/{unit}.service/cgroup.procs"))
+    if not found:
+        return None, f"{unit} is not running under {user}"
+    try:
+        pids = found[0].read_text().split()
+    except OSError as exc:
+        return None, f"cannot read {unit}'s cgroup: {type(exc).__name__}"
+    starts = [t for t in map(_pid_started_at, pids) if t is not None]
+    if not starts:
+        return None, f"no readable process in {unit} under {user}"
+    return min(starts), ""
+
+
+def _git_any(repo: str, *args: str) -> Optional[str]:
+    """`_git` that also reads a repository another account owns."""
+    return _git(repo, "-c", f"safe.directory={repo}", *args)
+
+
+def head_at(repo: str, when: int) -> tuple[Optional[str], str]:
+    """`repo`'s HEAD at epoch `when`, by reflog time: a commit can land days
     after it was made."""
-    log = _git(deploy_tree, "log", "-g", f"-n{REFLOG_SCAN}", "--date=unix",
-               "--format=%H %gd", "HEAD")
+    log = _git_any(repo, "log", "-g", f"-n{REFLOG_SCAN}", "--date=unix",
+                   "--format=%H %gd", "HEAD")
     if not log:
-        return None, "cannot read prod's reflog"
+        return None, f"cannot read the reflog of {repo}"
     for line in log.splitlines():
         sha, _, selector = line.partition(" ")
         m = _REFLOG_TIME_RE.fullmatch(selector.strip())
         if m and int(m.group(1)) <= when:
             return sha, ""
-    return None, "prod's reflog does not reach back to the server's start"
+    return None, f"the reflog of {repo} does not reach back to the start"
 
 
-def running_state(deploy_tree: str, deployed_head: str,
-                  started: tuple[Optional[int], str]) -> dict:
-    """Has the live server loaded the server code on disk? `ok` is None when
-    that cannot be told, and None must never render green."""
-    started_at, why = started
-    out = {"ok": None, "started_at": started_at, "started_head": None,
-           "detail": ""}
-    if started_at is None:
-        out["detail"] = f"running: unknown ({why})"
-        return out
-    sha, why = head_at(deploy_tree, started_at)
-    if sha is None:
-        out["detail"] = f"running: unknown ({why})"
-        return out
-    out["started_head"] = sha
-    changed = ("" if sha == deployed_head else
-               _git(deploy_tree, "diff", "--name-only", sha, deployed_head,
-                    "--", *RESTART_PATHSPEC))
-    if changed is None:
-        out["detail"] = "running: unknown (cannot compare server/ across the restart)"
-        return out
-    out["ok"] = not changed.strip()
-    out["detail"] = (f"running: server started on {_short(sha)}"
-                     + ("" if out["ok"] else ", server/ changed since; restart pending"))
+def _copy_files(root: Path) -> dict:
+    out = {}
+    for path in sorted(root.rglob("*")):
+        rel = path.relative_to(root)
+        if (COPY_IGNORED.intersection(rel.parts) or path.suffix == ".pyc"
+                or not path.is_file()):
+            continue
+        out[rel.as_posix()] = path
     return out
+
+
+def _copy_drift(copy: Path, source: Path) -> tuple[Optional[str], Optional[int], str]:
+    """(differing file or "", newest ctime in the copy, why unreadable).
+    ctime, because an install that preserves mtimes still moves it."""
+    try:
+        got, want = _copy_files(copy), _copy_files(source)
+        if not got or not want:
+            return None, None, f"cannot list {copy if not got else source}"
+        for rel in sorted(set(got) | set(want)):
+            if rel not in got or rel not in want or (
+                    hashlib.sha256(got[rel].read_bytes()).digest()
+                    != hashlib.sha256(want[rel].read_bytes()).digest()):
+                return rel, None, ""
+        return "", max(int(p.stat().st_ctime) for p in got.values()), ""
+    except OSError as exc:
+        return None, None, f"cannot read the deployed copy: {type(exc).__name__}"
+
+
+def process_started_at(spec: dict) -> tuple[Optional[int], str]:
+    if spec.get("user"):
+        return user_unit_started_at(spec["user"], spec["unit"])
+    return service_started_at(spec["unit"])
+
+
+def _probe(spec: dict, deploy_tree: str) -> dict:
+    repo = spec.get("repo") or deploy_tree
+    watch = list(spec.get("watch") or ["."])
+    newest = None
+    if spec.get("copy"):
+        differ, newest, why = _copy_drift(Path(spec["copy"]),
+                                          Path(repo, spec.get("source", ".")))
+        if differ is None:
+            return {"state": "unknown", "detail": why}
+        if differ:
+            return {"state": "differs",
+                    "detail": f"deployed copy differs from repo at {differ}"}
+    if spec.get("upstream"):
+        ref = spec.get("ref", "HEAD")
+        mine = _git_any(repo, "rev-parse", "HEAD")
+        theirs = _git_any(spec["upstream"], "rev-parse", ref)
+        if mine is None or theirs is None:
+            return {"state": "unknown", "detail": "cannot read "
+                    + (repo if mine is None else f"{spec['upstream']} {ref}")}
+        if mine.strip() != theirs.strip():
+            return {"state": "differs", "detail": f"checkout is at {_short(mine)}, "
+                    f"{ref} is at {_short(theirs)}"}
+    status = _git_any(repo, "status", "--porcelain", "--", *watch)
+    if status is None:
+        return {"state": "unknown", "detail": f"cannot read {repo}'s working tree"}
+    dirty = _dirty_paths(status)
+    if dirty:
+        more = f" (+{len(dirty) - 1} more)" if len(dirty) > 1 else ""
+        return {"state": "unknown",
+                "detail": f"uncommitted edits under {dirty[0]}{more}"}
+    started_at, why = process_started_at(spec)
+    if started_at is None:
+        return {"state": "unknown", "detail": why}
+    if newest is not None:
+        late = newest > started_at
+        return {"state": "stale" if late else "current", "started_at": started_at,
+                "detail": "deployed copy changed after the start; restart pending"
+                if late else "started after the deployed copy was installed"}
+    sha, why = head_at(repo, started_at)
+    if sha is None:
+        return {"state": "unknown", "detail": why, "started_at": started_at}
+    head = _git_any(repo, "rev-parse", "HEAD")
+    changed = None if head is None else (
+        "" if sha == head.strip() else
+        _git_any(repo, "diff", "--name-only", sha, head.strip(), "--", *watch))
+    if changed is None:
+        return {"state": "unknown", "started_at": started_at,
+                "detail": "cannot compare the watched paths across the start"}
+    first = changed.split("\n", 1)[0].strip()
+    return {"state": "stale" if first else "current", "started_at": started_at,
+            "started_head": sha,
+            "detail": f"started on {_short(sha)}"
+            + (f", {first} changed since; restart pending" if first else "")}
+
+
+def process_state(name: str, spec: dict, deploy_tree: str) -> dict:
+    """One process's running fact. `ok` is None when it cannot be told, and
+    one unreadable process never takes the others down with it."""
+    out = {"name": name, "unit": spec.get("unit"), "started_at": None,
+           "started_head": None}
+    try:
+        out.update(_probe(spec, deploy_tree))
+    except Exception as exc:  # noqa: BLE001
+        out.update(state="unknown", detail=f"probe failed: {type(exc).__name__}")
+    out["ok"] = {"current": True, "stale": False, "differs": False}.get(out["state"])
+    return out
+
+
+def running_summary(processes: list) -> dict:
+    """Green needs every process current; the names say which are not."""
+    by = {s: [p["name"] for p in processes if p["state"] == s]
+          for s in ("stale", "differs", "unknown")}
+    ok = (False if by["stale"] or by["differs"]
+          else None if by["unknown"] or not processes else True)
+    parts = [f"{label}: {', '.join(by[s])}" for s, label in
+             (("stale", "restart pending"), ("differs", "copy differs"),
+              ("unknown", "unknown")) if by[s]]
+    detail = "; ".join(parts) if parts else (
+        f"all {len(processes)} current" if processes else "unknown")
+    return {"ok": ok, "detail": f"running: {detail}", **by}
 
 
 def deploy_state(config: Optional[dict] = None, *, mirror: Optional[str] = None,
                  deploy_tree: Optional[str] = None,
                  branch: str = "main",
-                 service: Optional[str] = None) -> dict:
+                 service: Optional[str] = None,
+                 processes: Optional[dict] = None) -> dict:
     """Prod's tree against mirror head (`state`: in-sync, drift, unknown), and
-    the live server against prod's tree (`running`). The Plan Room badge and
-    the digest both call this so they cannot disagree. A dirty tree is code
-    running that was never published."""
+    each live process against the code it loads (`processes`, summed up in
+    `running`). The Plan Room badge and the digest both call this so they
+    cannot disagree. A dirty tree is code running that was never published."""
     if config is not None:
         p = gate_paths(config)
         mirror = mirror or p["mirror"]
         deploy_tree = deploy_tree or p["deploy_tree"]
         branch = branch or p["branch"]
-        service = service or p["deploy_service"]
-    service = service or DEPLOY_SERVICE
+        processes = processes or deploy_processes(config, service or p["deploy_service"])
+    processes = processes or deploy_processes(service=service)
     out = {"state": "unknown", "mirror_head": None, "deployed_head": None,
            "dirty": None, "ahead": None, "behind": None, "detail": "",
-           "running": {"ok": None, "detail": "running: unknown"}}
+           "processes": [], "running": running_summary([])}
     if not mirror or not deploy_tree:
         out["detail"] = "no [gate].mirror / [gate].deploy_tree configured"
         return out
@@ -1492,8 +1649,9 @@ def deploy_state(config: Optional[dict] = None, *, mirror: Optional[str] = None,
         return out
     out["mirror_head"] = mirror_head.strip()
     out["deployed_head"] = deployed_head.strip()
-    out["running"] = running_state(deploy_tree, out["deployed_head"],
-                                   service_started_at(service))
+    out["processes"] = [process_state(n, spec, deploy_tree)
+                        for n, spec in processes.items()]
+    out["running"] = running_summary(out["processes"])
     status = _git(deploy_tree, "status", "--porcelain")
     out["dirty"] = None if status is None else bool(status.strip())
     # Paths only, never contents: enough to tell an unmerged fix from an edit.
@@ -1755,7 +1913,8 @@ def gate_drift(config: dict, *, date: str, now: Optional[_dt.datetime] = None,
         drift["chat_merges"] = seq_trailers(mirror, "merge-seq", branch)
         drift["deploy"] = deploy_state(mirror=mirror,
                                        deploy_tree=paths["deploy_tree"],
-                                       branch=branch)
+                                       branch=branch,
+                                       processes=paths["deploy_processes"])
         drift["prose"] = prose_summary(paths["deploy_tree"])
     finally:
         if db is not None:

@@ -1377,7 +1377,7 @@ def started(monkeypatch, at):
 def test_a_server_started_after_the_last_landing_is_running(lane, monkeypatch):
     lane.deploy()
     started(monkeypatch, LANDED + 60)
-    run = M.deploy_state(lane.config())["running"]
+    run = M.deploy_state(lane.config())["processes"][0]
     assert run["ok"] is True and run["started_head"] == lane.head()
 
 
@@ -1388,8 +1388,8 @@ def test_server_code_landing_after_the_start_is_a_restart_pending(lane, monkeypa
     started(monkeypatch, LANDED + 60)
     d = M.deploy_state(lane.config())
     assert d["state"] == "in-sync"
-    assert d["running"]["ok"] is False and d["running"]["started_head"] == first
-    assert "restart pending" in d["running"]["detail"]
+    assert d["running"]["ok"] is False and d["processes"][0]["started_head"] == first
+    assert d["running"]["detail"] == "running: restart pending: server"
 
 
 @pytest.mark.parametrize("rel", ["client/src/x.ts", "server/tests/test_x.py"])
@@ -1410,13 +1410,13 @@ def test_reflog_time_not_commit_time_decides_when_code_landed(lane, monkeypatch)
 def test_a_start_older_than_the_reflog_is_unknown_never_running(lane, monkeypatch):
     lane.deploy()
     started(monkeypatch, LANDED - 3600)
-    run = M.deploy_state(lane.config())["running"]
-    assert run["ok"] is None and "reflog does not reach back" in run["detail"]
+    run = M.deploy_state(lane.config())["processes"][0]
+    assert run["ok"] is None and "does not reach back" in run["detail"]
 
 
 def test_an_unreadable_start_time_is_unknown_never_running(lane):
     lane.deploy()
-    run = M.deploy_state(lane.config())["running"]
+    run = M.deploy_state(lane.config())["processes"][0]
     assert run["ok"] is None and "not asked in tests" in run["detail"]
 
 
@@ -1424,7 +1424,15 @@ def test_the_digest_deploy_line_carries_the_running_fact(lane, monkeypatch):
     lane.deploy()
     started(monkeypatch, LANDED + 60)
     line = [l for l in lane.block().splitlines() if l.startswith("deploy:")][0]
-    assert line.endswith(f"; running: server started on {lane.head()[:8]}")
+    assert line.endswith("; running: all 1 current")
+
+
+def test_the_digest_deploy_line_names_the_stale_process(lane, monkeypatch):
+    lane.deploy()
+    deploy_later(lane, "server/app/x.py")
+    started(monkeypatch, LANDED + 60)
+    line = [l for l in lane.block().splitlines() if l.startswith("deploy:")][0]
+    assert line.endswith("; running: restart pending: server")
 
 
 def test_the_unit_is_configurable_and_defaults_to_disjorn(lane, monkeypatch):

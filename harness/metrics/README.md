@@ -200,7 +200,10 @@ never read alike.
 
 `deploy_state()` is exported as a named function on purpose: the Plan Room's
 tri-state badge is the same computation and calls it rather than
-re-implementing it.
+re-implementing it. Its `processes` list holds one running fact per process in
+`DEPLOY_PROCESSES` (or `[deploy.processes.<name>]`), each probed on its own so
+one unreadable process never hides the others; the digest's deploy line ends
+with `running: all N current` or names the processes that are not.
 
 ## Tests
 
