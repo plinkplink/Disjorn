@@ -609,6 +609,8 @@ export interface PushPayload {
   channel_id: number;
   message_id: number;
   url: string; // e.g. "/channels/3"
+  /** Why this recipient was notified; absent from older servers. */
+  kind?: "dm" | "mention" | "message";
 }
 
 /* ---- plan room (SPECS/2026-08-20-plan-room.md) ---- */

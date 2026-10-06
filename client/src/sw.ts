@@ -3,7 +3,7 @@
    Precaches the built app shell (self.__WB_MANIFEST, injected at build time)
    with a hand-rolled cache — no workbox runtime dependency — and carries the
    Web Push plumbing for WP7's payload shape:
-       event.data.json() -> {title, body, channel_id, message_id, url}
+       event.data.json() -> {title, body, channel_id, message_id, url, kind}
    WP11 wires the subscription UI; the handlers land here so pushes work the
    moment a subscription exists. Notification clicks deep-link via the url
    ("/channels/{id}" -> "/#/channels/{id}" hash route). */
@@ -97,6 +97,62 @@ self.addEventListener("fetch", (event) => {
 
 /* ---- Web Push (WP7 payload shape; WP11 adds the subscribe UI) ---- */
 
+/** Members the WebWorker lib does not declare yet; browsers without them ignore them. */
+interface AlertingNotificationOptions extends NotificationOptions {
+  renotify?: boolean;
+  vibrate?: number[];
+}
+
+/* A plain message replacing a recent one in the same channel updates the
+   banner quietly; it alerts again once this long has passed since the last
+   alert. DMs and mentions always alert. */
+const REALERT_AFTER_MS = 30_000;
+const VIBRATE_MESSAGE = [90];
+const VIBRATE_URGENT = [120, 70, 120];
+
+async function showPush(payload: PushPayload): Promise<void> {
+  const tag = `channel-${payload.channel_id}`; // newest per channel wins
+  const urgent = payload.kind === "dm" || payload.kind === "mention";
+  const now = Date.now();
+  let lastAlertAt: number | null = null;
+  let appFocused = false;
+  try {
+    const [previous] = await self.registration.getNotifications({ tag });
+    if (previous !== undefined) {
+      const at = (previous.data as { alerted_at?: unknown } | null)?.alerted_at;
+      lastAlertAt = typeof at === "number" ? at : 0;
+    }
+    const windows = await self.clients.matchAll({
+      type: "window",
+      includeUncontrolled: true,
+    });
+    appFocused = windows.some((w) => w.focused);
+  } catch {
+    // Unknown state: alert, which is the safe side of the trade.
+  }
+  const alert =
+    lastAlertAt === null || urgent || now - lastAlertAt >= REALERT_AFTER_MS;
+  // A focused app plays its own in-app sound, so the banner stays quiet.
+  const silent = appFocused || !alert;
+  const options: AlertingNotificationOptions = {
+    body: payload.body,
+    icon: "/icons/icon-192.png",
+    badge: "/icons/icon-192.png",
+    tag,
+    renotify: alert,
+    silent,
+    data: {
+      url: payload.url,
+      channel_id: payload.channel_id,
+      message_id: payload.message_id,
+      alerted_at: alert ? now : lastAlertAt,
+    },
+  };
+  // The spec throws on vibrate together with silent: true.
+  if (!silent) options.vibrate = urgent ? VIBRATE_URGENT : VIBRATE_MESSAGE;
+  await self.registration.showNotification(payload.title, options);
+}
+
 self.addEventListener("push", (event) => {
   if (event.data === null) return;
   let payload: PushPayload;
@@ -105,19 +161,7 @@ self.addEventListener("push", (event) => {
   } catch {
     return;
   }
-  event.waitUntil(
-    self.registration.showNotification(payload.title, {
-      body: payload.body,
-      icon: "/icons/icon-192.png",
-      badge: "/icons/icon-192.png",
-      tag: `channel-${payload.channel_id}`, // newest per channel wins
-      data: {
-        url: payload.url,
-        channel_id: payload.channel_id,
-        message_id: payload.message_id,
-      },
-    }),
-  );
+  event.waitUntil(showPush(payload));
 });
 
 /* Browser rotated/expired the subscription: re-subscribe with the same VAPID
