@@ -26,7 +26,8 @@ def test_export_is_sorted_and_carries_superseded(live, tmp_path):
     out = tmp_path / "export.json"
     facts = mx.export(live, out)
     records = json.loads(out.read_bytes())
-    assert facts == {"count": 3, "export_sha256": mx.sha256(out)}
+    assert facts == {"count": 3, "export_sha256": mx.sha256(out), "store_count": 3,
+                     "ids_sha256": mx.ids_sha256(r["id"] for r in records)}
     assert [r["id"] for r in records] == sorted(r["id"] for r in records)
     assert sum(1 for r in records if r["metadata"].get("superseded_by")) == 1
     assert all(r["embedding"] for r in records)

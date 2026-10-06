@@ -37,18 +37,25 @@ def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def ids_sha256(ids) -> str:
+    return hashlib.sha256("\n".join(sorted(ids)).encode()).hexdigest()
+
+
 def export(data_dir: Path, out: Path) -> dict:
     # Opening a missing dir creates an empty store and exports zero records.
     if not (data_dir / "chroma.sqlite3").is_file():
         raise SystemExit(f"memory_export: no chroma.sqlite3 under {data_dir}")
-    records = _store(data_dir).export_all()
+    store = _store(data_dir)
+    records = store.export_all()
     if not records:
         raise SystemExit(f"memory_export: {data_dir} exported zero records")
     out.write_bytes(dumps(records))
-    return {"count": len(records), "export_sha256": sha256(out)}
+    return {"count": len(records), "export_sha256": sha256(out),
+            "store_count": store.count(), "ids_sha256": ids_sha256(r["id"] for r in records)}
 
 
-def verify(export_file: Path, count: int, sha: str, scratch: Path) -> list[str]:
+def verify(export_file: Path, count: int, sha: str, scratch: Path,
+           store_count: int | None = None, ids_sha: str | None = None) -> list[str]:
     """Returns failures; empty means the export is intact and round-trips losslessly."""
     fails = []
     got_sha = sha256(export_file)
@@ -57,6 +64,10 @@ def verify(export_file: Path, count: int, sha: str, scratch: Path) -> list[str]:
     records = json.loads(export_file.read_bytes())
     if len(records) != count:
         fails.append(f"export holds {len(records)} records, manifest says {count}")
+    if store_count is not None and store_count != count:
+        fails.append(f"source store held {store_count} records but {count} were exported")
+    if ids_sha is not None and ids_sha256(r["id"] for r in records) != ids_sha:
+        fails.append("export ids differ from the source store's ids")
     if scratch.exists():
         shutil.rmtree(scratch)
     store = _store(scratch)
@@ -79,13 +90,15 @@ def main(argv: list[str] | None = None) -> int:
     v.add_argument("--count", type=int, required=True)
     v.add_argument("--sha", required=True)
     v.add_argument("--scratch", type=Path, required=True)
+    v.add_argument("--store-count", type=int)
+    v.add_argument("--ids-sha")
     ns = p.parse_args(argv)
 
     if ns.cmd == "export":
         print(json.dumps(export(ns.data_dir, ns.out)))
         return 0
     try:
-        fails = verify(ns.export, ns.count, ns.sha, ns.scratch)
+        fails = verify(ns.export, ns.count, ns.sha, ns.scratch, ns.store_count, ns.ids_sha)
     except Exception as exc:
         fails = [f"round-trip raised {type(exc).__name__}: {exc}"]
     for f in fails:

@@ -128,7 +128,8 @@ def test_snapshot_writes_manifest_and_prunes_with_the_retention_policy(house):
     snap = only_snapshot(house)
     m = json.loads(restored(house, snap, house["stage"] / "manifest.json").read_text())
     assert m["messages"] == 3 and m["migration"] == 10
-    assert m["claudette"]["count"] == 3
+    assert m["claudette"]["count"] == 3 and m["claudette"]["store_count"] == 3
+    assert m["claudette_discord"] is None
     assert m["gable"]["memory_files"] == 3
     assert set(m["bundles"]) == {"claudette", "spine", "disjorn"}
     assert {"refs/heads/main", "refs/heads/side"} <= set(m["bundles"]["spine"])
@@ -200,6 +201,38 @@ def test_drill_goes_red_on_every_tampered_surface(house):
     for bit in ("db messages 2 != manifest 3", "claudette: export sha", "gable memory files 2",
                 "bundle spine: verify failed"):
         assert bit in post, post
+
+
+def test_the_discord_side_store_is_snapshotted_and_drilled(house):
+    discord = house["tmp"] / "discord-chroma"
+    store = MemoryStore(discord, "claudette_memory", StubEmbedder(dim=64))
+    for text in ("plink plays bass", "the server is called disjorn"):
+        store.remember(Memory(content=text, subject="plink", source_author="plink"))
+    house["env"]["CLAUDETTE_DISCORD_MEMORY_DIR"] = str(discord)
+    assert run(house, "snapshot.sh").returncode == 0
+    snap = only_snapshot(house)
+    stage = restored(house, snap, house["stage"])
+    m = json.loads((stage / "manifest.json").read_text())
+    assert m["claudette_discord"]["count"] == 2 == m["claudette_discord"]["store_count"]
+
+    r = run(house, "drill.sh")
+    assert r.returncode == 0, r.stderr + "\n".join(posts(house))
+    assert "claudette 3 memories round-trip, discord-side 2;" in posts(house)[0]
+
+    export = stage / "claudette/discord-memory-export.json"
+    export.write_text(export.read_text().replace("bass", "drums"))
+    assert run(house, "drill.sh").returncode == 1
+    assert "claudette_discord: export sha" in posts(house)[1]
+
+
+def test_drill_red_when_the_export_dropped_records_the_source_store_held(house):
+    assert run(house, "snapshot.sh").returncode == 0
+    mf = restored(house, only_snapshot(house), house["stage"]) / "manifest.json"
+    m = json.loads(mf.read_text())
+    m["claudette"]["store_count"] = 4
+    mf.write_text(json.dumps(m))
+    assert run(house, "drill.sh").returncode == 1
+    assert "source store held 4 records but 3 were exported" in posts(house)[0]
 
 
 def test_drill_red_when_there_is_no_snapshot(house):

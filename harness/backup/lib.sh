@@ -8,6 +8,7 @@
 : "${GABLE_MEMORY:=$GABLE_HOME/.claude/projects/-home-resident/memory}"
 : "${CLAUDETTE_REPO:=/home/plink/bots/claudette}"
 : "${SPINE_REPO:=/home/plink/bots/fable/spine}"
+: "${CLAUDETTE_DISCORD_MEMORY_DIR:=$CLAUDETTE_REPO/chroma_data}"
 : "${CLAUDETTE_PY:=/home/plink/bots/claudette/.venv/bin/python}"
 : "${POST_PY:=$DISJORN/server/.venv/bin/python}"
 : "${BROKER_CONFIG:=/etc/disjorn-broker/broker.toml}"
