@@ -301,9 +301,14 @@ function SoundsSection() {
         <span>
           Play a sound when a message arrives
           <span className="settings-hint">
-            A soft chime for messages in other channels or while Disjorn is in
-            the background, a brighter one for DMs and @mentions of you. This
-            device only.
+            A soft chime for unread messages, a brighter one for DMs and
+            @mentions of you. With push notifications on for this device,
+            chimes play only while the Disjorn window is focused; the
+            notification alerts you otherwise. This device only.
+          </span>
+          <span className="settings-hint">
+            Turning sounds off does not silence push notifications. Those
+            follow the Notifications setting above and your system settings.
           </span>
         </span>
       </label>

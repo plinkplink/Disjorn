@@ -1,5 +1,6 @@
 /* Web Push subscription flow (WP11). Spec §10: the permission prompt lives in
-   Settings ONLY — nothing here runs on page load except the passive state
+   Settings ONLY — nothing here runs on page load except probeSubscribed(), a
+   prompt-free, network-free lookup the sound gate needs, and the passive state
    probe that Settings triggers when it mounts.
 
    State machine (status field):
@@ -60,9 +61,13 @@ interface PushState {
   detail: string | null;
   /** True while enable()/disable() is in flight (buttons disable on it). */
   busy: boolean;
+  /** This browser holds a push subscription; null until first probed. */
+  subscribed: boolean | null;
 
   /** Passive probe — no permission prompt, ever. Settings calls it on mount. */
   refresh: () => Promise<void>;
+  /** Sets `subscribed` only; never prompts, never touches the server. */
+  probeSubscribed: () => Promise<void>;
   enable: () => Promise<void>;
   disable: () => Promise<void>;
 }
@@ -71,6 +76,7 @@ export const usePush = create<PushState>()((set, get) => ({
   status: "checking",
   detail: null,
   busy: false,
+  subscribed: null,
 
   refresh: async () => {
     if (!supported()) {
@@ -80,6 +86,7 @@ export const usePush = create<PushState>()((set, get) => ({
     try {
       const reg = await registration();
       const sub = await reg?.pushManager.getSubscription();
+      set({ subscribed: sub != null });
       if (sub != null) {
         set({ status: "enabled", detail: null });
         return;
@@ -100,6 +107,20 @@ export const usePush = create<PushState>()((set, get) => ({
           detail: err instanceof ApiError ? err.detail : "Push state check failed",
         });
       }
+    }
+  },
+
+  probeSubscribed: async () => {
+    if (!supported()) {
+      set({ subscribed: false });
+      return;
+    }
+    try {
+      const reg = await registration();
+      const sub = await reg?.pushManager.getSubscription();
+      set({ subscribed: sub != null });
+    } catch {
+      set({ subscribed: false });
     }
   },
 
@@ -132,7 +153,7 @@ export const usePush = create<PushState>()((set, get) => ({
       const json = sub.toJSON();
       if (json.endpoint === undefined) throw new Error("subscription has no endpoint");
       await pushSubscribe(json.endpoint, json.keys ?? {});
-      set({ status: "enabled", detail: null });
+      set({ status: "enabled", detail: null, subscribed: true });
     } catch (err) {
       if (err instanceof ApiError && err.status === 503) {
         set({ status: "not-configured", detail: err.detail });
@@ -165,7 +186,7 @@ export const usePush = create<PushState>()((set, get) => ({
         }
         await sub.unsubscribe();
       }
-      set({ status: "disabled", detail: null });
+      set({ status: "disabled", detail: null, subscribed: false });
     } catch {
       set({ status: "error", detail: "Could not disable notifications" });
     } finally {

@@ -16,6 +16,7 @@
      and reconnect catch-up arrive over HTTP and never pass through here. */
 
 import { soundFor } from "./lib/messageSound";
+import { usePush } from "./push";
 import { playSound, useSoundSettings } from "./sounds";
 import { useApps } from "./stores/apps";
 import { useChannelDelete } from "./stores/channelDelete";
@@ -212,6 +213,8 @@ export class DisjornSocket {
         .getState()
         .channels.find((c) => c.id === message.channel_id)?.type,
       readOnArrival: isRead,
+      windowFocused: document.hasFocus(),
+      pushOnThisDevice: usePush.getState().subscribed === true,
       mentionsOnly: useSoundSettings.getState().mentionsOnly,
     });
     if (kind !== null) playSound(kind);

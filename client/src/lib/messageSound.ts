@@ -14,6 +14,9 @@ export interface SoundFacts {
   channelType: ChannelType | undefined;
   /** The same test that marks the message read on arrival: active channel, window focused. */
   readOnArrival: boolean;
+  windowFocused: boolean;
+  /** This device holds a push subscription, so the server alerts it while unfocused. */
+  pushOnThisDevice: boolean;
   mentionsOnly: boolean;
 }
 
@@ -22,10 +25,11 @@ export function soundFor(message: Message, facts: SoundFacts): SoundKind | null 
     return null;
   }
   if (facts.readOnArrival) return null;
+  // The push notification is the alert here; a chime as well would ding twice.
+  if (!facts.windowFocused && facts.pushOnThisDevice) return null;
   // The build modal is where its builder's replies are watched.
   if (facts.channelType === "app_build") return null;
-  // An unlisted channel is a DM someone just opened with us (see onMessageCreate).
-  const isDm = facts.channelType === "dm_1to1" || facts.channelType === undefined;
+  const isDm = facts.channelType === "dm_1to1";
   if (isDm || buildMentionRe(facts.myNames)?.test(message.content) === true) {
     return "mention";
   }
