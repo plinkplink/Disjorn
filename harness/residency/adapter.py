@@ -121,6 +121,7 @@ class SummonAdapter:
 
     async def _dispatch(self, event) -> None:
         if isinstance(event, Ready):
+            self.detector.own_bot_id = getattr(event, "bot_id", None)
             logger.info(
                 "connected as bot %s (reconnected=%s)",
                 getattr(event, "bot_id", "?"),

@@ -33,6 +33,7 @@ from residency_testlib import (
     FakeLauncher,
     make_config,
     make_event,
+    make_ready,
 )
 
 CUSTODIAN = 4
@@ -125,6 +126,27 @@ def test_a_bot_mention_in_custodian_opens_a_chain_at_depth_1(tmp_path):
     assert trigger.mode == MODE_BOT_CHAIN
     assert trigger.summoner_type == "bot" and trigger.depth == 1
     assert trigger.work_item == "2026-08-24-hop-counter"
+
+
+def test_its_own_at_mention_is_not_a_summon_and_a_peer_s_still_is(tmp_path):
+    det = SummonDetector(_chain_config(tmp_path, peer_bots=["claudette", "gable"]).summon)
+    det.own_bot_id = 2
+    own = make_event(channel_id=CUSTODIAN, author_type="bot", author_id=2,
+                     author_name="Gable", context={"awake_users": []},
+                     content="as @gable said above, it holds")
+    peer = make_event(channel_id=CUSTODIAN, author_type="bot", author_id=1,
+                      author_name="claudette", context={"awake_users": []},
+                      content="@gable can you check this")
+    assert det.detect(own) is None
+    assert det.detect(peer).mode == MODE_BOT_CHAIN
+
+
+def test_the_ready_frame_tells_the_detector_which_bot_it_is(tmp_path):
+    client = FakeClient([make_ready()])
+    adapter = SummonAdapter(client, make_config(tmp_path), launcher=FakeLauncher(),
+                            hops=FakeArbiter())
+    _run(adapter)
+    assert adapter.detector.own_bot_id == 2
 
 
 def test_a_bot_cannot_open_a_chain_outside_a_mention_only_channel(tmp_path):
