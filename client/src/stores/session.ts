@@ -86,7 +86,10 @@ export const useSession = create<SessionState>()((set, get) => ({
         set({ user, booting: false, bootUnreachable: false });
         return;
       } catch (err) {
-        const unreachable = err instanceof ApiError && err.status === 0;
+        // A 5xx is the proxy answering for a server that is restarting (a
+        // deploy), which says no more about the session than silence does.
+        const unreachable =
+          err instanceof ApiError && (err.status === 0 || err.status >= 500);
         if (!unreachable) {
           set({ user: null, booting: false, bootUnreachable: false });
           return;
