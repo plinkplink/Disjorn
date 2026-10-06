@@ -17,15 +17,12 @@ Rules (Architecture §9):
                   author is a user).
     Suppressed  = recipient is WS-connected AND has that channel focused
                   (ws.manager.is_user_connected + user_focused_channel_ids).
-    Eligible    = channel is a DM,
+    Eligible    = channel is a DM (kind "dm"),
                   OR the content mentions the recipient's username/display
-                  name as a word (optionally @-prefixed, case-insensitive),
-                  OR (main_feed and the recipient's notify_all_main pref set).
+                  name as a word, optionally @-prefixed (kind "mention"),
+                  OR main_feed, never a text channel, with the recipient's
+                  notify_all_main pref set (kind "message").
     Notify when: candidate AND NOT suppressed AND eligible.
-
-    NOTE on text channels: the notify_all_main pref covers main_feed ONLY —
-    named text channels are mention-notify only (plus DMs as ever) in v1.
-    A message in #custodian pushes only to users it mentions.
 
 Privacy: `secret`/`off_the_record` flags gate BOTS, not humans — flagged
 messages still push to human members like any other message.
@@ -35,7 +32,8 @@ Payload (what the WP11 service worker receives):
               and text channels),
      "body": ~120-char snippet, markdown roughly stripped
              ("📎 attachment" for attachment-only messages),
-     "channel_id": int, "message_id": int, "url": "/channels/{id}"}
+     "channel_id": int, "message_id": int, "url": "/channels/{id}",
+     "kind": the recipient's eligibility kind above}
 """
 
 import asyncio
@@ -191,7 +189,9 @@ def _mentions(content: str, *names: Optional[str]) -> bool:
     return False
 
 
-def _build_payload(channel: dict[str, Any], message: dict[str, Any]) -> dict[str, Any]:
+def _build_payload(
+    channel: dict[str, Any], message: dict[str, Any], kind: str
+) -> dict[str, Any]:
     author = message.get("author") or {}
     author_name = author.get("name") or "Someone"
     if channel["type"] in ("main_feed", "text"):
@@ -207,6 +207,7 @@ def _build_payload(channel: dict[str, Any], message: dict[str, Any]) -> dict[str
         "channel_id": channel["id"],
         "message_id": message.get("id"),
         "url": f"/channels/{channel['id']}",
+        "kind": kind,
     }
 
 
@@ -244,8 +245,7 @@ def handle_bus_event(event: dict[str, Any]) -> None:
 
 async def _process_message_create(event: dict[str, Any]) -> None:
     try:
-        recipients, payload = await _plan_notifications(event)
-        if recipients:
+        for recipients, payload in await _plan_notifications(event):
             await push.notify_users(recipients, payload)
     except Exception:  # noqa: BLE001 — notifier failures must stay contained
         logger.exception("push notifier failed for event %r", event.get("type"))
@@ -253,17 +253,17 @@ async def _process_message_create(event: dict[str, Any]) -> None:
 
 async def _plan_notifications(
     event: dict[str, Any],
-) -> tuple[list[int], dict[str, Any]]:
-    """Compute (recipient user ids, payload) for a message_create event."""
+) -> list[tuple[list[int], dict[str, Any]]]:
+    """(recipient user ids, payload) batches for a message_create event, one per kind."""
     channel_id = event.get("channel_id")
     message = event.get("message") or {}
     if channel_id is None or not message:
-        return [], {}
+        return []
     channel = await db.fetch_one(
         "SELECT id, type, name, visibility FROM channels WHERE id = ?", (channel_id,)
     )
     if channel is None:
-        return [], {}
+        return []
 
     is_main = channel["type"] == "main_feed"
     is_dm = channel["type"] == "dm_1to1"
@@ -290,21 +290,23 @@ async def _plan_notifications(
     author_id = message.get("author_id")
     content = message.get("content") or ""
 
-    recipients: list[int] = []
+    by_kind: dict[str, list[int]] = {}
     for u in candidates:
         if author_type == "user" and u["id"] == author_id:
             continue  # never notify the author
         # Suppression: connected AND focused on this channel = actively reading.
         if manager.is_user_connected(u["id"]) and channel_id in manager.user_focused_channel_ids(u["id"]):
             continue
-        eligible = (
-            is_dm
-            or _mentions(content, u["username"], u["display_name"])
-            or (is_main and bool(u["notify_all_main"]))
-        )
-        if eligible:
-            recipients.append(u["id"])
+        if is_dm:
+            kind = "dm"
+        elif _mentions(content, u["username"], u["display_name"]):
+            kind = "mention"
+        elif is_main and u["notify_all_main"]:
+            kind = "message"
+        else:
+            continue
+        by_kind.setdefault(kind, []).append(u["id"])
 
-    if not recipients:
-        return [], {}
-    return recipients, _build_payload(channel, message)
+    return [
+        (ids, _build_payload(channel, message, kind)) for kind, ids in by_kind.items()
+    ]

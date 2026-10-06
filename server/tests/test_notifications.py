@@ -233,6 +233,7 @@ async def test_dm_message_notifies_offline_member_but_never_author(client, sent)
         "channel_id": dm,
         "message_id": msg["id"],
         "url": f"/channels/{dm}",
+        "kind": "dm",
     }
 
 
@@ -354,6 +355,7 @@ async def test_text_channel_mention_notifies_but_notify_all_main_does_not_apply(
         "channel_id": cid,
         "message_id": msg["id"],
         "url": f"/channels/{cid}",
+        "kind": "mention",
     }
     sent.clear()
 
@@ -361,6 +363,26 @@ async def test_text_channel_mention_notifies_but_notify_all_main_does_not_apply(
     main = await main_feed_id()
     await post_msg(client, ta, main, "no mention here")
     assert notified_user_ids(sent) == {bob}
+
+
+async def test_one_main_feed_message_tells_each_recipient_why_it_was_notified(
+    client, sent
+):
+    await make_user("alice")
+    bob = await make_user("bob")
+    carol = await make_user("carol")
+    ta, tc = await login(client, "alice"), await login(client, "carol")
+    await add_sub(bob, "https://p.example/bob")
+    await add_sub(carol, "https://p.example/carol")
+    r = await client.put(
+        "/notify-prefs", json={"notify_all_main": True}, headers=cookie(tc)
+    )
+    assert r.status_code == 200
+
+    await post_msg(client, ta, await main_feed_id(), "@bob over here")
+
+    kinds = {c["user_id"]: c["payload"]["kind"] for c in sent}
+    assert kinds == {bob: "mention", carol: "message"}
 
 
 # ---------------------------------------------------------------------------
@@ -387,7 +409,7 @@ def test_attachment_only_message_body():
         "author": {"name": "Alice"},
         "attachments": [{"id": 1}],
     }
-    payload = notifications._build_payload(channel, message)
+    payload = notifications._build_payload(channel, message, "dm")
     assert payload["body"] == "📎 attachment"
     assert payload["title"] == "Alice"
     assert payload["url"] == "/channels/7"
