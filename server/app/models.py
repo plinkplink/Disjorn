@@ -96,6 +96,7 @@ class Message(BaseModel):
     privacy_flags: dict[str, Any] = Field(default_factory=dict)
     emote_refs: list[Any] = Field(default_factory=list)
     attribution: dict[str, Any] = Field(default_factory=dict)
+    trace: Optional[dict[str, Any]] = None
     attachments: list[Attachment] = Field(default_factory=list)
 
 

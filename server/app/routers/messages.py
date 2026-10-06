@@ -26,13 +26,12 @@ Privacy integration:
     - privacy.detect_flags(content) merged into user-authored messages on
       create/edit; bots set their own flags explicitly. Flags are only ever
       ADDED, never removed.
-    - Bot reads exclude secret/off_the_record messages entirely (no tombstone);
-      see _hidden_from_bots for the WP5 handoff TODO.
+    - Bot reads exclude secret/off_the_record messages entirely (no tombstone).
 """
 
 import inspect
 import json
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -61,17 +60,18 @@ MAX_MESSAGE_CHARS = 16000
 # into the same row (both are json.dumps'd straight into the DB).
 MAX_METADATA_CHARS = 4000
 
+# A trace has its own budget: fifty labelled steps do not fit the shared one.
+MAX_TRACE_CHARS = 12000
+MAX_TRACE_STEPS = 50
+MAX_TRACE_LABEL_CHARS = 160
+
 
 # ---------------------------------------------------------------------------
 # Privacy / chibi / media integration seams (guarded — later WPs fill them in)
 # ---------------------------------------------------------------------------
 
 def _detect_flags(content: str) -> dict[str, Any]:
-    """Server-side NL trigger detection via WP5's privacy module.
-
-    privacy.py doesn't exist until WP5 lands; until then detection yields {}
-    and caller-supplied flags pass through unchanged.
-    """
+    """Server-side NL trigger detection; {} when the privacy module is absent."""
     try:
         from .. import privacy  # WP5
     except ImportError:
@@ -180,7 +180,7 @@ async def message_payload(row: dict[str, Any]) -> dict[str, Any]:
         {id, channel_id, seq, author_type, author_id,
          author: {type, id, name, username?, avatar_path, avatar_url},
          content, created_at, edited_at, deleted_at, reply_to_id,
-         privacy_flags: {}, emote_refs: [], attribution: {}, attachments: [
+         privacy_flags: {}, emote_refs: [], attribution: {}, trace, attachments: [
              {id, original_filename, mime_type, size_bytes, width, height,
               url, thumb_url, orig_url}]}
 
@@ -227,8 +227,15 @@ async def message_payload(row: dict[str, Any]) -> dict[str, Any]:
         "privacy_flags": json.loads(row["privacy_flags"] or "{}"),
         "emote_refs": json.loads(row["emote_refs"] or "[]"),
         "attribution": json.loads(row["attribution"] or "{}"),
+        "trace": _stored_trace(row["trace"]),
         "attachments": attachments,
     }
+
+
+def _stored_trace(raw: Optional[str]) -> Optional[dict[str, Any]]:
+    """The stored {steps, total} object, or None for a message without one."""
+    parsed = json.loads(raw or "{}")
+    return parsed if isinstance(parsed, dict) and parsed.get("total") else None
 
 
 def _tombstone(row: dict[str, Any]) -> dict[str, Any]:
@@ -273,6 +280,7 @@ async def deliver_message(
     flags: Optional[dict[str, Any]] = None,
     emote_refs: Optional[list[Any]] = None,
     attribution: Optional[dict[str, Any]] = None,
+    trace: Optional[dict[str, Any]] = None,
     reply_to_id: Optional[int] = None,
 ) -> dict[str, Any]:
     """Allocate a per-channel seq, insert the message, publish message_create.
@@ -292,8 +300,8 @@ async def deliver_message(
         cur = await db.execute(
             """INSERT INTO messages
                    (channel_id, seq, author_type, author_id, content, created_at,
-                    reply_to_id, privacy_flags, emote_refs, attribution)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    reply_to_id, privacy_flags, emote_refs, attribution, trace)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 channel_id,
                 seq_row["next_seq"],
@@ -305,6 +313,7 @@ async def deliver_message(
                 json.dumps(flags or {}),
                 json.dumps(emote_refs or []),
                 json.dumps(attribution or {}),
+                json.dumps(trace or {}),
             ),
             commit=False,
         )
@@ -337,6 +346,35 @@ class Attribution(BaseModel):
     summoner: Optional[str] = Field(default=None, max_length=100)
 
 
+class TraceStep(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    kind: Literal["read", "search", "memory", "broker", "web", "write", "shell",
+                  "agent", "other"]
+    label: str = Field(max_length=MAX_TRACE_LABEL_CHARS)
+    outcome: Literal["ok", "refused", "error"]
+    reason: Optional[Literal["refused-by-broker", "not-found", "timeout",
+                             "permission", "too-large", "other"]] = None
+    ms: int = Field(ge=0)
+
+
+class Trace(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    steps: list[TraceStep] = Field(max_length=MAX_TRACE_STEPS)
+    total: int
+
+    @model_validator(mode="after")
+    def _bounded(self) -> "Trace":
+        if self.total < len(self.steps):
+            raise ValueError("trace total is less than its number of steps")
+        if len(json.dumps(self.model_dump())) > MAX_TRACE_CHARS:
+            raise ValueError(
+                f"trace exceeds {MAX_TRACE_CHARS} serialized characters"
+            )
+        return self
+
+
 class MessageCreate(BaseModel):
     # max_length is the intake wall for oversized content (BL-D6): pydantic
     # rejects with a 422 before anything is persisted, indexed by FTS5, or
@@ -348,6 +386,7 @@ class MessageCreate(BaseModel):
     emotion: Optional[str] = Field(default=None, max_length=200)
     emote_refs: Optional[list[Any]] = None  # bot authors only; stored as-is
     attribution: Optional[Attribution] = None  # bot authors only
+    trace: Optional[Trace] = None  # bot authors only
 
     @model_validator(mode="after")
     def _bound_metadata(self) -> "MessageCreate":
@@ -416,12 +455,15 @@ async def create_message(
         _detect_flags(content) if actor.type == "user" else {},
     )
 
-    # emote_refs / emotion / attribution: bot authors only; ignored for users.
+    # emote_refs / emotion / attribution / trace: bot authors only; ignored for users.
     emote_refs: list[Any] = []
     attribution: dict[str, Any] = {}
+    trace: dict[str, Any] = {}
     if actor.type == "bot":
         if body.attribution is not None:
             attribution = body.attribution.model_dump()
+        if body.trace is not None and body.trace.total > 0:
+            trace = body.trace.model_dump()
         if body.emote_refs:
             emote_refs = list(body.emote_refs)
         if body.emotion:
@@ -442,6 +484,7 @@ async def create_message(
         flags=flags,
         emote_refs=emote_refs,
         attribution=attribution,
+        trace=trace,
         reply_to_id=body.reply_to_id,
     )
 
