@@ -476,9 +476,37 @@ function CardModal({
               >
                 Reject
               </button>
+              <button
+                className="btn"
+                disabled={busy}
+                title="Mark the backlog row built. Same write as `/backlog built <id>` in chat."
+                onClick={() =>
+                  act(() =>
+                    planBacklogStatus(card.slug, "built").then((r) =>
+                      setNotice(r.note),
+                    ),
+                  )
+                }
+              >
+                Built
+              </button>
+              <button
+                className="btn"
+                disabled={busy}
+                title="Mark the backlog row a duplicate. Same write as `/backlog duplicate <id>` in chat."
+                onClick={() =>
+                  act(() =>
+                    planBacklogStatus(card.slug, "duplicate").then((r) =>
+                      setNotice(r.note),
+                    ),
+                  )
+                }
+              >
+                Duplicate
+              </button>
             </div>
             <p className="plan-modal-hint">
-              Rejecting edits the backlog row, which is the artifact this card
+              Each button edits the backlog row, which is the artifact this card
               renders. The card stays put until the next derivation tick moves
               it — the board reports reality, it does not assert it.
             </p>
