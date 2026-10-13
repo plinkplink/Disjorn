@@ -4,24 +4,158 @@
 
    Click a human (not yourself) -> open/create the 1:1 DM and jump to it.
 
-   Bot membership is managed from here (add via AddBotModal, remove inline).
-   The affordance is offered only when the viewer appears in this channel's own
-   roster — which for a DM means being one of its two participants, exactly the
-   condition POST/DELETE /channels/{id}/bots enforces server-side. The server is
-   the wall; this is just refusing to show a button that would only 403. */
+   Bot membership is managed from here (add via AddBotModal; reply mode and
+   removal from a bot row's context menu). The affordance is offered only when
+   the viewer appears in this channel's own roster — which for a DM means being
+   one of its two participants, exactly the condition the bot endpoints enforce
+   server-side. The server is the wall; this is just refusing to show a button
+   that would only 403. A bot DM's bot is fixed, so it gets no menu at all. */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 
-import { ApiError, kickFromChannel, removeChannelBot } from "../api";
+import {
+  ApiError,
+  kickFromChannel,
+  removeChannelBot,
+  setBotReplyMode,
+} from "../api";
 import { useChannels } from "../stores/channels";
 import { useMembers } from "../stores/members";
 import { usePresence } from "../stores/presence";
 import { useSession } from "../stores/session";
-import type { ChannelMemberOut, UserStatus } from "../types";
+import type { ChannelMemberOut, ReplyMode, UserStatus } from "../types";
 import { isChannelMember, isPrivateChannel } from "../types";
 import { AddBotModal } from "./AddBotModal";
 import { AddMembersModal } from "./AddMembersModal";
 import { Avatar, BotAvatar } from "./Avatar";
+import { BotRowMenu } from "./BotRowMenu";
+
+const LONG_PRESS_MS = 500;
+const LONG_PRESS_SLOP_PX = 10;
+
+const REPLY_MODE_TITLE: Record<ReplyMode, string> = {
+  mention: "Replies when called by name",
+  always: "Replies to every message",
+};
+
+/** What a bot-manager can do to one bot's row. */
+interface BotRowActions {
+  mentionOnly: boolean;
+  onSetMode: (mode: ReplyMode) => void;
+  onRemove: () => void;
+}
+
+/** A bot row: mode badge for everyone, plus the context menu for managers
+    (right-click, long-press on touch, or the ⋯ button). */
+function BotMemberRow({
+  member,
+  body,
+  actions,
+}: {
+  member: ChannelMemberOut;
+  body: ReactNode;
+  actions?: BotRowActions;
+}) {
+  const mode: ReplyMode = member.reply_mode ?? "mention";
+  const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const press = useRef<{ timer: number; x: number; y: number } | null>(null);
+
+  const cancelPress = () => {
+    if (press.current !== null) window.clearTimeout(press.current.timer);
+    press.current = null;
+  };
+  useEffect(() => cancelPress, []);
+
+  const openFromButton = () => {
+    const r = buttonRef.current?.getBoundingClientRect();
+    setMenuAt(r ? { x: r.right - 220, y: r.bottom + 4 } : { x: 0, y: 0 });
+  };
+
+  const badge = (
+    <span
+      className={`reply-mode-badge ${mode}`}
+      title={REPLY_MODE_TITLE[mode]}
+      aria-label={REPLY_MODE_TITLE[mode]}
+    >
+      {mode === "always" ? "all" : "@"}
+    </span>
+  );
+
+  if (actions === undefined) {
+    return (
+      <div className="member-row static">
+        {body}
+        {badge}
+      </div>
+    );
+  }
+  return (
+    <div
+      className="member-row static bot-row"
+      onContextMenu={(e) => {
+        e.preventDefault();
+        cancelPress();
+        // The keyboard context-menu key reports no pointer position.
+        if (e.clientX === 0 && e.clientY === 0) openFromButton();
+        else setMenuAt({ x: e.clientX, y: e.clientY });
+      }}
+      onPointerDown={(e) => {
+        if (e.pointerType !== "touch") return;
+        const { clientX: x, clientY: y } = e;
+        cancelPress();
+        press.current = {
+          x,
+          y,
+          timer: window.setTimeout(() => {
+            press.current = null;
+            setMenuAt({ x, y });
+          }, LONG_PRESS_MS),
+        };
+      }}
+      onPointerMove={(e) => {
+        const p = press.current;
+        if (
+          p !== null &&
+          Math.hypot(e.clientX - p.x, e.clientY - p.y) > LONG_PRESS_SLOP_PX
+        ) {
+          cancelPress();
+        }
+      }}
+      onPointerUp={cancelPress}
+      onPointerCancel={cancelPress}
+    >
+      {body}
+      {badge}
+      <button
+        ref={buttonRef}
+        className="bot-menu-btn"
+        title={`${member.name} options`}
+        aria-label={`${member.name} options`}
+        aria-haspopup="menu"
+        aria-expanded={menuAt !== null}
+        onClick={openFromButton}
+      >
+        ⋯
+      </button>
+      {menuAt !== null && (
+        <BotRowMenu
+          botName={member.name}
+          at={menuAt}
+          mode={mode}
+          mentionOnly={actions.mentionOnly}
+          onSetMode={actions.onSetMode}
+          onRemove={actions.onRemove}
+          onClose={(restoreFocus) => {
+            setMenuAt(null);
+            if (restoreFocus) buttonRef.current?.focus();
+          }}
+        />
+      )}
+    </div>
+  );
+}
 
 const STATUS_ORDER: Record<UserStatus, number> = {
   online: 0,
@@ -45,6 +179,7 @@ function MemberRow({
   onOpenDm,
   onRemove,
   removeLabel,
+  botActions,
 }: {
   member: ChannelMemberOut;
   status: UserStatus | null; // null for bots
@@ -55,6 +190,8 @@ function MemberRow({
   /** Only when the viewer may manage this member (never on the owner row). */
   onRemove?: () => void;
   removeLabel?: string;
+  /** Bot rows the viewer may manage: the context menu's verbs. */
+  botActions?: BotRowActions;
 }) {
   const isBot = member.type === "bot";
   const clickable = !isBot && !isSelf;
@@ -84,6 +221,10 @@ function MemberRow({
       {isBot && <span className="bot-tag">BOT</span>}
     </>
   );
+
+  if (isBot) {
+    return <BotMemberRow member={member} body={body} actions={botActions} />;
+  }
 
   if (clickable && onRemove === undefined) {
     return (
@@ -190,6 +331,10 @@ export function UserPanel({
      therefore the same question the server asks before it will touch bot
      membership — and the roster is only served to members in the first place. */
   const isDm = channel?.type === "dm_1to1";
+  /* A bot DM's one bot always replies and cannot be removed (the server
+     refuses both), and no second bot may join it. */
+  const isBotDm = channel?.dm_bot_id != null;
+  const mentionOnly = channel?.mention_only === true;
   const isPrivate = channel !== undefined && isPrivateChannel(channel);
   /* A private channel narrows "any member" to "the owner": invite, kick and
      bot membership are all the owner's alone (server-enforced). */
@@ -197,7 +342,7 @@ export function UserPanel({
     me !== null && channel?.created_by != null && channel.created_by === me.id;
   const inRoster =
     me !== null && members !== undefined && users.some((u) => u.id === me.id);
-  const canManageBots = inRoster && (!isPrivate || isOwner);
+  const canManageBots = inRoster && (!isPrivate || isOwner) && !isBotDm;
   const canManageMembers = isPrivate && isOwner;
   const channelLabel =
     channel === undefined
@@ -214,6 +359,17 @@ export function UserPanel({
       (err: unknown) => {
         window.alert(
           err instanceof ApiError ? err.detail : "Failed to remove the bot",
+        );
+      },
+    );
+  };
+
+  const setMode = (bot: ChannelMemberOut, mode: ReplyMode) => {
+    setBotReplyMode(channelId, bot.id, mode).then(
+      () => useMembers.getState().applyReplyMode(channelId, bot.id, mode),
+      (err: unknown) => {
+        window.alert(
+          err instanceof ApiError ? err.detail : "Failed to change how the bot replies",
         );
       },
     );
@@ -300,8 +456,15 @@ export function UserPanel({
             status={null}
             isSelf={false}
             onOpenDm={openDm}
-            onRemove={canManageBots ? () => removeBot(m) : undefined}
-            removeLabel={`Remove ${m.name} from ${channelLabel}`}
+            botActions={
+              canManageBots
+                ? {
+                    mentionOnly,
+                    onSetMode: (mode) => setMode(m, mode),
+                    onRemove: () => removeBot(m),
+                  }
+                : undefined
+            }
           />
         ))}
       </aside>
@@ -320,6 +483,7 @@ export function UserPanel({
           channelId={channelId}
           channelLabel={channelLabel}
           isDm={isDm}
+          mentionOnly={mentionOnly}
           existingBotIds={bots.map((b) => b.id)}
           onAdded={() => void useMembers.getState().refresh(channelId)}
           onClose={() => setAddingBot(false)}

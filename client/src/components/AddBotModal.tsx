@@ -16,7 +16,7 @@
 import { useEffect, useState } from "react";
 
 import { addChannelBot, ApiError, listBots } from "../api";
-import type { Bot } from "../types";
+import type { Bot, ReplyMode } from "../types";
 import { BotAvatar } from "./Avatar";
 
 /** The seeded message-author row; it can't authenticate, so it isn't joinable. */
@@ -27,6 +27,8 @@ export interface AddBotModalProps {
   /** Display label for the channel ("#main" / "@alice"). */
   channelLabel: string;
   isDm: boolean;
+  /** "Every message" is refused here; offered greyed out with the reason. */
+  mentionOnly: boolean;
   /** Bots already in the channel — hidden from the picker. */
   existingBotIds: number[];
   /** Called after a successful add so the caller can refresh its roster. */
@@ -38,6 +40,7 @@ export function AddBotModal({
   channelId,
   channelLabel,
   isDm,
+  mentionOnly,
   existingBotIds,
   onAdded,
   onClose,
@@ -45,6 +48,7 @@ export function AddBotModal({
   const [bots, setBots] = useState<Bot[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [chosen, setChosen] = useState<Bot | null>(null);
+  const [mode, setMode] = useState<ReplyMode>("mention");
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -71,7 +75,7 @@ export function AddBotModal({
     if (chosen === null || busy) return;
     setBusy(true);
     setError(null);
-    addChannelBot(channelId, chosen.id).then(
+    addChannelBot(channelId, chosen.id, mentionOnly ? "mention" : mode).then(
       () => {
         setBusy(false);
         onAdded();
@@ -147,9 +151,40 @@ export function AddBotModal({
                 </>
               )}
             </p>
+            <fieldset className="reply-mode-choice">
+              <legend className="reply-mode-legend">When does it reply?</legend>
+              <label className="reply-mode-option">
+                <input
+                  type="radio"
+                  name="reply-mode"
+                  checked={mode === "mention" || mentionOnly}
+                  onChange={() => setMode("mention")}
+                />
+                <span>Replies when called by name</span>
+              </label>
+              <label
+                className={`reply-mode-option${mentionOnly ? " disabled" : ""}`}
+              >
+                <input
+                  type="radio"
+                  name="reply-mode"
+                  checked={mode === "always" && !mentionOnly}
+                  disabled={mentionOnly}
+                  onChange={() => setMode("always")}
+                />
+                <span>
+                  Replies to every message
+                  <span className="reply-mode-hint">
+                    {mentionOnly
+                      ? "This room is mention-only."
+                      : "It will read and answer everything people post here."}
+                  </span>
+                </span>
+              </label>
+            </fieldset>
             <p className="bot-modal-note">
-              You can remove it again from the member list, but anything it has
-              already read stays read.
+              You can change this or remove it again from the member list, but
+              anything it has already read stays read.
             </p>
           </div>
         )}

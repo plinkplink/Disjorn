@@ -12,6 +12,7 @@ import { DeleteChannelModal } from "../components/DeleteChannelModal";
 import { LockGlyph } from "../components/LockGlyph";
 import { stripMarkdown } from "../components/Markdown";
 import { MembershipNotice } from "../components/MembershipNotice";
+import { NewDmModal } from "../components/NewDmModal";
 import { SearchBar } from "../components/SearchBar";
 import { UserPanel } from "../components/UserPanel";
 import {
@@ -97,6 +98,7 @@ function MemberCount({ channelId }: { channelId: number }) {
 function ChannelMenu({
   canAddMembers,
   canLeave,
+  leaveLabel,
   canDelete,
   open,
   onToggle,
@@ -107,6 +109,7 @@ function ChannelMenu({
 }: {
   canAddMembers: boolean;
   canLeave: boolean;
+  leaveLabel: string;
   canDelete: boolean;
   open: boolean;
   onToggle: () => void;
@@ -146,7 +149,7 @@ function ChannelMenu({
                 className="status-option danger"
                 onClick={onLeave}
               >
-                Leave channel
+                {leaveLabel}
               </button>
             )}
             {canDelete && (
@@ -214,6 +217,12 @@ function ChannelRow({
         ) : (
           <span className="hash">#</span>
         )
+      ) : channel.dm_bot_id != null ? (
+        <BotAvatar
+          src={channel.dm_bot_avatar_url}
+          name={channel.name ?? "bot"}
+          size={20}
+        />
       ) : (
         channel.dm_user_id !== null && <PresenceDot userId={channel.dm_user_id} />
       )}
@@ -509,6 +518,7 @@ export function AppShell() {
   const [addingMembers, setAddingMembers] = useState(false);
   const [deletingChannel, setDeletingChannel] = useState(false);
   const [channelMenuOpen, setChannelMenuOpen] = useState(false);
+  const [startingDm, setStartingDm] = useState(false);
   const [choosingApp, setChoosingApp] = useState(false);
   const [buildSessionId, setBuildSessionId] = useState<number | null>(null);
   const [appCardId, setAppCardId] = useState<string | null>(null);
@@ -800,7 +810,10 @@ export function AppShell() {
     !PROTECTED_CHANNEL_NAMES.has(active.name ?? "") &&
     (isOwner || me?.is_admin === true);
   const canAddMembers = activePrivate && activeMember && isOwner;
-  const canLeave = activePrivate && activeMember;
+  /* A bot DM is the one DM you can leave: its bot cannot be removed, so
+     leaving is the person's way out (server-enforced the same way). */
+  const activeBotDm = active?.dm_bot_id != null;
+  const canLeave = (activePrivate && activeMember) || activeBotDm;
 
   /* Clicking an app row: resume the live session if there is one; start a new
      one if it is my own draft (the server still rules on quota and locks —
@@ -835,7 +848,10 @@ export function AppShell() {
     if (active === undefined) return;
     setChannelMenuOpen(false);
     const label = `#${active.name ?? ""}`;
-    const warning = isOwner
+    const warning = activeBotDm
+      ? `Leave your DM with ${active.name ?? "this bot"}? The conversation ` +
+        `is deleted; a new DM with it starts empty.`
+      : isOwner
       ? `Leave ${label}? You stay its owner, but you lose access to it — ` +
         `including everything already posted — until you add yourself back.`
       : `Leave ${label}? You lose access to it, including everything already ` +
@@ -943,7 +959,17 @@ export function AppShell() {
               onOpen={openApp}
             />
           ))}
-          <div className="channel-section">Direct messages</div>
+          <div className="channel-section channel-section-row">
+            <span>Direct messages</span>
+            <button
+              className="icon-btn add-channel-btn"
+              title="New direct message"
+              aria-label="New direct message"
+              onClick={() => setStartingDm(true)}
+            >
+              +
+            </button>
+          </div>
           {loaded && dms.length === 0 && (
             <span className="channel-section" style={{ textTransform: "none" }}>
               No DMs yet
@@ -997,6 +1023,7 @@ export function AppShell() {
                 <ChannelMenu
                   canAddMembers={canAddMembers}
                   canLeave={canLeave}
+                  leaveLabel={activeBotDm ? "Leave DM" : "Leave channel"}
                   canDelete={canDelete}
                   open={channelMenuOpen}
                   onToggle={() => setChannelMenuOpen((v) => !v)}
@@ -1056,6 +1083,9 @@ export function AppShell() {
       </main>
       {cheatOpen && me?.is_admin && (
         <CheatSheet onClose={() => setCheatOpen(false)} />
+      )}
+      {startingDm && (
+        <NewDmModal onOpened={select} onClose={() => setStartingDm(false)} />
       )}
       {creatingChannel && (
         <CreateChannelModal

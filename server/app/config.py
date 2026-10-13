@@ -48,9 +48,8 @@ class Settings(BaseSettings):
     # Media (WP6)
     MAX_UPLOAD_BYTES: int = 200 * 1024 * 1024  # generous — trusted users
     MEDIA_URL_TTL: int = 3600  # seconds a signed media URL stays valid
-    # Picker assets are served raw (no display/thumb conversion) and the popover
-    # loads a whole tab at once, so this cap is deliberately much tighter than
-    # MAX_UPLOAD_BYTES — one fat GIF degrades the grid for everyone.
+    # Picker assets are served raw and a whole tab loads at once, so this cap is
+    # much tighter than MAX_UPLOAD_BYTES: one fat GIF degrades the grid.
     MAX_PICKER_BYTES: int = 8 * 1024 * 1024
     # Pluggable services (WP8)
     OLLAMA_MODEL: str = "llama3.2"
@@ -80,8 +79,7 @@ class Settings(BaseSettings):
     # what the SERVER enforces — the daily session cap, the lock lifetime, who
     # may build, who may publish a stage — is server config; what the BROKER
     # enforces — the per-build token ceiling, the serving origin base, the
-    # apps-builder spawn — stays in broker.toml for a later stage. A knob whose
-    # enforcer cannot read it is not a knob.
+    # apps-builder spawn — stays in broker.toml for a later stage.
 
     # Build sessions per user per UTC day (RULED seq 2176: 3). The visible
     # unit; there is deliberately no daily token cap.
@@ -106,7 +104,7 @@ class Settings(BaseSettings):
 
     # Bot names allowed to POST a build-stage event (plus admin users). The
     # stage stream is an attestation about what a build actually did, so its
-    # publisher list is config a person edits, never something a caller claims.
+    # publisher list is config a person edits.
     APPS_STAGE_PUBLISHER_BOT_NAMES: list[str] = ["broker"]
 
     # APPS serving gate (SPECS/2026-09-09-apps-serving-gate.md, stage 3).
@@ -151,6 +149,10 @@ class Settings(BaseSettings):
     BROKER_SOCKET_PATH: str = "/run/disjorn-broker/broker.sock"
 
     PLATFORM_BUILD_BOT: str = "BuildGable"
+
+    # Rooms no bot may answer every message in, by id or text-channel name.
+    MENTION_ONLY_CHANNEL_IDS: list[int] = []
+    MENTION_ONLY_CHANNEL_NAMES: list[str] = ["custodian"]
 
     @property
     def db_path(self) -> Path:
