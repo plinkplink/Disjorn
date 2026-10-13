@@ -336,8 +336,8 @@ class OrderIn(BaseModel):
 class StatusIn(BaseModel):
     """A backlog row's new status, and the spec slug a `spec'd` write implies.
 
-    The field is the status, not a fixed verb, even though the only button
-    shipping today is Reject: this endpoint IS the slash command's write path
+    The field is the status, not a fixed verb: this endpoint IS the slash
+    command's write path
     reached from the UI, and narrowing it to one value here would make the two
     callers different write paths that merely look alike. Which values are
     settable, and what `spec'd` requires, is decided once in
