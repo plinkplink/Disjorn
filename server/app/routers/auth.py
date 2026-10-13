@@ -39,6 +39,8 @@ from pydantic import BaseModel, Field
 from .. import db
 from ..config import get_settings
 from ..models import Bot, MemberType, User, UserStatus
+from ..services import throttle
+from ..services.accounts import note_password_reset, take_reset_notice
 
 router = APIRouter()
 
@@ -200,18 +202,6 @@ async def _session_user(token: Optional[str]) -> Optional[tuple[User, bool]]:
     return _user_from_row(row), bool(row["must_change_password"])
 
 
-async def _user_for_token(token: Optional[str]) -> Optional[User]:
-    """Session token -> User, with no rotation gate applied.
-
-    The WebSocket handshake (ws.py) authenticates through here. The gate is
-    HTTP-shaped — it answers 403 with a detail string a client can branch on —
-    and a socket has no way to say that, so rotation state is not enforced on
-    the WS surface. See ROTATION_EXEMPT_ROUTES.
-    """
-    found = await _session_user(token)
-    return found[0] if found is not None else None
-
-
 def _route_key(request: Request) -> tuple[str, str]:
     """(METHOD, path) for the current request, with any ASGI root_path stripped."""
     path = request.url.path
@@ -317,14 +307,43 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class PasswordResetNotice(BaseModel):
+    by: str
+    at: str
+
+
+class LoginResult(User):
+    must_change_password: bool = False
+    password_reset: Optional[PasswordResetNotice] = None
+
+
+_logins_by_ip = throttle.Limiter(10, 15 * 60)
+_logins_by_ip_and_name = throttle.Limiter(5, 15 * 60)
+_logins_by_name = throttle.Limiter(50, 15 * 60)
+
+
 @router.post("/auth/login")
-async def login(body: LoginRequest, response: Response) -> User:
+async def login(body: LoginRequest, request: Request, response: Response) -> LoginResult:
+    ip = throttle.client_ip(request)
+    name = body.username.casefold()
+    pair = f"{ip}\0{name}"
+    wait = throttle.attempt(
+        [(_logins_by_ip, ip), (_logins_by_ip_and_name, pair), (_logins_by_name, name)]
+    )
+    if wait:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many failed logins. Try again later.",
+            headers={"Retry-After": str(wait)},
+        )
     row = await db.fetch_one("SELECT * FROM users WHERE username = ?", (body.username,))
     if row is None:
         _dummy_verify(body.password)
+    if row is None or not verify_password(row["password_hash"], body.password):
         raise HTTPException(status_code=401, detail="Invalid username or password")
-    if not verify_password(row["password_hash"], body.password):
-        raise HTTPException(status_code=401, detail="Invalid username or password")
+    _logins_by_ip.forget_one(ip)
+    _logins_by_ip_and_name.clear(pair)
+    _logins_by_name.clear(name)
     if _ph.check_needs_rehash(row["password_hash"]):
         await db.execute(
             "UPDATE users SET password_hash = ? WHERE id = ?",
@@ -336,7 +355,12 @@ async def login(body: LoginRequest, response: Response) -> User:
         (token, row["id"], db.utc_now(), session_expiry()),
     )
     _set_session_cookie(response, token)
-    return _user_from_row(row)
+    notice = await take_reset_notice(row["id"])
+    return LoginResult(
+        **_user_from_row(row).model_dump(),
+        must_change_password=bool(row["must_change_password"]),
+        password_reset=notice,
+    )
 
 
 @router.post("/auth/logout")
@@ -481,6 +505,10 @@ async def admin_reset_password(
             commit=False,
         )
         await db.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,), commit=False)
+        await note_password_reset(user_id, admin.id, admin.display_name)
+    from ..ws import close_user_sockets  # ws.py imports this module
+
+    await close_user_sockets(user_id)
     return {"ok": True}
 
 

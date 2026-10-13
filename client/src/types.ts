@@ -37,6 +37,17 @@ export interface User {
   created_at: string;
 }
 
+/** POST /auth/login: the user, plus an admin reset not yet shown to them. */
+export interface LoginResult extends User {
+  must_change_password?: boolean;
+  password_reset?: PasswordResetNotice | null;
+}
+
+export interface PasswordResetNotice {
+  by: string;
+  at: string;
+}
+
 /** GET /auth/users (admin only): enough to pick an account to reset. */
 export interface AdminUserRow {
   id: number;
@@ -44,6 +55,16 @@ export interface AdminUserRow {
   display_name: string;
   is_admin: boolean;
   must_change_password: boolean;
+}
+
+/** GET /auth/reset-requests (admin only): someone asked from the login page. */
+export interface ResetRequest {
+  id: number;
+  user_id: number;
+  username: string;
+  display_name: string;
+  note: string | null;
+  requested_at: string;
 }
 
 /** GET /channels/deletions (admin only): that a channel existed, never what was said in it. */

@@ -4,7 +4,9 @@
      itself). The server 403s that handshake unless its Origin is a house
      origin, so this only connects when served from the house itself.
    - Liveness: a resume pings and replaces a socket that does not pong in 4 s;
-     on close we reconnect with exponential backoff (1s -> 30s, +/- jitter).
+     on close we reconnect with exponential backoff (1s -> 30s, +/- jitter),
+     except after 4403 (password rotation owed), which stops the socket, and
+     4401, which re-checks the session first and retries only if it stands.
    - On RECONNECT (any ready after the first): refetch GET /channels and, for
      every channel with local messages, backfill `?from_seq=lastSeq+1`
      (current-state semantics — edits applied, tombstones drop deletions).
@@ -35,6 +37,9 @@ const BACKOFF_MAX_MS = 30000;
 /** A socket younger than this is a replacement already in flight, not a suspect. */
 const REPLACE_MIN_AGE_MS = 5000;
 const PONG_TIMEOUT_MS = 4000;
+/** Mirror CLOSE_UNAUTHENTICATED / CLOSE_PASSWORD_CHANGE_REQUIRED in server/app/ws.py. */
+const CLOSE_UNAUTHENTICATED = 4401;
+const CLOSE_PASSWORD_CHANGE_REQUIRED = 4403;
 
 type SocketState = "idle" | "connecting" | "open" | "ready";
 
@@ -185,11 +190,29 @@ export class DisjornSocket {
       }
       this.dispatch(frame);
     };
-    ws.onclose = () => {
+    ws.onclose = (event: CloseEvent) => {
       if (ws !== this.ws) return;
       this.ws = null;
       this.state = "idle";
       this.closeRetiring();
+      if (event.code === CLOSE_PASSWORD_CHANGE_REQUIRED) {
+        // Retrying cannot succeed until the password changes; the rotation
+        // screen replaces the shell, and the shell reconnects when it returns.
+        this.stopped = true;
+        useSession.setState({ mustChangePassword: true });
+        return;
+      }
+      if (event.code === CLOSE_UNAUTHENTICATED) {
+        // Ask whether the session stands before retrying: a dead one routes
+        // to the login form, whose unmounting of the shell disconnects us.
+        void useSession
+          .getState()
+          .recheck()
+          .then((alive) => {
+            if (alive && this.ws === null) this.scheduleReconnect();
+          });
+        return;
+      }
       this.scheduleReconnect();
     };
     // onerror always precedes onclose; close handling is enough.

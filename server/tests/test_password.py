@@ -237,6 +237,13 @@ async def test_rotation_pending_user_can_still_log_in(client):
     assert (await client.get("/me")).status_code == 200
 
 
+async def test_login_says_whether_the_account_owes_a_rotation(client):
+    await make_user("alice", must_change_password=True)
+    await make_user("bob")
+    assert (await login(client, "alice")).json()["must_change_password"] is True
+    assert (await login(client, "bob")).json()["must_change_password"] is False
+
+
 async def test_rotation_pending_user_is_403_everywhere_else(client):
     await make_user("alice", must_change_password=True)
     await login(client)

@@ -13,6 +13,7 @@ import pytest
 from starlette.testclient import WebSocketTestSession
 
 from app import db, events
+from app.services import throttle
 from app.config import Settings, reset_settings_cache
 
 # A deploy's server/.env must never decide a test result.
@@ -38,6 +39,13 @@ WebSocketTestSession.receive = _receive_with_deadline
 # HOUSE_ORIGINS; the wall 403s a cookied unsafe request with a foreign or no
 # Origin.
 HOUSE_ORIGIN = "https://test"
+
+
+@pytest.fixture(autouse=True)
+def fresh_throttles():
+    throttle.reset_all()
+    yield
+    throttle.reset_all()
 
 
 @pytest.fixture

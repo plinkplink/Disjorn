@@ -7,9 +7,10 @@ import {
   login as apiLogin,
   logout as apiLogout,
   setRotationHandler,
+  setUnauthenticatedHandler,
   updateMe,
 } from "../api";
-import type { SettableStatus, User } from "../types";
+import type { PasswordResetNotice, SettableStatus, User } from "../types";
 
 /** Backoff between boot probes when the server cannot be reached at all. */
 const BOOT_RETRY_DELAYS_MS = [400, 1200];
@@ -32,18 +33,26 @@ interface SessionState {
   /**
    * The account must rotate its password before it can do anything else.
    *
-   * Learned from a 403, never from GET /me — the public User shape does not
-   * carry the flag. Any walled-off request sets this (see setRotationHandler
-   * in api.ts), so the app cannot end up in the state that shipped on
-   * 2026-08-14: every route 403ing with no screen that could clear it.
+   * Learned from the login response, a 403, or a socket closed with 4403;
+   * GET /me does not carry it. Any walled-off request sets this (see
+   * setRotationHandler in api.ts), so there is always a screen that can
+   * clear it.
    */
   mustChangePassword: boolean;
+  /** An admin reset this account; shown once, on the login that follows it. */
+  resetNotice: PasswordResetNotice | null;
   changePasswordError: string | null;
   changingPassword: boolean;
   changePassword: (currentPassword: string, newPassword: string) => Promise<boolean>;
 
   /** App boot: resolve the session cookie into a user (or null). */
   bootstrap: () => Promise<void>;
+  /**
+   * Ask the server whether the session still stands. False only when it
+   * answered 401 (and the store is now signed out); an unreachable server
+   * says nothing about the session, so that is true.
+   */
+  recheck: () => Promise<boolean>;
   login: (username: string, password: string) => Promise<boolean>;
   logout: () => Promise<void>;
   /** Persist a status change (also mirror it over WS via ws.sendStatus). */
@@ -58,6 +67,7 @@ export const useSession = create<SessionState>()((set, get) => ({
   loginError: null,
   loggingIn: false,
   mustChangePassword: false,
+  resetNotice: null,
   changePasswordError: null,
   changingPassword: false,
 
@@ -107,6 +117,15 @@ export const useSession = create<SessionState>()((set, get) => ({
     }
   },
 
+  recheck: async () => {
+    try {
+      set({ user: await fetchMe() });
+      return true;
+    } catch (err) {
+      return !(err instanceof ApiError && err.status === 401);
+    }
+  },
+
   changePassword: async (currentPassword, newPassword) => {
     set({ changingPassword: true, changePasswordError: null });
     try {
@@ -121,7 +140,7 @@ export const useSession = create<SessionState>()((set, get) => ({
     }
     // Clear the wall BEFORE re-reading the user: fetchMe goes through the same
     // request path, and a stale flag would just re-arm on the next 403.
-    set({ mustChangePassword: false, changingPassword: false });
+    set({ mustChangePassword: false, changingPassword: false, resetNotice: null });
     try {
       set({ user: await fetchMe() });
     } catch {
@@ -133,8 +152,19 @@ export const useSession = create<SessionState>()((set, get) => ({
   login: async (username, password) => {
     set({ loggingIn: true, loginError: null });
     try {
-      const user = await apiLogin(username, password);
-      set({ user, loggingIn: false, mustChangePassword: false });
+      const {
+        password_reset: notice,
+        must_change_password: owesRotation,
+        ...user
+      } = await apiLogin(username, password);
+      // Setting the wall here keeps the shell, and so the socket, from
+      // mounting at all for a handed-over password.
+      set({
+        user,
+        loggingIn: false,
+        mustChangePassword: owesRotation === true,
+        resetNotice: notice ?? null,
+      });
       return true;
     } catch (err) {
       set({
@@ -151,7 +181,12 @@ export const useSession = create<SessionState>()((set, get) => ({
     } catch {
       /* clearing local state matters more than the server ack */
     }
-    set({ user: null, mustChangePassword: false, changePasswordError: null });
+    set({
+      user: null,
+      mustChangePassword: false,
+      changePasswordError: null,
+      resetNotice: null,
+    });
   },
 
   setStatus: async (status) => {
@@ -176,5 +211,18 @@ export const useSession = create<SessionState>()((set, get) => ({
 setRotationHandler(() => {
   if (!useSession.getState().mustChangePassword) {
     useSession.setState({ mustChangePassword: true });
+  }
+});
+
+// Any 401 means the cookie no longer names a session: show the login form.
+// Unmounting the shell is what disconnects the socket.
+setUnauthenticatedHandler(() => {
+  if (useSession.getState().user !== null) {
+    useSession.setState({
+      user: null,
+      mustChangePassword: false,
+      changePasswordError: null,
+      resetNotice: null,
+    });
   }
 });

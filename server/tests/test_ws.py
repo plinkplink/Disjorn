@@ -274,6 +274,112 @@ def test_ws_rejects_bad_credentials(wsc):
     assert exc.value.code == 4401
 
 
+def owe_rotation(wsc, user_id):
+    call(wsc, db.execute, "UPDATE users SET must_change_password = 1 WHERE id = ?", (user_id,))
+
+
+def test_ws_refuses_a_session_that_owes_a_password_rotation(wsc):
+    uid = make_user(wsc, "alice")
+    owe_rotation(wsc, uid)
+    token = login(wsc, "alice")
+    with wsc.websocket_connect("/ws", headers=cookie(token)) as ws:
+        with pytest.raises(WebSocketDisconnect) as exc:
+            ws.receive_json()
+    assert exc.value.code == 4403
+    assert exc.value.reason == auth.PASSWORD_CHANGE_REQUIRED
+    assert not ws_module.manager.is_user_connected(uid)
+
+
+def test_ws_opens_once_the_rotation_is_done(wsc):
+    uid = make_user(wsc, "alice")
+    owe_rotation(wsc, uid)
+    token = login(wsc, "alice")
+    r = wsc.post(
+        "/auth/password",
+        json={"current_password": PASSWORD, "new_password": "alices own long pw"},
+        headers=cookie(token),
+    )
+    assert r.status_code == 200
+    with ExitStack() as stack:
+        open_user(stack, wsc, token, uid)
+
+
+def test_an_admin_reset_closes_the_accounts_live_sockets(wsc):
+    root_id = make_user(wsc, "root")
+    call(wsc, db.execute, "UPDATE users SET is_admin = 1 WHERE id = ?", (root_id,))
+    bob_id = make_user(wsc, "bob")
+    root_token, bob_token = login(wsc, "root"), login(wsc, "bob")
+    with ExitStack() as stack:
+        bob_ws = open_user(stack, wsc, bob_token, bob_id)
+        r = wsc.post(
+            f"/auth/users/{bob_id}/password",
+            json={"new_password": "handed over password"},
+            headers=cookie(root_token),
+        )
+        assert r.status_code == 200
+        with pytest.raises(WebSocketDisconnect) as exc:
+            bob_ws.receive_json()
+    assert exc.value.code == 4401
+
+
+def end_session(wsc, token):
+    call(wsc, db.execute, "DELETE FROM sessions WHERE token = ?", (token,))
+
+
+def test_ws_closes_on_the_next_op_once_its_session_is_gone(wsc):
+    uid = make_user(wsc, "alice")
+    token = login(wsc, "alice")
+    with ExitStack() as stack:
+        ws = open_user(stack, wsc, token, uid)
+        ws.send_json({"op": "ping"})
+        assert ws.receive_json() == {"type": "pong"}
+        end_session(wsc, token)
+        ws.send_json({"op": "ping"})
+        with pytest.raises(WebSocketDisconnect) as exc:
+            ws.receive_json()
+    assert exc.value.code == 4401
+
+
+def test_ws_closes_on_the_periodic_check_once_its_session_is_gone(wsc, monkeypatch):
+    monkeypatch.setattr(ws_module, "SESSION_RECHECK_SECONDS", 0.05)
+    uid = make_user(wsc, "alice")
+    token = login(wsc, "alice")
+    with ExitStack() as stack:
+        ws = open_user(stack, wsc, token, uid)
+        end_session(wsc, token)
+        with pytest.raises(WebSocketDisconnect) as exc:
+            ws.receive_json()
+    assert exc.value.code == 4401
+
+
+def test_ws_stays_open_while_its_session_lives(wsc, monkeypatch):
+    monkeypatch.setattr(ws_module, "SESSION_RECHECK_SECONDS", 0.05)
+    uid = make_user(wsc, "alice")
+    token = login(wsc, "alice")
+    with ExitStack() as stack:
+        ws = open_user(stack, wsc, token, uid)
+        call(wsc, asyncio.sleep, 0.2)
+        ws.send_json({"op": "ping"})
+        assert ws.receive_json() == {"type": "pong"}
+
+
+def test_changing_a_password_closes_the_other_sessions_sockets(wsc):
+    uid = make_user(wsc, "alice")
+    phone, laptop = login(wsc, "alice"), login(wsc, "alice")
+    with ExitStack() as stack:
+        phone_ws = open_user(stack, wsc, phone, uid)
+        r = wsc.post(
+            "/auth/password",
+            json={"current_password": PASSWORD, "new_password": "alices own long pw"},
+            headers=cookie(laptop),
+        )
+        assert r.status_code == 200
+        phone_ws.send_json({"op": "ping"})
+        with pytest.raises(WebSocketDisconnect) as exc:
+            phone_ws.receive_json()
+    assert exc.value.code == 4401
+
+
 # ---------------------------------------------------------------------------
 # Message fan-out scoping
 # ---------------------------------------------------------------------------
