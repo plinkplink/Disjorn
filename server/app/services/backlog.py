@@ -6,7 +6,7 @@ seq 1625).
 Two callers, one write path:
 
   * ``/backlog reject|duplicate|spec'd|built <id>`` in chat (routers/slash.py)
-  * the reject button on a Backlog-column card (routers/planroom.py)
+  * the triage buttons on a Backlog card (routers/planroom.py)
 
 They are the same write, reached two ways, and this module is the only place
 that write exists. That is not tidiness — it is where the gate lives. If the

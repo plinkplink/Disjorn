@@ -15,9 +15,9 @@
    such site — the client hiding a control is never the wall; the server's
    refusal is.
 
-   THE REJECT BUTTON (Phase II slice A, seq 1625) is the one control that
-   changes something the board does not own, and it is not an exception to the
-   rule above. For a backlog card the DB ROW IS THE ARTIFACT, so the button
+   THE TRIAGE BUTTONS (Reject, Built, Duplicate) are the controls that
+   change something the board does not own, and they are no exception to the
+   rule above. For a backlog card the DB ROW IS THE ARTIFACT, so each button
    writes through to it — the same server write as `/backlog reject <id>` in
    chat, one write path with two callers. It does not move the card. The
    Backlog column is derived from the row on the broker's timer, so the card
@@ -466,13 +466,14 @@ function CardModal({
                 className="btn btn-danger"
                 disabled={busy}
                 title="Mark the backlog row rejected. Same write as `/backlog reject <id>` in chat."
-                onClick={() =>
-                  act(() =>
+                onClick={() => {
+                  if (!window.confirm(`Mark this backlog row rejected? Nothing in the board sets a row back to open.`)) return;
+                  void act(() =>
                     planBacklogStatus(card.slug, "rejected").then((r) =>
                       setNotice(r.note),
                     ),
-                  )
-                }
+                  );
+                }}
               >
                 Reject
               </button>
@@ -480,13 +481,14 @@ function CardModal({
                 className="btn"
                 disabled={busy}
                 title="Mark the backlog row built. Same write as `/backlog built <id>` in chat."
-                onClick={() =>
-                  act(() =>
+                onClick={() => {
+                  if (!window.confirm(`Mark this backlog row built? Nothing in the board sets a row back to open.`)) return;
+                  void act(() =>
                     planBacklogStatus(card.slug, "built").then((r) =>
                       setNotice(r.note),
                     ),
-                  )
-                }
+                  );
+                }}
               >
                 Built
               </button>
@@ -494,13 +496,14 @@ function CardModal({
                 className="btn"
                 disabled={busy}
                 title="Mark the backlog row a duplicate. Same write as `/backlog duplicate <id>` in chat."
-                onClick={() =>
-                  act(() =>
+                onClick={() => {
+                  if (!window.confirm(`Mark this backlog row a duplicate? Nothing in the board sets a row back to open.`)) return;
+                  void act(() =>
                     planBacklogStatus(card.slug, "duplicate").then((r) =>
                       setNotice(r.note),
                     ),
-                  )
-                }
+                  );
+                }}
               >
                 Duplicate
               </button>
