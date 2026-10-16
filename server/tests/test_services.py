@@ -438,6 +438,25 @@ async def test_summarize_ollama_unreachable_503(client, monkeypatch):
     assert "unreachable" in r.json()["detail"].lower()
 
 
+async def test_summarize_timeout_names_the_failure(client, monkeypatch):
+    """httpx timeouts carry an empty message; the 503 must still say what failed."""
+    await make_user()
+    await login(client)
+
+    async def fake_fetch_page(url):
+        return CANNED_HTML
+
+    class TimingOut:
+        async def summarize(self, text, url):
+            raise httpx.ConnectTimeout("")
+
+    monkeypatch.setattr(summarize_service, "fetch_page", fake_fetch_page)
+    monkeypatch.setattr(summarize_service, "get_summarizer", lambda: TimingOut())
+    r = await client.post("/summarize", json={"url": "https://example.com/a"})
+    assert r.status_code == 503
+    assert r.json()["detail"].rstrip().endswith("ConnectTimeout")
+
+
 async def test_summarize_no_engine_503(client, monkeypatch):
     await make_user()
     await login(client)

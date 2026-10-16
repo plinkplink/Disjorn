@@ -78,7 +78,7 @@ async def summarize_url(body: SummarizeRequest, user: CurrentUser) -> dict[str, 
             status_code=503,
             detail=(
                 f"Summarization backend unreachable at {get_settings().OLLAMA_URL}: "
-                f"{exc or exc.__class__.__name__}"
+                f"{str(exc) or exc.__class__.__name__}"
             ),
         )
     return {"url": body.url, "summary": summary}
