@@ -3,6 +3,7 @@ endpoint with mocked engines, STT 501 degradation + engine factory selection."""
 
 import asyncio
 import importlib.util
+import json
 import shutil
 from pathlib import Path
 
@@ -477,6 +478,64 @@ def test_get_summarizer_engine_selection(monkeypatch, tmp_db_path):
     monkeypatch.setenv("SUMMARIZE_ENGINE", "no-such-engine")
     reset_settings_cache()
     assert summarize_service.get_summarizer() is None
+
+
+def test_get_summarizer_anthropic_needs_key(monkeypatch, tmp_db_path):
+    monkeypatch.setenv("SUMMARIZE_ENGINE", "anthropic")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    reset_settings_cache()
+    assert summarize_service.get_summarizer() is None
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    reset_settings_cache()
+    assert isinstance(
+        summarize_service.get_summarizer(), summarize_service.AnthropicSummarizer
+    )
+
+
+async def test_anthropic_summarizer_request_and_reply(monkeypatch):
+    seen = {}
+
+    def handler(request):
+        seen["url"] = str(request.url)
+        seen["headers"] = request.headers
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"content": [
+            {"type": "text", "text": " Two sentences. "},
+        ]})
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        summarize_service.httpx, "AsyncClient",
+        lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw),
+    )
+    s = summarize_service.AnthropicSummarizer(api_key="k", model="claude-haiku-5-5")
+    assert await s.summarize("page body", "https://example.com/a") == "Two sentences."
+    assert seen["url"] == summarize_service.ANTHROPIC_MESSAGES_URL
+    assert seen["headers"]["x-api-key"] == "k"
+    assert seen["headers"]["anthropic-version"] == summarize_service.ANTHROPIC_VERSION
+    assert seen["body"]["model"] == "claude-haiku-5-5"
+    assert "page body" in seen["body"]["messages"][0]["content"]
+
+
+async def test_summarize_backend_status_error_names_status_not_host(client, monkeypatch):
+    await make_user()
+    await login(client)
+
+    async def fake_fetch_page(url):
+        return CANNED_HTML
+
+    class Rejecting:
+        async def summarize(self, text, url):
+            req = httpx.Request("POST", "http://backend.internal:11434/x")
+            raise httpx.HTTPStatusError(
+                "denied", request=req, response=httpx.Response(401, request=req))
+
+    monkeypatch.setattr(summarize_service, "fetch_page", fake_fetch_page)
+    monkeypatch.setattr(summarize_service, "get_summarizer", lambda: Rejecting())
+    r = await client.post("/summarize", json={"url": "https://example.com/a"})
+    assert r.status_code == 503
+    assert "HTTP 401" in r.json()["detail"]
+    assert "backend.internal" not in r.json()["detail"]
 
 
 def test_extract_text_fallback_strips_tags():

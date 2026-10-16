@@ -55,6 +55,8 @@ class Settings(BaseSettings):
     OLLAMA_MODEL: str = "llama3.2"
     STT_ENGINE: str = "faster_whisper"      # key into services.stt.ENGINES
     SUMMARIZE_ENGINE: str = "ollama"        # key into services.summarize.ENGINES
+    ANTHROPIC_API_KEY: str = ""
+    ANTHROPIC_MODEL: str = "claude-haiku-5-5"
 
     # Plan Room (SPECS/2026-08-20-plan-room.md). The derived card index, written
     # BROKER-SIDE by harness/planroom/planroom.py and opened READ-ONLY here.

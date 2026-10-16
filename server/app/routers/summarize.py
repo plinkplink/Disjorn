@@ -6,9 +6,9 @@ serving live here rather than in a new router file):
 
     POST /summarize {url}   (user auth)  -> {"url", "summary"}
         fetch page (10s, ~2MB cap) -> extract main text (trafilatura,
-        crude tag-strip fallback) -> Summarizer engine (Ollama by default).
+        crude tag-strip fallback) -> the SUMMARIZE_ENGINE Summarizer.
         502 when the page can't be fetched / has no text; 503 when no
-        summarization engine is configured or Ollama is unreachable.
+        engine is configured or its backend fails.
 
     GET /unfurl?url=        (any actor)  -> {"url", "title", "description",
         "image_url"} — OG/twitter-card metadata, DB-cached 7 days
@@ -71,13 +71,22 @@ async def summarize_url(body: SummarizeRequest, user: CurrentUser) -> dict[str, 
                 f"(SUMMARIZE_ENGINE={get_settings().SUMMARIZE_ENGINE!r})"
             ),
         )
+    engine = get_settings().SUMMARIZE_ENGINE
     try:
         summary = await summarizer.summarize(text, body.url)
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Summarization backend ({engine}) returned HTTP "
+                f"{exc.response.status_code}"
+            ),
+        )
     except httpx.HTTPError as exc:
         raise HTTPException(
             status_code=503,
             detail=(
-                f"Summarization backend unreachable at {get_settings().OLLAMA_URL}: "
+                f"Summarization backend ({engine}) unreachable: "
                 f"{str(exc) or exc.__class__.__name__}"
             ),
         )
