@@ -1,9 +1,8 @@
 """Page summarization (WP8) behind a pluggable Summarizer protocol.
 
-Engine swapping is config-driven: `SUMMARIZE_ENGINE` (default "ollama") keys
-into the ENGINES registry; drop-in replacements register a zero-arg factory
-there. `get_summarizer()` returns None when no engine matches — the router
-turns that into a 503.
+`SUMMARIZE_ENGINE` keys into the ENGINES registry of zero-arg factories.
+`get_summarizer()` returns None when no engine matches or the engine lacks its
+credential; the router turns that into a 503.
 
 Also hosts the page-fetch + main-text-extraction helpers used by
 POST /summarize (trafilatura with a crude stdlib tag-strip fallback), kept
@@ -25,7 +24,10 @@ PAGE_MAX_BYTES = 2 * 1024 * 1024
 PAGE_FETCH_TIMEOUT = 10.0
 SUMMARIZE_TIMEOUT = 30.0
 USER_AGENT = "Mozilla/5.0 (compatible; Disjorn/1.0; summarizer)"
-MAX_INPUT_CHARS = 16_000  # keep prompts sane for small local models
+MAX_INPUT_CHARS = 16_000  # bounds per-summary cost and local-model context
+ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
+ANTHROPIC_VERSION = "2023-06-01"
+SUMMARY_MAX_TOKENS = 512
 
 PROMPT_TEMPLATE = (
     "Summarize this page in 3-5 sentences. Reply with only the summary, "
@@ -64,9 +66,46 @@ class OllamaSummarizer:
             return answer.strip()
 
 
-# Engine registry — add entries for drop-in replacement engines.
-ENGINES: dict[str, Callable[[], Summarizer]] = {
+class AnthropicSummarizer:
+    """Messages API call with ANTHROPIC_MODEL; raises httpx.HTTPError on failure."""
+
+    def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None):
+        settings = get_settings()
+        self.api_key = api_key or settings.ANTHROPIC_API_KEY
+        self.model = model or settings.ANTHROPIC_MODEL
+
+    async def summarize(self, text: str, url: str) -> str:
+        prompt = PROMPT_TEMPLATE.format(url=url, text=text[:MAX_INPUT_CHARS])
+        async with httpx.AsyncClient(timeout=SUMMARIZE_TIMEOUT) as client:
+            resp = await client.post(
+                ANTHROPIC_MESSAGES_URL,
+                headers={
+                    "x-api-key": self.api_key,
+                    "anthropic-version": ANTHROPIC_VERSION,
+                },
+                json={
+                    "model": self.model,
+                    "max_tokens": SUMMARY_MAX_TOKENS,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+            )
+            if resp.is_error:
+                logger.warning("anthropic summarize %s: %s",
+                               resp.status_code, resp.text[:500])
+            resp.raise_for_status()
+            blocks = resp.json().get("content", [])
+            return "".join(
+                b.get("text", "") for b in blocks if b.get("type") == "text"
+            ).strip()
+
+
+def _anthropic() -> Optional[Summarizer]:
+    return AnthropicSummarizer() if get_settings().ANTHROPIC_API_KEY else None
+
+
+ENGINES: dict[str, Callable[[], Optional[Summarizer]]] = {
     "ollama": OllamaSummarizer,
+    "anthropic": _anthropic,
 }
 
 

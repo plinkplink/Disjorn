@@ -101,13 +101,13 @@
 "server/app/routers/notifications.py" = 4622
 "server/app/routers/planroom.py" = 11251
 "server/app/routers/slash.py" = 10418
-"server/app/routers/summarize.py" = 1656
+"server/app/routers/summarize.py" = 1632
 "server/app/services/backlog.py" = 4593
 "server/app/services/chibi.py" = 3985
 "server/app/services/emotion_match.py" = 5954
 "server/app/services/media_convert.py" = 2800
 "server/app/services/push.py" = 1356
-"server/app/services/summarize.py" = 1546
+"server/app/services/summarize.py" = 1509
 "server/app/ws.py" = 13065
 "server/tests/conftest.py" = 1111
 "server/tests/test_apps.py" = 18646
