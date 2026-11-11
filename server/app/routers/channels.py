@@ -684,7 +684,7 @@ async def delete_channel(channel_id: int, user: CurrentUser) -> dict[str, bool]:
     ORPHANS: attachment FILES under DATA_DIR are deliberately left on disk;
     nothing serves them once their rows are gone.
 
-    Publishes `channel_delete` (see _destroy_channel for its audience).
+    Publishes `channel_delete` (see destroy_channel for its audience).
     """
     channel = await _get_channel(channel_id)
     if channel["type"] != "text":
@@ -701,11 +701,11 @@ async def delete_channel(channel_id: int, user: CurrentUser) -> dict[str, bool]:
             detail=f"#{channel['name']} is protected and cannot be deleted",
         )
     _require_owner_or_admin(channel, user)
-    await _destroy_channel(channel, user.id)
+    await destroy_channel(channel, user.id)
     return {"ok": True}
 
 
-async def _destroy_channel(channel: dict[str, Any], by_user_id: int) -> None:
+async def destroy_channel(channel: dict[str, Any], by_user_id: int) -> None:
     """Hard-delete a channel and publish `channel_delete`.
 
     The audience is computed before the row goes, because afterwards
@@ -1134,7 +1134,7 @@ async def leave_channel(channel_id: int, user: CurrentUser) -> dict[str, bool]:
     if await is_bot_dm(channel):
         if not await is_member(channel_id, "user", user.id):
             return {"ok": True, "left": False}
-        await _destroy_channel(channel, user.id)
+        await destroy_channel(channel, user.id)
         return {"ok": True, "left": True}
     _require_private(channel)
     cur = await db.execute(

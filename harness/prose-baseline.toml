@@ -92,7 +92,7 @@
 "server/app/models.py" = 7466
 "server/app/origin_wall.py" = 1497
 "server/app/privacy.py" = 2353
-"server/app/routers/apps.py" = 51908
+"server/app/routers/apps.py" = 51898
 "server/app/routers/auth.py" = 7549
 "server/app/routers/bots_admin.py" = 3013
 "server/app/routers/channels.py" = 21878

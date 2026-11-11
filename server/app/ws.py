@@ -67,11 +67,11 @@ Server -> client frames (Architecture §8.2; ephemeral events carry no seq):
                                             not other users, not admins). No
                                             percent, ever.
     {"type": "app_update", "app": {...}}    an app was renamed, re-described or
-                                            went live — same owner-only
-                                            audience, same reason. `app` is the
-                                            AppOut payload from routers/apps.py.
+                                            went live — owner only, same reason.
+                                            `app` is routers/apps.py's AppOut.
     {"type": "channel_read", "channel_id", "last_read_seq"}
                                             to that user's sockets, never a bot's
+    {"type": "app_delete", "app_id"}        deleted: owner and viewers.
 
 Fan-out (bus subscriber, registered idempotently by init() from the app
 lifespan): message events go to connected users who are members of the channel
@@ -530,6 +530,12 @@ async def handle_bus_event(event: dict[str, Any]) -> None:
                 "last_read_seq": event["last_read_seq"],
             },
         )
+        return
+    if etype == "app_delete":
+        for user_id in event.get("user_ids") or []:
+            await _send_to_user(
+                user_id, {"type": "app_delete", "app_id": event["app_id"]}
+            )
         return
     if etype == "approval_update":
         frame = {"type": "approval_update", "proposal": event["proposal"]}
