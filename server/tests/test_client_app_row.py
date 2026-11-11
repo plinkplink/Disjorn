@@ -27,4 +27,4 @@ def test_an_app_row_offers_a_session_to_its_owner_alone(tmp_path):
     r = subprocess.run(["node", "--test", str(NODE_TEST)], capture_output=True,
                        text=True, timeout=180, env=env)
     assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]
-    assert "# pass 4" in r.stdout
+    assert "# pass 6" in r.stdout

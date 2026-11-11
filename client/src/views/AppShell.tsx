@@ -9,6 +9,7 @@ import { Avatar, BotAvatar } from "../components/Avatar";
 import { ChannelDeletedToast } from "../components/ChannelDeletedToast";
 import { CheatSheet } from "../components/CheatSheet";
 import { CreateChannelModal } from "../components/CreateChannelModal";
+import { DeleteAppModal } from "../components/DeleteAppModal";
 import { DeleteChannelModal } from "../components/DeleteChannelModal";
 import { LockGlyph } from "../components/LockGlyph";
 import { stripMarkdown } from "../components/Markdown";
@@ -21,7 +22,7 @@ import {
   planRoomRouteFromHash,
   writeChannelHash,
 } from "../hashRoute";
-import { appRowAction, canKeepBuilding } from "../lib/appRow";
+import { appRowAction, canDeleteApp, canKeepBuilding } from "../lib/appRow";
 import { POPUP_BLOCKED_NOTE, openMinted } from "../lib/openMinted";
 import {
   badgeText,
@@ -378,35 +379,54 @@ function UserFooter({ onOpenSettings }: { onOpenSettings: () => void }) {
  * app has no face of its own in v1, and the seat that built it is the honest
  * thing to show. An unknown builder (a seat since removed from the roster)
  * still gets a row — the app did not stop existing.
+ *
+ * `onDetails` is the owner's door to the card. A click on their own draft, or
+ * on a row with a session open, goes to the build modal, so without this the
+ * card (and Delete on it) is out of reach for exactly the apps most often
+ * deleted.
  */
 function AppRow({
   app,
   builder,
   onOpen,
+  onDetails,
 }: {
   app: App;
   builder: Builder | undefined;
   onOpen: (app: App) => void;
+  onDetails?: (app: App) => void;
 }) {
   const building = app.open_session !== null;
   return (
-    <button className="channel-item app-row" onClick={() => onOpen(app)}>
-      <BotAvatar
-        src={builder?.avatar_url}
-        name={builder?.name ?? app.name}
-        size={20}
-      />
-      <span className="channel-item-text">
-        <span className="name">{app.name}</span>
-      </span>
-      {building && (
-        <span className="app-building" title="A build session is open">
-          <span className="app-building-dot" aria-hidden />
-          building…
+    <div className="app-row-wrap">
+      <button className="channel-item app-row" onClick={() => onOpen(app)}>
+        <BotAvatar
+          src={builder?.avatar_url}
+          name={builder?.name ?? app.name}
+          size={20}
+        />
+        <span className="channel-item-text">
+          <span className="name">{app.name}</span>
         </span>
+        {building && (
+          <span className="app-building" title="A build session is open">
+            <span className="app-building-dot" aria-hidden />
+            building…
+          </span>
+        )}
+        <span className={`app-status-chip ${app.status}`}>{app.status}</span>
+      </button>
+      {onDetails !== undefined && (
+        <button
+          className="icon-btn app-row-more"
+          title="App details"
+          aria-label={`Details for ${app.name}`}
+          onClick={() => onDetails(app)}
+        >
+          ⋯
+        </button>
       )}
-      <span className={`app-status-chip ${app.status}`}>{app.status}</span>
-    </button>
+    </div>
   );
 }
 
@@ -422,10 +442,12 @@ function AppRow({
 function AppCardModal({
   app,
   builder,
+  onDelete,
   onClose,
 }: {
   app: App;
   builder: Builder | undefined;
+  onDelete: (app: App) => void;
   onClose: () => void;
 }) {
   const originBase = useApps((s) => s.originBase);
@@ -551,6 +573,15 @@ function AppCardModal({
           </p>
         )}
         <div className="member-modal-actions">
+          {canDeleteApp(app, me?.id ?? null) && (
+            <button
+              className="btn app-card-delete"
+              disabled={busy}
+              onClick={() => onDelete(app)}
+            >
+              Delete app…
+            </button>
+          )}
           {/* Remix is offered on any live app, your own included: a remix of
               your own app is a new app, not an edit of the one people already
               have open (stage 3 D10). */}
@@ -619,6 +650,9 @@ export function AppShell() {
   const [choosingApp, setChoosingApp] = useState(false);
   const [buildSessionId, setBuildSessionId] = useState<number | null>(null);
   const [appCardId, setAppCardId] = useState<string | null>(null);
+  /* A copy, not an id: the row is gone from the list the moment the server
+     hides the app, and the dialog may still have a retry to offer. */
+  const [deletingApp, setDeletingApp] = useState<App | null>(null);
   const apps = useApps((s) => s.apps);
   const builders = useApps((s) => s.builders);
   const pendingSessionId = useApps((s) => s.pendingSessionId);
@@ -678,6 +712,17 @@ export function AppShell() {
     useApps.getState().setOpenBuildSession(buildSessionId);
     if (buildSessionId === null) socket.readActive();
   }, [buildSessionId]);
+
+  /* An app deleted from another tab or device takes its build modal with it:
+     the session and its chat no longer exist to show. */
+  const buildAppDeleted = useApps((s) => {
+    if (buildSessionId === null) return false;
+    const appId = s.sessions[buildSessionId]?.app.id;
+    return appId !== undefined && s.deletedAppIds.includes(appId);
+  });
+  useEffect(() => {
+    if (buildAppDeleted) setBuildSessionId(null);
+  }, [buildAppDeleted]);
 
   // Default to #main once channels arrive (unless a deep link chose one).
   useEffect(() => {
@@ -1079,6 +1124,14 @@ export function AppShell() {
                   app={a}
                   builder={builderFor(a)}
                   onOpen={openApp}
+                  onDetails={
+                    canDeleteApp(a, me?.id ?? null)
+                      ? (app) => {
+                          setSidebarOpen(false);
+                          setAppCardId(app.id);
+                        }
+                      : undefined
+                  }
                 />
               ))}
           </div>
@@ -1256,7 +1309,17 @@ export function AppShell() {
         <AppCardModal
           app={cardApp}
           builder={builderFor(cardApp)}
+          onDelete={(app) => {
+            setAppCardId(null);
+            setDeletingApp(app);
+          }}
           onClose={() => setAppCardId(null)}
+        />
+      )}
+      {deletingApp !== null && (
+        <DeleteAppModal
+          app={deletingApp}
+          onClose={() => setDeletingApp(null)}
         />
       )}
       {/* Added to / removed from a private channel — a modal for now. */}

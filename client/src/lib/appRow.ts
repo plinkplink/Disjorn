@@ -27,3 +27,22 @@ export function appRowAction(app: App, myId: number | null): AppRowAction {
 export function canKeepBuilding(app: App, myId: number | null): boolean {
   return isMine(app, myId) && app.status === "live";
 }
+
+/** Delete is offered to the owner at every status, a row with a session open
+    included: the server refuses while a build is running. */
+export function canDeleteApp(app: App, myId: number | null): boolean {
+  return isMine(app, myId);
+}
+
+/** What the confirm dialog says other people lose, or null for an app nobody
+    else could open. Only a live app is reachable by anyone but its owner. */
+export function deleteReachLine(app: App): string | null {
+  if (app.status !== "live") return null;
+  if (app.visibility === "public") {
+    return "It is live and public: everyone in the house loses it.";
+  }
+  if (app.visibility === "shared") {
+    return "It is live and shared: the people it was shared with lose access.";
+  }
+  return "It is live: its link stops working.";
+}

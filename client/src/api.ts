@@ -855,6 +855,12 @@ export async function patchApp(
   );
 }
 
+/** DELETE /apps/{id} — owner only. 409 while a build or a publish is running.
+    Safe to repeat: a call on an app already deleted finishes removing it. */
+export function deleteApp(appId: string): Promise<{ ok: boolean }> {
+  return request("DELETE", `/apps/${encodeURIComponent(appId)}`);
+}
+
 /** POST /apps/{id}/menu — add a visible app to my menu. 403 if it is not
     visible to me; the refusal, not a hidden button, is the wall. */
 export function addAppToMenu(appId: string): Promise<Record<string, unknown>> {

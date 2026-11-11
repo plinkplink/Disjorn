@@ -694,6 +694,13 @@ export interface AppUpdateFrame {
   app: App;
 }
 
+/** An app was deleted. Its owner's sockets, and those of everyone it was
+    shared with or who had it on their menu. */
+export interface AppDeleteFrame {
+  type: "app_delete";
+  app_id: string;
+}
+
 /** A proposal was filed or answered. Every connected person's sockets, no
     bot's; `proposal` is the whole record as GET returns it, so it replaces. */
 export interface ApprovalUpdateFrame {
@@ -722,6 +729,7 @@ export type ServerFrame =
   | MemberUpdateFrame
   | AppStageFrame
   | AppUpdateFrame
+  | AppDeleteFrame
   | PongFrame
   | ApprovalUpdateFrame
   | ChannelReadFrame;

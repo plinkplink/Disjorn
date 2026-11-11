@@ -22,6 +22,7 @@ import { create } from "zustand";
 
 import {
   addAppToMenu,
+  deleteApp as apiDeleteApp,
   endAppSession,
   stopAppTurn,
   fetchAppCard,
@@ -42,6 +43,7 @@ import {
 import type {
   App,
   AppCardData,
+  AppDeleteFrame,
   AppRoot,
   AppSession,
   AppStage,
@@ -245,6 +247,9 @@ interface AppsState {
    * the screen for a repo build.
    */
   openBuildSessionId: number | null;
+  /** Apps this tab has learned are deleted, by its own DELETE or by frame.
+      AppShell reads it to close a build modal whose app is gone. */
+  deletedAppIds: string[];
 
   /** GET /apps — boot, after any menu change, and on WS reconnect resync. */
   refresh: () => Promise<void>;
@@ -262,6 +267,10 @@ interface AppsState {
       turn running) or 410 (ended) as the outcome it is. */
   stopTurn: (sessionId: number) => Promise<void>;
   renameApp: (appId: string, name: string) => Promise<void>;
+  /** DELETE /apps/{id}. Rethrows the server's sentence. The list is re-read
+      on a failure too: the app can already be gone while its files are not,
+      and calling again finishes the job. */
+  deleteApp: (appId: string) => Promise<void>;
   addToMenu: (appId: string) => Promise<void>;
   removeFromMenu: (appId: string) => Promise<void>;
 
@@ -298,6 +307,7 @@ interface AppsState {
   /* ---- WS frame handlers (owner's sockets only) ---- */
   onStage: (frame: AppStageFrame) => void;
   onAppUpdate: (frame: AppUpdateFrame) => void;
+  onAppDelete: (frame: AppDeleteFrame) => void;
 }
 
 export const useApps = create<AppsState>()((set, get) => {
@@ -336,6 +346,17 @@ export const useApps = create<AppsState>()((set, get) => {
   const retryMissingCard = (appId: string): void => {
     if (get().cards[appId]?.status !== "missing") return;
     void get().loadCard(appId, true);
+  };
+
+  /** Drop a deleted app from the menu and blank its card. Loaded sessions
+      stay: a modal showing one is closed by AppShell, not emptied here. */
+  const forgetApp = (appId: string): void => {
+    const known = get().deletedAppIds;
+    set({
+      apps: get().apps.filter((a) => a.id !== appId),
+      cards: { ...get().cards, [appId]: { status: "missing", data: null } },
+      deletedAppIds: known.includes(appId) ? known : [...known, appId],
+    });
   };
 
   /** Sessions being fetched after a frame arrived for one we had never
@@ -394,6 +415,7 @@ export const useApps = create<AppsState>()((set, get) => {
     cards: {},
     pendingSessionId: null,
     openBuildSessionId: null,
+    deletedAppIds: [],
 
     refresh: async () => {
       const { apps, quota } = await listApps();
@@ -457,6 +479,18 @@ export const useApps = create<AppsState>()((set, get) => {
     renameApp: async (appId, name) => {
       const updated = await patchApp(appId, { name });
       patchAppEverywhere(appId, () => updated);
+    },
+
+    deleteApp: async (appId) => {
+      try {
+        await apiDeleteApp(appId);
+      } catch (err) {
+        await get().refresh().catch(() => {});
+        throw err;
+      }
+      forgetApp(appId);
+      // Closing an idle session can move the meter.
+      await get().refresh().catch(() => {});
     },
 
     addToMenu: async (appId) => {
@@ -613,5 +647,7 @@ export const useApps = create<AppsState>()((set, get) => {
       }
       patchAppEverywhere(app.id, () => app);
     },
+
+    onAppDelete: (frame) => forgetApp(frame.app_id),
   };
 });
