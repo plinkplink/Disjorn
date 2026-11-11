@@ -7,6 +7,12 @@
 
 import { create } from "zustand";
 
+import {
+  ATTACK_S,
+  CHIMES,
+  ENVELOPE_FLOOR,
+  masterGain,
+} from "./lib/chimeLevel";
 import type { SoundKind } from "./lib/messageSound";
 
 export interface SoundSettings {
@@ -61,26 +67,6 @@ export const useSoundSettings = create<SoundSettingsState>()((set, get) => ({
 
 /* ---- engine ---- */
 
-interface Note {
-  freq: number;
-  at: number;
-  peak: number;
-  decay: number;
-}
-
-/* Soft: a low two-note lift. Bright: a quick rising major triad. */
-const CHIMES: Record<SoundKind, Note[]> = {
-  message: [
-    { freq: 587.33, at: 0, peak: 0.22, decay: 0.32 },
-    { freq: 783.99, at: 0.075, peak: 0.18, decay: 0.42 },
-  ],
-  mention: [
-    { freq: 1046.5, at: 0, peak: 0.24, decay: 0.3 },
-    { freq: 1318.51, at: 0.08, peak: 0.22, decay: 0.32 },
-    { freq: 1567.98, at: 0.16, peak: 0.24, decay: 0.55 },
-  ],
-};
-
 let ctx: AudioContext | null = null;
 let lastPlayedAt = -Infinity;
 
@@ -115,7 +101,7 @@ export function installSoundUnlock(): void {
 function synth(kind: SoundKind, volume: number): void {
   if (ctx === null || ctx.state !== "running") return;
   const master = ctx.createGain();
-  master.gain.value = volume * volume;
+  master.gain.value = masterGain(volume);
   master.connect(ctx.destination);
   const t0 = ctx.currentTime + 0.01;
   for (const note of CHIMES[kind]) {
@@ -125,9 +111,9 @@ function synth(kind: SoundKind, volume: number): void {
     osc.type = "sine";
     osc.frequency.value = note.freq;
     const env = ctx.createGain();
-    env.gain.setValueAtTime(0.0001, start);
-    env.gain.exponentialRampToValueAtTime(note.peak, start + 0.012);
-    env.gain.exponentialRampToValueAtTime(0.0001, end);
+    env.gain.setValueAtTime(ENVELOPE_FLOOR, start);
+    env.gain.exponentialRampToValueAtTime(note.peak, start + ATTACK_S);
+    env.gain.exponentialRampToValueAtTime(ENVELOPE_FLOOR, end);
     osc.connect(env);
     env.connect(master);
     osc.start(start);
