@@ -14,7 +14,7 @@
 "harness/broker/tests/test_verb_surface.py" = 8701
 "harness/cc/apps/apps_harvest.py" = 38639
 "harness/cc/apps/config/entrypoint.sh" = 869
-"harness/cc/apps/run-apps.sh" = 12993
+"harness/cc/apps/run-apps.sh" = 3484
 "harness/cc/config-template/hooks/pre-tool-use.py" = 1337
 "harness/cc/run-build.sh" = 49825
 "harness/cc/run-resident.sh" = 27080
