@@ -17,7 +17,12 @@ import {
   useRef,
   useState,
 } from "react";
-import type { ChangeEvent, KeyboardEvent as ReactKeyboardEvent } from "react";
+import type {
+  ChangeEvent,
+  ClipboardEvent as ReactClipboardEvent,
+  DragEvent as ReactDragEvent,
+  KeyboardEvent as ReactKeyboardEvent,
+} from "react";
 
 import {
   ApiError,
@@ -29,6 +34,7 @@ import {
   sendMessage,
   uploadFiles,
 } from "../api";
+import { pastedImages } from "../lib/pasteAttachments";
 import { stripEmotionTags } from "./Markdown";
 import { useMessages } from "../stores/messages";
 import { useSession } from "../stores/session";
@@ -319,6 +325,7 @@ export function Composer({
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [dropping, setDropping] = useState(false);
 
   const taRef = useRef<HTMLTextAreaElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
@@ -440,6 +447,42 @@ export function Composer({
       for (const file of Array.from(files)) startUpload(file);
     }
     e.target.value = ""; // allow re-picking the same file
+  };
+
+  const onPaste = (e: ReactClipboardEvent<HTMLTextAreaElement>) => {
+    if (editing !== null) return;
+    const pasted = pastedImages(
+      e.clipboardData,
+      new Date(),
+      uploadsRef.current.map((u) => u.name),
+    );
+    if (pasted.length === 0) return;
+    e.preventDefault();
+    for (const { file, name } of pasted) {
+      startUpload(
+        name === file.name ? file : new File([file], name, { type: file.type }),
+      );
+    }
+  };
+
+  /* A drag that carries no files (selected text, a link) is left to the
+     browser, and so is everything while the picker is open: it has its own
+     drop target inside this one. */
+  const isFileDrag = (e: ReactDragEvent<HTMLDivElement>) =>
+    !pickerOpen && e.dataTransfer.types.includes("Files");
+
+  const onDragOver = (e: ReactDragEvent<HTMLDivElement>) => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault();
+    setDropping(editing === null);
+  };
+
+  const onDrop = (e: ReactDragEvent<HTMLDivElement>) => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault();
+    setDropping(false);
+    if (editing !== null) return;
+    for (const file of Array.from(e.dataTransfer.files)) startUpload(file);
   };
 
   const removeUpload = (key: string) => {
@@ -592,7 +635,12 @@ export function Composer({
   const overLimit = contentLength > MAX_MESSAGE_CHARS;
 
   return (
-    <div className="composer-wrap">
+    <div
+      className={`composer-wrap${dropping ? " dropping" : ""}`}
+      onDragOver={onDragOver}
+      onDragLeave={() => setDropping(false)}
+      onDrop={onDrop}
+    >
       {error !== null && (
         <div className="composer-error">
           <span>{error}</span>
@@ -692,6 +740,7 @@ export function Composer({
             emitTyping();
           }}
           onKeyDown={onKeyDown}
+          onPaste={onPaste}
         />
         {contentLength >= COUNTER_FROM && (
           <span
