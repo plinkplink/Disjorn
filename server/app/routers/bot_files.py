@@ -15,7 +15,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 from starlette.datastructures import Headers
 
-from .. import db
 from ..config import get_settings
 from ..services import bot_files
 from . import media
@@ -88,17 +87,7 @@ async def _post(poster: Optional[int], body: FilePost) -> dict[str, Any]:
     """Every check, in the spec's order, then the write; nothing is stored before the last check."""
     if poster is None:
         raise bot_files.Refused("no seat to post as")
-    channel = await db.fetch_one(
-        "SELECT files_safe FROM channels WHERE id = ?", (body.channel_id,)
-    )
-    if (
-        channel is None
-        or channel["files_safe"] != 1
-        or not await is_member(body.channel_id, "bot", poster)
-    ):
-        raise bot_files.Refused(
-            f"channel {body.channel_id} is not a files-safe channel this seat is a member of"
-        )
+    await bot_files.check_channel(poster, body.channel_id, "seat")
     mime = bot_files.postable_mime(body.filename)
     if mime is None:
         raise bot_files.Refused("a bot may not post a file of this type")
@@ -109,13 +98,8 @@ async def _post(poster: Optional[int], body: FilePost) -> dict[str, Any]:
     size, cap = len(data), get_settings().MAX_UPLOAD_BYTES
     if not 0 < size <= cap:
         raise bot_files.Refused(f"a posted file must be 1 to {cap} bytes")
-    used = await bot_files.uploaded_today(poster)
-    if used + size > body.daily_quota_bytes:
-        raise bot_files.Refused(
-            f"daily upload quota is {body.daily_quota_bytes} bytes; {used} are used "
-            f"today and this file is {size}"
-        )
-    if await bot_files.matches_hidden(data):
+    await bot_files.check_quota(poster, size, body.daily_quota_bytes)
+    if await bot_files.matches_hidden(data, poster):
         raise bot_files.Refused("this file matches an upload that bots may not read")
 
     bot = Actor(type="bot", id=poster)

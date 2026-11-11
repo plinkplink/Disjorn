@@ -32,6 +32,7 @@ from pydantic import BaseModel
 from ..config import get_settings
 from ..models import User
 from ..services import chibi as chibi_service
+from ..services import media_serve
 from ..services import summarize as summarize_service
 from ..services import throttle
 from ..services import unfurl as unfurl_service
@@ -149,6 +150,4 @@ async def serve_chibi(
     path = chibi_service.safe_file(pack, category, filename)
     if path is None:
         raise HTTPException(status_code=404, detail="Chibi not found")
-    return FileResponse(
-        path, media_type="image/png", headers={"Cache-Control": "private, max-age=86400"}
-    )
+    return media_serve.image(path, "image/png", {"Cache-Control": "private, max-age=86400"})

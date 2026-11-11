@@ -450,12 +450,55 @@ class Refused(Exception):
     """Why a bot's file was not posted, in words the seat may read."""
 
 
+def _postable(mime: str) -> bool:
+    return mime not in _UNPOSTABLE_MIMES and not mime.endswith("+xml") and (
+        mime.startswith(_ALLOWED_PREFIXES) or mime in _ALLOWED_MIMES
+    )
+
+
 def postable_mime(filename: str) -> Optional[str]:
     """The type a posted file is stored as, from its name alone; None for a type no bot may post."""
     mime = (mimetypes.guess_type(filename)[0] or "").lower()
-    if mime in _UNPOSTABLE_MIMES:
-        return None
-    return mime if mime.startswith(_ALLOWED_PREFIXES) or mime in _ALLOWED_MIMES else None
+    return mime if _postable(mime) else None
+
+
+async def check_channel(bot_id: int, channel_id: int, who: str = "bot") -> None:
+    """Refused unless the channel is files-safe and the bot is a member of it."""
+    # Imported here because routers.channels imports this module.
+    from ..routers.channels import is_member
+
+    channel = await db.fetch_one("SELECT files_safe FROM channels WHERE id = ?", (channel_id,))
+    if (
+        channel is None
+        or channel["files_safe"] != 1
+        or not await is_member(channel_id, "bot", bot_id)
+    ):
+        raise Refused(f"channel {channel_id} is not a files-safe channel this {who} is a member of")
+
+
+async def check_quota(bot_id: int, size: int, quota: int) -> None:
+    """Refused if `size` more bytes would take the bot past `quota` for the UTC day."""
+    used = await uploaded_today(bot_id)
+    if used + size > quota:
+        raise Refused(
+            f"daily upload quota is {quota} bytes; {used} are used today and this file is {size}"
+        )
+
+
+async def check_staged(bot_id: int, att: dict[str, Any]) -> None:
+    """Refused unless the bot may attach this stored upload of its own.
+
+    The type the uploader declared is checked beside the name, because the
+    bot's own key chose both.
+    """
+    if postable_mime(str(att["original_filename"])) is None or not _postable(_mime(att)):
+        raise Refused("a bot may not post a file of this type")
+    try:
+        data = await asyncio.to_thread(_stored(att["file_path"], "originals").read_bytes)
+    except (LookupError, OSError):
+        raise Refused("this upload cannot be read") from None
+    if await matches_hidden(data, bot_id):
+        raise Refused("this file matches an upload that bots may not read")
 
 
 async def uploaded_today(bot_id: int) -> int:
@@ -468,16 +511,18 @@ async def uploaded_today(bot_id: int) -> int:
     return row["used"]
 
 
-async def matches_hidden(data: bytes) -> bool:
+async def matches_hidden(data: bytes, poster: Optional[int] = None) -> bool:
     """True if these bytes are a stored upload that `visible_to_bots` does not pass now.
 
     A row of another size cannot hold the same bytes, and a same-size row that
-    cannot be hashed counts as a match.
+    cannot be hashed counts as a match. An upload `poster` staged itself and
+    linked to no message is that bot's own bytes, so it is not a match.
     """
     sha = hashlib.sha256(data).hexdigest()
     rows = await db.fetch_all("SELECT * FROM attachments WHERE size_bytes = ?", (len(data),))
     for att in rows:
-        if await visible_to_bots(att):
+        own = (att["uploader_type"], att["uploader_id"]) == ("bot", poster)
+        if (own and att["message_id"] is None) or await visible_to_bots(att):
             continue
         try:
             stored = await asyncio.to_thread(_sha256, _stored(att["file_path"], "originals"))

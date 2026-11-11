@@ -44,6 +44,7 @@ class LiveServer:
     api_key: str
     users: dict[str, str]  # username -> password
     bot_name: str
+    db_path: str
     session_cookie: str = SESSION_COOKIE
 
 
@@ -136,7 +137,7 @@ def server() -> LiveServer:
         for name, password in USERS.items():
             _rotate(base_url, name, f"handover-{password}", password)
         yield LiveServer(base_url=base_url, origin=base_url, api_key=api_key,
-                         users=USERS, bot_name=BOT_NAME)
+                         users=USERS, bot_name=BOT_NAME, db_path=env["DB_PATH"])
     finally:
         proc.terminate()
         try:

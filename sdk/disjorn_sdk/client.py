@@ -211,25 +211,25 @@ class DisjornClient:
             msg = await client.send(channel_id, "here's the chart")
             msg = await client.attach(msg["id"], [a["id"] for a in atts])
 
-        Prefer (1): it is one round trip fewer and the server links and
-        re-publishes the message in the same call. Use (2) when the bytes are
+        Prefer (1): it is one round trip fewer. Use (2) when the bytes are
         ready before the text is, or when an upload failure should abort
         posting at all. Either way the server publishes a ``message_edit``
         carrying the refreshed payload, so every client and bot sees the
         attachments appear — you do not need to re-send the message.
 
         ``message_id`` must be a message *this bot authored* (403 otherwise),
-        and staged uploads can only be claimed by their uploader. An upload
-        that is never claimed is a harmless orphan, not an error.
+        and staged uploads can only be claimed by their uploader. An
+        unclaimed upload still counts toward the day's quota.
 
         ``files`` items are paths on disk, or in-memory ``(filename, data)`` /
         ``(filename, data, content_type)`` tuples (:data:`UploadSource`); the
-        content type is guessed from the name when not given. Any file type is
-        accepted — images (JPEG/PNG/WebP/GIF/HEIC, RAW with the optional extra)
-        additionally get server-generated display and thumbnail variants, and
-        everything else is stored and served as-is with no preview. The server
-        caps each file at ``MAX_UPLOAD_BYTES`` (200 MB by default) and answers
-        413 over it; nothing is stored.
+        content type is guessed from the name when not given. Images
+        (JPEG/PNG/WebP/GIF/HEIC, RAW with the optional extra) get display and
+        thumbnail variants. The server caps each file at ``MAX_UPLOAD_BYTES``
+        (413 over it) and a bot's day at ``BOT_DAILY_UPLOAD_BYTES``. A bot
+        links a file only in a files-safe channel it is a member of, only as a
+        text, code, image or PDF type, and never bytes matching an upload bots
+        may not read; each refusal is a 403 that says which.
         """
         if not files:
             return []

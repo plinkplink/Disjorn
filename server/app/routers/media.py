@@ -46,11 +46,9 @@ ENDPOINTS
   posture of MAX_UPLOAD_BYTES — the picker is a shared shelf, not per-user.
   Tighten to `user.is_admin` here if that ever stops being true.
 
-  Because GET /picker/file is unauthenticated, an added file becomes publicly
-  readable at a guessable URL. So add_picker_item decodes every upload with
-  Pillow and derives the extension from the DETECTED format, never from the
-  client filename — that is what stops the directory being used to serve
-  arbitrary (or scriptable, e.g. SVG/HTML) content.
+  GET /picker/file is unauthenticated, so add_picker_item decodes every
+  upload with Pillow and names it by the DETECTED format, never by the client
+  filename.
 
 SIGNED URLS
   sign_media_url(attachment_id, variant="display", expires_in=None) -> str  (sync)
@@ -60,7 +58,8 @@ SIGNED URLS
   Variant fallback on GET: thumb -> display -> original; display -> original.
   Bad/expired signature -> 403. The signature IS the auth (no cookie/API key
   needed) so <img> tags and bots can fetch alike; DM attachments stay
-  unguessable.
+  unguessable. Stored bytes are served only through services/media_serve,
+  which types them by their bytes, not by what the upload said.
 
 STORAGE (relative paths under DATA_DIR are what's stored in the DB)
   uploads/originals/{attachment_id}_{slug}{ext}   original, metadata intact
@@ -78,7 +77,7 @@ import re
 import time
 import uuid
 from pathlib import Path
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, Awaitable, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
@@ -87,7 +86,7 @@ from pydantic import BaseModel, Field
 from .. import db, events
 from ..config import get_settings
 from ..models import User
-from ..services import media_convert
+from ..services import bot_files, media_convert, media_serve
 from ..services.media_convert import UnsupportedFormat
 from .auth import Actor, get_actor, get_current_user
 from .messages import message_payload
@@ -189,6 +188,13 @@ def _guess_mime(upload: UploadFile) -> str:
 # Attachment helpers
 # ---------------------------------------------------------------------------
 
+async def _bot_rule(check: Awaitable[None]) -> None:
+    try:
+        await check
+    except bot_files.Refused as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from None
+
+
 async def _require_own_message(message_id: int, actor: Actor) -> dict[str, Any]:
     row = await db.fetch_one("SELECT * FROM messages WHERE id = ?", (message_id,))
     if row is None:
@@ -197,7 +203,35 @@ async def _require_own_message(message_id: int, actor: Actor) -> dict[str, Any]:
         raise HTTPException(status_code=403, detail="Not the author of this message")
     if row["deleted_at"] is not None:
         raise HTTPException(status_code=409, detail="Message is deleted")
+    if actor.type == "bot":
+        await _bot_rule(bot_files.check_channel(actor.id, row["channel_id"]))
     return row
+
+
+async def _link_staged(message_id: int, attachment_ids: list[int], actor: Actor) -> None:
+    to_link: list[int] = []
+    for att_id in attachment_ids:
+        att = await db.fetch_one("SELECT * FROM attachments WHERE id = ?", (att_id,))
+        if att is None:
+            raise HTTPException(status_code=404, detail=f"Attachment {att_id} not found")
+        if att["message_id"] == message_id:
+            continue  # idempotent re-claim
+        if att["message_id"] is not None:
+            raise HTTPException(
+                status_code=409, detail=f"Attachment {att_id} already linked to a message"
+            )
+        if att["uploader_type"] != actor.type or att["uploader_id"] != actor.id:
+            raise HTTPException(
+                status_code=403, detail=f"Attachment {att_id} was not uploaded by you"
+            )
+        if actor.type == "bot":
+            await _bot_rule(bot_files.check_staged(actor.id, att))
+        to_link.append(att_id)
+
+    for att_id in to_link:
+        await db.execute(
+            "UPDATE attachments SET message_id = ? WHERE id = ?", (message_id, att_id)
+        )
 
 
 async def _publish_refreshed(message_id: int) -> dict[str, Any]:
@@ -242,6 +276,7 @@ async def upload_files(
     link_message_id = message_id if message_id is not None else message_id_q
     if link_message_id is not None:
         await _require_own_message(link_message_id, actor)
+    is_bot = actor.type == "bot"
 
     settings = get_settings()
     originals, web = _originals_dir(), _web_dir()
@@ -251,6 +286,14 @@ async def upload_files(
     for upload in files:
         tmp = originals / f"tmp_{uuid.uuid4().hex}"
         size = await _save_upload(upload, tmp, settings.MAX_UPLOAD_BYTES)
+        if is_bot:
+            try:
+                await _bot_rule(
+                    bot_files.check_quota(actor.id, size, settings.BOT_DAILY_UPLOAD_BYTES)
+                )
+            except HTTPException:
+                tmp.unlink(missing_ok=True)
+                raise
         mime = _guess_mime(upload)
         slug, ext = _slugify(upload.filename)
         original_name = Path(upload.filename or "file").name or "file"
@@ -260,7 +303,8 @@ async def upload_files(
                    (message_id, file_path, original_filename, mime_type, size_bytes,
                     uploader_type, uploader_id, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (link_message_id, "", original_name, mime, size, actor.type, actor.id, db.utc_now()),
+            (None if is_bot else link_message_id, "", original_name, mime, size,
+             actor.type, actor.id, db.utc_now()),
         )
         att_id = cur.lastrowid
         final = originals / f"{att_id}_{slug}{ext}"
@@ -290,6 +334,10 @@ async def upload_files(
         results.append(_attachment_out(att))
 
     message_payload_out = None
+    if is_bot and link_message_id is not None:
+        await _link_staged(link_message_id, [r["id"] for r in results], actor)
+        for r in results:
+            r["message_id"] = link_message_id
     if link_message_id is not None:
         message_payload_out = await _publish_refreshed(link_message_id)
     return {"attachments": results, "message": message_payload_out}
@@ -308,30 +356,8 @@ class ClaimRequest(BaseModel):
 async def claim_attachments(body: ClaimRequest, actor: CurrentActor) -> dict[str, Any]:
     """Link staged uploads to a message you authored; publishes message_edit."""
     await _require_own_message(body.message_id, actor)
-
-    to_link: list[int] = []
-    for att_id in body.attachment_ids:
-        att = await db.fetch_one("SELECT * FROM attachments WHERE id = ?", (att_id,))
-        if att is None:
-            raise HTTPException(status_code=404, detail=f"Attachment {att_id} not found")
-        if att["message_id"] == body.message_id:
-            continue  # idempotent re-claim
-        if att["message_id"] is not None:
-            raise HTTPException(
-                status_code=409, detail=f"Attachment {att_id} already linked to a message"
-            )
-        if att["uploader_type"] != actor.type or att["uploader_id"] != actor.id:
-            raise HTTPException(
-                status_code=403, detail=f"Attachment {att_id} was not uploaded by you"
-            )
-        to_link.append(att_id)
-
-    for att_id in to_link:
-        await db.execute(
-            "UPDATE attachments SET message_id = ? WHERE id = ?", (body.message_id, att_id)
-        )
-    payload = await _publish_refreshed(body.message_id)
-    return payload
+    await _link_staged(body.message_id, body.attachment_ids, actor)
+    return await _publish_refreshed(body.message_id)
 
 
 # ---------------------------------------------------------------------------
@@ -355,22 +381,20 @@ async def get_media(
     if att is None:
         raise HTTPException(status_code=404, detail="Attachment not found")
 
-    # Variant fallback: thumb -> display -> orig; display -> orig.
-    rel, mime = att["file_path"], att["mime_type"]
+    variant = None
     if v == "thumb" and att["thumb_path"]:
-        rel, mime = att["thumb_path"], "image/webp"
+        variant = att["thumb_path"]
     elif v in ("display", "thumb") and att["display_path"]:
-        rel, mime = att["display_path"], "image/webp"
+        variant = att["display_path"]
 
-    path = _data_dir() / rel
+    path = _data_dir() / (variant or att["file_path"])
     if not path.is_file():
         raise HTTPException(status_code=404, detail="File missing on disk")
-    return FileResponse(
-        path,
-        media_type=mime,
-        filename=att["original_filename"] if v == "orig" else None,
-        content_disposition_type="inline",
-        headers={"Cache-Control": f"private, max-age={max(0, exp - now)}"},
+    cache = {"Cache-Control": f"private, max-age={max(0, exp - now)}"}
+    if variant:
+        return media_serve.image(path, "image/webp", cache)
+    return media_serve.upload(
+        path, att["original_filename"], att["mime_type"], att["width"] is not None, cache
     )
 
 
@@ -457,11 +481,7 @@ def avatar_response(rel_path: str) -> FileResponse:
     path = _data_dir() / rel_path
     if not path.is_file():
         raise HTTPException(status_code=404, detail="No avatar")
-    return FileResponse(
-        path,
-        media_type="image/webp",
-        headers={"Cache-Control": "public, max-age=300"},
-    )
+    return media_serve.image(path, "image/webp", {"Cache-Control": "public, max-age=300"})
 
 
 @router.post("/me/avatar")
@@ -567,12 +587,7 @@ async def get_picker_file(tab: str, name: str) -> FileResponse:
     path = _picker_path(tab, name)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Not found")
-    mime, _ = mimetypes.guess_type(name)
-    return FileResponse(
-        path,
-        media_type=mime or "application/octet-stream",
-        headers={"Cache-Control": "public, max-age=3600"},
-    )
+    return media_serve.upload(path, name, "", True, {"Cache-Control": "public, max-age=3600"})
 
 
 @router.post("/picker/add")

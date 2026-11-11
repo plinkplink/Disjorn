@@ -105,7 +105,7 @@ export interface Attachment {
      first clients shipped — optional here so a message from an older payload
      (or an older server) is still a valid Attachment. */
   thumb_url?: string | null;
-  /** Preserved upload, pre-conversion. Absent -> no "view original". */
+  /** Preserved upload, pre-conversion. Absent -> no original link. */
   orig_url?: string | null;
 }
 
