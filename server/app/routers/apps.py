@@ -18,6 +18,7 @@ stage 1 opened at Round 12) and SPECS/2026-09-06-apps-builder-seat.md §J
 | POST   | /apps/sessions/{id}/stage        | broker bot / admin            |
 | POST   | /apps/sessions/{id}/live         | owner  — publish this build   |
 | PATCH  | /apps/{app_id}                   | owner  — name, description    |
+| DELETE | /apps/{app_id}                   | owner  — row, files, chats    |
 | POST   | /apps/{app_id}/menu              | user   — if visible to them   |
 | DELETE | /apps/{app_id}/menu              | user   — not the owner's own  |
 | POST   | /apps/{app_id}/open              | entitled — a signed grant URL |
@@ -79,7 +80,7 @@ entitlement question `_visible_to` already answers, and the preview root is
 minted for the owner alone.
 
 THE HOST OPERATIONS ARE NOT DONE HERE (D6). Publishing, reverting and cloning a
-tree happen as the apps seat, through one fixed-argv `sudo -n` helper with three
+tree happen as the apps seat, through one fixed-argv `sudo -n` helper with four
 modes; this file spawns it and reads three outcomes — done, refused (64, with
 one sentence for the user), failed. Nothing about a caller's request becomes a
 word of that command line, and there is no shell.
@@ -440,7 +441,9 @@ def _check_app_id(app_id: str) -> str:
 
 async def _require_app(app_id: str) -> dict[str, Any]:
     _check_app_id(app_id)
-    row = await db.fetch_one("SELECT * FROM apps WHERE id = ?", (app_id,))
+    row = await db.fetch_one(
+        "SELECT * FROM apps WHERE id = ? AND deleted_at IS NULL", (app_id,)
+    )
     if row is None:
         raise HTTPException(status_code=404, detail="App not found")
     return row
@@ -500,21 +503,23 @@ async def _require_quota(user_id: int) -> Quota:
 
 
 async def _quota_for(user_id: int) -> Quota:
-    """Builds used today: sessions that spent a turn, plus those still able to.
+    """Builds used today: sessions that spent a turn, plus those still able to,
+    plus a deleted app's builds of today (`deleted_builds`).
 
-    #26 (2026-09-14): this counted every `app_sessions` row started today, and
-    `create_session` writes the row when the dialog OPENS — so opening a
-    dialog and closing it cost a build, opening the same app twice cost two,
-    and a whole day's cap went on three sessions with zero turns between them.
     `turns` is the signal (maintained from the stage stream, MAX per turn);
     "open and unlapsed" is the same liveness `_open_sessions_by_app` uses.
     """
     cap = int(get_settings().APPS_DAILY_SESSION_CAP)
+    day = _utc_day_start()
     row = await db.fetch_one(
-        """SELECT COUNT(*) AS n FROM app_sessions
-            WHERE user_id = ? AND started_at >= ? AND mode = 'app'
-              AND (turns > 0 OR (ended_at IS NULL AND locked_until > ?))""",
-        (user_id, _utc_day_start(), _now()),
+        """SELECT (SELECT COUNT(*) FROM app_sessions s
+                  JOIN apps a ON a.id = s.app_id AND a.deleted_at IS NULL
+                 WHERE s.user_id = ? AND s.started_at >= ? AND s.mode = 'app'
+                   AND (s.turns > 0
+                        OR (s.ended_at IS NULL AND s.locked_until > ?)))
+                + (SELECT COALESCE(SUM(deleted_builds), 0) FROM apps
+                    WHERE owner_user_id = ? AND deleted_at >= ?) AS n""",
+        (user_id, day, _now(), user_id, day),
     )
     used = int(row["n"]) if row is not None else 0
     return Quota(
@@ -568,7 +573,7 @@ def _app_out(
         name=row["name"],
         description=row["description"],
         visibility=row["visibility"],
-        status=row["status"],
+        status=row["status"] if row["deleted_at"] is None else "deleting",
         owner_user_id=row["owner_user_id"],
         builder_bot_id=row["builder_bot_id"],
         parent_app_id=row["parent_app_id"],
@@ -635,6 +640,7 @@ async def _build_counts(bot_ids: list[int]) -> dict[int, tuple[int, int]]:
                    COUNT(*) AS total,
                    COALESCE(SUM(status = 'live'), 0) AS live
               FROM apps WHERE builder_bot_id IN ({placeholders})
+               AND deleted_at IS NULL
              GROUP BY builder_bot_id""",
         bot_ids,
     )
@@ -737,9 +743,7 @@ def _loads_detail(raw: Optional[str]) -> dict[str, Any]:
 
 
 async def _session_out(session: dict[str, Any], user: User) -> SessionOut:
-    app = await db.fetch_one("SELECT * FROM apps WHERE id = ?", (session["app_id"],))
-    if app is None:  # ON DELETE CASCADE means this cannot happen; fail loudly.
-        raise HTTPException(status_code=404, detail="App not found")
+    app = await _require_app(session["app_id"])
     builder = await _builder_for(session["builder_bot_id"])
     if builder is None:
         # The seat's bot row is gone. The session is still real, so answer with
@@ -963,11 +967,14 @@ async def list_apps(user: CurrentUser) -> dict[str, Any]:
     """
     rows = await db.fetch_all(
         """SELECT * FROM apps
-            WHERE owner_user_id = ?
-               OR EXISTS (SELECT 1 FROM user_apps ua
-                           WHERE ua.app_id = apps.id AND ua.user_id = ?)
+            WHERE (deleted_at IS NULL
+                   AND (owner_user_id = ?
+                        OR EXISTS (SELECT 1 FROM user_apps ua
+                                    WHERE ua.app_id = apps.id AND ua.user_id = ?)))
+               OR (owner_user_id = ? AND deleted_at IS NOT NULL
+                   AND purged_at IS NULL)
             ORDER BY created_at, id""",
-        (user.id, user.id),
+        (user.id, user.id, user.id),
     )
     return {
         "apps": [a.model_dump() for a in await _apps_out(rows, user.id)],
@@ -986,7 +993,7 @@ async def discover_apps(user: CurrentUser) -> dict[str, Any]:
     """
     rows = await db.fetch_all(
         """SELECT * FROM apps
-            WHERE owner_user_id != ?
+            WHERE owner_user_id != ? AND deleted_at IS NULL
               AND (visibility = 'public'
                    OR EXISTS (SELECT 1 FROM app_shares s
                                WHERE s.app_id = apps.id AND s.user_id = ?))
@@ -1094,6 +1101,12 @@ async def create_session(body: SessionCreate, user: CurrentUser) -> SessionOut:
         else:
             assert app is not None
             app_id = app["id"]
+            kept = await (await conn.execute(
+                "SELECT 1 FROM apps WHERE id = ? AND deleted_at IS NULL",
+                (app_id,),
+            )).fetchone()
+            if kept is None:
+                raise HTTPException(status_code=404, detail="App not found")
 
         # visibility 'private' is not decoration: every code path that keys on
         # channel visibility (the sidebar filter, slash's is_private_channel,
@@ -1658,8 +1671,7 @@ async def remove_from_menu(app_id: str, user: CurrentUser) -> dict[str, bool]:
 
     The owner cannot take their own app off their own menu (400): their menu
     row is implied by ownership, so the delete would report success and change
-    nothing. Deleting the APP is a later stage's verb, and it is a different
-    one.
+    nothing.
     """
     app = await _require_app(app_id)
     if app["owner_user_id"] == user.id:
@@ -1785,7 +1797,7 @@ async def _require_entitled(app: dict[str, Any], user: User) -> None:
 
 
 # ---------------------------------------------------------------------------
-# The host helper — three modes, fixed argv, no shell (D6)
+# The host helper — four modes, fixed argv, no shell (D6)
 # ---------------------------------------------------------------------------
 
 def _run_launch_helper(argv: list[str]) -> subprocess.CompletedProcess:
@@ -2009,10 +2021,14 @@ async def publish_live(session_id: int, user: CurrentUser) -> SessionOut:
     # second press arrives, changes no rows, and is told so.
     claim = await db.execute(
         """UPDATE app_sessions SET live_publishing_at = ?
-            WHERE id = ? AND live_publishing_at IS NULL""",
+            WHERE id = ? AND live_publishing_at IS NULL AND ended_at IS NULL""",
         (_now(), session_id),
     )
     if claim.rowcount == 0:
+        if (await _require_session(session_id, user))["ended_at"] is not None:
+            raise HTTPException(
+                status_code=410, detail="This build session has ended"
+            )
         raise HTTPException(
             status_code=409,
             detail="This build is already being published; give it a moment",
@@ -2397,3 +2413,88 @@ async def app_card(app_id: str, user: CurrentUser) -> CardOut:
         image_url=None,
         live_url=_app_url(origin, app["id"]) if (live and configured) else None,
     )
+
+
+DELETE_WHILE_BUILDING = (
+    "A build is running on this app; stop it first, then delete the app."
+)
+DELETE_WHILE_PUBLISHING = (
+    "This app is being published; delete it when that has finished."
+)
+PLATFORM_APP_KEPT = "The platform's build record is not an app and stays."
+
+
+async def _mark_app_deleted(app: dict[str, Any]) -> list[int]:
+    """Tombstone the row, or 409 on a running turn or publish, in one
+    transaction. Returns the users who listed it."""
+    now = _now()
+    async with db.transaction() as conn:
+        sessions = await (await conn.execute(
+            "SELECT id, live_publishing_at FROM app_sessions WHERE app_id = ?",
+            (app["id"],),
+        )).fetchall()
+        for session in sessions:
+            if session["live_publishing_at"] is not None:
+                raise HTTPException(status_code=409, detail=DELETE_WHILE_PUBLISHING)
+            if await _running_turn(conn, session["id"]) is not None:
+                raise HTTPException(status_code=409, detail=DELETE_WHILE_BUILDING)
+        builds = await (await conn.execute(
+            """SELECT COUNT(*) AS n FROM app_sessions
+                WHERE app_id = ? AND user_id = ? AND mode = 'app'
+                  AND turns > 0 AND started_at >= ?""",
+            (app["id"], app["owner_user_id"], _utc_day_start()),
+        )).fetchone()
+        viewers = await (await conn.execute(
+            """SELECT user_id FROM app_shares WHERE app_id = :id
+               UNION SELECT user_id FROM user_apps WHERE app_id = :id""",
+            {"id": app["id"]},
+        )).fetchall()
+        for session in sessions:
+            await _close_session(conn, session["id"], now)
+        await conn.execute("DELETE FROM app_shares WHERE app_id = ?", (app["id"],))
+        await conn.execute("DELETE FROM user_apps WHERE app_id = ?", (app["id"],))
+        await conn.execute(
+            """UPDATE apps SET deleted_at = ?, deleted_builds = ?, updated_at = ?
+                WHERE id = ?""",
+            (now, builds["n"], now, app["id"]),
+        )
+    return sorted({app["owner_user_id"], *(row["user_id"] for row in viewers)})
+
+
+@router.delete("/apps/{app_id}")
+async def delete_app(app_id: str, user: CurrentUser) -> dict[str, bool]:
+    """Row first, so a failed later step leaves an app nobody can reach;
+    the owner's next call resumes."""
+    _check_app_id(app_id)
+    app = await db.fetch_one("SELECT * FROM apps WHERE id = ?", (app_id,))
+    if app is None or (
+        app["deleted_at"] is not None and app["owner_user_id"] != user.id
+    ):
+        raise HTTPException(status_code=404, detail="App not found")
+    _require_app_owner(app, user)
+    if app_id == PLATFORM_APP_ID:
+        raise HTTPException(status_code=400, detail=PLATFORM_APP_KEPT)
+
+    if app["deleted_at"] is None:
+        user_ids = await _mark_app_deleted(app)
+        await events.publish(
+            {"type": "app_delete", "app_id": app_id, "user_ids": user_ids}
+        )
+    await _launch("delete", app_id)
+    rooms = await db.fetch_all(
+        """SELECT * FROM channels
+            WHERE type = 'app_build'
+              AND id IN (SELECT channel_id FROM app_sessions
+                          WHERE app_id = ? AND mode = 'app')""",
+        (app_id,),
+    )
+    for room in rooms:
+        await channels.destroy_channel(room, user.id)
+    await db.execute(
+        "UPDATE apps SET purged_at = ? WHERE id = ? AND purged_at IS NULL",
+        (_now(), app_id),
+    )
+    await events.publish(
+        {"type": "app_delete", "app_id": app_id, "user_ids": [user.id]}
+    )
+    return {"ok": True}

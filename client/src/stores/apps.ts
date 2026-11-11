@@ -22,6 +22,7 @@ import { create } from "zustand";
 
 import {
   addAppToMenu,
+  deleteApp as apiDeleteApp,
   endAppSession,
   stopAppTurn,
   fetchAppCard,
@@ -39,9 +40,11 @@ import {
   shareApp,
   startAppSession,
 } from "../api";
+import { useSession } from "./session";
 import type {
   App,
   AppCardData,
+  AppDeleteFrame,
   AppRoot,
   AppSession,
   AppStage,
@@ -245,6 +248,9 @@ interface AppsState {
    * the screen for a repo build.
    */
   openBuildSessionId: number | null;
+  /** Apps this tab has learned are deleted, by its own DELETE or by frame.
+      AppShell reads it to close a build modal whose app is gone. */
+  deletedAppIds: string[];
 
   /** GET /apps — boot, after any menu change, and on WS reconnect resync. */
   refresh: () => Promise<void>;
@@ -262,6 +268,11 @@ interface AppsState {
       turn running) or 410 (ended) as the outcome it is. */
   stopTurn: (sessionId: number) => Promise<void>;
   renameApp: (appId: string, name: string) => Promise<void>;
+  /** DELETE /apps/{id}. Rethrows the server's sentence. The list is re-read
+      on a failure too: the app can already be deleted while its files are
+      not, and the house then lists it to its owner as `deleting`. Calling
+      again finishes the job. */
+  deleteApp: (appId: string) => Promise<void>;
   addToMenu: (appId: string) => Promise<void>;
   removeFromMenu: (appId: string) => Promise<void>;
 
@@ -298,6 +309,7 @@ interface AppsState {
   /* ---- WS frame handlers (owner's sockets only) ---- */
   onStage: (frame: AppStageFrame) => void;
   onAppUpdate: (frame: AppUpdateFrame) => void;
+  onAppDelete: (frame: AppDeleteFrame) => void;
 }
 
 export const useApps = create<AppsState>()((set, get) => {
@@ -336,6 +348,26 @@ export const useApps = create<AppsState>()((set, get) => {
   const retryMissingCard = (appId: string): void => {
     if (get().cards[appId]?.status !== "missing") return;
     void get().loadCard(appId, true);
+  };
+
+  /** An app the house has deleted: blank its card, and drop its row, or grey
+      it for its owner until the list says whether anything is left to finish.
+      Loaded sessions stay: a modal showing one is closed by AppShell. */
+  const forgetApp = (appId: string): void => {
+    const known = get().deletedAppIds;
+    const me = useSession.getState().user?.id ?? null;
+    const greyed: App[] = [];
+    for (const a of get().apps) {
+      if (a.id !== appId) greyed.push(a);
+      else if (a.owner_user_id === me) {
+        greyed.push({ ...a, status: "deleting", open_session: null });
+      }
+    }
+    set({
+      apps: greyed,
+      cards: { ...get().cards, [appId]: { status: "missing", data: null } },
+      deletedAppIds: known.includes(appId) ? known : [...known, appId],
+    });
   };
 
   /** Sessions being fetched after a frame arrived for one we had never
@@ -394,6 +426,7 @@ export const useApps = create<AppsState>()((set, get) => {
     cards: {},
     pendingSessionId: null,
     openBuildSessionId: null,
+    deletedAppIds: [],
 
     refresh: async () => {
       const { apps, quota } = await listApps();
@@ -457,6 +490,21 @@ export const useApps = create<AppsState>()((set, get) => {
     renameApp: async (appId, name) => {
       const updated = await patchApp(appId, { name });
       patchAppEverywhere(appId, () => updated);
+    },
+
+    deleteApp: async (appId) => {
+      try {
+        await apiDeleteApp(appId);
+      } catch (err) {
+        // A refusal before anything changed leaves the row as it was; a
+        // failure after the house deleted the app comes back as `deleting`.
+        await get().refresh().catch(() => {});
+        throw err;
+      }
+      forgetApp(appId);
+      // The row is gone for good, and closing an idle session can move the
+      // meter: both are the list's to say.
+      await get().refresh().catch(() => {});
     },
 
     addToMenu: async (appId) => {
@@ -612,6 +660,13 @@ export const useApps = create<AppsState>()((set, get) => {
         return;
       }
       patchAppEverywhere(app.id, () => app);
+    },
+
+    onAppDelete: (frame) => {
+      forgetApp(frame.app_id);
+      // The owner gets this frame twice, when the app is deleted and when
+      // nothing is left to finish; the list tells the two apart.
+      void get().refresh().catch(() => {});
     },
   };
 });

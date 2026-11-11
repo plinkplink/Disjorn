@@ -47,9 +47,21 @@
 #   (`<mode>-as-seat`, a mode no line below can name), which is the account
 #   that owns /srv/apps and /srv/apps-www in the first place.
 #
+#   One DESTRUCTIVE mode (SPECS/2026-11-11-apps-delete.md): `delete <app>`
+#   removes what the seat holds for that one app id: /srv/apps-www/<app>,
+#   /srv/apps-www/.staging/<app>, /srv/apps/<app>, /srv/apps-git/<app>.git, and
+#   the turn result dirs under /srv/apps-turns whose own record names <app>.
+#   Same shape as the serving modes: root validates the one id and starts the
+#   unit, the removal runs as res-appsbuilding. It takes no path and no
+#   session id, removes only real directories the seat owns, unlinks a symlink
+#   found at one of those names without following it, gives the owner's rwx
+#   bits back to a closed directory inside a tree it is removing, and never
+#   opens /srv/apps-quarantine. It stops after the served root when a turn of
+#   the app is running or systemd cannot say.
+#
 # THE SERVER IS NOW A CALLER OF THIS FILE — the first one that is not the
-# broker. `POST /apps/sessions/{sid}/live`, `/apps/{id}/revert` and
-# `/apps/{id}/remix` shell out to `sudo -n <helper> <mode> <ids...>` from the
+# broker. `POST /apps/sessions/{sid}/live`, `/apps/{id}/revert`,
+# `/apps/{id}/remix` and `DELETE /apps/{id}` shell out to `sudo -n <helper> <mode> <ids...>` from the
 # disjorn server, which runs as plink (deploy/disjorn.service) exactly as the
 # broker does. So the plink line below serves two daemons, and both of them
 # reach exactly the modes named here. Noted for review in D6: the alternative
@@ -68,9 +80,13 @@
 # app id into another. Never a program, never a path: every root the serving
 # modes touch is a constant compiled into the helper, and the only names a
 # caller supplies are twelve-character app ids that become directory names
-# under /srv/apps and /srv/apps-www. The worst of it is serving app A's files
-# at app A's URL a deploy early or a deploy late. That is a LATERAL step into
-# a contained seat that holds one metered, revocable API key and one app's
+# under /srv/apps and /srv/apps-www. The worst of the serving modes is serving
+# app A's files at app A's URL a deploy early or a deploy late. The worst of
+# `delete` is worse and is stated plainly: every app's source, history, served
+# pages and turn records can be removed, one id at a time, and nothing here
+# brings them back (the house backup does not cover /srv/apps*). It still
+# reaches nothing outside the five places named above. That is a LATERAL step into
+# a contained seat that holds one metered, revocable API key and the apps'
 # source. Nothing here can start a root process, set a unit property, or name
 # a program.
 #
@@ -103,6 +119,9 @@
 #     builder is idle, whether a previous deploy exists) — the helper's job is
 #     that the ids are ids and the seat is the seat. NO `-as-seat` mode is
 #     reachable from here, which is what keeps the unit's half unprivileged.
+#
+#   delete  <app-id>          remove that app's trees and turn records
+#     one app id, anchored at both ends, exactly the shape of publish/revert.
 
 Cmnd_Alias DISJORN_APPS_LAUNCH = \
     /usr/local/lib/disjorn/disjorn-apps-launch ^run res-[a-z]{1,24} [1-9][0-9]{0,8} [1-9][0-9]{0,3} [a-z2-7]{12} /[^ ]{1,4000}$
@@ -114,7 +133,9 @@ Cmnd_Alias DISJORN_APPS_REVERT = \
     /usr/local/lib/disjorn/disjorn-apps-launch ^revert [a-z2-7]{12}$
 Cmnd_Alias DISJORN_APPS_REMIX = \
     /usr/local/lib/disjorn/disjorn-apps-launch ^remix [a-z2-7]{12} [a-z2-7]{12}$
+Cmnd_Alias DISJORN_APPS_DELETE = \
+    /usr/local/lib/disjorn/disjorn-apps-launch ^delete [a-z2-7]{12}$
 
 plink ALL=(root) NOPASSWD: DISJORN_APPS_LAUNCH, DISJORN_APPS_STOP, \
                            DISJORN_APPS_PUBLISH, DISJORN_APPS_REVERT, \
-                           DISJORN_APPS_REMIX
+                           DISJORN_APPS_REMIX, DISJORN_APPS_DELETE

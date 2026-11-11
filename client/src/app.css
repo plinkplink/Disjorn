@@ -4267,6 +4267,55 @@
   flex-shrink: 0;
 }
 
+/* The owner's row and its details button, side by side: a button cannot sit
+   inside the row, which is one. */
+.app-row-wrap {
+  display: flex;
+  align-items: center;
+}
+
+.app-row-wrap .app-row {
+  flex: 1;
+  min-width: 0;
+}
+
+.app-row-more {
+  flex-shrink: 0;
+  padding: var(--space-1) var(--space-2);
+  opacity: 0;
+}
+
+.app-row-wrap:hover .app-row-more,
+.app-row-more:focus-visible {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .app-row-more {
+    opacity: 1;
+  }
+}
+
+/* A delete the house could not finish: the app is greyed, its one verb is
+   not. */
+.app-row.deleting .avatar,
+.app-row.deleting .name {
+  opacity: 0.5;
+}
+
+.app-finish {
+  flex-shrink: 0;
+  color: var(--danger);
+  font-size: var(--text-xs);
+}
+
+/* Delete sits apart from the card's other verbs, in the danger colour but
+   without the filled button: the filled one is the confirm dialog's. */
+.app-card-delete {
+  margin-right: auto;
+  color: var(--danger);
+}
+
 .app-building {
   display: inline-flex;
   align-items: center;

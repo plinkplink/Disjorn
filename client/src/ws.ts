@@ -345,9 +345,10 @@ export class DisjornSocket {
           .getState()
           .applyReplyMode(frame.channel_id, frame.member_id, frame.reply_mode);
         return;
-      /* Apps (SPECS/2026-08-30-apps-tab-v1.md). Both frames reach the app
-         owner's sockets and nobody else's — the server decides that, and
-         this branch neither re-checks it nor widens it. The apps store is
+      /* Apps (SPECS/2026-08-30-apps-tab-v1.md). `app_stage` and `app_update`
+         reach the app owner's sockets and nobody else's; `app_delete` also
+         reaches the people who could list the app. The server decides that,
+         and this branch neither re-checks it nor widens it. The apps store is
          the subscriber; adding a second one means subscribing to that store,
          not adding a case here. */
       case "app_stage":
@@ -355,6 +356,9 @@ export class DisjornSocket {
         return;
       case "app_update":
         useApps.getState().onAppUpdate(frame);
+        return;
+      case "app_delete":
+        useApps.getState().onAppDelete(frame);
         return;
       case "approval_update":
         useApprovals.getState().onUpdate(frame);

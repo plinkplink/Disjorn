@@ -30,7 +30,7 @@ BacklogStatus = Literal["open", "spec'd", "built", "rejected", "duplicate"]
 # rendering self-report as a number is how a progress bar starts lying.
 AppStage = Literal["scoped", "scaffolded", "files_written", "deployed", "live"]
 AppVisibility = Literal["private", "shared", "public"]
-AppStatus = Literal["draft", "live", "archived"]
+AppStatus = Literal["draft", "live", "archived", "deleting"]
 
 
 # ---------------------------------------------------------------------------

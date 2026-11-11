@@ -19,7 +19,7 @@
 "harness/cc/run-build.sh" = 6896
 "harness/cc/run-resident.sh" = 3321
 "harness/cc/tests/test_apps_harvest.py" = 21824
-"harness/cc/tests/test_apps_launch.py" = 32741
+"harness/cc/tests/test_apps_launch.py" = 32740
 "harness/cc/tests/test_build_harvest.py" = 9599
 "harness/cc/tests/test_container.sh" = 7415
 "harness/cc/tests/test_image_deps.py" = 2252
@@ -92,10 +92,10 @@
 "server/app/models.py" = 7466
 "server/app/origin_wall.py" = 1497
 "server/app/privacy.py" = 2353
-"server/app/routers/apps.py" = 51908
+"server/app/routers/apps.py" = 51898
 "server/app/routers/auth.py" = 7549
 "server/app/routers/bots_admin.py" = 3013
-"server/app/routers/channels.py" = 21878
+"server/app/routers/channels.py" = 21877
 "server/app/routers/media.py" = 9286
 "server/app/routers/messages.py" = 10789
 "server/app/routers/notifications.py" = 4622
@@ -108,7 +108,7 @@
 "server/app/services/media_convert.py" = 2800
 "server/app/services/push.py" = 1356
 "server/app/services/summarize.py" = 1509
-"server/app/ws.py" = 13039
+"server/app/ws.py" = 13038
 "server/tests/conftest.py" = 1111
 "server/tests/test_apps.py" = 18646
 "server/tests/test_apps_serving.py" = 10700

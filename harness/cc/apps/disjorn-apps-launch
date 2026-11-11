@@ -12,6 +12,7 @@ boundary" is identical here and is not repeated in full.
     disjorn-apps-launch publish <app-id>
     disjorn-apps-launch revert  <app-id>
     disjorn-apps-launch remix   <parent-id> <child-id>
+    disjorn-apps-launch delete  <app-id>
 
 `run` execs, with stdin/stdout/stderr passed through untouched (`--pipe`):
 
@@ -86,6 +87,19 @@ nothing it did not already have as itself.
                      tree is what a builder turn writes, and a repository read
                      out of it was one `objects/info/alternates` away from
                      handing over another app's history (2026-09-13 spec, D4).
+
+    delete <app>     remove everything the seat holds for one app: its served
+                     roots first, then its staging leftovers, work tree, git
+                     dir, and each turn result dir whose own record names it.
+                     A real directory the seat owns is removed. A symlink at
+                     one of those names is unlinked, never followed, so nothing
+                     is served through it. Anything else there is left and the
+                     run fails. A directory a build left closed inside such a
+                     tree gets its owner's rwx bits back so it can be removed;
+                     no mode changes outside the tree or through a link.
+                     Refused, with the served roots already gone, while a turn
+                     of that app runs, and also when systemd cannot say whether
+                     one does. The quarantine root is never opened.
 
 NOTHING HERE IS POLICY. The session lock, the quota, the token ceiling and the
 seat→bot map all live in the broker (slice ii); who may press Live, who owns an
@@ -249,9 +263,9 @@ EXIT_FAILED = 1
 # transient unit and appear in no sudoers regex; everything else is a name a
 # caller may say through `sudo -n`. `backfill-as-seat` has no outside: it is run
 # once per app at the keyboard, as the seat.
-MODES = ("run", "stop", "publish", "revert", "remix",
+MODES = ("run", "stop", "publish", "revert", "remix", "delete",
          "publish-as-seat", "revert-as-seat", "remix-as-seat",
-         "backfill-as-seat")
+         "delete-as-seat", "backfill-as-seat")
 
 
 def die(msg: str) -> "None":
@@ -797,6 +811,9 @@ PREVIEW_NAME = "preview"
 # The commit each served tree was published from, kept in the app's git dir.
 LIVE_REF = "refs/disjorn/live"
 PREV_REF = "refs/disjorn/live.prev"
+# The files in a turn's result dir that carry its app id (apps_harvest's
+# RESULT_NAME, and run-apps.sh's harvest spec when a turn died before it).
+TURN_RECORDS = ("result.json", ".harvest-input.json")
 
 
 def _stamp() -> str:
@@ -1288,6 +1305,133 @@ def remix_app(apps_root, www_root, parent: str, child: str, *,
             "preview": staged is not None}
 
 
+def _turn_app(turn_dir: str) -> str:
+    """The app id a turn's own record names, or "" when it has no record."""
+    for name in TURN_RECORDS:
+        try:
+            fd = os.open(os.path.join(turn_dir, name),
+                         os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except OSError:
+            continue
+        try:
+            with os.fdopen(fd, "rb") as fh:
+                named = json.loads(fh.read(1 << 20)).get("app_id")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if isinstance(named, str):
+            return named
+    return ""
+
+
+def _turn_dirs_of(turns_root, app_id: str) -> "list":
+    """`<session>/<turn>` dirs under the turns root whose record names this
+    app. A symlink at either level is skipped, never entered."""
+    found = []
+    try:
+        sessions = sorted(os.scandir(turns_root), key=lambda e: e.name)
+    except OSError:
+        return found
+    for session in sessions:
+        if not SESSION_RE.match(session.name) \
+                or not session.is_dir(follow_symlinks=False):
+            continue
+        for turn in sorted(os.scandir(session.path), key=lambda e: e.name):
+            if TURN_RE.match(turn.name) \
+                    and turn.is_dir(follow_symlinks=False) \
+                    and _turn_app(turn.path) == app_id:
+                found.append(Path(turn.path))
+    return found
+
+
+def _rmtree_own(top: str) -> None:
+    """rmtree for a tree a build may have left closed to its owner.
+
+    On a permission error the directory in the way gets the owner's rwx bits
+    and that entry is removed again. Only real directories at or below `top`
+    are chmodded: never a symlink's target, never `top`'s parent."""
+    seen = set()
+
+    def reopen(_func, failing, exc):
+        failing = os.fspath(failing)
+        if not isinstance(exc, PermissionError) or failing in seen:
+            raise exc
+        seen.add(failing)
+        for name in (os.path.dirname(failing), failing):
+            if not _under(top, name):
+                continue
+            try:
+                mode = os.lstat(name).st_mode
+            except OSError:
+                continue
+            if stat.S_ISDIR(mode):
+                os.chmod(name, stat.S_IMODE(mode) | stat.S_IRWXU)
+        try:
+            mode = os.lstat(failing).st_mode
+        except FileNotFoundError:
+            return
+        if stat.S_ISDIR(mode):
+            shutil.rmtree(failing, **handler)
+        else:
+            os.unlink(failing)
+
+    if sys.version_info >= (3, 12):
+        handler = {"onexc": reopen}
+    else:                                                # pragma: no cover
+        handler = {"onerror": lambda f, p, info: reopen(f, p, info[1])}
+    shutil.rmtree(top, **handler)
+
+
+def delete_app(apps_root, www_root, app_id: str, *, git_root=GIT_ROOT,
+               turns_root=TURNS_ROOT, systemctl_bin: str = SYSTEMCTL,
+               uid: "int | None" = None) -> dict:
+    """Remove one app's trees. The served root goes before anything can
+    refuse, so a refusal or a failure still leaves nothing to serve."""
+    app_id = check_app_id(app_id)
+    uid = os.geteuid() if uid is None else uid
+    removed, left = [], []
+
+    def take(path: Path) -> None:
+        try:
+            st = os.lstat(path)
+        except FileNotFoundError:
+            return
+        if stat.S_ISLNK(st.st_mode):
+            os.unlink(path)
+        elif not stat.S_ISDIR(st.st_mode) or st.st_uid != uid:
+            left.append(str(path))
+            return
+        else:
+            _rmtree_own(os.path.abspath(path))
+        removed.append(str(path))
+
+    take(Path(www_root) / app_id)
+    try:
+        unit = active_turn_for_app(app_id, systemctl_bin=systemctl_bin,
+                                   strict=True)
+        busy = (f"{app_id} has a turn running ({unit}); its pages are gone, "
+                f"delete it again when the turn has ended") if unit else ""
+    except TurnQueryFailed as exc:
+        busy = (f"cannot tell whether a build of {app_id} is still running "
+                f"({exc}); its pages are gone, finish deleting it when no "
+                f"build is running")
+    if not busy:
+        take(Path(www_root) / STAGING_NAME / app_id)
+        take(Path(apps_root) / app_id)
+        take(app_git_dir(git_root, app_id))
+        for turn_dir in _turn_dirs_of(turns_root, app_id):
+            take(turn_dir)
+            try:
+                os.rmdir(turn_dir.parent)
+            except OSError:
+                pass
+    if left:
+        fail(f"not a directory of the seat's own, left in place: "
+             f"{', '.join(left)}")
+    if busy:
+        die(busy)
+    return {"mode": "delete", "app": app_id, "removed": removed}
+
+
 # ------------------------------------------------- the pre-flight refusals
 #
 # Read-only checks root makes BEFORE it starts a unit. Each of them is made
@@ -1295,7 +1439,12 @@ def remix_app(apps_root, www_root, parent: str, child: str, *,
 # common refusals cost a stat instead of a transient service, and so the house
 # gets its one sentence back in milliseconds.
 
-def active_turn_for_app(app_id: str, *, systemctl_bin: str = SYSTEMCTL) -> "str | None":
+class TurnQueryFailed(Exception):
+    """systemd did not say, in full, which turns are running."""
+
+
+def active_turn_for_app(app_id: str, *, systemctl_bin: str = SYSTEMCTL,
+                        strict: bool = False) -> "str | None":
     """The name of a RUNNING turn unit of this app, or None.
 
     A turn's unit name is `disjorn-apps-<session>-<turn>` and carries no app
@@ -1310,31 +1459,46 @@ def active_turn_for_app(app_id: str, *, systemctl_bin: str = SYSTEMCTL) -> "str 
     that is a clear refusal rather than a half-copied `live`. But systemd not
     answering is not evidence of a running turn, so a query that fails at all
     reports None and says so: the failure mode of guessing "yes" is a Live
-    button that never works, and that is worse than the race this closes."""
+    button that never works, and that is worse than the race this closes.
+
+    `strict` is for `delete`, where the costs are the other way round: a wrong
+    "no" removes a work tree under a running turn. Any part of the query that
+    fails, or a line that is not a unit of ours, raises TurnQueryFailed."""
+    def unanswered(why) -> None:
+        if strict:
+            raise TurnQueryFailed(" ".join(str(why).split()) or "no reason given")
+
     try:
         listing = subprocess.run(
             [systemctl_bin, "list-units", "--no-legend", "--no-pager",
              "--plain", "--state=active", f"{UNIT_PREFIX}*.service"],
             capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.SubprocessError) as exc:
+        unanswered(exc)
         warn(f"cannot ask systemd which turns are running ({exc}); "
-             f"publishing without that check")
+             f"going on without that check")
         return None
     if listing.returncode != 0:
+        unanswered(listing.stderr or f"systemctl exited {listing.returncode}")
         warn("cannot ask systemd which turns are running "
-             f"({(listing.stderr or '').strip()}); publishing without that check")
+             f"({(listing.stderr or '').strip()}); going on without that check")
         return None
     for line in listing.stdout.splitlines():
         unit = line.split()[0] if line.split() else ""
         if not unit.startswith(UNIT_PREFIX) or not unit.endswith(".service"):
+            if line.strip():
+                unanswered(f"not a unit line: {line.strip()[:80]}")
             continue
         try:
             shown = subprocess.run(
                 [systemctl_bin, "show", "--property=Description", "--value",
                  unit], capture_output=True, text=True, timeout=10)
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, subprocess.SubprocessError) as exc:
+            unanswered(exc)
             continue
-        if shown.returncode == 0 and f"({app_id})" in shown.stdout:
+        if shown.returncode != 0:
+            unanswered(shown.stderr or f"systemctl show exited {shown.returncode}")
+        elif f"({app_id})" in shown.stdout:
             return unit
     return None
 
@@ -1395,7 +1559,8 @@ def build_op_argv(mode: str, ids: "list", *, self_path: str = SELF,
     unit = f"{UNIT_PREFIX}{mode}-{'-'.join(ids)}"
     what = {"publish": f"Disjorn apps publish {ids[0]}",
             "revert": f"Disjorn apps revert {ids[0]}",
-            "remix": f"Disjorn apps remix {' to '.join(ids)}"}[mode]
+            "remix": f"Disjorn apps remix {' to '.join(ids)}",
+            "delete": f"Disjorn apps delete {ids[0]}"}[mode]
     return [
         SYSTEMD_RUN,
         # One unit name per (mode, app): a second publish of the same app
@@ -1439,7 +1604,7 @@ def main_op(mode: str, argv: "list", *, dry: bool, seat, self_path: str,
         preflight_publish(ids[0], www_root=www_root, systemctl_bin=systemctl_bin)
     elif mode == "revert":
         preflight_revert(ids[0], www_root=www_root)
-    else:
+    elif mode == "remix":
         preflight_remix(ids[0], ids[1], apps_root=apps_root,
                         git_root=git_root, www_root=www_root)
     if not dry:
@@ -1454,7 +1619,9 @@ def main_op(mode: str, argv: "list", *, dry: bool, seat, self_path: str,
 
 
 def main_as_seat(mode: str, argv: "list", *, www_root: str = WWW_ROOT,
-                 apps_root: str = APPS_ROOT, git_root: str = GIT_ROOT) -> int:
+                 apps_root: str = APPS_ROOT, git_root: str = GIT_ROOT,
+                 turns_root: str = TURNS_ROOT,
+                 systemctl_bin: str = SYSTEMCTL) -> int:
     """The unprivileged half, inside the transient unit, as res-appsbuilding.
 
     Reachable by name only from build_op_argv above: the sudoers regexes are
@@ -1479,6 +1646,10 @@ def main_as_seat(mode: str, argv: "list", *, www_root: str = WWW_ROOT,
             out = revert_app(www_root, ids[0], git_root=git_root)
         elif mode == "backfill-as-seat":
             out = backfill_app(www_root, ids[0], git_root=git_root)
+        elif mode == "delete-as-seat":
+            out = delete_app(apps_root, www_root, ids[0], git_root=git_root,
+                             turns_root=turns_root,
+                             systemctl_bin=systemctl_bin)
         else:
             out = remix_app(apps_root, www_root, ids[0], ids[1],
                             git_root=git_root)
@@ -1520,18 +1691,23 @@ def main(argv: "list") -> int:
         apps_root = os.environ["DISJORN_APPS_LAUNCH_APPS_ROOT"]
     if dry and os.environ.get("DISJORN_APPS_LAUNCH_GIT_ROOT"):
         git_root = os.environ["DISJORN_APPS_LAUNCH_GIT_ROOT"]
+    turns_root = TURNS_ROOT
+    if dry and os.environ.get("DISJORN_APPS_LAUNCH_TURNS_ROOT"):
+        turns_root = os.environ["DISJORN_APPS_LAUNCH_TURNS_ROOT"]
 
     if len(argv) < 2 or argv[1] not in MODES:
         die("usage: disjorn-apps-launch run <resident> <session> <turn> "
             "<app-id> <prompt-path> | stop <resident> <session> <turn> "
-            "| publish <app-id> | revert <app-id> | remix <parent> <child>")
+            "| publish <app-id> | revert <app-id> | remix <parent> <child> "
+            "| delete <app-id>")
 
     # The seat's half of a serving operation, inside the transient unit. No
     # seat lookup, no config, no privilege: it IS the seat, and it moves
     # directories it owns.
     if argv[1].endswith("-as-seat"):
         return main_as_seat(argv[1], argv, www_root=www_root,
-                            apps_root=apps_root, git_root=git_root)
+                            apps_root=apps_root, git_root=git_root,
+                            turns_root=turns_root, systemctl_bin=systemctl_bin)
 
     seat = None
     if dry and os.environ.get("DISJORN_APPS_LAUNCH_FAKE_SEAT"):
@@ -1540,7 +1716,7 @@ def main(argv: "list") -> int:
         uid, home, group = os.environ["DISJORN_APPS_LAUNCH_FAKE_SEAT"].split(":")
         seat = (type("pw", (), {"pw_uid": int(uid), "pw_dir": home})(), group)
 
-    if argv[1] in ("publish", "revert", "remix"):
+    if argv[1] in ("publish", "revert", "remix", "delete"):
         # No config and no prompt: a serving operation names apps, and every
         # root it touches is a constant in this file.
         return main_op(argv[1], argv, dry=dry, seat=seat or check_seat(),

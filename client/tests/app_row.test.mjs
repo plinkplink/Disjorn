@@ -22,7 +22,7 @@ function nodeModules() {
 }
 
 const ENTRY = `
-export { appRowAction, canKeepBuilding } from "../src/lib/appRow";
+export { appRowAction, canDeleteApp, canKeepBuilding, deleteReachLine } from "../src/lib/appRow";
 `;
 
 let m;
@@ -50,8 +50,8 @@ const ALICE = 1;
 const BOB = 2;
 const SESSION = { id: 7, channel_id: 70, stage: null, locked_until: '2099-01-01T00:00:00Z' };
 
-function app(status, open_session = null) {
-  return { id: 'abc234567xyz', name: 'Tips', status, owner_user_id: ALICE, open_session };
+function app(status, open_session = null, visibility = 'private') {
+  return { id: 'abc234567xyz', name: 'Tips', status, visibility, owner_user_id: ALICE, open_session };
 }
 
 test("the owner's draft row starts a session and their live row shows the card", () => {
@@ -79,4 +79,32 @@ test('Keep building is offered to the owner of a live app and to nobody else', (
   assert.equal(m.canKeepBuilding(app('archived'), ALICE), false);
   assert.equal(m.canKeepBuilding(app('live'), BOB), false);
   assert.equal(m.canKeepBuilding(app('live'), null), false);
+});
+
+test('Delete is offered to the owner at every status and to nobody else', () => {
+  for (const status of ['draft', 'live', 'archived']) {
+    assert.equal(m.canDeleteApp(app(status), ALICE), true);
+    assert.equal(m.canDeleteApp(app(status, SESSION), ALICE), true);
+    assert.equal(m.canDeleteApp(app(status, SESSION, 'public'), BOB), false);
+    assert.equal(m.canDeleteApp(app(status), null), false);
+  }
+});
+
+test("an unfinished delete offers its owner one verb, and it is not a card", () => {
+  const row = app('deleting');
+  assert.deepEqual(m.appRowAction(row, ALICE), { kind: 'finish' });
+  assert.deepEqual(m.appRowAction(app('deleting', SESSION), ALICE), { kind: 'finish' });
+  assert.equal(m.canDeleteApp(row, ALICE), false);
+  assert.equal(m.canKeepBuilding(row, ALICE), false);
+  assert.equal(m.deleteReachLine(app('deleting', null, 'public')), null);
+  assert.deepEqual(m.appRowAction(row, BOB), { kind: 'card' });
+});
+
+test('the confirm dialog names who else loses a live app, and nobody for a draft', () => {
+  for (const visibility of ['private', 'shared', 'public']) {
+    assert.equal(m.deleteReachLine(app('draft', null, visibility)), null);
+  }
+  assert.match(m.deleteReachLine(app('live')), /^It is live: /);
+  assert.match(m.deleteReachLine(app('live', null, 'shared')), /live and shared.*shared with lose access/);
+  assert.match(m.deleteReachLine(app('live', SESSION, 'public')), /live and public.*everyone in the house/);
 });
