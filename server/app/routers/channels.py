@@ -35,7 +35,7 @@ Membership semantics (Architecture §4.1 + SPECS/2026-08-08-per-channel-membersh
   grandfathered to) or `private`.
 - PUBLIC main_feed AND public named `text` channels implicitly include ALL
   users (this is a <=5-human server); a channel_members row is created lazily
-  only to store last_read_seq (first PUT /channels/{id}/read).
+  only to store last_read_seq.
 - PRIVATE text channels have no implicit members at all: channel_members is
   the wall, for humans and bots alike (no bot-shaped exception in either
   direction). Non-members get 403 on every read path, and their messages never
@@ -872,9 +872,16 @@ async def raise_read_cursor(
 ) -> Optional[tuple[int, bool]]:
     """Raise the user's read cursor to `seq`: (the cursor now, whether it moved).
 
-    Call inside a transaction. Only a public channel gets a row made for it;
-    anywhere else a missing row is a removed member, and the answer is None.
+    Call inside a transaction. `seq` stops at the newest message, or the cursor
+    would hide the next one. A missing row is made only in a public channel;
+    elsewhere it is a removed member: None.
     """
+    newest = await db.fetch_one(
+        "SELECT COALESCE(MAX(seq), 0) AS seq FROM messages WHERE channel_id = ?",
+        (channel_id,),
+    )
+    assert newest is not None
+    seq = min(seq, newest["seq"])
     row = await db.fetch_one(
         """SELECT last_read_seq FROM channel_members
            WHERE channel_id = ? AND member_type = 'user' AND member_id = ?""",
@@ -923,8 +930,7 @@ async def publish_read(channel_id: int, user_id: int, last_read_seq: int) -> Non
 @router.put("/channels/{channel_id}/read")
 async def mark_read(channel_id: int, body: ReadRequest, user: CurrentUser) -> dict[str, int]:
     await _get_channel(channel_id)
-    # Read state is a read path: a non-member must not learn a private
-    # channel's seq numbers.
+    # A non-member must not learn a private channel's seq numbers.
     if not await is_member(channel_id, "user", user.id):
         raise HTTPException(status_code=403, detail="Not a member of this channel")
     async with db.transaction():

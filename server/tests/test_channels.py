@@ -95,10 +95,15 @@ async def test_list_main_feed_always_present_with_unread_math(client):
     [item] = (await client.get("/channels")).json()
     assert item["unread"] == 2 and item["last_read_seq"] == 3
 
-    # last_read above max seq -> unread floored at 0, never negative
-    await client.put(f"/channels/{main}/read", json={"seq": 99})
+    # A read past the newest message is stored as the newest, so the message
+    # after it still counts.
+    r = await client.put(f"/channels/{main}/read", json={"seq": 99})
+    assert r.status_code == 200 and r.json()["last_read_seq"] == 5
     [item] = (await client.get("/channels")).json()
-    assert item["unread"] == 0
+    assert item["unread"] == 0 and item["last_read_seq"] == 5
+    await insert_message(main, 6, "msg 6", author_id=uid)
+    [item] = (await client.get("/channels")).json()
+    assert item["unread"] == 1
 
 
 async def test_list_dm_shows_other_participant_and_skips_deleted_snippet(client):
@@ -214,6 +219,9 @@ async def test_read_state_lazy_row_and_monotonic(client):
     uid = await make_user("alice")
     await login(client, "alice")
     main = await main_feed_id()
+
+    for seq in range(1, 8):
+        await insert_message(main, seq, f"msg {seq}", author_id=uid + 1)
 
     # Implicit membership: no row until first mark-read
     assert await member_row(main, "user", uid) is None
@@ -589,6 +597,8 @@ async def test_text_channel_implicit_membership_and_read_state(client):
     assert await channels.bot_channel_ids(bot_id) == []
 
     # Lazy read-state row, monotonic, no user_channel_ids duplication.
+    for seq in range(1, 5):
+        await insert_message(cid, seq, f"msg {seq}", author_id=uid_b)
     r = await client.put(f"/channels/{cid}/read", json={"seq": 4})
     assert r.json() == {"channel_id": cid, "last_read_seq": 4}
     assert (await member_row(cid, "user", uid))["last_read_seq"] == 4

@@ -95,7 +95,7 @@
 "server/app/routers/apps.py" = 51908
 "server/app/routers/auth.py" = 7549
 "server/app/routers/bots_admin.py" = 3013
-"server/app/routers/channels.py" = 21896
+"server/app/routers/channels.py" = 21878
 "server/app/routers/media.py" = 9425
 "server/app/routers/messages.py" = 10789
 "server/app/routers/notifications.py" = 4622
