@@ -558,6 +558,48 @@ def test_unset_spine_var_adds_nothing_at_all(rig, script):
     assert {m[1] for m in mounts(argv)} == UNSET_SPINE_MOUNTS[script]
 
 
+@pytest.fixture()
+def files_dirs(tmp_path):
+    ro, outbox = tmp_path / "files-ro", tmp_path / "files-outbox"
+    ro.mkdir()
+    outbox.mkdir()
+    return {"RESIDENT_FILES_RO": str(ro), "RESIDENT_FILES_OUTBOX": str(outbox)}
+
+
+def test_resident_seat_mounts_files_read_only_and_the_outbox_writable(rig, files_dirs):
+    proc, argv, environ, envfile = rig("run-resident.sh", "BROKER_DISABLE=1\n", files_dirs)
+    assert proc.returncode == 0, proc.stderr
+    by_target = {m[1]: m for m in mounts(argv)}
+    assert by_target["/files"] == [files_dirs["RESIDENT_FILES_RO"], "/files", "ro"]
+    assert by_target["/files-outbox"] == [files_dirs["RESIDENT_FILES_OUTBOX"], "/files-outbox"]
+    assert not any(m[0] == files_dirs["RESIDENT_FILES_RO"] and "ro" not in m[2:]
+                   for m in mounts(argv))
+
+
+@pytest.mark.parametrize("missing", ["RESIDENT_FILES_RO", "RESIDENT_FILES_OUTBOX"])
+def test_a_files_directory_that_does_not_exist_is_not_mounted(rig, files_dirs, tmp_path, missing):
+    env = {**files_dirs, missing: str(tmp_path / "absent")}
+    proc, argv, environ, envfile = rig("run-resident.sh", "BROKER_DISABLE=1\n", env)
+    assert proc.returncode == 0, proc.stderr
+    targets = {m[1] for m in mounts(argv)}
+    assert targets - UNSET_SPINE_MOUNTS["run-resident.sh"] == (
+        {"/files-outbox"} if missing == "RESIDENT_FILES_RO" else {"/files"})
+
+
+def test_the_files_directories_default_to_the_seat_s_own_under_srv():
+    wrapper = (CC_DIR / "run-resident.sh").read_text()
+    assert 'FILES_RO="${RESIDENT_FILES_RO:-/srv/disjorn-files-ro/res-$NAME}"' in wrapper
+    assert 'FILES_OUTBOX="${RESIDENT_FILES_OUTBOX:-/srv/disjorn-files-outbox/res-$NAME}"' in wrapper
+
+
+def test_build_seat_gets_neither_files_mount(rig, files_dirs):
+    proc, argv, environ, envfile = rig("run-build.sh", "BROKER_DISABLE=1\n", files_dirs)
+    assert proc.returncode == 0, proc.stderr
+    assert {m[1] for m in mounts(argv)} == UNSET_SPINE_MOUNTS["run-build.sh"]
+    build = (CC_DIR / "run-build.sh").read_text()
+    assert "disjorn-files" not in build and "RESIDENT_FILES" not in build
+
+
 @pytest.mark.parametrize("script", SPINE_WRAPPERS)
 def test_empty_spine_var_is_treated_as_unset(rig, script):
     proc, argv, environ, envfile = rig(
