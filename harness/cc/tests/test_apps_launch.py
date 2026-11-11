@@ -1056,7 +1056,7 @@ def test_the_as_seat_modes_are_not_reachable_through_sudo():
     only mode that moves a file — cannot be named by any caller of the sudoers
     file. This is the whole reason the split is safe."""
     text = SUDOERS.read_text(encoding="utf-8")
-    for mode in ("publish", "revert", "remix"):
+    for mode in ("publish", "revert", "remix", "delete"):
         assert f"^{mode} " in text
         assert f"{mode}-as-seat" not in text.split("Cmnd_Alias")[-1]
 
@@ -1668,14 +1668,15 @@ def test_the_lineage_commit_is_authored_by_the_app_builder(launcher):
     assert launcher.STAGING_NAME == harvest.STAGING_NAME
 
 
-def test_the_sudoers_file_grants_exactly_the_five_modes():
+def test_the_sudoers_file_grants_exactly_the_six_modes():
     """One alias per mode, anchored at both ends, and the plink line names all
-    five. A sixth alias, or a wildcard, is a diff someone has to defend."""
+    six. Another alias, or a wildcard, is a diff someone has to defend."""
     text = SUDOERS.read_text(encoding="utf-8")
     aliases = dict(re.findall(r"^Cmnd_Alias (\w+) = \\\n\s*(\S.*)$", text, re.M))
     assert set(aliases) == {"DISJORN_APPS_LAUNCH", "DISJORN_APPS_STOP",
                             "DISJORN_APPS_PUBLISH", "DISJORN_APPS_REVERT",
-                            "DISJORN_APPS_REMIX"}
+                            "DISJORN_APPS_REMIX", "DISJORN_APPS_DELETE"}
+    assert aliases["DISJORN_APPS_DELETE"].endswith("^delete [a-z2-7]{12}$")
     assert aliases["DISJORN_APPS_PUBLISH"].endswith("^publish [a-z2-7]{12}$")
     assert aliases["DISJORN_APPS_REVERT"].endswith("^revert [a-z2-7]{12}$")
     assert aliases["DISJORN_APPS_REMIX"].endswith(

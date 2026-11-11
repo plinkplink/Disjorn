@@ -19,7 +19,7 @@
 "harness/cc/run-build.sh" = 6896
 "harness/cc/run-resident.sh" = 3321
 "harness/cc/tests/test_apps_harvest.py" = 21824
-"harness/cc/tests/test_apps_launch.py" = 32741
+"harness/cc/tests/test_apps_launch.py" = 32740
 "harness/cc/tests/test_build_harvest.py" = 9599
 "harness/cc/tests/test_container.sh" = 7415
 "harness/cc/tests/test_image_deps.py" = 2252
