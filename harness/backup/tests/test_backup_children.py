@@ -86,7 +86,7 @@ def test_a_hung_git_costs_one_app_its_bundle_and_the_rest_are_staged(srv, tmp_pa
     began = time.monotonic()
     facts = apps.stage(srv["tmp"] / "apps-git", srv["tmp"] / "apps-www", tmp_path / "out")
     assert time.monotonic() - began < 30
-    assert facts["warnings"] == {LIVE: "git timed out after 3s"}
+    assert facts["warnings"] == {LIVE: "git dir: git timed out after 3s"}
     assert facts["apps"][LIVE]["bundle_sha256"] is None and facts["apps"][LIVE]["live"]["files"] == 2
     assert not (tmp_path / "out" / LIVE / "repo.bundle").exists()
     assert facts["apps"][DRAFT]["bundle_sha256"]

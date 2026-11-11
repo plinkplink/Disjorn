@@ -86,6 +86,9 @@ that changes or is deleted during the run cannot fail `restic backup`.
   out; a root that is itself a symlink is a warning.
 - An app whose directories vanish mid-run (a delete) is left out with a
   logged note and the run goes on.
+- Nothing one app does stops the run: every exception raised while staging
+  an app is caught there and becomes that app's warning, recorded by its
+  type and our own line number, never by its text.
 - A git dir that is half-written, unreadable or will not bundle, or a web
   root that cannot be read, is a
   `WARNING` in the unit's log and an entry in `apps.warnings`. Only the part
@@ -102,6 +105,10 @@ that changes or is deleted during the run cannot fail `restic backup`.
   commits in the clone; it recounts each staged web root against the
   manifest. Any mismatch, or a manifest with no `apps` section, is RED. The
   PASS line ends `apps: N bundles verified, N live roots matched`.
+
+A deleted app's bundle and web roots stay in the offsite repository until
+`forget --prune` drops the last snapshot that holds them: `snapshot.sh`
+keeps 7 daily, 4 weekly and 12 monthly snapshots, so up to about a year.
 
 Not built: a size ceiling. A web root is copied whole into the stage, so a
 build that writes a huge file into `preview` fills
@@ -152,7 +159,10 @@ and removes the rest). After a disk loss with the database intact, none of
 this applies.
 
 - As plink, never root (root-owned `-wal`/`-shm` lock the server out):
-  `sqlite3 server/data/disjorn.db "UPDATE apps SET deleted_at = NULL, deleted_builds = 0 WHERE id = '<id>'"`.
+  `sqlite3 server/data/disjorn.db "UPDATE apps SET deleted_at = NULL, purged_at = NULL, deleted_builds = 0 WHERE id = '<id>'"`.
+  All three columns arrive with the apps-delete merge; before it there is
+  no delete and no row to fix. A `purged_at` left set would hide the row of
+  a later, half-finished delete of the same app from its owner.
   Name, status and visibility were kept on the row, so the app is back on
   its owner's list as it was once the client reloads. If the row says live
   and the snapshot held no `live`, the owner publishes again.

@@ -12,6 +12,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import traceback
 from pathlib import Path
 
 APP_ID = re.compile(r"^[a-z2-7]{12}$")
@@ -33,6 +34,16 @@ def say(msg: str) -> None:
     print(f"apps: {msg}", file=sys.stderr)
 
 
+def why(exc: Exception) -> str:
+    """A reason fit for the manifest and the log: never the exception's own text, which can name an app's file."""
+    if isinstance(exc, Skip):
+        return str(exc)
+    if isinstance(exc, OSError) and exc.strerror:
+        return exc.strerror
+    at = traceback.extract_tb(exc.__traceback__)[-1]
+    return f"unexpected {type(exc).__name__} at {Path(at.filename).name}:{at.lineno}"
+
+
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as fh:
@@ -44,7 +55,7 @@ def sha256(path: Path) -> str:
 def run(argv: list[str], **kw) -> subprocess.CompletedProcess:
     """This process's environment holds the offsite credentials, so every child gets a built one."""
     return subprocess.run([shutil.which(argv[0]) or argv[0], *argv[1:]], env=CHILD_ENV, text=True,
-                          stderr=subprocess.PIPE, **kw)
+                          errors="replace", stderr=subprocess.PIPE, **kw)
 
 
 def git_as_owner(git_dir: Path, *args: str, stdout) -> subprocess.CompletedProcess:
@@ -79,7 +90,7 @@ def must(git_dir: Path, proc: subprocess.CompletedProcess) -> str:
 def bundle(git_dir: Path, dest: Path) -> dict:
     """The recorded commits are read back from the bundle, so they describe it even if a turn commits meanwhile."""
     if git_dir.is_symlink() or not os.path.isfile(git_dir / "HEAD"):
-        raise Skip("git dir has no readable HEAD")
+        raise Skip("no readable HEAD")
     refs = must(git_dir, git_as_owner(git_dir, "for-each-ref", "--count=1", "--format=%(refname)",
                                       stdout=subprocess.PIPE))
     if not refs.strip():
@@ -128,27 +139,27 @@ def stage_root(app_fd: int, name: str, dst: Path) -> dict | None:
 
 
 def stage_app(dirs: dict, dest: Path) -> tuple[dict, list[str]]:
-    """Each part fails alone: a repo that will not bundle still gets its web roots staged, and the reverse."""
+    """Each part fails alone, whatever it raises: a repo that will not bundle still gets its web roots staged."""
     dest.mkdir()
     entry = {"bundle_sha256": None, "head": None, "live_commit": None, **dict.fromkeys(ROOTS)}
     reasons = []
     if "git" in dirs:
         try:
             entry.update(bundle(dirs["git"], dest / "repo.bundle"))
-        except (Skip, OSError) as exc:
-            reasons.append(str(exc) if isinstance(exc, Skip) else f"git dir: {exc.strerror}")
+        except Exception as exc:
+            reasons.append(f"git dir: {why(exc)}")
             (dest / "repo.bundle").unlink(missing_ok=True)
     if "www" in dirs:
         try:
             app_fd = os.open(dirs["www"], DIR_FLAGS)
-        except OSError as exc:
-            return entry, reasons + [f"web roots: {exc.strerror}"]
+        except Exception as exc:
+            return entry, reasons + [f"web roots: {why(exc)}"]
         try:
             for key, name in ROOTS.items():
                 try:
                     entry[key] = stage_root(app_fd, name, dest / name)
-                except (OSError, RecursionError) as exc:
-                    reasons.append(f"{name}: {getattr(exc, 'strerror', 'nested too deep')}")
+                except Exception as exc:
+                    reasons.append(f"{name}: {why(exc)}")
                     shutil.rmtree(dest / name, ignore_errors=True)
         finally:
             os.close(app_fd)
@@ -171,17 +182,22 @@ def stage(git_root: Path, www_root: Path, out: Path) -> dict:
             if name.endswith(suffix) and APP_ID.match(app):
                 found.setdefault(app, {})[kind] = root / name
     for app, dirs in sorted(found.items()):
-        entry, reasons = stage_app(dirs, out / app)
+        try:
+            entry, reasons = stage_app(dirs, out / app)
+        except Exception as exc:
+            entry, reasons = None, [why(exc)]
         if reasons and not all(os.path.lexists(p) for p in dirs.values()):
             say(f"{app} vanished during the backup (deleted?), skipped")
-            shutil.rmtree(out / app, ignore_errors=True)
-            continue
-        if reasons:
+            entry = None
+        elif reasons:
             warnings[app] = "; ".join(reasons)
             say(f"WARNING {app}: {warnings[app]}")
         elif "git" not in dirs:
             say(f"{app} has web roots and no git dir; only the web roots are staged")
-        apps[app] = entry
+        if entry is None:
+            shutil.rmtree(out / app, ignore_errors=True)
+        else:
+            apps[app] = entry
     return {"apps": apps, "warnings": warnings, "lost_roots": lost_roots}
 
 
@@ -233,20 +249,23 @@ def verify(stage_dir: Path, manifest: dict, scratch: Path) -> tuple[list[str], s
         if not APP_ID.match(app):
             fails.append("apps: the manifest names something that is not an app id")
             continue
-        if want["bundle_sha256"]:
-            error = check_bundle(stage_dir / app / "repo.bundle", want, scratch)
-            if error:
-                fails.append(f"app {app}: {error}")
-            else:
-                bundles += 1
-        for key, name in ROOTS.items():
-            if want[key] is None:
-                continue
-            have = count(stage_dir / app / name)
-            if have != want[key]:
-                fails.append(f"app {app}: {name} holds {told(have)}, manifest says {told(want[key])}")
-            elif key == "live":
-                live += 1
+        try:
+            if want["bundle_sha256"]:
+                error = check_bundle(stage_dir / app / "repo.bundle", want, scratch)
+                if error:
+                    fails.append(f"app {app}: {error}")
+                else:
+                    bundles += 1
+            for key, name in ROOTS.items():
+                if want[key] is None:
+                    continue
+                have = count(stage_dir / app / name)
+                if have != want[key]:
+                    fails.append(f"app {app}: {name} holds {told(have)}, manifest says {told(want[key])}")
+                elif key == "live":
+                    live += 1
+        except Exception as exc:
+            fails.append(f"app {app}: {why(exc)}")
     summary = f"apps: {bundles} bundles verified, {live} live roots matched"
     warnings = manifest["apps"]["warnings"]
     if warnings:

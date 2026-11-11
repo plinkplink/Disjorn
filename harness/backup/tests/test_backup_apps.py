@@ -184,10 +184,10 @@ def test_a_broken_git_dir_is_a_warning_and_the_coverage_is_called_partial(srv):
         obj.unlink()
 
     r, staged, m = snapshot(srv)
-    assert m["apps"]["warnings"] == {half: "git dir has no readable HEAD",
-                                     broken: "git could not bundle the repository"}
+    assert m["apps"]["warnings"] == {half: "git dir: no readable HEAD",
+                                     broken: "git dir: git could not bundle the repository"}
     assert f"apps: {broken}.git: git said: " in r.stderr
-    assert f"apps: WARNING {half}: git dir has no readable HEAD" in r.stderr
+    assert f"apps: WARNING {half}: git dir: no readable HEAD" in r.stderr
     assert {LIVE, DRAFT} <= set(m["apps"]["apps"])
     assert m["apps"]["apps"][broken]["bundle_sha256"] is None
     assert m["apps"]["apps"][broken]["live"]["files"] == 2
@@ -199,32 +199,95 @@ def test_a_broken_git_dir_is_a_warning_and_the_coverage_is_called_partial(srv):
     [post] = posts(srv)
     assert post.startswith("backup drill PARTIAL on snapshot")
     assert "apps: 2 bundles verified, 2 live roots matched; APPS COVERAGE PARTIAL at snapshot time: " in post
-    assert f"{half} (git dir has no readable HEAD)" in post
+    assert f"{half} (git dir: no readable HEAD)" in post
 
     r = run(srv, "freshness.sh")
     assert r.returncode == 0, r.stderr
     assert posts(srv)[1].startswith("backup freshness WARNING") and "apps coverage was partial" in posts(srv)[1]
 
 
-def test_a_missing_git_root_is_red_after_the_rest_of_the_snapshot_is_taken(srv):
-    srv["env"]["APPS_GIT_ROOT"] = str(srv["tmp"] / "nowhere")
+def _lose(srv, key):
+    srv["env"][key] = str(srv["tmp"] / "nowhere")
+    return "No such file or directory"
+
+
+def _lock(srv, key):
+    os.chmod(srv["env"][key], 0)
+    return "Permission denied"
+
+
+@pytest.mark.parametrize("key", ["APPS_GIT_ROOT", "APPS_WWW_ROOT"])
+@pytest.mark.parametrize("lose", [_lose, _lock])
+def test_a_lost_apps_root_is_red_after_the_rest_of_the_snapshot_is_taken(srv, key, lose):
+    if lose is _lock and os.geteuid() == 0:
+        pytest.skip("root reads a mode-0 directory")
+    root = Path(srv["env"][key])
+    why = lose(srv, key)
+    name = Path(srv["env"][key]).name
     r = run(srv, "snapshot.sh")
+    os.chmod(root, 0o755)
     assert r.returncode == 1
     assert r.stderr.strip().endswith(
-        "snapshot taken WITHOUT the apps: an apps root could not be read (No such file or directory nowhere)")
+        f"snapshot taken WITHOUT the apps: an apps root could not be read ({why} {name})")
     assert not srv["stage"].exists()
     staged = restored(srv, only_snapshot(srv), srv["stage"])
     m = json.loads((staged / "manifest.json").read_text())
     assert m["messages"] == 3 and (staged / "disjorn.db").exists()
-    assert m["apps"]["lost_roots"] == {"nowhere": "No such file or directory"} and m["apps"]["warnings"] == {}
-    assert m["apps"]["apps"][LIVE]["bundle_sha256"] is None and m["apps"]["apps"][LIVE]["live"]
+    assert m["apps"]["lost_roots"] == {name: why} and m["apps"]["warnings"] == {}
+    kept = m["apps"]["apps"][LIVE]
+    assert bool(kept["bundle_sha256"]) == (key == "APPS_WWW_ROOT")
+    assert bool(kept["live"]) == (key == "APPS_GIT_ROOT")
     assert "apps-partial" in tags(srv)
     assert "forget" in (srv["tmp"] / "repo/calls.log").read_text()
 
     assert run(srv, "drill.sh").returncode == 1
     [post] = posts(srv)
     assert post.startswith("backup drill RED")
-    assert "apps: nowhere could not be read at snapshot time (No such file or directory)" in post
+    assert f"apps: {name} could not be read at snapshot time ({why})" in post
+
+
+def test_an_unexpected_error_in_one_app_is_its_warning_and_the_others_are_staged(srv, tmp_path, monkeypatch):
+    real_bundle, real_copy = apps.bundle, apps.copy_tree
+
+    def bundle(git_dir, dest):
+        if LIVE in str(git_dir):
+            raise ValueError("secret-file-name.html")
+        return real_bundle(git_dir, dest)
+
+    def copy_tree(fd, dst):
+        if DRAFT in str(dst):
+            raise KeyError("secret-file-name.html")
+        return real_copy(fd, dst)
+
+    for key in ("PATH", "GIT_CONFIG_GLOBAL"):
+        monkeypatch.setenv(key, srv["env"][key])
+    monkeypatch.setattr(apps, "bundle", bundle)
+    monkeypatch.setattr(apps, "copy_tree", copy_tree)
+    facts = apps.stage(srv["tmp"] / "apps-git", srv["tmp"] / "apps-www", tmp_path / "out")
+    assert set(facts["warnings"]) == {LIVE, DRAFT}
+    assert facts["warnings"][LIVE].startswith("git dir: unexpected ValueError at test_backup_apps.py:")
+    assert facts["warnings"][DRAFT].startswith("preview: unexpected KeyError at test_backup_apps.py:")
+    assert "secret-file-name" not in json.dumps(facts)
+    assert facts["apps"][LIVE]["bundle_sha256"] is None and facts["apps"][LIVE]["live"]["files"] == 2
+    assert facts["apps"][DRAFT]["bundle_sha256"] and facts["apps"][DRAFT]["preview"] is None
+
+    monkeypatch.setattr(apps, "stage_app", lambda dirs, dest: 1 / 0)
+    facts = apps.stage(srv["tmp"] / "apps-git", srv["tmp"] / "apps-www", tmp_path / "out2")
+    assert facts["apps"] == {} and set(facts["warnings"]) == {LIVE, DRAFT}
+    assert facts["warnings"][LIVE].startswith("unexpected ZeroDivisionError at test_backup_apps.py:")
+
+
+def test_a_ref_name_that_is_not_utf8_does_not_stop_the_snapshot_or_the_drill(srv):
+    git_dir, _ = srv["live"]
+    _git(srv["env"], git_dir, "update-ref", os.fsdecode(b"refs/heads/caf\xe9"), "HEAD")
+    r, staged, m = snapshot(srv)
+    assert m["apps"]["warnings"] == {} and m["apps"]["apps"][LIVE]["bundle_sha256"]
+    heads = subprocess.run(["git", "bundle", "list-heads", str(staged / "apps" / LIVE / "repo.bundle")],
+                           capture_output=True, check=True).stdout
+    assert b"refs/heads/caf\xe9" in heads
+    r = run(srv, "drill.sh")
+    assert r.returncode == 0, r.stderr + "\n".join(posts(srv))
+    assert "apps: 2 bundles verified, 1 live roots matched" in posts(srv)[0]
 
 
 def test_an_app_with_no_commits_is_recorded_without_a_bundle(srv):
