@@ -87,6 +87,8 @@ def tmp_db_path(tmp_path, monkeypatch):
     monkeypatch.setenv("VAPID_PUBLIC_KEY", "")
     monkeypatch.setenv("VAPID_PRIVATE_KEY", "")
     monkeypatch.setenv("MENTION_ONLY_CHANNEL_IDS", "[]")
+    monkeypatch.setenv("BOT_FILES_EXPORT_ROOT", str(tmp_path / "files-ro"))
+    monkeypatch.setenv("BOT_FILES_SWEEP_SECONDS", "0")
     reset_settings_cache()
     yield db_path
     reset_settings_cache()

@@ -94,6 +94,7 @@ from ..models import (
     User,
     UserStatus,
 )
+from ..services import bot_files
 from .auth import Actor, get_actor, get_admin_user, get_current_user
 
 router = APIRouter()
@@ -735,6 +736,7 @@ async def _destroy_channel(channel: dict[str, Any], by_user_id: int) -> None:
     async with db.transaction() as conn:
         await _record_deletion(conn, channel, "user", by_user_id)
         await conn.execute("DELETE FROM channels WHERE id = ?", (channel["id"],))
+    await bot_files.export_sweep()
 
     await events.publish(
         {
@@ -1295,6 +1297,7 @@ async def remove_bot_from_channel(
         (channel_id, bot_id),
     )
     removed = cur.rowcount > 0
+    await bot_files.export_sweep()
     if removed:
         # The removed bot is in the `also` recipient set (ws._send_to_members),
         # so it hears its own eviction — the last frame it gets for this

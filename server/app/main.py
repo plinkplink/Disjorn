@@ -15,6 +15,7 @@ same shape every HTTPException already uses, instead of FastAPI's default
 list-of-dicts.
 """
 
+import asyncio
 import logging
 import re
 from contextlib import asynccontextmanager
@@ -48,6 +49,7 @@ from .routers import (
     stt,
     summarize,
 )
+from .services import bot_files as bot_files_service
 
 logger = logging.getLogger(__name__)
 
@@ -371,7 +373,17 @@ async def lifespan(app: FastAPI):
     ws.init()  # WP5: reset hub state + (re-)subscribe fan-out to the event bus
     notifications.init()  # WP7: subscribe the Web Push notifier to the event bus
     slash.init()  # WP-L2: reset the in-process slash rate-limit window
+    bot_files_service.init()
+    await bot_files_service.export_sweep()
+    sweeper = None
+    if settings.BOT_FILES_SWEEP_SECONDS > 0:
+        sweeper = asyncio.create_task(
+            bot_files_service.sweep_forever(settings.BOT_FILES_SWEEP_SECONDS)
+        )
     yield
+    if sweeper is not None:
+        sweeper.cancel()
+        await asyncio.gather(sweeper, return_exceptions=True)
     await db.close()
 
 

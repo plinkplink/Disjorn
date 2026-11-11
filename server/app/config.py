@@ -76,6 +76,9 @@ class Settings(BaseSettings):
     APPROVAL_RELAY_BOT_NAMES: list[str] = ["broker"]
     BACKLOG_RELAY_BOT_NAMES: list[str] = ["broker"]
     FILES_RELAY_BOT_NAMES: list[str] = ["broker"]
+    BOT_FILES_EXPORT_ROOT: str = "/srv/disjorn-files-ro"
+    BOT_FILES_EXPORT_SEATS: list[str] = ["res-gable"]
+    BOT_FILES_SWEEP_SECONDS: float = 60  # 0 runs no timer
 
     CUSTODIAN_CHANNEL_ID: int = 4
 
