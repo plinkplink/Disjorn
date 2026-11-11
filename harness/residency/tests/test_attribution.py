@@ -77,6 +77,19 @@ def test_an_unpinned_human_summon_sends_no_attribution(tmp_path):
     assert "attribution" not in posted.kwargs
 
 
+@pytest.mark.parametrize("pin, model", [(PIN, PIN), (None, "")])
+def test_a_session_is_launched_knowing_its_pin_and_its_summoner(tmp_path, pin, model):
+    config = make_config(tmp_path, container={"model": pin} if pin else {})
+    client = FakeClient(events=[make_event(
+        channel_id=MAIN, seq=50, msg_id=1234, author_name="alice",
+        context={"awake_users": []})])
+    launcher = FakeLauncher()
+    asyncio.run(SummonAdapter(client, config, launcher=launcher,
+                              hops=FakeArbiter()).run())
+    assert launcher.envs == [
+        {"DISJORN_SUMMON_MODEL": model, "DISJORN_SUMMONER": "alice"}]
+
+
 def test_audit_line_chars_equal_the_body_length(tmp_path):
     posted, audit = _serve(tmp_path)
     assert f"posted #101 ({len(REPLY)} chars)" in audit

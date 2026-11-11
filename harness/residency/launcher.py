@@ -538,7 +538,8 @@ class ContainerLauncher:
         except Exception:  # noqa: BLE001 — already reaping
             pass
 
-    async def run(self, prompt: str) -> SessionResult:
+    async def run(self, prompt: str,
+                  env: Optional[dict[str, str]] = None) -> SessionResult:
         """Launch one session, feed ``prompt`` on stdin, return the result.
 
         Never raises for a subprocess failure/timeout — those come back as a
@@ -556,7 +557,7 @@ class ContainerLauncher:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                env=self._env(),
+                env={**self._env(), **(env or {})},
             )
         except OSError as exc:
             return SessionResult(

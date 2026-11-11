@@ -68,6 +68,17 @@ def test_extra_env_reaches_subprocess(tmp_path, monkeypatch):
     assert result.action_count == 1
 
 
+def test_one_runs_env_reaches_subprocess_over_the_config_s(tmp_path):
+    cfg = make_config(tmp_path, container={
+        "env": {"RESIDENCY_STUB_STDOUT": json.dumps({"reply": "config", "actions": 1})},
+    })
+    launcher = ContainerLauncher(cfg.container)
+    stamped = asyncio.run(launcher.run("x", env={
+        "RESIDENCY_STUB_STDOUT": json.dumps({"reply": "this run", "actions": 1})}))
+    assert stamped.reply == "this run"
+    assert asyncio.run(launcher.run("x")).reply == "config"
+
+
 # The session id is what lets a caller pick this session's lines out of the
 # shared action log (2026-08-25 wake-pre-arm-riders item 3), so it has to
 # survive both output shapes and a session that died mid-stream.

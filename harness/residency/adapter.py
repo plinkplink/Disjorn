@@ -288,10 +288,12 @@ class SummonAdapter:
         )
 
         prompt = await self._assemble(event, trigger, where)
+        stamp = {"DISJORN_SUMMON_MODEL": self.config.container.model or "",
+                 "DISJORN_SUMMONER": str(summoner or "")}
 
         keepalive = asyncio.ensure_future(self._typing_keepalive(channel_id))
         try:
-            result = await self.launcher.run(prompt)
+            result = await self.launcher.run(prompt, env=stamp)
         finally:
             keepalive.cancel()
             try:

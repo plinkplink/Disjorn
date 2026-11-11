@@ -200,11 +200,13 @@ class FakeLauncher:
     )
     delay: float = 0.0
     prompts: list[str] = field(default_factory=list)
+    envs: list[dict] = field(default_factory=list)
 
-    async def run(self, prompt: str) -> SessionResult:
+    async def run(self, prompt: str, env=None) -> SessionResult:
         import asyncio
 
         self.prompts.append(prompt)
+        self.envs.append(env)
         if self.delay:
             await asyncio.sleep(self.delay)
         return self.result
