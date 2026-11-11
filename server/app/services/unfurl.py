@@ -30,13 +30,13 @@ from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 import httpx
 
 from .. import db
+from ..config import get_settings
 
 logger = logging.getLogger(__name__)
 
 UNFURL_MAX_BYTES = 256 * 1024
 FETCH_TIMEOUT = 10.0
 CACHE_TTL = datetime.timedelta(days=7)
-USER_AGENT = "Mozilla/5.0 (compatible; Disjorn/1.0; link unfurler)"
 MAX_REDIRECTS = 5
 
 YOUTUBE_HOSTS = frozenset(
@@ -103,11 +103,21 @@ def parse_meta(html: str, base_url: str) -> dict[str, Optional[str]]:
     return {"title": title, "description": description, "image_url": image}
 
 
+class NonPublicAddress(ValueError):
+    """The host resolves to an address that is not globally routable."""
+
+
+def user_agent() -> str:
+    """Wikimedia answers 403 to a fetcher whose User-Agent names no contact."""
+    contact = get_settings().FETCH_CONTACT.strip() or "self-hosted chat link fetcher"
+    return f"Disjorn/1.0 ({contact}) python-httpx/{httpx.__version__}"
+
+
 async def require_public(url: str) -> str:
     """The first resolved address, once every address the host resolves to is globally routable."""
     parts = urlsplit(url)
     if parts.scheme not in ("http", "https") or not parts.hostname:
-        raise ValueError("unfurl fetches only http(s) URLs with a host")
+        raise ValueError("only http(s) URLs with a host are fetched")
     port = parts.port or (443 if parts.scheme == "https" else 80)
     infos = await asyncio.get_running_loop().getaddrinfo(
         parts.hostname, port, type=socket.SOCK_STREAM)
@@ -117,10 +127,10 @@ async def require_public(url: str) -> str:
         if ip.version == 6 and ip.ipv4_mapped is not None:
             ip = ip.ipv4_mapped
         if not ip.is_global:
-            raise ValueError("unfurl refuses a non-public address")
+            raise NonPublicAddress("refusing a non-public address")
         checked.append(ip)
     if not checked:
-        raise ValueError("unfurl: the host resolved to nothing")
+        raise ValueError("the host resolved to nothing")
     return str(checked[0])
 
 
@@ -131,9 +141,9 @@ def _pinned(url: str, ip: str) -> str:
     return parts._replace(netloc=netloc).geturl()
 
 
-async def fetch_head(url: str, transport: Optional[httpx.AsyncBaseTransport] = None
-                     ) -> tuple[str, str]:
-    """GET the first UNFURL_MAX_BYTES of a page. Returns (final_url, html).
+async def fetch_head(url: str, transport: Optional[httpx.AsyncBaseTransport] = None,
+                     max_bytes: int = UNFURL_MAX_BYTES) -> tuple[str, str]:
+    """GET the first max_bytes of a page. Returns (final_url, html).
 
     Raises httpx errors / ValueError on failure — unfurl() catches them.
     Monkeypatched in tests.
@@ -145,7 +155,7 @@ async def fetch_head(url: str, transport: Optional[httpx.AsyncBaseTransport] = N
         async with httpx.AsyncClient(
             timeout=FETCH_TIMEOUT,
             follow_redirects=False,
-            headers={"User-Agent": USER_AGENT},
+            headers={"User-Agent": user_agent()},
             transport=transport,
         ) as client, client.stream(
             "GET", _pinned(url, ip),
@@ -161,12 +171,12 @@ async def fetch_head(url: str, transport: Optional[httpx.AsyncBaseTransport] = N
             async for chunk in resp.aiter_bytes():
                 chunks.append(chunk)
                 total += len(chunk)
-                if total >= UNFURL_MAX_BYTES:
+                if total >= max_bytes:
                     break
-            body = b"".join(chunks)[:UNFURL_MAX_BYTES]
+            body = b"".join(chunks)[:max_bytes]
             encoding = resp.charset_encoding or "utf-8"
             return url, body.decode(encoding, errors="replace")
-    raise ValueError("unfurl: too many redirects")
+    raise ValueError("too many redirects")
 
 
 def _start_seconds(raw: str) -> Optional[int]:

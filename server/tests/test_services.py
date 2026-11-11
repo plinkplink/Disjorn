@@ -702,3 +702,79 @@ def test_the_fetch_connects_to_the_checked_address_under_the_original_name(monke
 ])
 def test_pinning_swaps_only_the_host(url, ip, pinned):
     assert unfurl_service._pinned(url, ip) == pinned
+
+
+# ---------------------------------------------------------------------------
+# Summarize: public-only fetch
+# ---------------------------------------------------------------------------
+
+def _never_fetched(request):
+    raise AssertionError(f"fetched {request.url}")
+
+
+@pytest.mark.parametrize("url", [
+    "http://127.0.0.1:8399/", "http://localhost/", "http://10.0.0.5/", "http://192.168.1.1/",
+    "http://169.254.169.254/latest/meta-data/", "http://[::1]/", "http://100.101.102.103/",
+    "http://[fd7a:115c:a1e0::1]/",
+])
+async def test_fetch_page_refuses_a_private_loopback_or_tailnet_address(url):
+    with pytest.raises(summarize_service.PageRefused):
+        await summarize_service.fetch_page(url, transport=httpx.MockTransport(_never_fetched))
+
+
+async def test_fetch_page_refuses_a_redirect_into_the_tailnet():
+    hops = []
+
+    def handler(request):
+        hops.append(str(request.url))
+        return httpx.Response(302, headers={"location": "http://100.101.102.103/status"})
+
+    with pytest.raises(summarize_service.PageRefused):
+        await summarize_service.fetch_page(
+            "https://93.184.215.14/", transport=httpx.MockTransport(handler))
+    assert hops == ["https://93.184.215.14/"]
+
+
+async def test_a_refused_page_is_a_400_and_never_reaches_the_engine(client, monkeypatch):
+    await make_user()
+    await login(client)
+    fake = FakeSummarizer()
+    monkeypatch.setattr(summarize_service, "get_summarizer", lambda: fake)
+    r = await client.post("/summarize", json={"url": "http://127.0.0.1:9/admin"})
+    assert r.status_code == 400
+    assert r.json()["detail"] == summarize_service.REFUSED
+    assert fake.calls == []
+
+
+async def test_fetch_page_sends_the_contact_user_agent_and_reads_past_the_unfurl_cap(
+        monkeypatch, tmp_db_path):
+    monkeypatch.setenv("FETCH_CONTACT", "https://chat.example/about")
+    reset_settings_cache()
+    page = "<p>" + "x" * (unfurl_service.UNFURL_MAX_BYTES + 1000) + "</p>"
+    seen = {}
+
+    def handler(request):
+        seen["ua"] = request.headers["user-agent"]
+        return httpx.Response(200, html=page)
+
+    html = await summarize_service.fetch_page(
+        "https://93.184.215.14/a", transport=httpx.MockTransport(handler))
+    assert seen["ua"] == (
+        f"Disjorn/1.0 (https://chat.example/about) python-httpx/{httpx.__version__}")
+    assert html == page
+
+
+def test_the_user_agent_without_a_contact_still_describes_the_fetcher(monkeypatch, tmp_db_path):
+    monkeypatch.delenv("FETCH_CONTACT", raising=False)
+    reset_settings_cache()
+    assert unfurl_service.user_agent() == (
+        f"Disjorn/1.0 (self-hosted chat link fetcher) python-httpx/{httpx.__version__}")
+
+
+async def test_fetch_page_reports_the_sites_status_not_the_pinned_address():
+    def handler(request):
+        return httpx.Response(403)
+
+    with pytest.raises(summarize_service.PageFetchError, match="^the site answered HTTP 403$"):
+        await summarize_service.fetch_page(
+            "https://93.184.215.14/a", transport=httpx.MockTransport(handler))

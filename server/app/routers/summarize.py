@@ -53,6 +53,8 @@ class SummarizeRequest(BaseModel):
 async def summarize_url(body: SummarizeRequest, user: CurrentUser) -> dict[str, str]:
     try:
         html = await summarize_service.fetch_page(body.url)
+    except summarize_service.PageRefused as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     except summarize_service.PageFetchError as exc:
         raise HTTPException(status_code=502, detail=f"Could not fetch page: {exc}")
 
