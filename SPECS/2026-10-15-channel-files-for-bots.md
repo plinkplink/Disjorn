@@ -77,10 +77,10 @@ Tier 2 — touches the privacy wall (`privacy.py` callers), a migration, broker 
 ~500k build tokens across two slices (A: migration + filter + Claudette's read with read shapes; B: exporter + both mounts + write verb). Slice A first; B is useless without A's filter function.
 
 ## Confirm record
-- **Confirmed by**: <pending>
-- **#custodian seq**: <pending>
-- **Confirmed at**: <pending>
+- **Confirmed by**: plink
+- **#custodian seq**: 3483 (the slug is typed there without its first digit)
+- **Confirmed at**: 2026-11-11
 <!-- No Confirm record → no build. This is the gate. -->
 
 ## Status
-`draft`
+`confirmed`
