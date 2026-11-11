@@ -9,6 +9,7 @@ time, and there is nothing else: no CDN, no npm, no network.
 | slot | copy | into |
 |---|---|---|
 | game | `/shelf/game/kaplay.js`, `/shelf/game/LICENSE` | `vendor/` |
+| phaser | `/shelf/phaser/phaser.min.js`, `/shelf/phaser/LICENSE-phaser`, `/shelf/phaser/phaser-boot/` | `vendor/` |
 | chart | `/shelf/chart/chart.umd.min.js`, `/shelf/chart/LICENSE` | `vendor/` |
 | reset | `/shelf/css/modern-normalize.css`, `/shelf/css/LICENSE` | `vendor/` |
 | fonts | `/shelf/fonts/` — the whole directory | `vendor/fonts/` |
@@ -26,6 +27,57 @@ modules. `kaplay()` makes its own full-window canvas and puts the whole API on
   add([text('hi'), pos(80, 40)]);
 </script>
 ```
+
+**phaser — Phaser 3.90.0, 1.2 MB, MIT.** The larger 2D engine: scenes,
+arcade and matter physics, tilemaps, tweens, particles. Script tag, global
+`Phaser`. This is Phaser 3, the last 3.x release; Phaser 4 APIs are not here.
+
+The house CSP blocks `data:` and `blob:` images, and Phaser uses both by
+default, so **two config keys are not optional**. Without `images` the game
+dies at boot; without `loader` no image ever loads.
+
+```html
+<div id="game"></div>
+<script src="vendor/phaser.min.js"></script>
+<script src="app.js"></script>
+```
+
+```js
+new Phaser.Game({
+  images: {
+    default: 'vendor/phaser-boot/default.png',
+    missing: 'vendor/phaser-boot/missing.png',
+    white: 'vendor/phaser-boot/white.png',
+  },
+  loader: { imageLoadType: 'HTMLImageElement' },
+  parent: 'game', width: 800, height: 600, scene: MyScene,
+});
+```
+
+For the same reason `load.svg`, `load.htmlTexture` and `textures.addBase64` do
+not work here. Load PNG files, or draw with `this.add.graphics()`.
+
+**typescript — esbuild 0.28.2 and tsc 7.0.2, commands in the image, nothing to
+copy.** `tsc` type-checks and writes nothing; `esbuild` strips the types and
+writes the one file the page loads. Run both from `/work`, and run them again
+after every change to `src/`:
+
+```sh
+tsc --noEmit src/main.ts
+esbuild src/main.ts --bundle --outfile=app.js
+```
+
+With Phaser, use the global `Phaser` from the script tag (do not `import` it;
+esbuild has nothing to resolve it to) and hand its types to the checker. The
+types stay on the shelf: they are 6 MB and no browser reads them.
+
+```sh
+tsc --noEmit --skipLibCheck /shelf/phaser/types/phaser.d.ts src/main.ts
+```
+
+This is tsc 7: `strict` is on unless you turn it off, and options removed
+after TypeScript 5 (`--moduleResolution node`, `--target es5`, `--outFile`)
+are errors. The two commands above need no `tsconfig.json`.
 
 **chart — Chart.js 4.5.1 UMD, 208 KB, MIT.** Script tag, global `Chart`, all
 controllers registered.
@@ -88,6 +140,6 @@ storage, so do not design around it yet. Any other scope throws `RangeError`.
 As a module instead: `import { houseStore } from './vendor/house-store.mjs';`
 — the same code, exported rather than assigned to `window`.
 
-**not on the shelf:** anything else. No 3D, no video, no framework, no build
-step, no package manager. If a job seems to need one, write it plainly instead
-and say so in your closing line.
+**not on the shelf:** anything else. No 3D, no video, no framework, no package
+manager, and no build step but the two typescript commands above. If a job
+seems to need one, write it plainly instead and say so in your closing line.

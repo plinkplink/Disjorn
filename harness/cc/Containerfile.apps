@@ -49,6 +49,39 @@
 #   forgotten line away from an image that carries it. Same rule, same reason,
 #   as 07-resident-image.sh.
 
+# ── the TypeScript toolchain ─────────────────────────────────────────────────
+# Fetched here, where the build has egress, because the running seat has none.
+# Every ADD below must have its line in the sha256sum check: a tarball that is
+# downloaded and not verified is an unpinned dependency with a version number
+# on it. Both tools are static linux-x64 binaries; neither needs node or npm.
+FROM docker.io/library/debian:trixie-slim AS toolchain
+
+ARG ESBUILD_VERSION=0.28.2
+ARG ESBUILD_LINUX_X64_TGZ_SHA256=9573bb2233aab0f9ea7647d5cca9726113cc1768de61d66b17267f4db84488f6
+ARG ESBUILD_TGZ_SHA256=e045f94c235c7adc50e77ba2a579c7bec41b496b6b47c3a7845f7c1e19959a88
+ARG TYPESCRIPT_VERSION=7.0.2
+ARG TYPESCRIPT_LINUX_X64_TGZ_SHA256=7ecad6f67377e831856367ab062ef394f21506a611405bf8ac0ff039348637d3
+
+ADD https://registry.npmjs.org/@esbuild/linux-x64/-/linux-x64-${ESBUILD_VERSION}.tgz /dl/esbuild-linux-x64.tgz
+ADD https://registry.npmjs.org/esbuild/-/esbuild-${ESBUILD_VERSION}.tgz /dl/esbuild.tgz
+ADD https://registry.npmjs.org/@typescript/typescript-linux-x64/-/typescript-linux-x64-${TYPESCRIPT_VERSION}.tgz /dl/typescript-linux-x64.tgz
+
+# The esbuild binary's own package ships no licence text, so that one file
+# comes from the main esbuild package. The TypeScript package is kept whole:
+# tsc reads its lib.*.d.ts from the directory it sits in.
+RUN printf '%s  %s\n' \
+        "${ESBUILD_LINUX_X64_TGZ_SHA256}" /dl/esbuild-linux-x64.tgz \
+        "${ESBUILD_TGZ_SHA256}" /dl/esbuild.tgz \
+        "${TYPESCRIPT_LINUX_X64_TGZ_SHA256}" /dl/typescript-linux-x64.tgz \
+        | sha256sum -c - \
+    && mkdir -p /out/bin /out/lib/typescript /out/share/licenses/esbuild \
+    && tar -xzf /dl/esbuild-linux-x64.tgz -C /out/bin \
+           --strip-components=2 --no-same-owner package/bin/esbuild \
+    && tar -xzf /dl/esbuild.tgz -C /out/share/licenses/esbuild \
+           --strip-components=1 --no-same-owner package/LICENSE.md \
+    && tar -xzf /dl/typescript-linux-x64.tgz -C /out/lib/typescript \
+           --strip-components=1 --no-same-owner
+
 FROM docker.io/library/debian:trixie-slim
 
 # Pinned Claude Code release. THIS MUST EQUAL harness/cc/Containerfile's pin —
@@ -82,6 +115,13 @@ RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
 # res-appsbuilding host uid onto it, so files the turn writes into /work are
 # owned on the host by the one account that owns /srv/apps.
 RUN useradd --create-home --uid 1000 --user-group --shell /bin/bash resident
+
+# esbuild and tsc, from the stage above. The versions are run once here so an
+# image whose tools cannot start fails at build, not in a user's turn.
+COPY --from=toolchain /out/ /usr/local/
+RUN ln -s ../lib/typescript/lib/tsc /usr/local/bin/tsc \
+    && esbuild --version \
+    && tsc --version
 
 # ── the shelf ────────────────────────────────────────────────────────────────
 # Vendored assets, pinned and hashed in shelf/MANIFEST.toml. Read-only by

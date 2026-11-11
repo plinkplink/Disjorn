@@ -12,10 +12,11 @@ Spec: `SPECS/2026-09-06-apps-builder-seat.md` §F (shelf) and §G (store shim).
 
 **"An app is worse without it."** Not "an app might use it", not "it's popular",
 not "it saves the builder ten minutes". Worse without it. That bar is why the
-shelf is six packages and not sixty: one 2D game library, one chart library,
-one CSS reset, two font families at the weights a UI actually uses, one icon
-sprite. No 3D, no video, no framework, no build step — a turn writes static
-files and the browser runs them.
+shelf is seven packages and not seventy: two 2D game libraries, one chart
+library, one CSS reset, two font families at the weights a UI actually uses,
+one icon sprite. No 3D, no video, no framework — a turn writes static files
+and the browser runs them. The one build step is TypeScript: `esbuild` and
+`tsc` are commands in the image, pinned in `Containerfile.apps`, not here.
 
 Every entry costs image size, a licence to carry, and a version to keep an eye
 on, forever. A package that only *might* help does not clear the bar.
@@ -25,6 +26,9 @@ on, forever. A package that only *might* help does not clear the bar.
 | path | what | licence |
 |---|---|---|
 | `game/kaplay.js` | kaplay 3001.0.19, IIFE, global `kaplay` | MIT |
+| `phaser/phaser.min.js` | phaser 3.90.0, UMD, global `Phaser` | MIT |
+| `phaser/types/*.d.ts` | phaser 3.90.0 type definitions, for `tsc` only | MIT |
+| `phaser/phaser-boot/*.png` | phaser's three boot textures as files | MIT |
 | `chart/chart.umd.min.js` | chart.js 4.5.1, UMD, global `Chart` | MIT |
 | `css/modern-normalize.css` | modern-normalize 3.0.1 | MIT |
 | `fonts/*.woff2` + `fonts/fonts.css` | Inter 400/500/600/700, JetBrains Mono 400/700, latin | OFL-1.1 |
@@ -80,5 +84,15 @@ lists.
 - `icons/sprite.svg` symbols carry no `stroke` presentation attributes, so the
   consuming `<svg>` must set `fill="none" stroke="currentColor"` itself — see
   `INDEX.md` for the exact snippet.
+- Phaser builds its three boot textures from `data:` URIs and loads images
+  through `blob:` URLs. The gate's `default-src 'self'` allows neither, and
+  without the boot textures the game throws before the first scene. So
+  `phaser/phaser-boot/` carries those textures as files, decoded from the
+  base64 literals in `phaser.min.js`, and `INDEX.md` gives the two config
+  keys (`images`, `loader.imageLoadType`) that point Phaser at files. One
+  `data:` refusal still reaches the console at load: Phaser's blend-mode
+  probe, which only falls back.
+- `phaser/types/phaser.d.ts` is 6.2 MB and is never copied into an app: a
+  turn passes it to `tsc` from `/shelf`.
 - The fonts are the latin subset only. A glyph outside it falls through to the
   next family in the CSS stack, so always give `font-family` a real fallback.

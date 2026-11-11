@@ -34,8 +34,14 @@ a-w`).
 - `Bash(ls|cat|head|tail|mkdir|cp|mv|rm:*)` — the file moves the brief tells it
   to make ("copy what you use into `/work/vendor/`"). Scoped by prefix, which
   is what Claude Code's Bash matcher can express.
-- `Bash(node:*)` — a static app has no build step, but a one-off `node -e` to
-  check a JS file parses is honest work and needs no network.
+- `Bash(node:*)` — a one-off `node -e` to check a JS file parses is honest
+  work and needs no network.
+- `Bash(esbuild:*)`, `Bash(tsc:*)` — the TypeScript build step. Both are
+  static binaries baked into the image at pinned versions
+  (`Containerfile.apps`); neither resolves a package from a registry or
+  fetches a URL, so they compile what is already in `/work` and `/shelf` and
+  nothing else. Allowed by name, not by a wider pattern: `node` could already
+  run arbitrary JavaScript, so these two add convenience, not reach.
 
 Deliberately NOT allowed: `git`. The harvest owns this repo's history — it
 commits `turn N` itself, from outside the container — and a turn that made its
@@ -51,7 +57,8 @@ than a silent success.
 - `Bash(curl|wget|nc|ncat|socat|ssh|scp:*)` — the same wall at the shell.
 - `Bash(npm|npx|pip:*)` — no package install. The app is static files; the
   shelf is the dependency story, and a turn that could install could also
-  fetch.
+  fetch. The TypeScript tools do not change this: they are in the image
+  already, and `npx tsc` stays refused.
 - `Bash(git push:*)` — there is no remote and there must never be one; denied
   by name so it reads as a decision rather than an omission.
 - `Bash(sudo|su:*)` — nothing to escalate to, and an attempt should be loud.
