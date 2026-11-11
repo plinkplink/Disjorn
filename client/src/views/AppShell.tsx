@@ -22,7 +22,7 @@ import {
 } from "../hashRoute";
 import { appRowAction, canKeepBuilding } from "../lib/appRow";
 import { POPUP_BLOCKED_NOTE, openMinted } from "../lib/openMinted";
-import { isSidebarRow, tabTitle } from "../lib/unread";
+import { isSidebarRow, syncAppBadge, tabTitle, totalUnread } from "../lib/unread";
 import { usePush } from "../push";
 import { useApprovals } from "../stores/approvals";
 import { useApps } from "../stores/apps";
@@ -798,13 +798,16 @@ export function AppShell() {
 
   // The title is the sum of the sidebar's own badges: "(3) Disjorn".
   const title = tabTitle(channels);
+  const unreadTotal = totalUnread(channels);
   useEffect(() => {
     document.title = title;
-  }, [title]);
+    syncAppBadge(navigator, unreadTotal);
+  }, [title, unreadTotal]);
   // Signed out, the tab must not go on claiming unread messages.
   useEffect(
     () => () => {
       document.title = tabTitle([]);
+      syncAppBadge(navigator, 0);
     },
     [],
   );

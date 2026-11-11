@@ -109,3 +109,32 @@ export function tabTitle(
   const total = totalUnread(rows);
   return total > 0 ? `(${total}) Disjorn` : "Disjorn";
 }
+
+export type BadgeCall = "set" | "clear" | null;
+
+/** What the installed app's icon badge needs for this total; null where the
+    Badging API does not exist. */
+export function badgeCall(total: number, supported: boolean): BadgeCall {
+  if (!supported) return null;
+  return total > 0 ? "set" : "clear";
+}
+
+export interface BadgeNavigator {
+  setAppBadge?: (count?: number) => Promise<void>;
+  clearAppBadge?: () => Promise<void>;
+}
+
+/** Put the total on the app icon. A badge is decoration: this never throws
+    and never leaves a rejection unhandled. */
+export function syncAppBadge(nav: BadgeNavigator | undefined, total: number): void {
+  const supported =
+    typeof nav?.setAppBadge === "function" && typeof nav.clearAppBadge === "function";
+  const call = badgeCall(total, supported);
+  if (call === null || nav === undefined) return;
+  try {
+    const done = call === "set" ? nav.setAppBadge?.(total) : nav.clearAppBadge?.();
+    void Promise.resolve(done).catch(() => undefined);
+  } catch {
+    /* refused by the platform */
+  }
+}
