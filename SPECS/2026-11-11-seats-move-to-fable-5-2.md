@@ -47,7 +47,9 @@ touched: she stays on `claude-opus-5-5`.
   1. `07-resident-image.sh` and the apps image rebuild (`10-appsbuilding.sh`).
   2. Probes in each image: `claude -p --model claude-fable-5-2`, then one
      session under the seat's managed settings that spawns a subagent, with
-     `modelUsage` read off the result event.
+     `modelUsage` read off the result event. Then the credential-cache
+     recheck `config-template/README.md` asks for on a CLI bump: no
+     `.credentials.json` in the resident home (Gable #3425).
   3. Install the settings into `/srv/disjorn-build-config/{gable,claudette}/`.
   4. Live pins, each with a backup: `/etc/disjorn-broker/broker.toml`
      `[start_build]` and `[apps]`, `/etc/disjorn-apps/launch.toml` `[runner]`,
@@ -71,6 +73,7 @@ touched: she stays on `claude-opus-5-5`.
 - **Surfaces by lane**:
   - custodian: `harness/broker/` (template pin, APPS_DEFAULTS, test) → review owner Claudette
   - gable: `harness/cc/` (both Containerfiles, apps runner pins, both managed settings, test), `harness/residency/summon.toml.template` → review owner Gable
+- **Reviews**: custodian half approved by Claudette #3424, gable half PASS by Gable #3425, both at e3b4210.
 
 ## Expected diff tier
 Tier 2 — build-seat model, Gable's model, and the image both seats run.
@@ -79,8 +82,9 @@ Tier 2 — build-seat model, Gable's model, and the image both seats run.
 One keyboard session.
 
 ## Confirm record
-- **Confirmed by**: plink, at the keyboard (the request above)
-- **#custodian seq**: pending
+- **Confirmed by**: plink
+- **#custodian seq**: 3427
+- **Confirmed at**: 2026-11-11T17:58:54Z
 
 ## Status
 built@loop/2026-11-11-seats-move-to-fable-5-2
