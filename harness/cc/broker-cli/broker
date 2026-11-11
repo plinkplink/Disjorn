@@ -570,6 +570,37 @@ VERB_SURFACE = {
             },
         },
     },
+    "post-file": {
+        "help": "post one file from /files-outbox as an attachment on your own message",
+        "args": {
+            "path": {
+                "flag": "--path",
+                "type": "string",
+                "required": True,
+                "help": "The file to post, as /files-outbox/<name>. No subdirectories.",
+                "max_len": 300,
+                "pattern": "^/files-outbox/[^/]+$",
+                "no_dotdot": True,
+                "no_nul": True,
+            },
+            "channel": {
+                "flag": "--channel",
+                "type": "integer",
+                "required": True,
+                "help": "The id of the channel to post into.",
+                "minimum": 1,
+                "maximum": 2147483647,
+            },
+            "text": {
+                "flag": "--text",
+                "type": "string",
+                "required": False,
+                "help": "The message the file is attached to. May be omitted.",
+                "max_len": 16000,
+                "no_nul": True,
+            },
+        },
+    },
 }
 # ── END GENERATED VERB SURFACE ──────────────────────────────────────────
 

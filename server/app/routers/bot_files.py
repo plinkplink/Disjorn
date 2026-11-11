@@ -1,26 +1,31 @@
 """GET /bot/attachments/{id}: one uploaded file, in the shape a bot may read.
+POST /bot/attachments: one file a resident seat posts as its own bot.
 
 A file is never easier to reach than its message: the reading bot must be a
 member of the file's channel, and then `visible_to_bots` decides the file.
 """
 
+import base64
+import binascii
+import io
 import logging
 from typing import Annotated, Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile
+from pydantic import BaseModel, Field
+from starlette.datastructures import Headers
 
 from .. import db
 from ..config import get_settings
 from ..services import bot_files
-from .approval import RESIDENT_PRINCIPAL_RE
+from . import media
 from .auth import Actor, get_actor
 from .channels import is_member
+from .messages import MAX_MESSAGE_CHARS, deliver_message
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-MAX_SEAT_LABEL_CHARS = 64
 
 
 async def _reader(actor: Actor, on_behalf_of: Optional[str]) -> Optional[int]:
@@ -35,14 +40,7 @@ async def _reader(actor: Actor, on_behalf_of: Optional[str]) -> Optional[int]:
         return actor.id
     if actor.bot.name not in get_settings().FILES_RELAY_BOT_NAMES:
         return None
-    if len(on_behalf_of) > MAX_SEAT_LABEL_CHARS or not RESIDENT_PRINCIPAL_RE.fullmatch(
-        on_behalf_of
-    ):
-        return None
-    rows = await db.fetch_all(
-        "SELECT id FROM bots WHERE lower(name) = ?", (on_behalf_of.removeprefix("res-"),)
-    )
-    return rows[0]["id"] if len(rows) == 1 else None
+    return await bot_files.seat_bot(on_behalf_of)
 
 
 @router.get("/bot/attachments/{attachment_id}")
@@ -74,4 +72,98 @@ async def read_attachment(
     )
     if out is None:
         raise HTTPException(status_code=404, detail="Not found")
+    return out
+
+
+class FilePost(BaseModel):
+    on_behalf_of: str
+    channel_id: int
+    filename: str = Field(min_length=1, max_length=255)
+    data: str
+    text: str = Field(default="", max_length=MAX_MESSAGE_CHARS)
+    daily_quota_bytes: int = Field(ge=0)
+
+
+async def _post(poster: Optional[int], body: FilePost) -> dict[str, Any]:
+    """Every check, in the spec's order, then the write; nothing is stored before the last check."""
+    if poster is None:
+        raise bot_files.Refused("no seat to post as")
+    channel = await db.fetch_one(
+        "SELECT files_safe FROM channels WHERE id = ?", (body.channel_id,)
+    )
+    if (
+        channel is None
+        or channel["files_safe"] != 1
+        or not await is_member(body.channel_id, "bot", poster)
+    ):
+        raise bot_files.Refused(
+            f"channel {body.channel_id} is not a files-safe channel this seat is a member of"
+        )
+    mime = bot_files.postable_mime(body.filename)
+    if mime is None:
+        raise bot_files.Refused("a bot may not post a file of this type")
+    try:
+        data = base64.b64decode(body.data, validate=True)
+    except (binascii.Error, ValueError):
+        raise bot_files.Refused("file data is not base64") from None
+    size, cap = len(data), get_settings().MAX_UPLOAD_BYTES
+    if not 0 < size <= cap:
+        raise bot_files.Refused(f"a posted file must be 1 to {cap} bytes")
+    used = await bot_files.uploaded_today(poster)
+    if used + size > body.daily_quota_bytes:
+        raise bot_files.Refused(
+            f"daily upload quota is {body.daily_quota_bytes} bytes; {used} are used "
+            f"today and this file is {size}"
+        )
+    if await bot_files.matches_hidden(data):
+        raise bot_files.Refused("this file matches an upload that bots may not read")
+
+    bot = Actor(type="bot", id=poster)
+    upload = UploadFile(
+        io.BytesIO(data), filename=body.filename, headers=Headers({"content-type": mime})
+    )
+    staged = await media.upload_files(bot, files=[upload], message_id=None, message_id_q=None)
+    attachment_id = staged["attachments"][0]["id"]
+    try:
+        message = await deliver_message(body.channel_id, "bot", poster, body.text)
+        await media.claim_attachments(
+            media.ClaimRequest(attachment_ids=[attachment_id], message_id=message["id"]), bot
+        )
+    except BaseException:
+        await bot_files.discard_staged(attachment_id)
+        raise
+    return {
+        "attachment_id": attachment_id,
+        "message_id": message["id"],
+        "channel_id": body.channel_id,
+        "seq": message["seq"],
+        "size_bytes": size,
+    }
+
+
+@router.post("/bot/attachments")
+async def post_attachment(
+    body: FilePost, actor: Annotated[Actor, Depends(get_actor)]
+) -> dict[str, Any]:
+    """A relay bot posts a file as the bot of the seat it names; nobody else posts here.
+
+    `on_behalf_of` is a required string, so `_reader` never answers with the caller itself.
+    """
+    poster, out, why = None, None, "error"
+    try:
+        poster = await _reader(actor, body.on_behalf_of)
+        out = await _post(poster, body)
+    except bot_files.Refused as exc:
+        why = str(exc)
+        raise HTTPException(status_code=403, detail=why) from None
+    finally:
+        logger.info(
+            "bot attachment post: caller=%s:%s poster_bot=%s channel=%s attachment=%s %s",
+            actor.type,
+            actor.id,
+            poster,
+            body.channel_id,
+            out and out["attachment_id"],
+            "allowed" if out is not None else f"refused ({why})",
+        )
     return out

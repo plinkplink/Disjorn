@@ -549,6 +549,8 @@ async def edit_message(
         "UPDATE messages SET content = ?, edited_at = ?, privacy_flags = ? WHERE id = ?",
         (body.content, db.utc_now(), json.dumps(flags), message_id),
     )
+    if privacy.hidden_from_bots(flags):
+        await bot_files.export_sweep()
     updated = await _require_message(message_id)
     payload = await message_payload(updated)
     await events.publish(
@@ -570,6 +572,7 @@ async def delete_message(message_id: int, actor: CurrentActor) -> dict[str, bool
     await db.execute(
         "UPDATE messages SET deleted_at = ? WHERE id = ?", (db.utc_now(), message_id)
     )
+    await bot_files.export_sweep()
     await events.publish(
         {
             "type": "message_delete",

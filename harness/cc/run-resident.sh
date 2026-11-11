@@ -51,6 +51,15 @@ if [ -n "${RESIDENT_DISJORN_RO:-}" ]; then
   args+=( -v "$RESIDENT_DISJORN_RO:/opt/disjorn:ro" )
 fi
 
+FILES_RO="${RESIDENT_FILES_RO:-/srv/disjorn-files-ro/res-$NAME}"
+FILES_OUTBOX="${RESIDENT_FILES_OUTBOX:-/srv/disjorn-files-outbox/res-$NAME}"
+if [ -d "$FILES_RO" ]; then
+  args+=( -v "$FILES_RO:/files:ro" )  # the server alone writes the export
+fi
+if [ -d "$FILES_OUTBOX" ]; then
+  args+=( -v "$FILES_OUTBOX:/files-outbox" )
+fi
+
 # Writable bare repo, the only write path out of a container. Mount the directory: a resident spans repos.
 if [ -n "${RESIDENT_GATEHOUSE:-}" ]; then
   [ -d "$RESIDENT_GATEHOUSE" ] || { echo "run-resident: RESIDENT_GATEHOUSE not a dir: $RESIDENT_GATEHOUSE" >&2; exit 1; }

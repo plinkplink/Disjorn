@@ -707,6 +707,7 @@ async def _files_safe(ctx: Ctx) -> Optional[str]:
     target = rows[0]["id"]
     on, history = parts[1] == "on", len(parts) == 3
     changed = await bot_files.set_channel_safe(target, on, include_history=history)
+    await bot_files.export_sweep()
     lines = [FILES_SAFE_ON if on else FILES_SAFE_OFF] if changed else []
     if history:
         lines.append(FILES_SAFE_HISTORY)

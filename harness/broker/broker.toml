@@ -187,6 +187,9 @@ metrics_json = "/var/lib/disjorn-broker/metrics.json"
 # placement: install the repo's harness/classifier/protected-paths.toml to
 # /etc/disjorn-broker/ (root:plink 0640, resident-unreachable) and point here.
 protected_paths = "/etc/disjorn-broker/protected-paths.toml"
+# post-file reads only <files_outbox_root>/<seat>/, the host side of the seat's
+# /files-outbox mount.
+files_outbox_root = "/srv/disjorn-files-outbox"
 
 [gate]
 # KEYBOARD-LANE GATE (Plan Room Phase 0) — what the DAILY DIGEST needs to read
@@ -329,6 +332,11 @@ announce = true
 # daily_action_cap = 2000
 # [budgets.res-gable]
 # daily_action_cap = 2000
+#
+# post-file's daily byte quota per seat; 26214400 (25 MB) for a seat with no line.
+# The server counts the day's bytes from the bot's own attachment rows.
+# [budgets.res-gable]
+# bot_daily_upload_bytes = 26214400
 
 [summon_hops]
 # The bot-to-bot summon wall (SPECS/2026-08-24-custodian-mention-summons.md).

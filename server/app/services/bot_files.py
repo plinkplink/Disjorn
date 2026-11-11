@@ -1,14 +1,30 @@
-"""What a bot may see of an uploaded file, and the shapes one read returns."""
+"""What a bot may see of an uploaded file, the shapes one read returns, and a seat's export."""
 
 import asyncio
 import base64
+import hashlib
 import json
+import logging
+import mimetypes
+import os
+import re
+import shutil
 from pathlib import Path
 from typing import Any, Optional
 
 from .. import db, privacy
 from ..config import get_settings
+from ..routers.approval import RESIDENT_PRINCIPAL_RE
 
+logger = logging.getLogger(__name__)
+
+MAX_SEAT_LABEL_CHARS = 64
+MANIFEST = "manifest.json"
+EXPORT_FILE_MODE = 0o640
+EXPORT_DIR_MODE = 0o750
+_CHUNK = 1024 * 1024
+# A browser runs these when it opens one from the house origin.
+_UNPOSTABLE_MIMES = frozenset({"text/html", "text/xml", "application/xml", "image/svg+xml"})
 PDF_MIME = "application/pdf"
 PDF_MAX_PAGES = 200
 VARIANT_MIME = "image/webp"
@@ -213,3 +229,279 @@ async def read(attachment_id: int) -> Optional[dict[str, Any]]:
         return None
     return {"id": att["id"], "mime_type": att["mime_type"],
             "size_bytes": att["size_bytes"], **shape}
+
+
+async def seat_bot(seat: str) -> Optional[int]:
+    """`res-<name>` is the one bot whose lowercased name is `<name>`; any other label is nobody."""
+    if len(seat) > MAX_SEAT_LABEL_CHARS or not RESIDENT_PRINCIPAL_RE.fullmatch(seat):
+        return None
+    rows = await db.fetch_all(
+        "SELECT id FROM bots WHERE lower(name) = ?", (seat.removeprefix("res-"),)
+    )
+    return rows[0]["id"] if len(rows) == 1 else None
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        while chunk := fh.read(_CHUNK):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def export_name(att: dict[str, Any]) -> str:
+    """`{id}_{slug}{ext}`: one path component, whatever the uploader named the file."""
+    name = str(att["original_filename"] or "")
+    stem, dot, ext = name.rpartition(".")
+    if not (dot and stem and re.fullmatch(r"[A-Za-z0-9]{1,9}", ext)):
+        stem, ext = name, ""
+    slug = re.sub(r"[^A-Za-z0-9_-]+", "-", stem).strip("-")[:40] or "file"
+    return f"{int(att['id'])}_{slug}{'.' + ext.lower() if ext else ''}"
+
+
+def _remove(path: str) -> None:
+    """A removal that fails is logged and left to the next sweep."""
+    try:
+        if os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path)
+        else:
+            os.unlink(path)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        logger.exception("bot file export: could not remove %s", path)
+
+
+def _empty(seat_dir: Path) -> None:
+    try:
+        for entry in os.scandir(seat_dir):
+            _remove(entry.path)
+    except OSError:
+        logger.exception("bot file export: could not empty %s", seat_dir)
+
+
+def _write_atomic(dest: Path, chunks) -> None:
+    """A temp file renamed within the directory, so a reader never sees part of a file."""
+    tmp = dest.with_name(f".tmp-{dest.name}")
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, EXPORT_FILE_MODE)
+        with os.fdopen(fd, "wb") as out:
+            os.fchmod(fd, EXPORT_FILE_MODE)
+            for chunk in chunks:
+                out.write(chunk)
+        os.replace(tmp, dest)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _copy(src: Path, dest: Path) -> str:
+    digest = hashlib.sha256()
+
+    def chunks():
+        with src.open("rb") as fh:
+            while chunk := fh.read(_CHUNK):
+                digest.update(chunk)
+                yield chunk
+
+    _write_atomic(dest, chunks())
+    return digest.hexdigest()
+
+
+def _write_manifest(folder: Path, entries: list[dict[str, Any]]) -> None:
+    """A manifest that cannot be written is removed, so it never lists a file that is gone."""
+    manifest = folder / MANIFEST
+    rows = sorted(entries, key=lambda e: e["attachment_id"])
+    body = json.dumps(rows, indent=1).encode("utf-8")
+    try:
+        if not (manifest.is_file() and manifest.read_bytes() == body):
+            _write_atomic(manifest, [body])
+    except OSError:
+        logger.exception("bot file export: could not write %s", manifest)
+        _remove(str(manifest))
+
+
+def _reconcile(seat_dir: Path, wanted: dict[int, dict[str, tuple[Path, dict[str, Any]]]]) -> None:
+    """Removals, then pruned manifests, then copies: a failure leaves too little, never too much."""
+    folders = {str(channel_id): files for channel_id, files in wanted.items()}
+    for entry in os.scandir(seat_dir):
+        keep = folders.get(entry.name) if entry.is_dir(follow_symlinks=False) else None
+        if keep is None:
+            _remove(entry.path)
+            continue
+        for item in os.scandir(entry.path):
+            listed = item.name in keep or item.name == MANIFEST
+            if not (listed and item.is_file(follow_symlinks=False)):
+                _remove(item.path)
+
+    copies = []
+    for name, files in folders.items():
+        folder = seat_dir / name
+        try:
+            folder.mkdir(mode=EXPORT_DIR_MODE, exist_ok=True)
+        except OSError:
+            logger.exception("bot file export: could not create %s", folder)
+            continue
+        try:
+            known = {e["file"]: e["sha256"] for e in json.loads((folder / MANIFEST).read_bytes())}
+        except (OSError, ValueError, TypeError, KeyError):
+            known = {}
+        entries, missing = [], []
+        for file_name, (src, meta) in files.items():
+            if file_name in known and (folder / file_name).is_file():
+                entries.append({**meta, "file": file_name, "sha256": known[file_name]})
+            else:
+                missing.append((file_name, src, meta))
+        _write_manifest(folder, entries)
+        if missing:
+            copies.append((folder, entries, missing))
+
+    for folder, entries, missing in copies:
+        for file_name, src, meta in missing:
+            dest = folder / file_name
+            try:
+                sha = _copy(src, dest)
+            except OSError:
+                logger.exception("bot file export: could not write %s", dest)
+                _remove(str(dest))
+                continue
+            entries.append({**meta, "file": file_name, "sha256": sha})
+        _write_manifest(folder, entries)
+
+
+async def _sweep_seat(seat: str, seat_dir: Path) -> None:
+    # Imported here because routers.channels imports this module.
+    from ..routers.channels import is_member
+
+    wanted: dict[int, dict[str, tuple[Path, dict[str, Any]]]] = {}
+    bot_id = await seat_bot(seat)
+    rows = [] if bot_id is None else await db.fetch_all(
+        """SELECT a.*, m.channel_id,
+                  CASE m.author_type WHEN 'user' THEN u.display_name ELSE b.name END AS author
+             FROM attachments a
+             JOIN messages m ON m.id = a.message_id
+             JOIN channels c ON c.id = m.channel_id
+             LEFT JOIN users u ON m.author_type = 'user' AND u.id = m.author_id
+             LEFT JOIN bots b ON m.author_type = 'bot' AND b.id = m.author_id
+            WHERE c.files_safe = 1
+            ORDER BY a.id"""
+    )
+    member: dict[int, bool] = {}
+    for att in rows:
+        channel_id = att["channel_id"]
+        if channel_id not in member:
+            member[channel_id] = await is_member(channel_id, "bot", bot_id)
+        if not (member[channel_id] and await visible_to_bots(att)):
+            continue
+        try:
+            src = _stored(att["file_path"], "originals")
+        except LookupError:
+            continue
+        wanted.setdefault(channel_id, {})[export_name(att)] = (src, {
+            "attachment_id": att["id"],
+            "message_id": att["message_id"],
+            "author": att["author"],
+            "created_at": att["created_at"],
+            "mime_type": att["mime_type"],
+        })
+    await asyncio.to_thread(_reconcile, seat_dir, wanted)
+
+
+_sweep_lock = asyncio.Lock()
+
+
+def init() -> None:
+    """A lock belongs to the event loop it first waited on, so each app start takes a new one."""
+    global _sweep_lock
+    _sweep_lock = asyncio.Lock()
+
+
+async def export_sweep() -> None:
+    """Make each seat's export hold exactly the files `visible_to_bots` passes for its bot now.
+
+    Never raises: a seat whose sweep cannot finish has its export emptied. A
+    seat directory that does not exist is a seat with no export.
+    """
+    try:
+        settings = get_settings()
+        root = Path(settings.BOT_FILES_EXPORT_ROOT)
+        seats = [s for s in settings.BOT_FILES_EXPORT_SEATS if RESIDENT_PRINCIPAL_RE.fullmatch(s)]
+        async with _sweep_lock:
+            for seat in seats:
+                seat_dir = root / seat
+                if seat_dir.is_symlink() or not seat_dir.is_dir():
+                    continue
+                try:
+                    await _sweep_seat(seat, seat_dir)
+                except Exception:
+                    logger.exception("bot file export: sweep failed for %s; emptying it", seat)
+                    _empty(seat_dir)
+    except Exception:
+        logger.exception("bot file export: sweep could not run")
+
+
+async def sweep_forever(seconds: float) -> None:
+    while True:
+        await asyncio.sleep(seconds)
+        await export_sweep()
+
+
+class Refused(Exception):
+    """Why a bot's file was not posted, in words the seat may read."""
+
+
+def postable_mime(filename: str) -> Optional[str]:
+    """The type a posted file is stored as, from its name alone; None for a type no bot may post."""
+    mime = (mimetypes.guess_type(filename)[0] or "").lower()
+    if mime in _UNPOSTABLE_MIMES:
+        return None
+    return mime if mime.startswith(_ALLOWED_PREFIXES) or mime in _ALLOWED_MIMES else None
+
+
+async def uploaded_today(bot_id: int) -> int:
+    """Bytes this bot has uploaded since 00:00 UTC, counted from its attachment rows."""
+    row = await db.fetch_one(
+        """SELECT COALESCE(SUM(size_bytes), 0) AS used FROM attachments
+            WHERE uploader_type = 'bot' AND uploader_id = ? AND created_at >= ?""",
+        (bot_id, db.utc_now()[:10]),
+    )
+    return row["used"]
+
+
+async def matches_hidden(data: bytes) -> bool:
+    """True if these bytes are a stored upload that `visible_to_bots` does not pass now.
+
+    A row of another size cannot hold the same bytes, and a same-size row that
+    cannot be hashed counts as a match.
+    """
+    sha = hashlib.sha256(data).hexdigest()
+    rows = await db.fetch_all("SELECT * FROM attachments WHERE size_bytes = ?", (len(data),))
+    for att in rows:
+        if await visible_to_bots(att):
+            continue
+        try:
+            stored = await asyncio.to_thread(_sha256, _stored(att["file_path"], "originals"))
+        except Exception:
+            return True
+        if stored == sha:
+            return True
+    return False
+
+
+async def discard_staged(attachment_id: int) -> None:
+    """Drop an upload that reached no message, so it neither counts nor matches afterwards."""
+    att = await db.fetch_one(
+        "SELECT * FROM attachments WHERE id = ? AND message_id IS NULL", (attachment_id,)
+    )
+    if att is None:
+        return
+    await db.execute(
+        "DELETE FROM attachments WHERE id = ? AND message_id IS NULL", (attachment_id,)
+    )
+    for rel, folder in (
+        (att["file_path"], "originals"), (att["display_path"], "web"), (att["thumb_path"], "web")
+    ):
+        try:
+            _stored(rel, folder).unlink()
+        except (LookupError, OSError):
+            pass
