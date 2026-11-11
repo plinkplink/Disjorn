@@ -65,15 +65,23 @@ nothing it did not already have as itself.
                      step is a rename, so a reader sees the old tree or the new
                      one. Refused if there is no preview, or if a turn of that
                      app is running (a turn's own publish renames preview under
-                     the copy).
+                     the copy). The published commit is recorded as
+                     refs/disjorn/live in the app's git dir, only when HEAD's
+                     tree is byte-identical to the tree that went live.
     revert <app>     swap live and live.prev through a sibling temp name; both
-                     must exist. Three renames, no copy.
-    remix <p> <c>    git clone --bare --no-local of the parent's HOST-ONLY
-                     git dir (/srv/apps-git/<p>.git) into /srv/apps-git/<c>.git,
-                     checked out into the work tree /srv/apps/<c>, one empty
-                     commit "remix of <p>" so lineage is in the log, and the
-                     parent's preview copied to the child's by the same
-                     staged-rename discipline. Refused if <c> exists.
+                     must exist. Three renames, no copy. refs/disjorn/live and
+                     refs/disjorn/live.prev swap with them.
+    remix <p> <c>    the parent's PUBLISHED state into a new app: history up
+                     to refs/disjorn/live and nothing after it, fetched from
+                     the parent's HOST-ONLY git dir (/srv/apps-git/<p>.git)
+                     into /srv/apps-git/<c>.git, checked out into the work
+                     tree /srv/apps/<c>, one empty commit "remix of <p>" so
+                     lineage is in the log, and the parent's live tree copied
+                     to the child's preview by the same staged-rename
+                     discipline. A parent with no recorded commit, or one whose
+                     tree is not its live tree, gives the child the live tree
+                     as one parentless commit. Refused if <c> exists or <p> is
+                     not live.
                      The SOURCE is the git dir, never the work tree: the work
                      tree is what a builder turn writes, and a repository read
                      out of it was one `objects/info/alternates` away from
@@ -129,6 +137,7 @@ from __future__ import annotations
 
 import fcntl
 import grp
+import hashlib
 import json
 import os
 import pwd
@@ -236,11 +245,13 @@ MAX_ARG_LEN = 512
 EXIT_REFUSED = 64
 EXIT_FAILED = 1
 
-# Every mode this program answers to. The `-as-seat` three are the inside of a
+# Every mode this program answers to. The `-as-seat` modes are the inside of a
 # transient unit and appear in no sudoers regex; everything else is a name a
-# caller may say through `sudo -n`.
+# caller may say through `sudo -n`. `backfill-as-seat` has no outside: it is run
+# once per app at the keyboard, as the seat.
 MODES = ("run", "stop", "publish", "revert", "remix",
-         "publish-as-seat", "revert-as-seat", "remix-as-seat")
+         "publish-as-seat", "revert-as-seat", "remix-as-seat",
+         "backfill-as-seat")
 
 
 def die(msg: str) -> "None":
@@ -783,6 +794,9 @@ STAGING_NAME = ".staging"                # apps_harvest.STAGING_NAME
 LIVE_NAME = "live"
 PREV_NAME = "live.prev"
 PREVIEW_NAME = "preview"
+# The commit each served tree was published from, kept in the app's git dir.
+LIVE_REF = "refs/disjorn/live"
+PREV_REF = "refs/disjorn/live.prev"
 
 
 def _stamp() -> str:
@@ -900,7 +914,8 @@ def _snapshot_into(src: Path, dest: Path, rsync_bin: str) -> None:
 
 
 def publish_app(www_root, app_id: str, *, rsync_bin: str = RSYNC,
-                stamp: "str | None" = None) -> dict:
+                stamp: "str | None" = None, git_root=None,
+                git_bin: str = GIT) -> dict:
     """`preview/` → `live/`, by rename, keeping the old `live/` as `live.prev/`.
 
     THE ROTATE, and the only reason this is a function and not four lines in
@@ -918,7 +933,10 @@ def publish_app(www_root, app_id: str, *, rsync_bin: str = RSYNC,
     directory in one syscall. The window between them is the only instant a
     reader sees no `live` at all, and it is the same instant either way. If
     step 4 fails, step 3 is undone and the tree that was serving is serving
-    again."""
+    again.
+
+    Both live refs are cleared before the rotate and written after it, so an
+    interrupted publish leaves no ref rather than a ref for another tree."""
     app_id = check_app_id(app_id)
     root = Path(www_root)
     app_dir = root / app_id
@@ -933,6 +951,15 @@ def publish_app(www_root, app_id: str, *, rsync_bin: str = RSYNC,
     staged = _staging(root, app_id) / f"{LIVE_NAME}.tmp.{stamp or _stamp()}"
     _snapshot_into(preview, staged, rsync_bin)
 
+    git_dir = _repo_or_none(git_root, app_id)
+    was = now = ""
+    if git_dir:
+        was = _rev(git_dir, LIVE_REF, git_bin)
+        head = _rev(git_dir, "HEAD", git_bin)
+        now = head if head and _tree_is(git_dir, head, staged, git_bin) else ""
+        _set_ref(git_dir, LIVE_REF, "", git_bin)
+        _set_ref(git_dir, PREV_REF, "", git_bin)
+
     if prev.exists() or prev.is_symlink():
         _remove(prev)
     had_live = live.exists() or live.is_symlink()
@@ -944,11 +971,15 @@ def publish_app(www_root, app_id: str, *, rsync_bin: str = RSYNC,
         if had_live:
             os.rename(prev, live)
         raise
+    if git_dir:
+        _set_ref(git_dir, PREV_REF, was if had_live else "", git_bin)
+        _set_ref(git_dir, LIVE_REF, now, git_bin)
     return {"mode": "publish", "app": app_id, "live": str(live),
             "previous": had_live}
 
 
-def revert_app(www_root, app_id: str, *, stamp: "str | None" = None) -> dict:
+def revert_app(www_root, app_id: str, *, stamp: "str | None" = None,
+               git_root=None, git_bin: str = GIT) -> dict:
     """Swap `live` and `live.prev`. Three renames through a name under the
     staging root, because two directories cannot trade places in two.
 
@@ -967,6 +998,14 @@ def revert_app(www_root, app_id: str, *, stamp: "str | None" = None) -> dict:
     if not _real_dir(prev):
         die(f"{app_id} has no previous deploy to revert to")
 
+    git_dir = _repo_or_none(git_root, app_id)
+    was_live = was_prev = ""
+    if git_dir:
+        was_live = _rev(git_dir, LIVE_REF, git_bin)
+        was_prev = _rev(git_dir, PREV_REF, git_bin)
+        _set_ref(git_dir, LIVE_REF, "", git_bin)
+        _set_ref(git_dir, PREV_REF, "", git_bin)
+
     tmp = _staging(root, app_id) / f"{LIVE_NAME}.swap.{stamp or _stamp()}"
     _remove(tmp)
     os.rename(live, tmp)
@@ -975,6 +1014,8 @@ def revert_app(www_root, app_id: str, *, stamp: "str | None" = None) -> dict:
     except OSError:
         os.rename(tmp, live)             # nothing moved; the older tree stays
         raise
+    if git_dir:
+        _set_ref(git_dir, LIVE_REF, was_prev, git_bin)
     try:
         os.rename(tmp, prev)
     except OSError as exc:
@@ -982,6 +1023,9 @@ def revert_app(www_root, app_id: str, *, stamp: "str | None" = None) -> dict:
         # point of the button. Losing the far side of the swap costs the next
         # revert, not this one, so it is a warning and not a failure.
         warn(f"reverted, but the superseded tree is still at {tmp}: {exc}")
+    else:
+        if git_dir:
+            _set_ref(git_dir, PREV_REF, was_live, git_bin)
     return {"mode": "revert", "app": app_id, "live": str(live)}
 
 
@@ -1050,9 +1094,86 @@ def _has_commits(git_dir, git_bin: str) -> bool:
                      git_dir=git_dir, check=False, git_bin=git_bin).strip())
 
 
+def _repo_or_none(git_root, app_id: str) -> "Path | None":
+    """The app's git dir when there is a root and a repository in it."""
+    if git_root is None:
+        return None
+    git_dir = app_git_dir(git_root, app_id)
+    return git_dir if _is_a_real_gitdir(git_dir, git_root) else None
+
+
+def _rev(git_dir, name: str, git_bin: str) -> str:
+    """The commit `name` resolves to, or "" when it resolves to none."""
+    return _git(["rev-parse", "--verify", "-q", f"{name}^{{commit}}"],
+                git_dir=git_dir, cwd="/", check=False, git_bin=git_bin).strip()
+
+
+def _set_ref(git_dir, ref: str, sha: str, git_bin: str) -> None:
+    """Point `ref` at `sha`, or delete it when `sha` is empty. Best effort: a
+    ref that is missing costs a remix its history and nothing else."""
+    _git(["update-ref", ref, sha] if sha else ["update-ref", "-d", ref],
+         git_dir=git_dir, cwd="/", check=False, git_bin=git_bin)
+
+
+def _blob_id(path: str) -> str:
+    digest = hashlib.sha1()
+    with open(path, "rb") as fh:
+        digest.update(b"blob %d\0" % os.fstat(fh.fileno()).st_size)
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _tree_is(git_dir, commit: str, root, git_bin: str) -> bool:
+    """Whether `commit`'s tree and the directory `root` hold the same regular
+    files with the same bytes. Any doubt is False: a symlink on either side, a
+    listing git could not give, a name that will not decode."""
+    try:
+        want = {}
+        listing = _git(["ls-tree", "-r", "-z", commit], git_dir=git_dir,
+                       cwd="/", check=False, git_bin=git_bin)
+        for entry in filter(None, listing.split("\0")):
+            meta, _, path = entry.partition("\t")
+            mode, kind, oid = meta.split()
+            if kind != "blob" or mode == "120000":
+                return False
+            want[path] = oid
+        have = {}
+        for here, dirs, files in os.walk(root):
+            for name in dirs + files:
+                full = os.path.join(here, name)
+                mode = os.lstat(full).st_mode
+                if stat.S_ISREG(mode):
+                    rel = os.path.relpath(full, root)
+                    if rel not in want:
+                        return False
+                    have[rel] = _blob_id(full)
+                elif not stat.S_ISDIR(mode):
+                    return False
+        return bool(want) and have == want
+    except (OSError, ValueError):
+        return False
+
+
+def backfill_app(www_root, app_id: str, *, git_root=GIT_ROOT,
+                 git_bin: str = GIT) -> dict:
+    """Record the live ref of an app published before publish recorded one,
+    only when HEAD's tree is byte-identical to its `live/`."""
+    app_id = check_app_id(app_id)
+    live = Path(www_root) / app_id / LIVE_NAME
+    git_dir = _repo_or_none(git_root, app_id)
+    recorded = False
+    if git_dir and _real_dir(live) and not _rev(git_dir, LIVE_REF, git_bin):
+        head = _rev(git_dir, "HEAD", git_bin)
+        if head and _tree_is(git_dir, head, live, git_bin):
+            _set_ref(git_dir, LIVE_REF, head, git_bin)
+            recorded = _rev(git_dir, LIVE_REF, git_bin) == head
+    return {"mode": "backfill", "app": app_id, "recorded": recorded}
+
+
 def remix_app(apps_root, www_root, parent: str, child: str, *,
               git_root=GIT_ROOT, git_bin: str = GIT, rsync_bin: str = RSYNC,
-              stamp: "str | None" = None) -> dict:
+              stamp: "str | None" = None, published: bool = True) -> dict:
     """Clone one app into a new one, lineage in the git log.
 
     THE SOURCE IS THE PARENT'S HOST-ONLY GIT DIR, not its work tree. The work
@@ -1077,11 +1198,14 @@ def remix_app(apps_root, www_root, parent: str, child: str, *,
     child says where it came from, and it says it inside the artefact that
     gets copied around.
 
-    The parent's PREVIEW, not its `live`, is what the child starts from: a
-    remix opens a build session, and the thing a build session shows is a
-    preview. It is published by the same staged-rename discipline as
-    everything else here, so the child's preview root either exists complete
-    or does not exist."""
+    `published` is the wall between a viewer and the owner's unpublished
+    turns: the child comes from ONE snapshot of the parent's `live/`, with
+    history only when the recorded live commit is byte-identical to that
+    snapshot, fetched by its ref into an empty repository so no later object
+    ever enters the child's git dir. False is HEAD and `preview/`.
+
+    The child's preview is published by the same staged-rename discipline as
+    everything else here, so it either exists complete or does not exist."""
     parent = check_app_id(parent)
     child = check_app_id(child)
     if parent == child:
@@ -1098,6 +1222,18 @@ def remix_app(apps_root, www_root, parent: str, child: str, *,
     if dst_git.exists() or dst_git.is_symlink():
         die(f"{child} already has a repository at {dst_git} — "
             f"a remix never writes over one")
+    source = Path(www_root) / parent / (LIVE_NAME if published else PREVIEW_NAME)
+    if published and not _real_dir(source):
+        die(f"{parent} is not live, so it has nothing published to remix")
+
+    staged = None
+    if _real_dir(source):
+        staged = (_staging(www_root, child)
+                  / f"{PREVIEW_NAME}.tmp.{stamp or _stamp()}")
+        _snapshot_into(source, staged, rsync_bin)
+    commit = _rev(src_git, LIVE_REF, git_bin) if published else ""
+    if commit and not _tree_is(src_git, commit, staged, git_bin):
+        commit = ""
 
     # `--no-local`: without it git clones a local path by copying the object
     # store directly, which is how an `objects/info/alternates` in the parent
@@ -1107,8 +1243,20 @@ def remix_app(apps_root, www_root, parent: str, child: str, *,
     # `--no-hardlinks` is kept: it is what --no-local implies, said out loud,
     # and it is the one that survives if this ever stops being a local clone.
     Path(git_root).mkdir(parents=True, exist_ok=True)
-    _git(["clone", "--bare", "--no-local", "--no-hardlinks", "--quiet",
-          str(src_git), str(dst_git)], cwd="/", git_bin=git_bin)
+    if not published:
+        _git(["clone", "--bare", "--no-local", "--no-hardlinks", "--quiet",
+              str(src_git), str(dst_git)], cwd="/", git_bin=git_bin)
+    else:
+        _git(["init", "--bare", "--quiet", "-b", "main"], git_dir=dst_git,
+             cwd="/", git_bin=git_bin)
+        if commit:
+            _git(["fetch", "--quiet", "--no-tags", str(src_git),
+                  f"+{LIVE_REF}:refs/heads/main"], git_dir=dst_git, cwd="/",
+                 git_bin=git_bin)
+            if _rev(dst_git, "refs/heads/main", git_bin) != commit:
+                fail(f"{parent} was published again during the remix")
+        else:
+            _snapshot_into(staged, dst, rsync_bin)
     os.chmod(dst_git, 0o700)                 # the seat's own; nobody else reads it
     # 0750, the mode every app work tree has: an app's SOURCE is the seat's own
     # and the served copy is the world-readable one (spec §C).
@@ -1117,29 +1265,27 @@ def remix_app(apps_root, www_root, parent: str, child: str, *,
     _git(["config", "core.bare", "false"], git_dir=dst_git, git_bin=git_bin)
     _git(["config", "user.name", GIT_USER_NAME], git_dir=dst_git, git_bin=git_bin)
     _git(["config", "user.email", GIT_USER_EMAIL], git_dir=dst_git, git_bin=git_bin)
-    if _has_commits(dst_git, git_bin):
+    if published and not commit:
+        _git(["add", "-A"], git_dir=dst_git, work_tree=dst, cwd=str(dst),
+             git_bin=git_bin)
+    elif _has_commits(dst_git, git_bin):
         _git(["checkout", "-q", "-f"], git_dir=dst_git, work_tree=dst,
              cwd=str(dst), git_bin=git_bin)
     _git(["commit", "--allow-empty", "-q", "-m", f"remix of {parent}"],
          git_dir=dst_git, work_tree=dst, cwd=str(dst), git_bin=git_bin)
 
-    published = False
-    parent_preview = Path(www_root) / parent / PREVIEW_NAME
-    if _real_dir(parent_preview):
+    if staged is not None:
         child_app = Path(www_root) / child
         if not child_app.is_dir():
             os.makedirs(child_app, exist_ok=True)
             os.chmod(child_app, 0o755)   # the served path; the gate reads it
-        staged = (_staging(www_root, child)
-                  / f"{PREVIEW_NAME}.tmp.{stamp or _stamp()}")
-        _snapshot_into(parent_preview, staged, rsync_bin)
         target = child_app / PREVIEW_NAME
         if target.exists() or target.is_symlink():
             _remove(target)              # child_app was ours a moment ago
         os.rename(staged, target)
-        published = True
     return {"mode": "remix", "parent": parent, "child": child,
-            "repo": str(dst), "git_dir": str(dst_git), "preview": published}
+            "repo": str(dst), "git_dir": str(dst_git),
+            "preview": staged is not None}
 
 
 # ------------------------------------------------- the pre-flight refusals
@@ -1213,7 +1359,7 @@ def preflight_revert(app_id: str, *, www_root: str = WWW_ROOT) -> None:
 
 
 def preflight_remix(parent: str, child: str, *, apps_root: str = APPS_ROOT,
-                    git_root: str = GIT_ROOT) -> None:
+                    git_root: str = GIT_ROOT, www_root: str = WWW_ROOT) -> None:
     if parent == child:
         die("a remix's parent and child cannot be the same app")
     if not _is_a_real_gitdir(app_git_dir(git_root, parent), git_root):
@@ -1226,6 +1372,8 @@ def preflight_remix(parent: str, child: str, *, apps_root: str = APPS_ROOT,
     if dst_git.exists() or dst_git.is_symlink():
         die(f"{child} already has a repository at {dst_git} — "
             f"a remix never writes over one")
+    if not _real_dir(Path(www_root) / parent / LIVE_NAME):
+        die(f"{parent} is not live, so it has nothing published to remix")
 
 
 # --------------------------------------------------- the serving-mode argv
@@ -1293,7 +1441,7 @@ def main_op(mode: str, argv: "list", *, dry: bool, seat, self_path: str,
         preflight_revert(ids[0], www_root=www_root)
     else:
         preflight_remix(ids[0], ids[1], apps_root=apps_root,
-                        git_root=git_root)
+                        git_root=git_root, www_root=www_root)
     if not dry:
         check_wrapper(self_path)
     out = build_op_argv(mode, ids, self_path=self_path, seat=seat)
@@ -1326,9 +1474,11 @@ def main_as_seat(mode: str, argv: "list", *, www_root: str = WWW_ROOT,
     ids = [check_app_id(i) for i in ids]
     try:
         if mode == "publish-as-seat":
-            out = publish_app(www_root, ids[0])
+            out = publish_app(www_root, ids[0], git_root=git_root)
         elif mode == "revert-as-seat":
-            out = revert_app(www_root, ids[0])
+            out = revert_app(www_root, ids[0], git_root=git_root)
+        elif mode == "backfill-as-seat":
+            out = backfill_app(www_root, ids[0], git_root=git_root)
         else:
             out = remix_app(apps_root, www_root, ids[0], ids[1],
                             git_root=git_root)

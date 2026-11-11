@@ -975,6 +975,7 @@ def test_revert_argv_needs_a_real_publish_first(seat, www, launcher):
 
 
 def test_remix_argv_byte_for_byte(seat, www, apps, gitroot):
+    (www / APP_A / "live").mkdir()
     assert op_argv(seat, "remix", APP_A, APP_B, www_root=www, apps_root=apps, git_root=gitroot) == [
         "/usr/bin/systemd-run",
         f"--unit=disjorn-apps-remix-{APP_A}-{APP_B}",
@@ -995,6 +996,7 @@ def test_remix_argv_byte_for_byte(seat, www, apps, gitroot):
 
 
 def test_the_seat_uid_is_never_an_argument_for_a_serving_mode(seat, www, apps, gitroot):
+    (www / APP_A / "live").mkdir()
     for argv in (op_argv(seat, "publish", APP_A, www_root=www),
                  op_argv(seat, "remix", APP_A, APP_B, www_root=www, apps_root=apps, git_root=gitroot)):
         assert "--uid=res-appsbuilding" in argv
@@ -1066,7 +1068,8 @@ def test_the_as_seat_half_is_wired_end_to_end(seat, www):
     does the work and prints one JSON line, which is what comes back through
     `--pipe` to the server. The rotate's own properties are asserted against
     the functions below; this is the wiring."""
-    proc = op(seat, "publish-as-seat", APP_A, www_root=www)
+    proc = op(seat, "publish-as-seat", APP_A, www_root=www,
+              git_root=www.parent / "apps-git")
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout) == {
         "mode": "publish", "app": APP_A,
@@ -1312,7 +1315,8 @@ def test_revert_refuses_unless_both_trees_exist(www, launcher, shape):
 @pytest.mark.skipif(not (HAVE_GIT and HAVE_RSYNC), reason="git/rsync missing")
 def test_remix_clones_the_repo_and_records_the_lineage(www, apps, gitroot, launcher):
     out = launcher.remix_app(apps, www, APP_A, APP_B,
-                             git_bin=HAVE_GIT, rsync_bin=HAVE_RSYNC, git_root=gitroot)
+                             git_bin=HAVE_GIT, rsync_bin=HAVE_RSYNC, git_root=gitroot,
+                             published=False)
     child = apps / APP_B
     child_git = gitroot / f"{APP_B}.git"
     assert out["child"] == APP_B and out["preview"] is True
@@ -1336,7 +1340,8 @@ def test_remix_shares_no_objects_with_its_parent(www, apps, gitroot, launcher):
     """--no-hardlinks. Two separately writable apps must not share a byte on
     disk: `git gc` in one would be reaching into the other's history."""
     launcher.remix_app(apps, www, APP_A, APP_B,
-                       git_bin=HAVE_GIT, rsync_bin=HAVE_RSYNC, git_root=gitroot)
+                       git_bin=HAVE_GIT, rsync_bin=HAVE_RSYNC, git_root=gitroot,
+                       published=False)
     child_git = gitroot / f"{APP_B}.git"
     parent_git = gitroot / f"{APP_A}.git"
     assert not (child_git / "objects" / "info" / "alternates").exists()
@@ -1356,7 +1361,8 @@ def test_remix_shares_no_objects_with_its_parent(www, apps, gitroot, launcher):
 @pytest.mark.skipif(not (HAVE_GIT and HAVE_RSYNC), reason="git/rsync missing")
 def test_remix_gives_the_child_the_parents_preview(www, apps, gitroot, launcher):
     launcher.remix_app(apps, www, APP_A, APP_B,
-                       git_bin=HAVE_GIT, rsync_bin=HAVE_RSYNC, git_root=gitroot)
+                       git_bin=HAVE_GIT, rsync_bin=HAVE_RSYNC, git_root=gitroot,
+                       published=False)
     child_preview = www / APP_B / "preview"
     assert (child_preview / "index.html").read_text() == "<h1>v1</h1>\n"
     assert (child_preview / "sub" / "a.txt").read_text() == "one\n"
@@ -1372,7 +1378,7 @@ def test_remix_of_an_app_that_has_never_deployed_still_clones(www, apps, gitroot
     yet. The child gets the repo and no preview root at all."""
     _shutil.rmtree(www / APP_A / "preview")
     out = launcher.remix_app(apps, www, APP_A, APP_B, git_bin=HAVE_GIT,
-                             git_root=gitroot)
+                             git_root=gitroot, published=False)
     assert out["preview"] is False
     assert (gitroot / f"{APP_B}.git" / "HEAD").is_file()
     assert not (apps / APP_B / ".git").exists()
@@ -1382,7 +1388,8 @@ def test_remix_of_an_app_that_has_never_deployed_still_clones(www, apps, gitroot
 @pytest.mark.skipif(not (HAVE_GIT and HAVE_RSYNC), reason="git/rsync missing")
 def test_the_child_repo_is_the_seats_own(www, apps, gitroot, launcher):
     launcher.remix_app(apps, www, APP_A, APP_B,
-                       git_bin=HAVE_GIT, rsync_bin=HAVE_RSYNC, git_root=gitroot)
+                       git_bin=HAVE_GIT, rsync_bin=HAVE_RSYNC, git_root=gitroot,
+                       published=False)
     assert stat.S_IMODE((apps / APP_B).stat().st_mode) == 0o750
     assert stat.S_IMODE((gitroot / f"{APP_B}.git").stat().st_mode) == 0o700
 
@@ -1416,6 +1423,234 @@ def test_remix_refusals(www, apps, gitroot, launcher, bad):
                            git_root=gitroot)
     assert exc.value.code == 64
     assert not (apps / APP_B / ".git").exists()
+
+
+def _gitq(git_dir: Path, *args: str) -> str:
+    return _subprocess.run(["git", f"--git-dir={git_dir}", *args],
+                           capture_output=True, text=True).stdout.strip()
+
+
+def _has_object(git_dir: Path, oid: str) -> bool:
+    return _subprocess.run(["git", f"--git-dir={git_dir}", "cat-file", "-e", oid],
+                           capture_output=True).returncode == 0
+
+
+def _turn(apps_root: Path, git_root: Path, app_id: str, tmp_path, name: str,
+          text: str, message: str) -> str:
+    work, git_dir = apps_root / app_id, git_root / f"{app_id}.git"
+    (work / name).write_text(text, encoding="utf-8")
+    where = [f"--git-dir={git_dir}", f"--work-tree={work}"]
+    for args in (["add", "-A"], ["commit", "-q", "-m", message]):
+        _subprocess.run(["git", *where, *args], check=True,
+                        env=_git_env(tmp_path), cwd=str(work))
+    return _gitq(git_dir, "rev-parse", "HEAD")
+
+
+def _deploy(apps_root: Path, www_root: Path, app_id: str) -> None:
+    preview = www_root / app_id / "preview"
+    _shutil.rmtree(preview, ignore_errors=True)
+    _shutil.copytree(apps_root / app_id, preview)
+
+
+def _files(root: Path) -> dict:
+    return {str(f.relative_to(root)): f.read_bytes()
+            for f in root.rglob("*") if f.is_file()}
+
+
+@pytest.fixture()
+def live_with_a_draft(www, apps, gitroot, launcher, tmp_path):
+    parent_git = gitroot / f"{APP_A}.git"
+    _deploy(apps, www, APP_A)
+    launcher.publish_app(www, APP_A, rsync_bin=HAVE_RSYNC, git_root=gitroot,
+                         git_bin=HAVE_GIT)
+    published = _gitq(parent_git, "rev-parse", "HEAD")
+    draft = _turn(apps, gitroot, APP_A, tmp_path, "draft.txt",
+                  "not published yet\n", "turn 2")
+    _deploy(apps, www, APP_A)
+    return {"published": published, "draft": draft,
+            "blob": _gitq(parent_git, "rev-parse", f"{draft}:draft.txt")}
+
+
+@pytest.mark.skipif(not (HAVE_GIT and HAVE_RSYNC), reason="git/rsync missing")
+def test_a_viewers_remix_holds_nothing_built_after_the_last_publish(
+        www, apps, gitroot, launcher, live_with_a_draft):
+    out = launcher.remix_app(apps, www, APP_A, APP_B, git_bin=HAVE_GIT,
+                             rsync_bin=HAVE_RSYNC, git_root=gitroot)
+    child_git = gitroot / f"{APP_B}.git"
+    live = _files(www / APP_A / "live")
+    assert out["preview"] is True
+    assert "draft.txt" not in live
+    assert _files(apps / APP_B) == live
+    assert _files(www / APP_B / "preview") == live
+    assert _gitq(child_git, "log", "--format=%s").splitlines() == [
+        f"remix of {APP_A}", "turn 1"]
+    assert _gitq(child_git, "rev-parse", "HEAD^") == live_with_a_draft["published"]
+    assert not _has_object(child_git, live_with_a_draft["draft"])
+    assert not _has_object(child_git, live_with_a_draft["blob"])
+    everything = _gitq(child_git, "cat-file", "--batch-all-objects",
+                       "--batch-check=%(objectname)").split()
+    reachable = _gitq(child_git, "rev-list", "--all", "--objects",
+                      "--no-object-names").split()
+    assert sorted(everything) == sorted(reachable)
+    assert live_with_a_draft["draft"] not in everything
+    assert "dangling" not in _gitq(child_git, "fsck", "--lost-found")
+    assert _gitq(child_git, "for-each-ref", "refs/disjorn") == ""
+    assert _gitq(child_git, f"--work-tree={apps / APP_B}", "status",
+                 "--porcelain") == ""
+    assert not (apps / APP_B / ".git").exists()
+    assert not (child_git / "objects" / "info" / "alternates").exists()
+    assert all(o.stat().st_nlink == 1
+               for o in (child_git / "objects").rglob("*") if o.is_file())
+    assert stat.S_IMODE((apps / APP_B).stat().st_mode) == 0o750
+    assert stat.S_IMODE(child_git.stat().st_mode) == 0o700
+
+
+@pytest.mark.skipif(not (HAVE_GIT and HAVE_RSYNC), reason="git/rsync missing")
+def test_publish_records_the_commit_and_revert_moves_it_back(
+        www, apps, gitroot, launcher, live_with_a_draft):
+    parent_git = gitroot / f"{APP_A}.git"
+    first, second = live_with_a_draft["published"], live_with_a_draft["draft"]
+    kw = {"git_root": gitroot, "git_bin": HAVE_GIT}
+    assert _gitq(parent_git, "rev-parse", "refs/disjorn/live") == first
+    assert _gitq(parent_git, "for-each-ref", "refs/disjorn/live.prev") == ""
+    launcher.publish_app(www, APP_A, rsync_bin=HAVE_RSYNC, **kw)
+    assert _gitq(parent_git, "rev-parse", "refs/disjorn/live") == second
+    assert _gitq(parent_git, "rev-parse", "refs/disjorn/live.prev") == first
+    launcher.revert_app(www, APP_A, **kw)
+    assert _gitq(parent_git, "rev-parse", "refs/disjorn/live") == first
+    assert _gitq(parent_git, "rev-parse", "refs/disjorn/live.prev") == second
+    assert "draft.txt" not in _files(www / APP_A / "live")
+    launcher.revert_app(www, APP_A, **kw)
+    assert _gitq(parent_git, "rev-parse", "refs/disjorn/live") == second
+
+
+@pytest.mark.skipif(not (HAVE_GIT and HAVE_RSYNC), reason="git/rsync missing")
+def test_publish_records_no_commit_when_head_is_not_the_tree_that_went_live(
+        www, apps, gitroot, launcher, live_with_a_draft, tmp_path):
+    parent_git = gitroot / f"{APP_A}.git"
+    halted = _turn(apps, gitroot, APP_A, tmp_path, "half.txt", "half built\n",
+                   "turn 3 (halted)")
+    launcher.publish_app(www, APP_A, rsync_bin=HAVE_RSYNC, git_root=gitroot,
+                         git_bin=HAVE_GIT)
+    assert _gitq(parent_git, "for-each-ref", "refs/disjorn/live") == ""
+    launcher.remix_app(apps, www, APP_A, APP_B, git_bin=HAVE_GIT,
+                       rsync_bin=HAVE_RSYNC, git_root=gitroot)
+    child_git = gitroot / f"{APP_B}.git"
+    assert _files(apps / APP_B) == _files(www / APP_A / "live")
+    assert "half.txt" not in _files(apps / APP_B)
+    assert _gitq(child_git, "rev-list", "--count", "--all") == "1"
+    assert not _has_object(child_git, halted)
+
+
+@pytest.mark.skipif(not (HAVE_GIT and HAVE_RSYNC), reason="git/rsync missing")
+def test_a_recorded_commit_that_is_not_the_live_tree_gives_no_history(
+        www, apps, gitroot, launcher, live_with_a_draft):
+    parent_git = gitroot / f"{APP_A}.git"
+    _subprocess.run(["git", f"--git-dir={parent_git}", "update-ref",
+                     "refs/disjorn/live", live_with_a_draft["draft"]], check=True)
+    launcher.remix_app(apps, www, APP_A, APP_B, git_bin=HAVE_GIT,
+                       rsync_bin=HAVE_RSYNC, git_root=gitroot)
+    child_git = gitroot / f"{APP_B}.git"
+    assert _files(apps / APP_B) == _files(www / APP_A / "live")
+    assert _gitq(child_git, "rev-list", "--count", "--all") == "1"
+    assert not _has_object(child_git, live_with_a_draft["blob"])
+
+
+@pytest.mark.skipif(not (HAVE_GIT and HAVE_RSYNC), reason="git/rsync missing")
+def test_an_app_published_before_the_ref_remixes_as_one_parentless_commit(
+        www, apps, gitroot, launcher, tmp_path):
+    parent_git = gitroot / f"{APP_A}.git"
+    _deploy(apps, www, APP_A)
+    launcher.publish_app(www, APP_A, rsync_bin=HAVE_RSYNC)
+    first = _gitq(parent_git, "rev-parse", "HEAD")
+    draft = _turn(apps, gitroot, APP_A, tmp_path, "draft.txt",
+                  "not published yet\n", "turn 2")
+    _deploy(apps, www, APP_A)
+    assert _gitq(parent_git, "for-each-ref", "refs/disjorn") == ""
+    launcher.remix_app(apps, www, APP_A, APP_B, git_bin=HAVE_GIT,
+                       rsync_bin=HAVE_RSYNC, git_root=gitroot)
+    child_git = gitroot / f"{APP_B}.git"
+    live = _files(www / APP_A / "live")
+    assert _files(apps / APP_B) == live and "draft.txt" not in live
+    assert _files(www / APP_B / "preview") == live
+    assert _gitq(child_git, "log", "--format=%s|%P|%an") == (
+        f"remix of {APP_A}||apps-builder")
+    assert not _has_object(child_git, first)
+    assert not _has_object(child_git, draft)
+    assert _gitq(child_git, f"--work-tree={apps / APP_B}", "status",
+                 "--porcelain") == ""
+    assert not (apps / APP_B / ".git").exists()
+    assert _gitq(child_git, "config", "core.bare") == "false"
+
+
+@pytest.mark.skipif(not HAVE_GIT, reason="git is not installed")
+def test_the_launcher_refuses_a_viewers_remix_of_an_app_that_was_never_live(
+        seat, www, apps, gitroot, launcher):
+    assert not (www / APP_A / "live").exists()
+    with pytest.raises(SystemExit) as exc:
+        launcher.remix_app(apps, www, APP_A, APP_B, git_bin=HAVE_GIT,
+                           git_root=gitroot)
+    assert exc.value.code == 64
+    assert not (apps / APP_B).exists()
+    assert not (gitroot / f"{APP_B}.git").exists()
+    assert not (www / APP_B).exists() and not (www / ".staging").exists()
+    proc = op_refuse(seat, "remix", APP_A, APP_B, www_root=www, apps_root=apps,
+                     git_root=gitroot)
+    assert "not live" in proc.stderr
+    (www / APP_A / "live").symlink_to(www / APP_A / "preview")
+    op_refuse(seat, "remix", APP_A, APP_B, www_root=www, apps_root=apps,
+              git_root=gitroot)
+
+
+@pytest.mark.skipif(not (HAVE_GIT and HAVE_RSYNC) or os.geteuid() == 0,
+                    reason="git/rsync missing, or running as root")
+def test_the_seat_half_records_and_remixes_the_published_commit(
+        seat, www, apps, gitroot, tmp_path):
+    parent_git = gitroot / f"{APP_A}.git"
+    roots = {"www_root": www, "apps_root": apps, "git_root": gitroot}
+    _deploy(apps, www, APP_A)
+    assert op(seat, "publish-as-seat", APP_A, **roots).returncode == 0
+    first = _gitq(parent_git, "rev-parse", "refs/disjorn/live")
+    assert first == _gitq(parent_git, "rev-parse", "HEAD")
+    draft = _turn(apps, gitroot, APP_A, tmp_path, "draft.txt",
+                  "not published yet\n", "turn 2")
+    _deploy(apps, www, APP_A)
+    proc = op(seat, "remix-as-seat", APP_A, APP_B, **roots)
+    assert proc.returncode == 0, proc.stderr
+    child_git = gitroot / f"{APP_B}.git"
+    assert _gitq(child_git, "rev-parse", "HEAD^") == first
+    assert not _has_object(child_git, draft)
+    assert not (apps / APP_B / "draft.txt").exists()
+
+
+@pytest.mark.skipif(not (HAVE_GIT and HAVE_RSYNC) or os.geteuid() == 0,
+                    reason="git/rsync missing, or running as root")
+def test_the_backfill_records_only_a_head_that_is_the_live_tree(
+        seat, www, apps, gitroot, launcher, tmp_path):
+    parent_git = gitroot / f"{APP_A}.git"
+    roots = {"www_root": www, "apps_root": apps, "git_root": gitroot}
+    _deploy(apps, www, APP_A)
+    launcher.publish_app(www, APP_A, rsync_bin=HAVE_RSYNC)
+    first = _gitq(parent_git, "rev-parse", "HEAD")
+    draft = _turn(apps, gitroot, APP_A, tmp_path, "draft.txt",
+                  "not published yet\n", "turn 2")
+    proc = op(seat, "backfill-as-seat", APP_A, **roots)
+    assert json.loads(proc.stdout) == {"mode": "backfill", "app": APP_A,
+                                       "recorded": False}
+    assert _gitq(parent_git, "for-each-ref", "refs/disjorn") == ""
+    _subprocess.run(["git", f"--git-dir={parent_git}", "update-ref",
+                     "refs/heads/main", first], check=True)
+    proc = op(seat, "backfill-as-seat", APP_A, **roots)
+    assert json.loads(proc.stdout)["recorded"] is True
+    assert _gitq(parent_git, "rev-parse", "refs/disjorn/live") == first
+    _subprocess.run(["git", f"--git-dir={parent_git}", "update-ref",
+                     "refs/heads/main", draft], check=True)
+    assert json.loads(op(seat, "backfill-as-seat", APP_A, **roots).stdout)[
+        "recorded"] is False
+    assert _gitq(parent_git, "rev-parse", "refs/disjorn/live") == first
+    assert op(seat, "backfill-as-seat", "aaaaaaaaaaaa", **roots).returncode == 0
+    assert op(seat, "backfill", APP_A, **roots).returncode == 64
+    assert "backfill" not in SUDOERS.read_text(encoding="utf-8")
 
 
 # ───────────────────────────────── the constants that live in two files ─────
@@ -1780,7 +2015,8 @@ def test_a_real_repository_is_still_remixable(www, apps, gitroot, launcher):
     apps."""
     assert launcher._is_a_real_gitdir(gitroot / f"{APP_A}.git", gitroot) is True
     out = launcher.remix_app(apps, www, APP_A, APP_B, git_bin=HAVE_GIT,
-                             rsync_bin=HAVE_RSYNC or "rsync", git_root=gitroot)
+                             rsync_bin=HAVE_RSYNC or "rsync", git_root=gitroot,
+                             published=False)
     assert out["child"] == APP_B
 
 
@@ -1824,7 +2060,7 @@ def test_the_clone_is_never_a_local_object_copy(www, apps, gitroot, launcher,
 
     monkeypatch.setattr(launcher, "_git", spy)
     launcher.remix_app(apps, www, APP_A, APP_B, git_bin=HAVE_GIT,
-                       rsync_bin=HAVE_RSYNC, git_root=gitroot)
+                       rsync_bin=HAVE_RSYNC, git_root=gitroot, published=False)
     clone = next(a for a in seen if a and a[0] == "clone")
     assert "--no-local" in clone
     assert "--no-hardlinks" in clone
@@ -1848,7 +2084,7 @@ def test_an_alternates_file_in_the_parent_does_not_travel(www, apps, gitroot,
     alt.parent.mkdir(parents=True, exist_ok=True)
     alt.write_text(f"{donor}/objects\n", encoding="utf-8")
     launcher.remix_app(apps, www, APP_A, APP_B, git_bin=HAVE_GIT,
-                       rsync_bin=HAVE_RSYNC, git_root=gitroot)
+                       rsync_bin=HAVE_RSYNC, git_root=gitroot, published=False)
     child_alt = gitroot / f"{APP_B}.git" / "objects" / "info" / "alternates"
     assert not child_alt.exists()
 
@@ -1890,7 +2126,7 @@ def test_a_planted_alternates_and_symlinked_ref_yields_no_other_app(
     (evil / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
 
     launcher.remix_app(apps, www, APP_A, "ddd234567xyz", git_bin=HAVE_GIT,
-                       git_root=gitroot)
+                       git_root=gitroot, published=False)
 
     child_git = gitroot / "ddd234567xyz.git"
     child_objects = {o.name for o in (child_git / "objects").rglob("*")

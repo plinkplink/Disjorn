@@ -39,9 +39,10 @@
 #   Three SERVING modes (stage 3, SPECS/2026-09-09-apps-serving-gate.md D6),
 #   each taking app ids and nothing else: `publish <app>` promotes that app's
 #   preview tree to its `live` tree (keeping one `live.prev`), `revert <app>`
-#   swaps those two back, and `remix <parent> <child>` clones one app's git
-#   repository into a new app id and copies the parent's preview to the
-#   child's. The helper does none of it as root: it validates, then execs
+#   swaps those two back, and `remix <parent> <child>` copies what one app has
+#   PUBLISHED into a new app id: its live tree, and its git history up to the
+#   published commit and no further. The helper does none of it as root: it
+#   validates, then execs
 #   systemd-run to re-enter ITSELF as res-appsbuilding inside a transient unit
 #   (`<mode>-as-seat`, a mode no line below can name), which is the account
 #   that owns /srv/apps and /srv/apps-www in the first place.
@@ -95,7 +96,7 @@
 #
 #   publish <app-id>          promote preview → live
 #   revert  <app-id>          swap live ↔ live.prev
-#   remix   <parent> <child>  clone the repo, copy the preview
+#   remix   <parent> <child>  copy the published tree and its history
 #     app ids only, [a-z2-7]{12} each, anchored at both ends so nothing rides
 #     in after them. NO principal: a serving operation is the HOUSE's, decided
 #     by the server against its own tables (who owns the app, whether the
