@@ -29,3 +29,22 @@ def test_closing_a_websocket_returns_only_after_its_handler_has():
         may_finish.set()
         closing.join()
         assert still_closing and finished.is_set()
+
+
+def test_leaving_the_with_block_lets_the_handler_finish_its_disconnect_work():
+    finished = threading.Event()
+    app = FastAPI()
+
+    @app.websocket("/lingering")
+    async def lingering(ws: WebSocket):
+        await ws.accept()
+        try:
+            await ws.receive_text()
+        except WebSocketDisconnect:
+            await anyio.sleep(0.05)
+            finished.set()
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/lingering"):
+            pass
+        assert finished.is_set()
