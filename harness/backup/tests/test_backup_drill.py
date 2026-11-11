@@ -80,6 +80,8 @@ def house(tmp_path):
 
     stage = tmp_path / "state/stage"
     (tmp_path / "t").mkdir()
+    for root in ("apps-git", "apps-www"):
+        (tmp_path / root).mkdir()
     env.update({
         "PATH": f"{bin_}:{env['PATH']}",
         "FAKE_RESTIC_REPO": str(tmp_path / "repo"),
@@ -93,6 +95,8 @@ def house(tmp_path):
         "CLAUDETTE_PY": sys.executable,
         "PYTHONPATH": str(HOUSE_MEMORY),
         "STAGE": str(stage),
+        "APPS_GIT_ROOT": str(tmp_path / "apps-git"),
+        "APPS_WWW_ROOT": str(tmp_path / "apps-www"),
         "BACKUP_PATHS": "\n".join(map(str, [stage, disjorn / "server/data/uploads",
                                             disjorn / "server/.env", c_home, g_home])),
         "BACKUP_POST_CMD": f"cat >> {tmp_path / 'posts.txt'}; echo --- >> {tmp_path / 'posts.txt'}",

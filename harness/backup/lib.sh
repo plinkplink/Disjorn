@@ -12,6 +12,8 @@
 : "${CLAUDETTE_PY:=/home/plink/bots/claudette/.venv/bin/python}"
 : "${POST_PY:=$DISJORN/server/.venv/bin/python}"
 : "${BROKER_CONFIG:=/etc/disjorn-broker/broker.toml}"
+: "${APPS_GIT_ROOT:=/srv/apps-git}"
+: "${APPS_WWW_ROOT:=/srv/apps-www}"
 : "${STAGE:=/var/lib/disjorn-backup/stage}"
 : "${BACKUP_TAG:=disjorn-nightly}"
 : "${FRESH_HOURS:=26}"
@@ -114,7 +116,7 @@ print(n, hashlib.sha256((d / "MEMORY.md").read_bytes()).hexdigest())
 PY
 }
 
-# Newest snapshot with our tag as "<id> <age-hours>"; empty if there is none.
+# Newest snapshot with our tag as "<id> <age-hours> [apps-partial]"; empty if there is none.
 latest_snapshot() {
     restic snapshots --json --tag "$BACKUP_TAG" --retry-lock 30m | python3 -c '
 import datetime as dt, json, re, sys
@@ -125,6 +127,6 @@ def when(s):
 if snaps:
     s = max(snaps, key=when)
     age = (dt.datetime.now(dt.timezone.utc) - when(s)).total_seconds() / 3600
-    print(s["id"], f"{age:.1f}")
+    print(s["id"], f"{age:.1f}", "apps-partial" if "apps-partial" in (s.get("tags") or []) else "")
 '
 }
