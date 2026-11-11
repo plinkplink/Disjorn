@@ -72,7 +72,8 @@ async def test_list_requires_auth(client):
 
 
 async def test_list_main_feed_always_present_with_unread_math(client):
-    uid = await make_user("alice")
+    await make_user("alice")
+    uid = await make_user("bob")
     await login(client, "alice")
     main = await main_feed_id()
 
@@ -86,13 +87,13 @@ async def test_list_main_feed_always_present_with_unread_math(client):
         await insert_message(main, seq, f"msg {seq}", author_id=uid)
 
     [item] = (await client.get("/channels")).json()
-    assert item["unread"] == 5  # no read state yet -> floor is 0
+    assert item["unread"] == 5 and item["last_read_seq"] == 0
     assert item["last_message"]["seq"] == 5
     assert item["last_message"]["snippet"] == "msg 5"
 
     await client.put(f"/channels/{main}/read", json={"seq": 3})
     [item] = (await client.get("/channels")).json()
-    assert item["unread"] == 2
+    assert item["unread"] == 2 and item["last_read_seq"] == 3
 
     # last_read above max seq -> unread floored at 0, never negative
     await client.put(f"/channels/{main}/read", json={"seq": 99})
@@ -113,8 +114,7 @@ async def test_list_dm_shows_other_participant_and_skips_deleted_snippet(client)
     assert [i["type"] for i in items] == ["main_feed", "dm_1to1"]
     dm = items[1]
     assert dm["name"] == "Bobby" and dm["dm_user_id"] == uid_b
-    assert dm["unread"] == 2  # max(seq)=2 (deleted still counts) minus last_read_seq=0
-    # deleted message still counts toward max seq but not the snippet
+    assert dm["unread"] == 0  # her own messages are never unread to her
     assert dm["last_message"]["snippet"] == "hello bob"
 
     # Bob sees Alice's name on the same channel
@@ -124,15 +124,32 @@ async def test_list_dm_shows_other_participant_and_skips_deleted_snippet(client)
     assert dm["name"] == "Alice" and dm["dm_user_id"] == uid_a
 
 
-async def test_list_unread_counts_deleted_toward_max_seq(client):
-    await make_user("alice")
+async def test_list_unread_counts_neither_deleted_nor_own_messages(client):
+    uid_a = await make_user("alice")
     uid_b = await make_user("bob")
     await login(client, "alice")
     dm_id = (await client.post("/dms", json={"user_id": uid_b})).json()["id"]
+
+    async def unread() -> int:
+        rows = (await client.get("/channels")).json()
+        return next(i for i in rows if i["id"] == dm_id)["unread"]
+
     await insert_message(dm_id, 1, "one", author_id=uid_b)
     await insert_message(dm_id, 2, "two", author_id=uid_b, deleted=True)
-    dm = next(i for i in (await client.get("/channels")).json() if i["id"] == dm_id)
-    assert dm["unread"] == 2  # max(seq)=2 minus last_read_seq=0
+    await insert_message(dm_id, 3, "mine", author_id=uid_a)
+    # A bot's id may equal the caller's; its message is still someone else's.
+    await insert_message(dm_id, 4, "beep", author_id=uid_a, author_type="bot")
+    await insert_message(dm_id, 5, "three", author_id=uid_b)
+    assert await unread() == 3
+
+    await client.put(f"/channels/{dm_id}/read", json={"seq": 1})
+    assert await unread() == 2
+    await client.put(f"/channels/{dm_id}/read", json={"seq": 4})
+    assert await unread() == 1
+
+    # Bob's view of the same room counts Alice's message and the bot's.
+    await login(client, "bob")
+    assert await unread() == 2
 
 
 async def test_list_excludes_other_peoples_dms(client):
@@ -483,7 +500,7 @@ async def test_create_text_channel_name_validation_and_auth(client):
 
 
 async def test_list_orders_main_then_text_alpha_then_dms(client):
-    uid = await make_user("alice")
+    await make_user("alice")
     uid_b = await make_user("bob")
     await login(client, "alice")
     zeta = await make_text_channel(client, "zeta")
@@ -501,7 +518,7 @@ async def test_list_orders_main_then_text_alpha_then_dms(client):
 
     # Unread math identical to main_feed: implicit membership, floor at 0.
     for seq in range(1, 4):
-        await insert_message(zeta, seq, f"z{seq}", author_id=uid)
+        await insert_message(zeta, seq, f"z{seq}", author_id=uid_b)
     zrow = next(i for i in (await client.get("/channels")).json() if i["id"] == zeta)
     assert zrow["unread"] == 3 and zrow["last_message"]["snippet"] == "z3"
     await client.put(f"/channels/{zeta}/read", json={"seq": 2})

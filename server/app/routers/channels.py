@@ -238,6 +238,7 @@ class ChannelListItem(BaseModel):
     dm_bot_id: Optional[int] = None     # bot DMs: the bot's id (dm_user_id is None)
     dm_bot_avatar_url: Optional[str] = None
     unread: int = 0
+    last_read_seq: int = 0
     last_message: Optional[LastMessage] = None
     visibility: ChannelVisibility = "public"
     member: bool = True
@@ -406,19 +407,10 @@ async def list_channels(user: CurrentUser) -> list[ChannelListItem]:
     ids = [c["id"] for c in chans if c["id"] in member_ids]
 
     # One aggregate query each — no per-channel N+1.
-    max_seqs: dict[int, int] = {}
     last_msgs: dict[int, dict[str, Any]] = {}
-    reads: dict[int, int] = {}
+    reads: dict[int, dict[str, int]] = {}
     if ids:
         ph = ",".join("?" * len(ids))
-        max_seqs = {
-            r["channel_id"]: r["max_seq"]
-            for r in await db.fetch_all(
-                f"""SELECT channel_id, MAX(seq) AS max_seq FROM messages
-                    WHERE channel_id IN ({ph}) GROUP BY channel_id""",
-                ids,
-            )
-        }
         last_msgs = {
             r["channel_id"]: r
             for r in await db.fetch_all(
@@ -433,11 +425,22 @@ async def list_channels(user: CurrentUser) -> list[ChannelListItem]:
             )
         }
         reads = {
-            r["channel_id"]: r["last_read_seq"]
+            r["channel_id"]: r
             for r in await db.fetch_all(
-                f"""SELECT channel_id, last_read_seq FROM channel_members
-                    WHERE member_type = 'user' AND member_id = ? AND channel_id IN ({ph})""",
-                [user.id, *ids],
+                f"""SELECT c.id AS channel_id,
+                           COALESCE(cm.last_read_seq, 0) AS last_read_seq,
+                           (SELECT COUNT(*) FROM messages m
+                             WHERE m.channel_id = c.id
+                               AND m.seq > COALESCE(cm.last_read_seq, 0)
+                               AND m.deleted_at IS NULL
+                               AND NOT (m.author_type = 'user' AND m.author_id = ?)
+                           ) AS unread
+                    FROM channels c
+                    LEFT JOIN channel_members cm
+                      ON cm.channel_id = c.id AND cm.member_type = 'user'
+                     AND cm.member_id = ?
+                    WHERE c.id IN ({ph})""",
+                [user.id, user.id, *ids],
             )
         }
     partners: dict[int, dict[str, Any]] = {}
@@ -468,6 +471,7 @@ async def list_channels(user: CurrentUser) -> list[ChannelListItem]:
 
     def build(c: dict[str, Any]) -> ChannelListItem:
         lm = last_msgs.get(c["id"])
+        read = reads.get(c["id"], {"unread": 0, "last_read_seq": 0})
         partner = partners.get(c["id"])
         bot = bot_partners.get(c["id"]) if partner is None else None
         name = c["name"]
@@ -488,7 +492,8 @@ async def list_channels(user: CurrentUser) -> list[ChannelListItem]:
             member=c["id"] in member_ids,
             created_by=c["created_by"],
             mention_only=is_mention_only(c),
-            unread=max(0, (max_seqs.get(c["id"]) or 0) - reads.get(c["id"], 0)),
+            unread=read["unread"],
+            last_read_seq=read["last_read_seq"],
             last_message=LastMessage(
                 seq=lm["seq"],
                 snippet=_snippet(lm["content"]),

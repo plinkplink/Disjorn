@@ -264,7 +264,7 @@ async def test_channel_list_hides_private_channels_from_ordinary_non_members(cli
 
     # Alice, a member, sees the row with its content.
     row = list_item((await client.get("/channels", headers=cookie(ta))).json(), cid)
-    assert row["member"] is True and row["unread"] == 1
+    assert row["member"] is True and row["unread"] == 0
     assert row["last_message"]["snippet"] == "a snippet bob must not see"
 
 
