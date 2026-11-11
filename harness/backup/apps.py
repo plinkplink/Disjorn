@@ -17,8 +17,11 @@ from pathlib import Path
 APP_ID = re.compile(r"^[a-z2-7]{12}$")
 ROOTS = {"live": "live", "live_prev": "live.prev", "preview": "preview"}
 LIVE_REF = "refs/disjorn/live"
-GIT_ENV = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1", "LC_ALL": "C",
-           "HOME": "/nonexistent"}
+CHILD_ENV = {"PATH": "/usr/bin:/bin", "LC_ALL": "C", "HOME": "/nonexistent",
+             "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null",
+             "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0"}
+GIT_HARDENING = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null")
+CHILD_TIMEOUT = 120
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
 
@@ -38,17 +41,30 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def run(argv: list[str], **kw) -> subprocess.CompletedProcess:
+    """This process's environment holds the offsite credentials, so every child gets a built one."""
+    return subprocess.run([shutil.which(argv[0]) or argv[0], *argv[1:]], env=CHILD_ENV, text=True,
+                          stderr=subprocess.PIPE, **kw)
+
+
 def git_as_owner(git_dir: Path, *args: str, stdout) -> subprocess.CompletedProcess:
-    """The seat can write this repo's config, so git reads it as the seat and never as root."""
+    """The seat can write this repo's config: git reads it as the seat, never as root, and under a deadline."""
     owner = os.stat(git_dir).st_uid
-    argv = ["git", "-c", "core.hooksPath=/dev/null", "-C", str(git_dir), *args]
+    git = [shutil.which("git") or "git", *GIT_HARDENING, "-C", str(git_dir), *args]
     try:
+        clean = ["env", "-i"]
         if os.geteuid() != owner:
-            argv = ["runuser", "-u", pwd.getpwuid(owner).pw_name, "--", *argv]
-        return subprocess.run(argv, stdout=stdout, stderr=subprocess.PIPE, text=True, cwd="/",
-                              env={**os.environ, **GIT_ENV})
+            clean = ["runuser", "-u", pwd.getpwuid(owner).pw_name, "--", "env", "-i"]
+        proc = run([*clean, *(f"{k}={v}" for k, v in CHILD_ENV.items()),
+                    "timeout", "-k", "5", str(CHILD_TIMEOUT), *git],
+                   stdout=stdout, cwd="/", timeout=CHILD_TIMEOUT + 30)
+    except subprocess.TimeoutExpired as exc:
+        raise Skip(f"git timed out after {CHILD_TIMEOUT}s") from exc
     except (OSError, KeyError) as exc:
-        raise Skip(f"cannot run {argv[0]} as the git dir's owner") from exc
+        raise Skip("cannot run git as the git dir's owner") from exc
+    if proc.returncode in (124, 137):
+        raise Skip(f"git timed out after {CHILD_TIMEOUT}s")
+    return proc
 
 
 def must(git_dir: Path, proc: subprocess.CompletedProcess) -> str:
@@ -71,8 +87,7 @@ def bundle(git_dir: Path, dest: Path) -> dict:
         return {}
     with open(dest, "wb") as fh:
         must(git_dir, git_as_owner(git_dir, "bundle", "create", "-q", "-", "--all", stdout=fh))
-    heads = must(git_dir, subprocess.run(["git", "bundle", "list-heads", str(dest)],
-                                         capture_output=True, text=True))
+    heads = must(git_dir, run(["git", "bundle", "list-heads", str(dest)], stdout=subprocess.PIPE))
     by_ref = {ref: sha for sha, ref in (line.split(" ", 1) for line in heads.splitlines())}
     return {"bundle_sha256": sha256(dest), "head": by_ref.get("HEAD"),
             "live_commit": by_ref.get(LIVE_REF)}
@@ -143,13 +158,13 @@ def stage_app(dirs: dict, dest: Path) -> tuple[dict, list[str]]:
 def stage(git_root: Path, www_root: Path, out: Path) -> dict:
     out.mkdir(parents=True)
     found: dict[str, dict] = {}
-    apps, warnings = {}, {}
+    apps, warnings, lost_roots = {}, {}, {}
     for kind, root, suffix in (("git", git_root, ".git"), ("www", www_root, "")):
         try:
             names = os.listdir(root)
         except OSError as exc:
-            say(f"WARNING {root}: {exc.strerror}; no app is covered from it")
-            warnings[root.name] = f"root: {exc.strerror}"
+            say(f"RED {root}: {exc.strerror}; no app is covered from it")
+            lost_roots[root.name] = exc.strerror
             continue
         for name in names:
             app = name.removesuffix(suffix)
@@ -167,7 +182,7 @@ def stage(git_root: Path, www_root: Path, out: Path) -> dict:
         elif "git" not in dirs:
             say(f"{app} has web roots and no git dir; only the web roots are staged")
         apps[app] = entry
-    return {"apps": apps, "warnings": warnings}
+    return {"apps": apps, "warnings": warnings, "lost_roots": lost_roots}
 
 
 def told(facts: dict | None) -> str:
@@ -188,7 +203,7 @@ def count(root: Path) -> dict | None:
 
 def check_bundle(path: Path, want: dict, scratch: Path) -> str | None:
     def git(*args: str) -> subprocess.CompletedProcess:
-        return subprocess.run(["git", *args], capture_output=True, text=True)
+        return run(["git", *args], stdout=subprocess.PIPE)
 
     if not path.is_file():
         return "no bundle in the snapshot"
@@ -210,8 +225,10 @@ def verify(stage_dir: Path, manifest: dict, scratch: Path) -> tuple[list[str], s
     if "apps" not in manifest:
         return ["apps: the manifest has no apps section (snapshot predates apps coverage)"], ""
     scratch.mkdir(parents=True)
-    subprocess.run(["git", "init", "-q", "--bare", str(scratch / "verify.git")], check=True)
+    run(["git", "init", "-q", "--bare", str(scratch / "verify.git")], check=True)
     fails, bundles, live = [], 0, 0
+    for name, why in sorted(manifest["apps"]["lost_roots"].items()):
+        fails.append(f"apps: {name} could not be read at snapshot time ({why}); no app is covered from it")
     for app, want in sorted(manifest["apps"]["apps"].items()):
         if not APP_ID.match(app):
             fails.append("apps: the manifest names something that is not an app id")
@@ -239,18 +256,21 @@ def verify(stage_dir: Path, manifest: dict, scratch: Path) -> tuple[list[str], s
 
 
 def main(argv: list[str]) -> int:
+    global CHILD_TIMEOUT
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("stage")
     s.add_argument("--git-root", type=Path, required=True)
     s.add_argument("--www-root", type=Path, required=True)
     s.add_argument("--out", type=Path, required=True)
+    s.add_argument("--timeout", type=int, default=CHILD_TIMEOUT)
     v = sub.add_parser("verify")
     v.add_argument("--stage", type=Path, required=True)
     v.add_argument("--manifest", type=Path, required=True)
     v.add_argument("--scratch", type=Path, required=True)
     a = ap.parse_args(argv)
     if a.cmd == "stage":
+        CHILD_TIMEOUT = a.timeout
         facts = stage(a.git_root, a.www_root, a.out)
         (a.out / "apps.json").write_text(json.dumps(facts, sort_keys=True) + "\n")
         return 0

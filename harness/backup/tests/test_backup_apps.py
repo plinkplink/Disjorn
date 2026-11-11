@@ -63,7 +63,8 @@ def tags(house):
 
 def test_each_app_is_bundled_with_its_live_ref_and_counted_in_the_manifest(srv):
     _, staged, m = snapshot(srv)
-    assert set(m["apps"]["apps"]) == {LIVE, DRAFT} and m["apps"]["warnings"] == {}
+    assert set(m["apps"]["apps"]) == {LIVE, DRAFT}
+    assert m["apps"]["warnings"] == {} and m["apps"]["lost_roots"] == {}
     git_dir, _ = srv["live"]
     head = _git(srv["env"], git_dir, "rev-parse", "HEAD")
     bundle = staged / "apps" / LIVE / "repo.bundle"
@@ -205,12 +206,25 @@ def test_a_broken_git_dir_is_a_warning_and_the_coverage_is_called_partial(srv):
     assert posts(srv)[1].startswith("backup freshness WARNING") and "apps coverage was partial" in posts(srv)[1]
 
 
-def test_a_missing_apps_root_is_partial_coverage_not_zero_apps(srv):
+def test_a_missing_git_root_is_red_after_the_rest_of_the_snapshot_is_taken(srv):
     srv["env"]["APPS_GIT_ROOT"] = str(srv["tmp"] / "nowhere")
-    r, _, m = snapshot(srv)
-    assert m["apps"]["warnings"] == {"nowhere": "root: No such file or directory"}
+    r = run(srv, "snapshot.sh")
+    assert r.returncode == 1
+    assert r.stderr.strip().endswith(
+        "snapshot taken WITHOUT the apps: an apps root could not be read (No such file or directory nowhere)")
+    assert not srv["stage"].exists()
+    staged = restored(srv, only_snapshot(srv), srv["stage"])
+    m = json.loads((staged / "manifest.json").read_text())
+    assert m["messages"] == 3 and (staged / "disjorn.db").exists()
+    assert m["apps"]["lost_roots"] == {"nowhere": "No such file or directory"} and m["apps"]["warnings"] == {}
     assert m["apps"]["apps"][LIVE]["bundle_sha256"] is None and m["apps"]["apps"][LIVE]["live"]
     assert "apps-partial" in tags(srv)
+    assert "forget" in (srv["tmp"] / "repo/calls.log").read_text()
+
+    assert run(srv, "drill.sh").returncode == 1
+    [post] = posts(srv)
+    assert post.startswith("backup drill RED")
+    assert "apps: nowhere could not be read at snapshot time (No such file or directory)" in post
 
 
 def test_an_app_with_no_commits_is_recorded_without_a_bundle(srv):
@@ -235,7 +249,7 @@ def test_git_reads_a_seat_owned_repo_as_the_seat_when_the_backup_is_root(srv, tm
     assert facts["warnings"] == {} and facts["apps"][LIVE]["head"]
     me = __import__("pwd").getpwuid(os.getuid()).pw_name
     calls = log.read_text().splitlines()
-    assert len(calls) == 4 and all(c.startswith(f"-u {me} -- git ") for c in calls), calls
+    assert len(calls) == 4 and all(c.startswith(f"-u {me} -- env -i ") and "/git " in c for c in calls), calls
 
 
 def test_one_app_comes_back_from_its_bundle_by_the_readme_recipe(srv, tmp_path):

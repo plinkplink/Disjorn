@@ -156,8 +156,9 @@ def test_the_live_databases_are_backed_up_as_their_owner(house):
     assert r.returncode == 0, r.stderr
     me = pwd.getpwuid(os.getuid()).pw_name
     calls = log.read_text().splitlines()
-    assert any(c.startswith(f"-u {me} -- sqlite3 ") and "disjorn.db" in c for c in calls), calls
-    assert any(c.startswith(f"-u {me} -- sqlite3 ") and "chroma.sqlite3" in c for c in calls), calls
+    as_owner = f"-u {me} -- env -i PATH=/usr/bin:/bin timeout -k 5 120 {bin_ / 'sqlite3'} "
+    assert any(c.startswith(as_owner) and "disjorn.db" in c for c in calls), calls
+    assert any(c.startswith(as_owner) and "chroma.sqlite3" in c for c in calls), calls
     snap = only_snapshot(house)
     assert restored(house, snap, house["stage"] / "disjorn.db").exists()
 

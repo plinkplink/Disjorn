@@ -17,7 +17,8 @@ Snapshot contents (all host-absolute):
 5. Broker state: `/var/lib/disjorn-broker/` (gatehouse bare repos with loop branches that exist nowhere else, the consumed ledger, gate logs, the wake spool), `/var/log/disjorn-broker/` (audit, apps ledger), `/etc/disjorn-broker/`.
 6. Resident config: `/home/plink/resident-config/*`, `/srv/disjorn-resident-config/*`.
 7. **Manifest**, written at snapshot time and stored inside it: message count, each bundle's branch HEADs, Claudette's memory count + export sha, Gable's memory file count + `MEMORY.md` sha, migration number, and per app the bundle sha, the HEAD and `refs/disjorn/live` commits and a file count + byte total of each staged web root. Every drill check compares against the manifest, never against live state.
-8. Apps, copied into the stage per app id by `harness/backup/apps.py`: a `--all` bundle of `/srv/apps-git/<id>.git` (made as the git dir's owner, not root) and `/srv/apps-www/<id>/{live,live.prev,preview}` as files, symlinks left out. Not in the snapshot: the work trees `/srv/apps/<id>` (HEAD rebuilds them), `/srv/apps-turns` (logs), `/srv/apps-www/.staging`, `/srv/apps-quarantine`. An app that vanishes mid-run is left out with a logged note. A git dir or web root that cannot be read is a WARNING, recorded in the manifest, and tags the snapshot `apps-partial`.
+8. Apps, copied into the stage per app id by `harness/backup/apps.py`: a `--all` bundle of `/srv/apps-git/<id>.git` (made as the git dir's owner, not root) and `/srv/apps-www/<id>/{live,live.prev,preview}` as files, symlinks left out. Not in the snapshot: the work trees `/srv/apps/<id>` (HEAD rebuilds them), `/srv/apps-turns` (logs), `/srv/apps-www/.staging`, `/srv/apps-quarantine`. An app that vanishes mid-run is left out with a logged note. A git dir or web root that cannot be read is a WARNING, recorded in the manifest, and tags the snapshot `apps-partial`. A missing or unreadable `/srv/apps-git` or `/srv/apps-www` is RED: the snapshot is taken for everything else and the unit then fails.
+9. A child run as another user (git as the apps seat, `sqlite3 .backup` as a database's owner) gets a built environment through `env -i`, never the backup's own, which holds the restic password and the bucket key, and a deadline of `BACKUP_CHILD_TIMEOUT` seconds (default 120).
 
 Tool: restic. Retention 7 daily / 4 weekly / 12 monthly, which also serves as the written retention policy from #1651. plink picks the destination. The spec only needs a repo URL and password in a root-only env file. Key escrow: print the password and keep it off-box.
 
@@ -28,7 +29,7 @@ Drill (`harness/backup/drill.sh`), against scratch:
 - Claudette: `import_all()` into a scratch MemoryStore, then `export_all()` == the file and count == manifest, superseded records included. Interpreter named explicitly: `/home/plink/bots/claudette/.venv/bin/python` (the only host env with house_memory's deps).
 - Gable: memory file count and `MEMORY.md` sha == manifest.
 - Bundles: `git bundle verify`, branch HEADs == manifest.
-- Apps: every recorded bundle verifies, matches its sha, and a clone of it holds the recorded HEAD and live commits; each staged web root's file count and byte total == manifest. Partial apps coverage turns the headline from PASS to PARTIAL without failing the unit.
+- Apps: every recorded bundle verifies, matches its sha, and a clone of it holds the recorded HEAD and live commits; each staged web root's file count and byte total == manifest. Partial apps coverage turns the headline from PASS to PARTIAL without failing the unit; a lost apps root is RED.
 - Result posted to #custodian under the broker bot's identity (the file-proposal transport).
 
 Failure reporting (a timer that never fires can't report itself):

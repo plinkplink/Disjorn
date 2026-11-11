@@ -38,7 +38,8 @@ for pair in "${BUNDLES[@]}"; do
     git bundle list-heads "$STAGE/bundles/$name.bundle" > "$STAGE/bundles/$name.heads"
 done
 
-python3 "$HERE/apps.py" stage --git-root "$APPS_GIT_ROOT" --www-root "$APPS_WWW_ROOT" --out "$STAGE/apps"
+python3 "$HERE/apps.py" stage --git-root "$APPS_GIT_ROOT" --www-root "$APPS_WWW_ROOT" --out "$STAGE/apps" \
+    --timeout "$BACKUP_CHILD_TIMEOUT"
 
 facts="$(gable_facts "$GABLE_MEMORY")"
 read -r gable_files gable_sha <<<"$facts"
@@ -68,8 +69,13 @@ PY
 
 mapfile -t paths < <(backup_paths)
 tags="$BACKUP_TAG"
-[[ -z "$(mget "$STAGE/manifest.json" apps.warnings)" ]] || tags+=",apps-partial"
+lost_roots="$(mget "$STAGE/manifest.json" apps.lost_roots)"
+[[ -z "$(mget "$STAGE/manifest.json" apps.warnings)$lost_roots" ]] || tags+=",apps-partial"
 restic backup --retry-lock 30m --tag "$tags" "${paths[@]}"
 restic forget --retry-lock 30m --tag "$BACKUP_TAG" --prune \
     --keep-daily 7 --keep-weekly 4 --keep-monthly 12
 rm -rf "$STAGE"
+if [[ -n "$lost_roots" ]]; then
+    printf 'snapshot taken WITHOUT the apps: an apps root could not be read (%s)\n' "${lost_roots//$'\n'/; }" >&2
+    exit 1
+fi

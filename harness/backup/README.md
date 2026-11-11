@@ -37,7 +37,7 @@ before a drill notices.
 `claudette.{count,export_sha256}`, `gable.{memory_files,memory_md_sha256}`,
 `apps.apps.<id>` (`bundle_sha256`, `head`, `live_commit`, and
 `{files,bytes}` for each of `live`, `live_prev`, `preview`; never a file
-name), `apps.warnings` (name → reason).
+name), `apps.warnings` (app → reason), `apps.lost_roots` (root → reason).
 The drill compares only against the manifest, never live state.
 
 Claudette's export is taken from a copy of her chroma dir (`sqlite3 .backup` of
@@ -67,23 +67,46 @@ that changes or is deleted during the run cannot fail `restic backup`.
 - `git` runs on a git dir as the dir's owner (`runuser -u res-appsbuilding`),
   never as root: the seat can write that repo's config. Nothing under `/srv`
   is written, chowned or chmodded.
+- **No child run as another user inherits the backup's environment**, which
+  holds the restic password and the bucket key. `apps.py` (git as the seat)
+  and `lib.sh` `as_user` (`sqlite3 .backup` as a database's owner) both run
+  `runuser -u <owner> -- env -i <built vars> timeout -k 5 <secs> <tool> …`.
+  git gets `PATH=/usr/bin:/bin`, `LC_ALL=C`, `HOME=/nonexistent`,
+  `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_SYSTEM=/dev/null`,
+  `GIT_CONFIG_NOSYSTEM=1`, `GIT_TERMINAL_PROMPT=0` and
+  `-c core.fsmonitor=false -c core.hooksPath=/dev/null`; sqlite3 gets `PATH`
+  alone. Every other git that `apps.py` starts gets the same built
+  environment. A test fails on any `runuser` here without `-- env -i`.
+- Each such child has a deadline, `BACKUP_CHILD_TIMEOUT` seconds (default
+  120; settable in `restic.env`). A git that hangs costs that app its bundle
+  and is a WARNING like any other; a database backup that hangs fails the
+  snapshot unit.
 - Web roots are copied as regular files and directories only, each opened
   relative to its parent with `O_NOFOLLOW`. A symlink inside a root is left
   out; a root that is itself a symlink is a warning.
 - An app whose directories vanish mid-run (a delete) is left out with a
   logged note and the run goes on.
-- A git dir that is half-written, unreadable or will not bundle, a web root
-  that cannot be read, or a missing `/srv/apps-git` or `/srv/apps-www`, is a
+- A git dir that is half-written, unreadable or will not bundle, or a web
+  root that cannot be read, is a
   `WARNING` in the unit's log and an entry in `apps.warnings`. Only the part
   that failed is left out; the app's other parts are still staged. The
   snapshot then carries the extra restic tag `apps-partial`; `freshness.sh`
   posts a WARNING for it every day it is the newest, and the drill's
   headline reads `PARTIAL` instead of `PASS`. Neither fails its unit.
+- A missing or unreadable `/srv/apps-git` or `/srv/apps-www` uncovers every
+  app at once and is RED: `apps.lost_roots` records it, the snapshot is still
+  taken and pruned for everything else, then `snapshot.sh` exits 1 so the
+  alert unit posts, and the drill is RED on that snapshot.
 - The drill runs `git bundle verify` on every recorded bundle, compares its
   sha256, clones it and requires the recorded `HEAD` and `refs/disjorn/live`
   commits in the clone; it recounts each staged web root against the
   manifest. Any mismatch, or a manifest with no `apps` section, is RED. The
   PASS line ends `apps: N bundles verified, N live roots matched`.
+
+Not built: a size ceiling. A web root is copied whole into the stage, so a
+build that writes a huge file into `preview` fills
+`/var/lib/disjorn-backup`; a free-space check or a per-root cap would stop
+that.
 
 ### Restore one app after a mistaken delete
 
