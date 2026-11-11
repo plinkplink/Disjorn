@@ -21,6 +21,7 @@ import {
   writeChannelHash,
 } from "../hashRoute";
 import { POPUP_BLOCKED_NOTE, openMinted } from "../lib/openMinted";
+import { isSidebarRow, tabTitle } from "../lib/unread";
 import { usePush } from "../push";
 import { useApprovals } from "../stores/approvals";
 import { useApps } from "../stores/apps";
@@ -46,6 +47,7 @@ import { SettingsView } from "./SettingsView";
 
 /** Hidden at least this long, a resumed page replaces its socket and resyncs. */
 const RESUME_STALE_AFTER_MS = 30_000;
+const LIST_SYNC_MIN_GAP_MS = 1000;
 
 const SETTINGS_HASH = "#/settings";
 const PLANROOM_HASH = "#/planroom";
@@ -713,9 +715,23 @@ export function AppShell() {
   // we were away, and retry a channel list that never landed.
   useEffect(() => {
     let hiddenAt: number | null = null;
+    let listSyncedAt = 0;
+    /* A read or a post made on another device reaches this tab only through
+       the channel list, so coming back to the tab refetches it. */
+    const syncList = () => {
+      const st = useChannels.getState();
+      if (!st.loaded) {
+        void st.ensureLoaded();
+        return;
+      }
+      // Returning to a tab fires visibilitychange and focus together.
+      if (Date.now() - listSyncedAt < LIST_SYNC_MIN_GAP_MS) return;
+      listSyncedAt = Date.now();
+      void st.refresh().catch(() => {});
+    };
     const resume = (stale: boolean) => {
       socket.wake(stale);
-      void useChannels.getState().ensureLoaded();
+      syncList();
     };
     const onVisibility = () => {
       if (document.visibilityState === "hidden") {
@@ -733,18 +749,27 @@ export function AppShell() {
     document.addEventListener("visibilitychange", onVisibility);
     window.addEventListener("pageshow", onPageShow);
     window.addEventListener("online", onOnline);
+    window.addEventListener("focus", syncList);
     return () => {
       document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener("pageshow", onPageShow);
       window.removeEventListener("online", onOnline);
+      window.removeEventListener("focus", syncList);
     };
   }, []);
 
-  // Document title carries the total unread count: "(3) Disjorn".
-  const totalUnread = channels.reduce((sum, c) => sum + c.unread, 0);
+  // The title is the sum of the sidebar's own badges: "(3) Disjorn".
+  const title = tabTitle(channels);
   useEffect(() => {
-    document.title = totalUnread > 0 ? `(${totalUnread}) Disjorn` : "Disjorn";
-  }, [totalUnread]);
+    document.title = title;
+  }, [title]);
+  // Signed out, the tab must not go on claiming unread messages.
+  useEffect(
+    () => () => {
+      document.title = tabTitle([]);
+    },
+    [],
+  );
 
   const openOverlay = (next: Exclude<Overlay, "none">) => {
     setSidebarOpen(false);
@@ -771,7 +796,7 @@ export function AppShell() {
      resync and unread bookkeeping depend on that — but they are never sidebar
      rows: their only door is the build modal. Filtered out once, before both
      groups, so neither can grow one by accident. */
-  const listable = channels.filter((c) => c.type !== "app_build");
+  const listable = channels.filter(isSidebarRow);
   const dms = listable.filter((c) => c.type === "dm_1to1");
   const mains = listable.filter((c) => c.type !== "dm_1to1"); // main_feed + text
   const builderFor = (app: App): Builder | undefined =>

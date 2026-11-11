@@ -1,0 +1,281 @@
+// Unread bookkeeping, the tab title, and the channels store and socket that
+// feed them, bundled for node:
+//
+//     node --test client/tests/unread.test.mjs
+
+import { test, before, after, beforeEach } from 'node:test';
+import assert from 'node:assert/strict';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const CLIENT = dirname(HERE);
+
+function nodeModules() {
+  const found = [process.env.DISJORN_CLIENT_NODE_MODULES,
+    join(CLIENT, 'node_modules'), '/opt/node_modules']
+    .find((d) => d && existsSync(join(d, 'esbuild')));
+  if (!found) throw new Error('no client toolchain (esbuild) found');
+  return found;
+}
+
+const ENTRY = `
+export * from "../src/lib/unread";
+export { useChannels } from "../src/stores/channels";
+export { useSession } from "../src/stores/session";
+export { DisjornSocket } from "../src/ws";
+`;
+
+class FakeSocket {
+  static OPEN = 1;
+  static made = [];
+  constructor() {
+    this.readyState = FakeSocket.OPEN;
+    FakeSocket.made.push(this);
+  }
+  send() {}
+  close() {}
+}
+
+let m;
+let scratch;
+let focused = false;
+
+before(async () => {
+  globalThis.WebSocket = FakeSocket;
+  globalThis.location = { protocol: 'https:', host: 'test', hash: '' };
+  globalThis.document = { hasFocus: () => focused };
+  const nm = nodeModules();
+  const bin = join(nm, '@esbuild', `${process.platform}-${process.arch}`, 'bin', 'esbuild');
+  if (!process.env.ESBUILD_BINARY_PATH && existsSync(bin)) process.env.ESBUILD_BINARY_PATH = bin;
+  const esbuild = createRequire(import.meta.url)(join(nm, 'esbuild'));
+  const out = await esbuild.build({
+    stdin: { contents: ENTRY, resolveDir: HERE, loader: 'js' },
+    bundle: true, platform: 'node', format: 'esm', write: false,
+    jsx: 'automatic', nodePaths: [nm], logLevel: 'silent',
+    define: { 'process.env.NODE_ENV': '"production"' },
+    banner: { js: "import { createRequire } from 'node:module';"
+      + ' const require = createRequire(import.meta.url);' },
+  });
+  scratch = mkdtempSync(join(tmpdir(), 'unread-'));
+  const file = join(scratch, 'bundle.mjs');
+  writeFileSync(file, out.outputFiles[0].text);
+  m = await import(pathToFileURL(file).href);
+});
+
+after(() => { if (scratch) rmSync(scratch, { recursive: true, force: true }); });
+
+const ALICE = { id: 1, username: 'alice', display_name: 'Alice', avatar_path: null,
+  status: 'online', is_admin: false, created_at: '2026-10-06T00:00:00Z' };
+
+function row(id, unread, lastSeq, type = 'text') {
+  return { id, type, name: `c${id}`, dm_user_id: null, unread,
+    last_message: lastSeq === null ? null : { seq: lastSeq, snippet: 's',
+      author_type: 'user', author_id: 2, created_at: '2026-10-06T00:00:00Z' } };
+}
+
+function message(channelId, seq, authorId = 2) {
+  return { id: channelId * 1000 + seq, channel_id: channelId, seq, content: 'hi',
+    author_type: 'user', author_id: authorId, created_at: '2026-10-06T00:00:00Z' };
+}
+
+/* Each GET /channels waits for the test to answer it; each read is recorded
+   and answered by `readStatus`. */
+let lists;
+let reads;
+let readStatus;
+
+function answerNextList(rows, which = 0) {
+  const [pending] = lists.splice(which, 1);
+  pending({ ok: true, status: 200, statusText: '', json: async () => rows });
+}
+
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+async function load(rows) {
+  const done = m.useChannels.getState().refresh();
+  answerNextList(rows);
+  await done;
+}
+
+const unreadOf = (id) => m.useChannels.getState().channels.find((c) => c.id === id).unread;
+
+beforeEach(() => {
+  focused = false;
+  lists = [];
+  reads = [];
+  readStatus = 200;
+  FakeSocket.made = [];
+  globalThis.fetch = (path, init) => {
+    if (init.method === 'GET' && path === '/channels') {
+      return new Promise((resolve) => lists.push(resolve));
+    }
+    const read = /^\/channels\/(\d+)\/read$/.exec(path);
+    if (init.method === 'PUT' && read) {
+      const seq = JSON.parse(init.body).seq;
+      reads.push([Number(read[1]), seq]);
+      return Promise.resolve({ ok: readStatus === 200, status: readStatus, statusText: '',
+        json: async () => ({ channel_id: Number(read[1]), last_read_seq: seq }) });
+    }
+    throw new Error(`unexpected ${init.method} ${path}`);
+  };
+  m.useSession.setState({ user: ALICE });
+  m.useChannels.setState({ channels: [], unreadState: {}, activeChannelId: null, loaded: false });
+});
+
+test('the title is the sum of the rows the sidebar draws, and nothing else', () => {
+  const rows = [row(1, 2, 9, 'main_feed'), row(2, 1, 4), row(3, 0, 7, 'dm_1to1'),
+    row(4, 65, 65, 'app_build')];
+  assert.equal(m.totalUnread(rows), 3);
+  assert.equal(m.tabTitle(rows), '(3) Disjorn');
+  assert.equal(m.tabTitle([row(4, 65, 65, 'app_build')]), 'Disjorn');
+  assert.equal(m.tabTitle([]), 'Disjorn');
+  assert.deepEqual(rows.filter(m.isSidebarRow).map((r) => r.id), [1, 2, 3]);
+});
+
+test('a frame the list already counted is not counted twice', () => {
+  const s = m.listed(undefined, row(1, 3, 10));
+  assert.equal(m.unreadCount(m.created(s, 10, false)), 3);
+  assert.equal(m.unreadCount(m.created(s, 11, false)), 4);
+  assert.equal(m.unreadCount(m.created(m.created(s, 11, false), 11, false)), 4);
+});
+
+test('a frame that beat an older list is still counted, in any arrival order', () => {
+  let s = m.created(m.listed(undefined, row(1, 0, 10)), 12, false);
+  s = m.created(s, 11, false);
+  assert.equal(m.unreadCount(s), 2);
+  assert.equal(m.unreadCount(m.listed(s, row(1, 0, 10))), 2);
+  assert.equal(m.unreadCount(m.listed(s, row(1, 1, 11))), 2);
+  assert.equal(m.unreadCount(m.listed(s, row(1, 2, 12))), 2);
+});
+
+test('a list computed before our read reached the server cannot bring the badge back', () => {
+  const s = m.markedRead(m.listed(undefined, row(1, 3, 10)), 10);
+  assert.equal(m.unreadCount(s), 0);
+  assert.equal(m.unreadCount(m.listed(s, row(1, 3, 10))), 0);
+  assert.equal(m.unreadCount(m.listed(s, row(1, 2, 12))), 2);
+});
+
+test('a read made on another device clears the count at the next list', () => {
+  const s = m.created(m.listed(undefined, row(1, 3, 10)), 11, false);
+  assert.equal(m.unreadCount(s), 4);
+  assert.equal(m.unreadCount(m.listed(s, row(1, 0, 11))), 0);
+});
+
+test('reading on arrival, or posting, reads everything up to that message', () => {
+  let s = m.created(m.listed(undefined, row(1, 3, 10)), 11, false);
+  s = m.created(s, 12, true);
+  assert.equal(m.unreadCount(s), 0);
+  assert.equal(m.unreadCount(m.created(s, 11, false)), 0);
+  assert.equal(m.unreadCount(m.created(s, 13, false)), 1);
+});
+
+test('deleting an unread arrival uncounts it, and only it', () => {
+  const s = m.created(m.created(m.listed(undefined, row(1, 1, 10)), 11, false), 12, false);
+  assert.equal(m.unreadCount(m.deleted(s, 12)), 2);
+  assert.equal(m.unreadCount(m.deleted(m.deleted(s, 12), 12)), 2);
+  assert.equal(m.unreadCount(m.deleted(s, 10)), 3);
+  assert.equal(m.deleted(undefined, 5), undefined);
+});
+
+test('marking read covers a newest message that was deleted after it arrived', () => {
+  const s = m.deleted(m.created(m.listed(undefined, row(1, 0, 10)), 11, false), 11);
+  assert.equal(m.markedRead(s, 10).read, 11);
+});
+
+test('a refused read lets the next list restore the count', () => {
+  const before = m.listed(undefined, row(1, 3, 10));
+  const s = m.readRefused(m.markedRead(before, 10), 10, before.read);
+  assert.equal(m.unreadCount(m.listed(s, row(1, 3, 10))), 3);
+  const later = m.markedRead(m.markedRead(before, 10), 12);
+  assert.equal(m.readRefused(later, 10, before.read).read, 12);
+});
+
+test('the store counts a message once whichever of list and frame lands first', async () => {
+  const st = m.useChannels.getState();
+  await load([row(1, 2, 10)]);
+  st.onMessageCreate(message(1, 10), false);
+  assert.equal(unreadOf(1), 2);
+
+  const done = st.refresh();
+  st.onMessageCreate(message(1, 11), false);
+  answerNextList([row(1, 2, 10)]);
+  await done;
+  assert.equal(unreadOf(1), 3);
+
+  await load([row(1, 3, 11)]);
+  assert.equal(unreadOf(1), 3);
+});
+
+test('a list that lands after a newer one is dropped', async () => {
+  const st = m.useChannels.getState();
+  const older = st.refresh();
+  const newer = st.refresh();
+  answerNextList([row(1, 0, 12)], 1);
+  await newer;
+  answerNextList([row(1, 2, 12)], 0);
+  await older;
+  assert.equal(unreadOf(1), 0);
+});
+
+test('a read racing a list stays read, and sends the highest seq it knows', async () => {
+  const st = m.useChannels.getState();
+  await load([row(1, 0, 10)]);
+  st.onMessageCreate(message(1, 11), false);
+  st.onMessageDelete(1, 11);
+  st.onMessageCreate(message(1, 12), false);
+  const done = st.refresh();
+  await st.markRead(1, 10);
+  assert.deepEqual(reads, [[1, 12]]);
+  answerNextList([row(1, 2, 12)]);
+  await done;
+  assert.equal(unreadOf(1), 0);
+  assert.equal(m.tabTitle(m.useChannels.getState().channels), 'Disjorn');
+});
+
+test('a read the server refused comes back with the next list', async () => {
+  const st = m.useChannels.getState();
+  await load([row(1, 3, 10)]);
+  readStatus = 503;
+  await st.markRead(1, 10);
+  assert.equal(unreadOf(1), 0);
+  await load([row(1, 3, 10)]);
+  assert.equal(unreadOf(1), 3);
+});
+
+test('a channel that left the list takes its bookkeeping with it', async () => {
+  const st = m.useChannels.getState();
+  await load([row(1, 0, 10), row(2, 0, 5)]);
+  await st.markRead(2, 5);
+  st.removeChannel(2);
+  assert.deepEqual(Object.keys(m.useChannels.getState().unreadState), ['1']);
+  await load([row(1, 0, 10), row(2, 5, 5)]);
+  assert.equal(unreadOf(2), 5);
+});
+
+test('the socket counts others\' messages, not mine, and uncounts a deleted one', async () => {
+  await load([row(1, 0, 10), row(9, 0, 3, 'app_build')]);
+  const socket = new m.DisjornSocket();
+  socket.connect();
+  const frame = (f) => FakeSocket.made[0].onmessage({ data: JSON.stringify(f) });
+  frame({ type: 'ready' });
+
+  frame({ type: 'message_create', message: message(1, 11) });
+  frame({ type: 'message_create', message: message(1, 12) });
+  assert.equal(unreadOf(1), 2);
+  frame({ type: 'message_delete', channel_id: 1, id: 1012, seq: 12 });
+  assert.equal(unreadOf(1), 1);
+
+  frame({ type: 'message_create', message: message(1, 13, ALICE.id) });
+  await settle();
+  assert.equal(unreadOf(1), 0);
+  assert.deepEqual(reads, [[1, 13]]);
+
+  frame({ type: 'message_create', message: message(9, 4) });
+  assert.equal(unreadOf(9), 1);
+  assert.equal(m.tabTitle(m.useChannels.getState().channels), 'Disjorn');
+  socket.disconnect();
+});
