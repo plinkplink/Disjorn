@@ -58,7 +58,7 @@ from pydantic import BaseModel
 from .. import db, privacy
 from ..config import get_settings
 from ..models import BacklogItem
-from ..services import backlog as backlog_service, broker_client
+from ..services import backlog as backlog_service, bot_files, broker_client
 from .approval import RESIDENT_PRINCIPAL_RE
 from .auth import Actor, get_actor
 from .messages import deliver_message
@@ -675,3 +675,42 @@ async def _merge(ctx: Ctx) -> str:
         f"Merge of `{result.get('slug') or slug}` started: the gates are "
         "running; the result will post here."
     )
+
+
+FILES_SAFE_NOT_ADMIN = "Only an admin can change whether bots may read a channel's files."
+FILES_SAFE_USAGE = "Usage: `/files-safe #channel on|off [--include-history]`."
+FILES_SAFE_NO_CHANNEL = (
+    "No such channel: `/files-safe` takes #main or a named text channel. "
+    "Nothing was changed."
+)
+FILES_SAFE_ON = "Files uploaded to this channel from now on are readable by bots."
+FILES_SAFE_HISTORY = "Files uploaded to this channel earlier are now readable by bots too."
+FILES_SAFE_OFF = "Files in this channel are no longer readable by bots."
+
+
+@command("files-safe")
+async def _files_safe(ctx: Ctx) -> Optional[str]:
+    user = ctx.actor.user if ctx.actor.type == "user" else None
+    if user is None or not user.is_admin:
+        return FILES_SAFE_NOT_ADMIN
+    parts = ctx.args.split()
+    if parts[1:] not in (["on"], ["off"], ["on", "--include-history"]):
+        return FILES_SAFE_USAGE
+    name = parts[0].removeprefix("#")
+    rows = await db.fetch_all(
+        "SELECT id FROM channels WHERE name = ? AND type IN ('main_feed', 'text')",
+        (name,),
+    )
+    if len(rows) != 1:
+        return FILES_SAFE_NO_CHANNEL
+    target = rows[0]["id"]
+    on, history = parts[1] == "on", len(parts) == 3
+    changed = await bot_files.set_channel_safe(target, on, include_history=history)
+    lines = [FILES_SAFE_ON if on else FILES_SAFE_OFF] if changed else []
+    if history:
+        lines.append(FILES_SAFE_HISTORY)
+    for line in lines:
+        await _post_system_reply(target, f"{line} Set by {ctx.poster}.")
+    if not lines:
+        return f"#{name} already has files-safe {parts[1]}. Nothing was changed."
+    return None if target == ctx.channel_id else f"#{name}: files-safe {' '.join(parts[1:])}."

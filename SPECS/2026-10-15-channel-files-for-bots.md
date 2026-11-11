@@ -78,7 +78,7 @@ Tier 2 — touches the privacy wall (`privacy.py` callers), a migration, broker 
 
 ## Confirm record
 - **Confirmed by**: plink
-- **#custodian seq**: 3483 (the slug is typed there without its first digit)
+- **#custodian seq**: 3485
 - **Confirmed at**: 2026-11-11
 <!-- No Confirm record → no build. This is the gate. -->
 

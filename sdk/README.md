@@ -68,8 +68,7 @@ python examples/echo_bot.py --url http://localhost:8000 --api-key KEY
 `message` is the server's full materialized payload:
 `{id, channel_id, seq, author_type, author_id, author: {type, id, name, ...},
 content, created_at, edited_at, deleted_at, reply_to_id, privacy_flags,
-emote_refs, mentioned_bot_ids, attachments: [{id, original_filename,
-mime_type, size_bytes, width, height, url}]}`.
+emote_refs, mentioned_bot_ids, attachments: [{id, mime_type, size_bytes}]}`.
 
 `mentioned_bot_ids` is the server's list of the channel's bots the message
 addressed with an explicit `@`: each bot named `@name`, and every bot in the
@@ -78,6 +77,12 @@ channel when a **person** wrote `@bots` (accounts that only post, set in
 nobody. The server resolves it once, when the message is written; text inside
 code spans does not count. `client.bot_id in event.message["mentioned_bot_ids"]`
 is the test for "I was @-addressed", with no name parsing.
+
+`attachments` is present only in a channel an admin has marked files-safe
+(`/files-safe #channel on`), and lists only the files a bot may read. In any
+other channel the key is absent, so read it with `.get("attachments", [])`.
+The response to your own `upload()` / `attach()` still carries the full
+attachment dicts.
 
 `context` (Architecture §8.3) is attached **only** to the copy delivered to a
 bot the message addressed (listed in `mentioned_bot_ids`, or the bot's name as

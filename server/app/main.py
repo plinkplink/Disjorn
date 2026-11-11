@@ -35,6 +35,7 @@ from .routers import (
     approval,
     apps,
     auth,
+    bot_files,
     bots_admin,
     chibi_admin,
     channels,
@@ -81,6 +82,7 @@ API_PREFIXES = frozenset(
         "notify-prefs",
         "healthz",
         "ws",
+        "bot",
         "bots",
         "planroom",
         "apps",
@@ -396,6 +398,7 @@ def create_app() -> FastAPI:
     app.include_router(channels.router)
     app.include_router(messages.router)
     app.include_router(media.router)
+    app.include_router(bot_files.router)
     app.include_router(notifications.router)
     app.include_router(bots_admin.router)
     app.include_router(chibi_admin.router)

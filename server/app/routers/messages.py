@@ -38,6 +38,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .. import db, events, mentions, privacy
 from ..models import User
+from ..services import bot_files
 from . import channels
 from .auth import Actor, get_actor, get_current_user
 
@@ -238,6 +239,11 @@ def _stored_trace(raw: Optional[str]) -> Optional[dict[str, Any]]:
     """The stored {steps, total} object, or None for a message without one."""
     parsed = json.loads(raw or "{}")
     return parsed if isinstance(parsed, dict) and parsed.get("total") else None
+
+
+async def _payload_for(actor: Actor, row: dict[str, Any]) -> dict[str, Any]:
+    payload = await message_payload(row)
+    return await bot_files.for_bot(payload) if actor.type == "bot" else payload
 
 
 def _tombstone(row: dict[str, Any]) -> dict[str, Any]:
@@ -617,7 +623,7 @@ async def list_messages(
         if row["deleted_at"] is not None:
             out.append(_tombstone(row))  # from_seq mode only; scrollback filters in SQL
         else:
-            out.append(await message_payload(row))
+            out.append(await _payload_for(actor, row))
     return out
 
 
@@ -728,7 +734,7 @@ async def search_messages(
             continue
         results.append(
             {
-                "message": await message_payload(row),
+                "message": await _payload_for(actor, row),
                 "channel": {
                     "id": row["channel_id"],
                     "type": row["channel_type"],

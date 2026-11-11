@@ -111,6 +111,7 @@ from .routers.auth import (
     _session_user,
 )
 from .routers.channels import is_member, is_mention_only
+from .services import bot_files
 
 logger = logging.getLogger(__name__)
 
@@ -582,6 +583,8 @@ async def handle_bus_event(event: dict[str, Any]) -> None:
     connected_bots = manager.connected_bot_ids()
     if not connected_bots:
         return
+    if event["type"] != "message_delete":
+        bot_event = {**event, "message": await bot_files.for_bot(event["message"])}
     bot_names: dict[int, str] = {}
     always_bots: set[int] = set()
     if event["type"] == "message_create":
