@@ -73,7 +73,7 @@ GENERATED_HEADER = (
 ARG_KEYS = {
     "type", "required", "flag", "description", "seats", "minimum", "maximum",
     "min_len", "max_len", "pattern", "absolute_path", "no_dotdot",
-    "no_leading_dash", "no_nul", "json_arg", "max_json_bytes",
+    "no_leading_dash", "no_nul", "json_arg", "max_json_bytes", "env",
 }
 VERB_KEYS = {"tool_name", "cli_help", "description", "announce_preface", "args",
              "tool"}
@@ -159,6 +159,12 @@ def load_surface(surface_path: Path = SURFACE_TOML) -> dict:
                     raise SurfaceError(f"{verb}.{arg}: unknown seat {seat!r}")
             if spec.get("pattern"):
                 re.compile(spec["pattern"])   # fail here, not in a resident
+            if "env" in spec and (
+                    not re.fullmatch(r"[A-Z][A-Z0-9_]*", str(spec["env"]))
+                    or spec.get("required") or spec.get("seats") != ["cli"]):
+                raise SurfaceError(
+                    f"{verb}.{arg}: env names the variable the CLI reads an "
+                    f"optional, cli-only arg from")
     return verbs
 
 
@@ -277,7 +283,7 @@ def cli_table(surface: dict) -> dict:
                       "help": spec["description"]}
             for key in ("minimum", "maximum", "min_len", "max_len", "pattern",
                         "absolute_path", "no_dotdot", "no_leading_dash",
-                        "no_nul", "json_arg", "max_json_bytes"):
+                        "no_nul", "json_arg", "max_json_bytes", "env"):
                 if key in spec:
                     shaped[key] = spec[key]
             args[arg] = shaped

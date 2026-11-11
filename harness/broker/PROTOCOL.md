@@ -958,10 +958,26 @@ SPECS/2026-10-15-channel-files-for-bots.md. Goes to the server's
 `POST /bot/attachments` as the broker's own bot; the server posts the file as
 the seat's bot. The broker holds no resident's key.
 
-- args `{"path": str, "channel": int, "text": str}`; `path` and `channel` are
-  required. `path` is `/files-outbox/<name>`, one file directly in the seat's
-  outbox, host directory `<[paths].files_outbox_root>/<seat>/` (default
-  `/srv/disjorn-files-outbox`). No subdirectory, no `..`.
+- args `{"path": str, "channel": int, "text": str, "model": str, "summoner":
+  str}`; `path` and `channel` are required. `path` is `/files-outbox/<name>`,
+  one file directly in the seat's outbox, host directory
+  `<[paths].files_outbox_root>/<seat>/` (default `/srv/disjorn-files-outbox`).
+  No subdirectory, no `..`.
+- `model` and `summoner` (1 to 100 chars each) are the seat's own word for
+  what produced the file. The CLI has no flag for them: it reads
+  `DISJORN_SUMMON_MODEL` and `DISJORN_SUMMONER`, which the summon adapter sets
+  from its model pin and the summon's trigger, and drops a value that fails
+  its rules. The broker sends what it is given as `attribution`; the server
+  stores it with `verified: false` whatever was sent, and stores `{}` when
+  neither is given. A seat can set either variable itself, which is why the
+  field is never verified on this path.
+- **A retry does not post twice.** The broker sends `idempotency_key`, the
+  sha256 of the JSON list `[channel, name, text, sha256(file)]`. For 24 hours
+  the server answers the same key from the same bot with the first post's
+  result, while that post's message stands, and writes nothing. A changed
+  channel, name, text or byte is a new post.
+- The broker waits `[disjorn].file_post_timeout_sec` (default 120) for this one
+  call; every other call to the server keeps its 20 seconds.
 - Refused in the broker, before any network call (`bad-args`): a name whose
   guessed type is not text, code, an image or PDF, or is HTML, XML or SVG; a
   file that is not a regular file owned by a uid `[uids]` maps to the calling

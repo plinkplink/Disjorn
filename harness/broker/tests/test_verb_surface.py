@@ -204,6 +204,22 @@ def test_an_unknown_arg_key_is_an_error_not_a_no_op(tmp_path):
         gen.load_surface(surface)
 
 
+@pytest.mark.parametrize("extra", [
+    'env = "lower"', 'env = "OK"\nrequired = true', 'env = "OK"',
+    'env = "OK"\nseats = ["cli", "tool"]', 'env = "OK"\nseats = ["tool"]',
+])
+def test_an_env_arg_is_optional_and_cli_only(tmp_path, extra):
+    surface = tmp_path / "verb_surface.toml"
+    surface.write_text('[verbs.x]\ntool_name = "x"\ncli_help = "h"\n'
+                       'description = "d"\n[verbs.x.args.a]\n'
+                       f'type = "string"\ndescription = "d"\n{extra}\n')
+    with pytest.raises(gen.SurfaceError, match="env names"):
+        gen.load_surface(surface)
+    surface.write_text(surface.read_text().replace(
+        extra, 'env = "OK"\nseats = ["cli"]'))
+    assert gen.cli_table(gen.load_surface(surface))["x"]["args"]["a"]["env"] == "OK"
+
+
 # ── the checked-in artifacts are what the generator produces ─────────────
 
 def test_the_cli_table_in_the_repo_is_current():

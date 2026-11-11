@@ -599,6 +599,24 @@ VERB_SURFACE = {
                 "max_len": 16000,
                 "no_nul": True,
             },
+            "model": {
+                "flag": "--model",
+                "type": "string",
+                "required": False,
+                "help": "The model this session was launched with, shown unverified on the post.",
+                "max_len": 100,
+                "no_nul": True,
+                "env": "DISJORN_SUMMON_MODEL",
+            },
+            "summoner": {
+                "flag": "--summoner",
+                "type": "string",
+                "required": False,
+                "help": "Who summoned this session, shown on the post.",
+                "max_len": 100,
+                "no_nul": True,
+                "env": "DISJORN_SUMMONER",
+            },
         },
     },
 }
@@ -665,6 +683,8 @@ def build_parser() -> argparse.ArgumentParser:
     for verb, entry in VERB_SURFACE.items():
         p = sub.add_parser(verb, help=entry["help"])
         for name, spec in entry["args"].items():
+            if "env" in spec:
+                continue  # build_request reads it from the environment
             # dest is always explicit: '--from' would otherwise derive the
             # dest `from`, which is a keyword and unreachable on a Namespace.
             p.add_argument(spec["flag"], dest=name, default=None,
@@ -673,16 +693,28 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def build_request(verb: str, ns: argparse.Namespace) -> dict:
+def build_request(verb: str, ns: argparse.Namespace,
+                  environ: dict | None = None) -> dict:
     """Validate ns per the verb's mirrored schema; return the request object.
 
     Omitted optional flags are DROPPED, never sent as null: defaults are the
-    broker's to decide, and a null in the request is a value, not an absence."""
+    broker's to decide, and a null in the request is a value, not an absence.
+
+    An `env` arg is the harness's stamp, read from the environment and never a
+    flag; one that fails its rules is dropped, so it cannot fail the call."""
     entry = VERB_SURFACE.get(verb)
     if entry is None:
         raise ArgError(f"unknown verb {verb!r}")
     args: dict = {}
     for name, spec in entry["args"].items():
+        if "env" in spec:
+            stamp = (environ or {}).get(spec["env"])
+            try:
+                if stamp:
+                    args[name] = _validate(verb, name, spec, stamp)
+            except ArgError:
+                pass
+            continue
         value = getattr(ns, name, None)
         if value is None:
             continue
@@ -729,7 +761,7 @@ def main(argv: list[str] | None = None, environ: dict = os.environ) -> int:
     ns = parser.parse_args(argv)
 
     try:
-        request = build_request(ns.verb, ns)
+        request = build_request(ns.verb, ns, environ)
     except ArgError as exc:
         _emit({"ok": False, "error": {"code": "bad-args-local",
                                       "message": str(exc)}})

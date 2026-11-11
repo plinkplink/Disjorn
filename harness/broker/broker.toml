@@ -635,6 +635,8 @@ url = "http://127.0.0.1:8399"
 api_key_path = "/etc/disjorn-broker/broker-api-key"
 # Channel id of #custodian (look it up in the server DB / channel list).
 custodian_channel_id = 4
+# Seconds post-file waits for the server to store one file; 120 with no line.
+# file_post_timeout_sec = 120
 
 [apps]
 # APPS v1 stage 2 — the apps-builder seat and the `apps-build` handoff verb
