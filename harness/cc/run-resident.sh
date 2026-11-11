@@ -1,85 +1,14 @@
 #!/usr/bin/env bash
-# run-resident.sh — WP-H5: podman run wrapper for one resident container.
-#
-# EXECUTED BY the res-* user (via their systemd user unit, see
-# resident-cc.service), never by plink and never with sudo. Rootless podman
-# under the res-* uid is the whole point: SO_PEERCRED at the broker socket
-# and the WP-H2 nftables wall both key on that uid.
-#
-# Usage:
-#   run-resident.sh <resident-name> [command...]
-#     <resident-name>  e.g. "claudette" or "gable" (no res- prefix)
-#     [command...]     optional command override (default: the image's
-#                      "sleep infinity" residence loop). Used by smoke tests.
-#
-# Overridable env (defaults are the production layout):
-#   RESIDENT_IMAGE           image ref        (localhost/disjorn-resident:latest)
-#   RESIDENT_HOME_VOL        host home volume ($HOME/resident-home)
-#   RESIDENT_CONFIG_DIR      host config dir  (/home/plink/resident-config/<name>)
-#   RESIDENT_BROKER_SOCKET   host socket path (/run/disjorn-broker/broker.sock)
-#   RESIDENT_HOUSE_MEMORY    host package dir (…/harness/house_memory; skipped
-#                            with a warning if absent — WP-H6 lands separately)
-#   RESIDENT_NETWORK         podman network   (pasta; the real egress wall is
-#                            host nftables on the res-* uid — WP-H2)
-#   RESIDENT_SPINE_HOST      host spine dir   (UNSET = no spine mount, today's
-#                            behaviour). Set it to the plink-owned mirror
-#                            /srv/disjorn-spine/<name>; mounted ro at
-#                            /opt/spine. See the spine mount block below.
-#   RESIDENT_CONTAINER_SUFFIX  appended to the container name (unset = today's
-#                            "resident-cc-<name>"). The wake lane sets it so a
-#                            woken session and a summon cannot take each
-#                            other's container name — see the name below.
-#   RESIDENT_PODMAN_EXTRA    extra podman-run flags (word-split; e.g. "-d")
-#   RESIDENT_REAP            1 (default) = a watchdog kills this wrapper's
-#                            container if the wrapper itself is killed, so a
-#                            refused/timed-out session cannot keep running.
-#                            0 disables it (debugging only; warns loudly).
-#                            Not armed for detached runs. See the container
-#                            reaper block near the bottom.
-#
-# Secrets: the session credential comes from the per-resident env file
-#   /home/plink/resident-config/<name>/env        (plink-owned, mounted ro)
-# That file is DOCUMENTED here, never created here — plink writes it at the
-# keyboard (see config-template/README.md). Expected contents:
-#   # a Max-subscription OAuth token (`claude setup-token`) — the ONLY
-#   # credential any seat runs on since the 2026-08-14 reversal:
-#   CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
-#   # An ANTHROPIC_API_KEY alone is REFUSED, not billed (see the credential
-#   # block; RESIDENT_METERED_OK=1 at launch is the deliberate override).
-#   # optional kill switch — any non-empty value makes the broker CLI refuse:
-#   # BROKER_DISABLE=1
-# EXACTLY ONE credential reaches the container: if both are in the file the
-# OAuth token wins and the API key is filtered out (see the credential block
-# below). If neither is there the container still starts (useful for smoke
-# tests) and this script says so LOUDLY on stderr; CC sessions will simply
-# fail to authenticate. No silent failover, ever.
-#
-# Mount map (must match the Containerfile's documented plan):
-#   $RESIDENT_HOME_VOL       -> /home/resident      rw
-#   $RESIDENT_BROKER_SOCKET  -> /run/broker.sock    ro   (socket)
-#   $RESIDENT_CONFIG_DIR     -> /config             ro   (kill-switch surface)
-#   $RESIDENT_HOUSE_MEMORY   -> /opt/house_memory   ro
-#   $RESIDENT_SPINE_HOST     -> /opt/spine          ro   (opt-in; the kernel —
-#                                                         see spine mount block)
-#
-# NOTE for the keyboard install (WP-H1 follow-up): res-* users cannot read
-# /home/plink — copy this script to a world-readable path, e.g.
-# /usr/local/lib/disjorn/run-resident.sh, and point the user unit there.
+# run-resident.sh: podman run wrapper for one resident container, run as the res-* user (SO_PEERCRED keys on it).
+# Usage: run-resident.sh <resident-name> [command...]. The spine, credential and reaper blocks are byte-identical in run-build.sh (test-enforced).
+# Res-* users cannot read /home/plink: the unit must point at a world-readable copy.
 set -euo pipefail
 
 NAME="${1:?usage: run-resident.sh <resident-name> [command...]}"
 shift
 
 IMAGE="${RESIDENT_IMAGE:-localhost/disjorn-resident:latest}"
-# Deterministic, and the single source of truth: --name below and the
-# container reaper block at the bottom must always mean the same container.
-# RESIDENT_CONTAINER_SUFFIX distinguishes two LANES of the same seat. Since
-# 2026-08-25 a seat has two independent daemons — the summon adapter and the
-# wake runner — and `--replace` below means whichever starts second takes the
-# name and KILLS the first. A summon silently killing an hour-long woken
-# session (or the reverse) is exactly the kind of failure that reads as a crash
-# and is not one. The wake runner sets this to "wake"; unset is today's name,
-# byte for byte, so nothing about the summon path changes.
+# --name and the reaper share this name. RESIDENT_CONTAINER_SUFFIX keeps the wake lane apart: --replace would kill the other.
 CONTAINER_NAME="resident-cc-$NAME${RESIDENT_CONTAINER_SUFFIX:+-$RESIDENT_CONTAINER_SUFFIX}"
 HOME_VOL="${RESIDENT_HOME_VOL:-$HOME/resident-home}"
 CONFIG_DIR="${RESIDENT_CONFIG_DIR:-/home/plink/resident-config/$NAME}"
@@ -93,37 +22,17 @@ NETWORK="${RESIDENT_NETWORK:-pasta}"
 
 args=(
   run --rm
-  # --init: catatonit as PID 1 reaps orphaned children. Same fix as
-  # run-build.sh (where the first gate build's git zombies hit pids.max);
-  # a summon spawns too few subprocesses to hit the wall, but the failure
-  # mode — fork() EAGAIN that reads as a tool call randomly erroring — is
-  # identical, and a long agentic session is a build by another name.
+  # --init reaps orphaned children; without it long sessions hit fork EAGAIN.
   --init
-  # --replace: if a container with this name survived the last stop, take the
-  # name anyway instead of refusing. Without it, a stop that timed out leaves a
-  # stale container and EVERY subsequent start fails with podman exit 125
-  # ("name is already in use") — systemd then sits in auto-restart while the
-  # OLD container keeps serving, so the resident stays up on stale code and the
-  # only symptom is that a freshly deployed change appears not to exist. That
-  # happened 2026-08-05 deploying her start_build tool: she reported the tool
-  # missing, and it was missing, because she was still running yesterday's
-  # image. --rm handles the clean path; this handles the dirty one.
+  # --replace is load-bearing: without it a stale container blocks every start while the old image serves.
   --replace
   --name "$CONTAINER_NAME"
   --hostname "resident-$NAME"
-  # keep-id: the calling res-* host uid appears INSIDE as uid 1000
-  # ('resident'). Files it writes to /home/resident are owned by the res-*
-  # user on the host; its connect() to the broker socket carries the res-*
-  # uid in SO_PEERCRED. Identity is the venue, not a credential in a file.
+  # keep-id: SO_PEERCRED at the broker carries the res-* uid.
   --userns "keep-id:uid=1000,gid=1000"
   --network "$NETWORK"
   -v "$HOME_VOL:/home/resident"
-  # Mount the socket's DIRECTORY, not the socket file: a bind-mounted socket
-  # inode goes dead the moment the broker restarts (unlink + re-create on
-  # the host leaves the container holding the old inode -> ECONNREFUSED on
-  # every verb until the container bounces). Mounting the dir means the
-  # fresh socket appears in place; BROKER_SOCKET tells the resident CLI
-  # where to look.
+  # Mount the socket's DIRECTORY: a bind-mounted socket inode dies when the broker restarts.
   -v "$(dirname "$BROKER_SOCK"):/run/disjorn-broker:ro"
   -e "BROKER_SOCKET=/run/disjorn-broker/$(basename "$BROKER_SOCK")"
   -v "$CONFIG_DIR:/config:ro"
@@ -135,41 +44,13 @@ else
   echo "run-resident: WARNING house_memory absent: $HOUSE_MEMORY (skipping mount)" >&2
 fi
 
-# Optional read-only view of the Disjorn repo at /opt/disjorn — for residents
-# whose volume has no writable worktree (e.g. Claudette reading
-# MERGE-CONTRACT.md or a diff under review). Opt-in per resident: set
-# RESIDENT_DISJORN_RO in the unit's Environment= (host-side; the /config env
-# file is container-side and never reaches this script). The source MUST be a
-# git-clean clone readable by res-* (this deployment: /srv/disjorn-ro,
-# refreshed by `git -C /srv/disjorn-ro pull` after merges) — NEVER the live
-# working tree: /home/plink is 0700 so rootless podman can't mount it, and
-# the working tree carries runtime data/ (the prod DB) that the privacy wall
-# exists to keep away from resident eyes. Committed code only.
+# Must be a git-clean res-readable clone, never the live tree, which holds the prod DB.
 if [ -n "${RESIDENT_DISJORN_RO:-}" ]; then
   [ -d "$RESIDENT_DISJORN_RO" ] || { echo "run-resident: RESIDENT_DISJORN_RO not a dir: $RESIDENT_DISJORN_RO" >&2; exit 1; }
   args+=( -v "$RESIDENT_DISJORN_RO:/opt/disjorn:ro" )
 fi
 
-# Optional READ-WRITE gatehouse mount at /run/gatehouse/disjorn.git — the
-# transport from MERGE-CONTRACT, and the only writable path out of a resident
-# container that reaches plink. The resident pushes a `loop/<slug>` branch into
-# this bare repo; plink fetches from it, reads the diff, and merges by hand.
-# Nothing here merges itself: a bare repo with no working tree cannot deploy
-# anything, which is exactly why the transport is a bare repo and not a
-# worktree.
-#
-# Opt-in per resident via RESIDENT_GATEHOUSE in the unit's Environment=, same
-# shape as RESIDENT_DISJORN_RO above. Deliberately NOT :ro — this is the one
-# mount whose whole purpose is that the resident can write to it.
-#
-# It is a BARE repo on purpose. `git push` into a non-bare repo's checked-out
-# branch is refused by default, and a worktree here would be a second writable
-# copy of the tree with all the ambiguity TREE.md exists to prevent.
-# RESIDENT_GATEHOUSE is the DIRECTORY of bare repos, not one repo. A resident's
-# work spans more than one — the supersede fix alone touches the Disjorn repo
-# and her adapter repo — and mounting a single .git means the second one is
-# simply absent with no hint as to why. Same reasoning as mounting the broker
-# socket's directory rather than the socket.
+# Writable bare repo, the only write path out of a container. Mount the directory: a resident spans repos.
 if [ -n "${RESIDENT_GATEHOUSE:-}" ]; then
   [ -d "$RESIDENT_GATEHOUSE" ] || { echo "run-resident: RESIDENT_GATEHOUSE not a dir: $RESIDENT_GATEHOUSE" >&2; exit 1; }
   if ! compgen -G "$RESIDENT_GATEHOUSE/*.git" >/dev/null; then
@@ -178,88 +59,15 @@ if [ -n "${RESIDENT_GATEHOUSE:-}" ]; then
   args+=( -v "$RESIDENT_GATEHOUSE:/run/gatehouse" )
 fi
 
-# ── BEGIN spine mount block ──────────────────────────────────────────────
-# Byte-identical in run-resident.sh and run-build.sh; a test asserts that
-# (harness/cc/tests/test_run_wrappers.py::test_spine_block_is_identical_in_both_wrappers).
-# Edit one, paste into the other.
-#
-# BOTH SEATS AGAIN as of 2026-08-12, and the history matters because this block
-# has already been deleted once. Branch B (2026-08-06) took it out of
-# run-build.sh on two grounds: that a build session is a tool rather than a
-# resident, and that `assemble_for_seat("build")` raised "no kernel entry
-# visible to seat 'build'" against the spine it was tried on. The second ground
-# was an observation about CLAUDETTE's spine, every entry of which is
-# `seats: [resident]`, generalised into a claim about the seat.
-#
-# GABLE's spine has carried an explicit build seat since the seat-split
-# (SPECS/2026-07-22-gable-spine-ro-cutover-seat-split.md), applied and verified
-# live 07-23: resident 7 entries, build 5, stamped `(seat: build)`. His ruling
-# as review owner is that baking the operational set for a detached build is
-# "correct, not a compromise" — a build has no retrieval loop, so an
-# operational entry that is not baked never arrives at all, and "the build seat
-# does load-bearing work with walls it's never read."
-#
-# The mount is restored for both seats by
-# SPECS/2026-08-08-gable-build-lane-provisioning.md (confirmed by plink,
-# #custodian seq 1008). Branch B's OTHER two deletions from run-build.sh — the
-# broker socket and house_memory — STAND; only the spine came back. See
-# harness/cc/BUILD-SEAT-CONTRACT.md before touching any of the three.
-#
-# PROTECTION BY PLACEMENT for the resident's SPINE — the directory
-# house_memory/bootstrap.py assembles into ~/.claude/CLAUDE.md at the start
-# of EVERY session. The spine is the resident's kernel. AGENTHOOD.md rules
-# that a resident's own code and prompt are always Tier 2 (a human reviews
-# every change), and bootstrap.py's docstring assumes a spine edit arrives
-# "witnessed, merged".
-#
-# Neither holds if the spine the container loads sits in the resident's own
-# read-write home volume: the resident rewrites its kernel directly and the
-# next session loads it — no diff for the WP-H4 classifier to tier, no
-# #custodian post, no human. The classifier sees SUBMITTED diffs; it cannot
-# see a direct write. Only placement can.
-#
-# So: mount a plink-owned mirror READ-ONLY at /opt/spine, and have
-# RESIDENT_SPINE_DIR (read by bootstrap.py, set in the /config env file)
-# point there. Three independent walls, none trusting the others:
-#   1. host ownership — the mirror is plink:plink 0755/0644 and the res-*
-#      uid is neither owner nor group;
-#   2. the `:ro` bind — a write is EROFS even if (1) were wrong;
-#   3. the refusal below — we will not launch at all if the source is
-#      writable by the uid we are running as. That is the check that
-#      catches a cutover mis-pointed back at the home volume.
-#
-# Opt-in per resident, HOST-side, exactly like RESIDENT_DISJORN_RO: set
-# RESIDENT_SPINE_HOST in the unit's Environment=. UNSET adds no mount and
-# no flag — byte-for-byte today's podman invocation — so shipping this
-# cannot regress a live summon. Mounting alone still changes nothing about
-# which spine loads; the cutover is a separate deliberate line in the env
-# file (config-template/README.md § Spine placement).
-#
-# MOUNTING IS NOT THE CUTOVER, and for the BUILD seat that has a second edge.
-# The build seat's kernel today is the file run-build.sh COPIES to
-# ~/.claude/CLAUDE.md (build-kernel.md), and nothing in [start_build].session_argv
-# runs bootstrap.py — so a mounted spine sits there unread until plink both
-# sets RESIDENT_SPINE_DIR=/opt/spine in the build seat's /config env file AND
-# adds the bootstrap call to session_argv. Those two move together, because
-# bootstrap.py WRITES ~/.claude/CLAUDE.md and would otherwise overwrite the
-# copied task kernel with no one having chosen that. Both are plink's
-# deliberate step, not this wrapper's: harness/cc/BUILD-SEAT-CONTRACT.md
-# § Kernel carries the ordering.
-#
-# The source MUST be the res-readable mirror (/srv/disjorn-spine/<name>,
-# published by harness/keyboard/06-spine-mirror.sh after plink approves a
-# spine change), NEVER the canonical copy under /home/plink: that tree is
-# 0700 and rootless podman cannot mount it. Do not "fix" that by loosening
-# /home/plink/bots/<name>/spine — that directory is the authorization
-# surface itself. Copy outward; never open inward.
+# ── BEGIN spine mount block ──
+# Mount the spine :ro from a plink-owned mirror, never the home volume: a writable kernel loads unreviewed.
+# Never mount the canonical /home/plink spine.
+# Build seat: mounting is not the cutover (harness/cc/BUILD-SEAT-CONTRACT.md § Kernel).
+# Keep the build seat's mount (SPECS/2026-08-08-gable-build-lane-provisioning.md).
 if [ -n "${RESIDENT_SPINE_HOST:-}" ]; then
   _spine_tag="$(basename "$0" .sh)"
   [ -d "$RESIDENT_SPINE_HOST" ] || { echo "$_spine_tag: RESIDENT_SPINE_HOST not a dir: $RESIDENT_SPINE_HOST" >&2; exit 1; }
-  # Fail CLOSED, not quietly: if this uid can write the spine source, the
-  # read-only mount is theatre (the resident can edit the host path
-  # directly, outside the container, and the next session loads it). Refuse
-  # the launch and say exactly why. `-writable` is access(2) as the calling
-  # uid, so it accounts for ownership, group, and ACLs — not just mode bits.
+  # Fail closed: a writable source makes the :ro mount theatre.
   _spine_writable="$(find "$RESIDENT_SPINE_HOST" -maxdepth 1 -writable -print -quit 2>/dev/null)"
   if [ -n "$_spine_writable" ]; then
     echo "$_spine_tag: REFUSING TO LAUNCH: spine source is WRITABLE by this uid ($(id -un)): $_spine_writable" >&2
@@ -269,101 +77,19 @@ if [ -n "${RESIDENT_SPINE_HOST:-}" ]; then
   unset _spine_writable _spine_tag
   args+=( -v "$RESIDENT_SPINE_HOST:/opt/spine:ro" )
 fi
-# ── END spine mount block ────────────────────────────────────────────────
+# ── END spine mount block ──
 
 ENV_FILE="$CONFIG_DIR/env"
 
-# THE ROUTING LINE (see the credential block's own § ROUTING BY SEAT).
-#
-# `refuse`, since 2026-08-14 — the SAME policy as the build seat, and no longer
-# a seat split at all. The original ruling ("chat seats on API keys, agent
-# loops on Max") was reversed by plink after the console showed ~$40/day of
-# metered spend on read-heavy chat days: every seat of every resident now runs
-# on the Max account, and the credential-routing spec carries the amendment.
-#
-# Refusing the metered key here is the half of that decision that has to live
-# in code: this wrapper PREFERS the OAuth token whenever one is present, so on
-# the day a token expires, an `allow` would not fail — it would quietly fall
-# back to the API key and resume the exact $40/day surprise this reversal
-# exists to stop, with nothing in any log calling it a fallback. A chat seat
-# with no working account token should go DOWN and say why, not go metered.
-#
-# Deliberately OUTSIDE the byte-identical block below — it is set per wrapper
-# because which WRAPPER launched is the one thing /config can never decide.
+# ROUTING: refuse, not allow. Allow would silently fall back to the metered key when the OAuth token expires.
 _seat_metered_fallback=refuse
 
-# ── BEGIN credential block ───────────────────────────────────────────────
-# Byte-identical in run-resident.sh and run-build.sh; a test asserts that
-# (harness/cc/tests/test_run_wrappers.py::test_credential_block_is_identical_in_both_wrappers).
-# Edit one, paste into the other.
-#
-# WHICH CREDENTIAL. Two are accepted, from the env file and NOWHERE else
-# (this script deliberately ignores its own environment, so a stray key in a
-# systemd unit cannot become a session's identity):
-#   CLAUDE_CODE_OAUTH_TOKEN  a long-lived OAuth token minted by
-#                            `claude setup-token`; bills plink's Claude Max
-#                            SUBSCRIPTION. Preferred.
-#   ANTHROPIC_API_KEY        a metered API key. Fallback — but only for a seat
-#                            allowed to spend it; see § ROUTING BY SEAT below.
-# If both are present the OAuth token wins and the API key is NOT passed —
-# "exactly one credential in the container" is the invariant. If neither is
-# present we warn loudly and pass none: fail loud, never fail over silently.
-#
-# ROUTING (SPECS/2026-08-05-credential-routing-and-halt-protocol.md §1 as
-# AMENDED 2026-08-14; SPECS/2026-08-08-gable-build-lane-provisioning.md,
-# architecture note 3). Every seat of every resident runs on plink's Max
-# account — the original seat split (chat on metered API keys, builds on Max)
-# was reversed by plink on 2026-08-14 after the console showed ~$40/day of
-# metered chat spend. Both wrappers therefore set `_seat_metered_fallback`
-# to `refuse` immediately above this block, and a refusing seat that finds
-# ONLY an API key does not launch. The knob itself outlives the reversal on
-# purpose: it is the one line to flip if a seat is ever deliberately routed
-# back to metered billing, and the refusal machinery below is identical
-# either way.
-#
-# It refuses rather than warning-and-continuing because the halt protocol says
-# so in as many words: no silent key-fallback. A loop that quietly fails over
-# from Max to the metered key has converted "your account said not now" into
-# "spend your API money instead", which is precisely the decision plink
-# reserved for himself (seqs 683/697: "I need to look at the account before
-# restarting any work that ate the whole budget"). The full fix is the
-# broker-side injecting proxy in that spec, where neither credential is inside
-# any container at all; until it lands this refusal holds the same line at the
-# one place a build can spend.
-#
-# The one line that differs by seat lives OUTSIDE this block on purpose, so the
-# block stays byte-identical and cannot drift between the two wrappers.
-#
-# HOW IT IS PASSED (and why not the obvious way).
-#   * The value NEVER appears in argv. `podman --env VAR=value` would put a
-#     credential for plink's whole Claude account into the process table,
-#     readable by any process on the host via /proc/*/cmdline. We use the
-#     NAME-ONLY form `--env VAR`, which tells podman "take VAR from my own
-#     environment" — argv carries the name only.
-#   * The remaining env-file vars (BROKER_DISABLE, …) still go through
-#     podman's own --env-file parser, so their semantics never drift from
-#     podman's. But podman offers no way to drop a var an --env-file sets:
-#     `--unsetenv` does not touch env-file vars, and `--env VAR=` only
-#     blanks it (verified against podman 5.4.2). So the file podman reads is
-#     a FILTERED copy with both credential lines removed. That copy is
-#     created 0600, opened on fd 9, and UNLINKED before exec — it holds no
-#     credential and does not outlive the launch. podman does not pass extra
-#     fds to the container (no --preserve-fds), so fd 9 stops here.
-#   * Value parsing matches podman's env-file semantics exactly: everything
-#     after the first "=" is taken literally — no quote stripping, no
-#     trimming (verified against podman 5.4.2). Do not quote the token.
-#     The bare `NAME` (inherit-from-environment) env-file form is NOT
-#     supported for credentials; write NAME=value.
-#   * The env FILE itself is masked inside the container: /config is mounted
-#     ro, and the resident could otherwise just `cat /config/env` and read
-#     the credential out of it (settings.json denies Read(//config/env), but
-#     Bash(cat:*) and Bash(python3:*) are allowed, so that deny is hygiene,
-#     not a wall). We bind /dev/null over /config/env, so the file reads
-#     empty from inside. This removes the FILE copy only — it does NOT and
-#     cannot hide the credential from the session itself, which necessarily
-#     has it in its own environment (/proc/self/environ). See
-#     config-template/README.md § Security note.
-#     Escape hatch for debugging: RESIDENT_MASK_ENV=0.
+# ── BEGIN credential block ──
+# Credentials come only from the env file: OAuth token wins over the API key; neither warns, never fails over.
+# Every seat refuses the metered key (SPECS/2026-08-05-credential-routing-and-halt-protocol.md).
+# The value stays out of argv: `--env VAR` names it. The env file is filtered on fd 9; podman cannot drop a var.
+# Write NAME=value unquoted: the value is literal after the first "=".
+# /config/env is masked with /dev/null: this hides the file, not the session environment.
 _tag="$(basename "$0" .sh)"
 _cred_name=""
 _cred_value=""
@@ -388,14 +114,7 @@ if [ -f "$ENV_FILE" ]; then
       echo "$_tag: WARNING $ENV_FILE sets BOTH CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY; using CLAUDE_CODE_OAUTH_TOKEN (Max subscription), NOT passing ANTHROPIC_API_KEY into the container" >&2
     fi
   elif [ -n "$_apikey_value" ]; then
-    # RESIDENT_METERED_OK=1 is the "change the route deliberately at the
-    # keyboard" the refusal below names — until 2026-08-14 that sentence meant
-    # editing this file, which is not a route change, it is a code change
-    # nobody makes at 2am. The override is HOST-side env (a unit's Environment=
-    # or a keyboard invocation), never /config: the env FILE is mounted into
-    # the container, and a knob the resident's uid can read must not be the
-    # thing that re-opens metered spending. Loud on every use — a silent
-    # override is the silent fallback with extra steps.
+    # RESIDENT_METERED_OK is host-side only: a resident-readable knob must not reopen metered spend.
     if [ "${_seat_metered_fallback:-allow}" = "refuse" ] \
         && [ "${RESIDENT_METERED_OK:-0}" != "1" ]; then
       echo "$_tag: REFUSING TO LAUNCH: $ENV_FILE offers ANTHROPIC_API_KEY only, and this seat routes to the Max account — it must never silently spend the metered key. Put a CLAUDE_CODE_OAUTH_TOKEN (\`claude setup-token\`) in $ENV_FILE, or launch with RESIDENT_METERED_OK=1 to spend the key deliberately. No silent key-fallback: SPECS/2026-08-05-credential-routing-and-halt-protocol.md §3." >&2
@@ -414,9 +133,6 @@ if [ -f "$ENV_FILE" ]; then
     echo "$_tag: WARNING no credential in $ENV_FILE (expected CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY) — CC sessions will fail to authenticate" >&2
   fi
 
-  # Filtered copy: every line EXCEPT the two credential assignments (and
-  # their bare inherit form). Created 0600, then unlinked — podman reads it
-  # through the inherited fd.
   _filtered="$(mktemp "${TMPDIR:-/tmp}/${_tag}-env.XXXXXXXX")"
   chmod 0600 "$_filtered"
   grep -vE '^[[:space:]]*(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY)([[:space:]]*=|[[:space:]]*$)' \
@@ -434,34 +150,19 @@ else
   echo "$_tag: WARNING env file absent: $ENV_FILE (no CLAUDE_CODE_OAUTH_TOKEN, no ANTHROPIC_API_KEY) — CC sessions will fail to authenticate" >&2
 fi
 
-# Hand the winner to podman by NAME only. Unset the loser in our own env so
-# nothing inherited can shadow the decision made above.
+# Unset the loser so nothing inherited shadows the decision.
 unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY
 if [ -n "$_cred_name" ]; then
   export "$_cred_name=$_cred_value"
   args+=( --env "$_cred_name" )
 fi
 unset _cred_value _oauth_value _apikey_value
-# ── END credential block ─────────────────────────────────────────────────
+# ── END credential block ──
 
-# SEAT (spec 2026-07-22 seat-split). This wrapper is the RESIDENT seat: a
-# summon loads the whole spine, biography included. bootstrap.py reads
-# RESIDENT_SEAT inside the container and gates both the CLAUDE.md bake and the
-# MEMORY.md index on it; 'resident' is also its default, so this line is
-# belt-and-braces, not load-bearing — but it is set EXPLICITLY so the two
-# wrappers say plainly which seat they are, and so a stray RESIDENT_SEAT in a
-# unit's Environment= cannot silently reclassify a summon. Passed AFTER the
-# credential block (whose --env-file is already in `args`), so the wrapper's
-# seat wins over any value a /config env file might carry: the seat is a
-# property of WHICH wrapper launched, never of per-resident config. This is
-# deliberately NOT inside a byte-identical block — it is the one line that
-# MUST differ from run-build.sh.
+# Set after the env file so /config cannot reclassify a summon. Must differ from run-build.sh.
 args+=( -e "RESIDENT_SEAT=resident" )
 
-# Per-summon sessions feed the prompt on stdin; podman drops stdin unless
-# -i is passed. Opt-in (RESIDENT_STDIN=1 in the summon unit) so long-lived
-# residence containers (stdin=/dev/null under systemd) keep their exact
-# proven invocation.
+# Summons feed the prompt on stdin, which podman drops without -i.
 if [ -n "${RESIDENT_STDIN:-}" ]; then
   args+=( -i )
 fi
@@ -471,74 +172,12 @@ if [ -n "${RESIDENT_PODMAN_EXTRA:-}" ]; then
   args+=( ${RESIDENT_PODMAN_EXTRA} )
 fi
 
-# ── BEGIN container reaper block ─────────────────────────────────────────
-# Byte-identical in run-resident.sh and run-build.sh; a test asserts that
-# (harness/cc/tests/test_run_wrappers.py::test_reaper_block_is_identical).
-# Edit one, paste into the other.
-#
-# THE GAP THIS CLOSES. The container is NOT this process's child. Rootless
-# `podman run` hands it to conmon, which is reparented away, so killing the
-# podman CLIENT leaves the container running. Measured on podman 5.4.2:
-# SIGKILL the client and `podman ps` still shows the container Up
-# (tests/test_container.sh check 14a asserts that baseline, so if a future
-# podman fixes it upstream we find out instead of quietly duplicating it).
-#
-# That matters because two supervisors kill this wrapper and expect the
-# session to stop with it:
-#   * residency/launcher.py's pre-act model gate, when the resolved model
-#     does not match the pin — it refuses the session and kills the process
-#     it spawned;
-#   * brokerd.py's build reaper, at start_build.timeout_sec.
-# Their channel guarantee holds regardless (nothing a refused or timed-out
-# session produces is ever read or posted). What did NOT stop were the SIDE
-# EFFECTS: a refused session inside a still-running container keeps writing
-# to the home volume and keeps calling the broker. At the `init` stage that
-# window is near-zero, but a mid-session refusal can have tool calls already
-# in flight and more still to come.
-#
-# WHY NOT A SIGNAL TRAP. Both supervisors use Python's `proc.kill()`, which
-# is SIGKILL, and no trap runs on SIGKILL — a trap-based reaper would look
-# closed without being closed. It would also cost us `exec podman`, and that
-# exec is load-bearing: same PID, same stdin, same exit status, no extra
-# shell between the supervisor and the container.
-#
-# WHAT WORKS. A watchdog sibling, started before the exec, that waits for
-# THIS pid to disappear and then takes the container down. `$$` survives
-# `exec`, so it watches the podman client itself, and it survives the
-# wrapper's death because a single-pid kill does not touch it. It covers
-# every exit path — SIGKILL, SIGTERM, SIGINT, crash, and normal completion
-# (where the container is already gone and the reap is a no-op).
-#
-# IT REAPS BY CONTAINER ID, NOT BY NAME, and that distinction is the whole
-# correctness of this block. Container names are per-resident and REUSED
-# every summon ("resident-cc-gable"). A watchdog that reaped by name would,
-# in the up-to-one-poll window after its own wrapper exits, kill the NEXT
-# summon's container instead of its own — turning a safety feature into an
-# intermittent killer of healthy sessions. (This is not hypothetical: the
-# first version of this block did exactly that, and check 14 caught it.)
-# --cidfile pins the identity, so the watchdog can only ever reap the one
-# container it was started for.
-#
-# `rm -f -t 0`, chosen deliberately over `stop`:
-#   * -t 0 => SIGKILL now, no grace period. A grace period is time in which
-#     a session we have already decided to refuse keeps calling tools.
-#     Nothing in-container needs flushing: /home/resident is a bind mount,
-#     so completed writes are already on the host, and the half-finished
-#     work is exactly what must not complete.
-#   * --ignore => a container that already exited is not an error, so the
-#     watchdog can never turn a clean run into a failure.
-#
-# NOT ARMED WHEN DETACHED. `RESIDENT_PODMAN_EXTRA=-d` means "start the
-# container and return"; the wrapper exiting IS the success path there, and
-# a watchdog would kill the container it just started. Detached callers own
-# their container's lifetime.
-#
-# The watchdog's stdio goes to /dev/null: it must not hold the wrapper's
-# stdout/stderr pipes open, because launcher.py reads those to EOF and an
-# inherited pipe would keep EOF from ever arriving.
-#
-# Escape hatch for debugging a container that dies too fast to inspect:
-# RESIDENT_REAP=0 (warns loudly).
+# ── BEGIN container reaper block ──
+# Killing podman leaves the container running: a sibling watchdog reaps it when this pid exits.
+# Supervisors send SIGKILL, which runs no trap: keep `exec podman` and the watchdog a sibling.
+# Reap by --cidfile ID, never by name: the next summon reuses the name.
+# rm -f -t 0: no grace period, so a refused session cannot keep calling tools.
+# Not armed when detached (-d). Its stdio goes to /dev/null.
 _reap_tag="$(basename "$0" .sh)"
 _reap_detached=0
 for _w in ${RESIDENT_PODMAN_EXTRA:-}; do
@@ -549,17 +188,14 @@ if [ "${RESIDENT_REAP:-1}" = "0" ]; then
 elif [ "$_reap_detached" = "1" ]; then
   : # detached by request: the caller owns the container's lifetime
 else
-  # A private DIRECTORY, not `mktemp -u`: podman refuses to start if the
-  # cidfile already exists, so an unlinked-name guess is a race that would
-  # turn into a failed summon. mktemp -d cannot collide.
+  # mktemp -d, not -u: podman refuses an existing cidfile.
   _reap_ciddir="$(mktemp -d "${TMPDIR:-/tmp}/${_reap_tag}-cid.XXXXXXXX")"
   _reap_cid="$_reap_ciddir/cid"
   args+=( --cidfile "$_reap_cid" )
   _reap_pid=$$
   (
     while kill -0 "$_reap_pid" 2>/dev/null; do sleep 0.25; done
-    # The container may still be being created as we die; give the cidfile a
-    # moment to appear before concluding there is nothing to reap.
+    # Wait briefly for a container still being created.
     for _ in $(seq 20); do [ -s "$_reap_cid" ] && break; sleep 0.1; done
     if [ -s "$_reap_cid" ]; then
       podman rm -f -t 0 --ignore "$(cat "$_reap_cid")"
@@ -568,16 +204,10 @@ else
   ) >/dev/null 2>&1 </dev/null &
 fi
 unset _reap_tag _reap_detached _w
-# ── END container reaper block ───────────────────────────────────────────
+# ── END container reaper block ──
 
 args+=( "$IMAGE" )
-# Everything after the resident name is forwarded verbatim as the container
-# command. This carries the summon session_argv AND the WP-L5 model pin: the
-# adapter appends `--model <id>` to the argv, so it arrives here in "$@" and
-# rides into the container command unchanged. run-resident.sh does NOT and
-# cannot cheaply re-derive the resolved model (that lives in Claude Code's
-# JSON result on stdout, which the adapter parses and asserts) — its job is
-# only to forward the pin faithfully; the assert happens one layer up.
+# Forwarded verbatim, including the adapter's model pin.
 [ "$#" -gt 0 ] && args+=( "$@" )
 
 
