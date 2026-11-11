@@ -751,11 +751,6 @@ def test_every_build_seat_and_its_subagents_share_one_model_pin():
 
 
 def test_every_fable_seat_pins_effort_high_in_one_place():
-    """Claude Code 2.1.322 sends effort `medium` for claude-fable-5-2 when
-    nothing sets it (captured off the request body, 2026-11-11). plink's
-    ruling that day replaces #2858's "Anthropic default": every seat pins
-    `high`, top-level, so a model bump cannot silently drop it the way a
-    per-model `modelSettings` entry would. Subagents inherit it (observed)."""
     for rel in ("build-config/settings.json", "apps/config/settings.json",
                 "config-template/settings.json"):
         settings = json.loads((CC_DIR / rel).read_text(encoding="utf-8"))
