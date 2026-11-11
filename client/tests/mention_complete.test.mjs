@@ -163,9 +163,9 @@ test('after a closed fenced block a token starts', () => {
 test('an empty @ lists answering bots, then @bots, then people with the reader last, then silent bots', () => {
   const list = m.mentionCandidates(MAIN, { selfUserId: 1 });
   assert.deepEqual(names(list),
-    ['claudette', 'Gable', 'CAVEMAN', 'bots', 'Anna', 'Brogan', 'plink', 'broker', 'BuildGable']);
+    ['claudette', 'Gable', 'CAVEMAN', 'bots', 'Anna', 'Brogan', 'plink', 'BuildGable']);
   assert.deepEqual(list.map((c) => c.kind),
-    ['bot', 'bot', 'bot', 'group', 'user', 'user', 'user', 'bot', 'bot']);
+    ['bot', 'bot', 'bot', 'group', 'user', 'user', 'user', 'bot']);
   assert.equal(new Set(list.map((c) => c.key)).size, list.length);
 });
 
@@ -179,7 +179,7 @@ test('each row says what a mention does here', () => {
     m.mentionCandidates(MAIN, { selfUserId: 1 }).map((c) => [c.name, c.hint]));
   assert.equal(hint.claudette, 'replies when mentioned');
   assert.equal(hint.CAVEMAN, 'replies to everything here');
-  assert.equal(hint.broker, 'does not reply');
+  assert.equal(hint.broker, undefined);
   assert.equal(hint.BuildGable, 'does not reply');
   assert.equal(hint.bots, 'every bot in this room (3)');
   assert.equal(hint.Anna, '');
@@ -224,7 +224,7 @@ test('while editing, no row promises a call', () => {
   assert.equal(hint.claudette, 'not called by an edit');
   assert.equal(hint.CAVEMAN, 'not called by an edit');
   assert.equal(hint.bots, 'not called by an edit');
-  assert.equal(hint.broker, 'does not reply');
+  assert.equal(hint.BuildGable, 'does not reply');
   assert.equal(hint.Anna, '');
 });
 
@@ -245,7 +245,7 @@ test('an empty query keeps every candidate in order', () => {
 test('names that start with the query come before names that contain it', () => {
   const list = m.mentionCandidates(MAIN, { selfUserId: 1 });
   assert.deepEqual(names(m.rankMentions(list, 'g')), ['Gable', 'Brogan', 'BuildGable']);
-  assert.deepEqual(names(m.rankMentions(list, 'b')), ['bots', 'Brogan', 'broker', 'BuildGable', 'Gable']);
+  assert.deepEqual(names(m.rankMentions(list, 'b')), ['bots', 'Brogan', 'BuildGable', 'Gable']);
   assert.deepEqual(names(m.rankMentions(list, 'an')), ['Anna', 'CAVEMAN', 'Brogan']);
 });
 

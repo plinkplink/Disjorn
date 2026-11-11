@@ -9,6 +9,8 @@ export const GROUP_NAME = "bots";
    a house that overrides the setting shows a wrong hint and count here, and
    the server still decides who is called. */
 export const SILENT_BOT_NAMES: readonly string[] = ["system", "broker", "BuildGable"];
+/* Accounts nobody addresses: silent, and left off the list entirely. */
+export const UNLISTED_BOT_NAMES: readonly string[] = ["system", "broker"];
 
 export interface MentionToken {
   /** Index of the `@`. */
@@ -90,7 +92,7 @@ export interface CandidateOptions {
 }
 
 /** Everyone who can be mentioned in a channel, in the order an empty `@`
-    lists them: answering bots, `@bots`, people, then bots that never answer. */
+    lists them: answering bots, `@bots`, people, then a bot that never answers. */
 export function mentionCandidates(
   members: readonly ChannelMemberOut[],
   opts: CandidateOptions,
@@ -107,6 +109,8 @@ export function mentionCandidates(
     if (m.type === "user") {
       if (m.id === opts.selfUserId) self = { ...base, kind: "user", hint: "you" };
       else people.push({ ...base, kind: "user", hint: "" });
+    } else if (UNLISTED_BOT_NAMES.includes(m.name.toLowerCase())) {
+      continue;
     } else if (silent.has(m.name.toLowerCase())) {
       quiet.push({ ...base, kind: "bot", hint: "does not reply" });
     } else {
