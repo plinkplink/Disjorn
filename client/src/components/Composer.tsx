@@ -13,7 +13,9 @@
 
 import {
   useEffect,
+  useId,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -34,8 +36,20 @@ import {
   sendMessage,
   uploadFiles,
 } from "../api";
+import {
+  acceptMention,
+  activeMention,
+  mentionCandidates,
+  mentionKey,
+  rankMentions,
+  trackMention,
+} from "../lib/mentionComplete";
+import type { MentionCandidate, MentionState } from "../lib/mentionComplete";
 import { pastedImages } from "../lib/pasteAttachments";
 import { stripEmotionTags } from "./Markdown";
+import { MentionPopup, mentionOptionId } from "./MentionPopup";
+import { useChannels } from "../stores/channels";
+import { useMembers } from "../stores/members";
 import { useMessages } from "../stores/messages";
 import { useSession } from "../stores/session";
 import type { Message, PickerItem } from "../types";
@@ -321,14 +335,43 @@ export function Composer({
   const [error, setError] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [dropping, setDropping] = useState(false);
+  const [mention, setMention] = useState<MentionState | null>(null);
+  const members = useMembers((s) => s.byChannel[channelId]);
+  const channelType = useChannels(
+    (s) => s.channels.find((c) => c.id === channelId)?.type,
+  );
+  const mentionListId = useId();
 
   const taRef = useRef<HTMLTextAreaElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
   const uploadsRef = useRef<PendingUpload[]>([]);
   const lastTypingRef = useRef(0);
   const draftBeforeEditRef = useRef("");
+  const typedRef = useRef("");
+  const caretAfterRenderRef = useRef<number | null>(null);
+  const mentionPressRef = useRef(false);
 
   uploadsRef.current = uploads;
+
+  const selfId = me?.id ?? null;
+  const isEdit = editing !== null;
+  const candidates = useMemo(
+    () =>
+      members === undefined
+        ? []
+        : mentionCandidates(members, {
+            selfUserId: selfId,
+            everyMessage: channelType === "app_build",
+            editing: isEdit,
+          }),
+    [members, selfId, channelType, isEdit],
+  );
+  const matches =
+    mention === null || mention.off ? [] : rankMentions(candidates, mention.token.query);
+  const mentionOpen = matches.length > 0;
+  const mentionIndex = mention === null ? 0 : Math.min(mention.index, matches.length - 1);
+  // A popup that closed under a held pointer never saw the pointer come up.
+  if (!mentionOpen) mentionPressRef.current = false;
 
   // Auto-grow.
   useLayoutEffect(() => {
@@ -336,7 +379,22 @@ export function Composer({
     if (ta === null) return;
     ta.style.height = "auto";
     ta.style.height = `${Math.min(ta.scrollHeight, MAX_TEXTAREA_PX)}px`;
+    // Text that was set rather than typed leaves the token's offsets stale.
+    if (value !== typedRef.current) setMention(null);
   }, [value]);
+
+  // No deps: the accepted text must be in the textarea before a caret can sit in it.
+  useLayoutEffect(() => {
+    const caret = caretAfterRenderRef.current;
+    if (caret === null) return;
+    caretAfterRenderRef.current = null;
+    taRef.current?.setSelectionRange(caret, caret);
+  });
+
+  const tracking = mention !== null;
+  useEffect(() => {
+    if (tracking) void useMembers.getState().ensureLoaded(channelId);
+  }, [tracking, channelId]);
 
   // Entering/leaving edit mode swaps the textarea content (draft preserved).
   useEffect(() => {
@@ -558,9 +616,48 @@ export function Composer({
     }
   };
 
+  /* ---- mention autocomplete ---- */
+
+  const followCaret = (ta: HTMLTextAreaElement, typed: boolean) => {
+    const token = activeMention(ta.value, ta.selectionStart, ta.selectionEnd);
+    setMention((prev) => trackMention(prev, token, typed));
+  };
+
+  const pickMention = (item: MentionCandidate) => {
+    if (mention === null) return;
+    const next = acceptMention(value, mention.token, item.name);
+    caretAfterRenderRef.current = next.caret;
+    setValue(next.text);
+    setMention(null);
+    taRef.current?.focus();
+  };
+
   /* ---- keys ---- */
 
   const onKeyDown = (e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    const picked = matches[mentionIndex];
+    if (mention !== null && picked !== undefined) {
+      const action = mentionKey({
+        key: e.key,
+        shiftKey: e.shiftKey,
+        altKey: e.altKey,
+        ctrlKey: e.ctrlKey,
+        metaKey: e.metaKey,
+        isComposing: e.nativeEvent.isComposing,
+        keyCode: e.keyCode,
+      });
+      if (action === "compose") return;
+      if (action !== null) {
+        e.preventDefault();
+        if (action === "accept") pickMention(picked);
+        else if (action === "dismiss") setMention({ ...mention, off: true });
+        else {
+          const step = action === "down" ? 1 : matches.length - 1;
+          setMention({ ...mention, index: (mentionIndex + step) % matches.length });
+        }
+        return;
+      }
+    }
     if (e.key === "Enter" && !e.shiftKey && !isCoarsePointer) {
       e.preventDefault();
       void doSend();
@@ -724,9 +821,22 @@ export function Composer({
           rows={1}
           placeholder={placeholder}
           value={value}
+          aria-autocomplete="list"
+          aria-haspopup="listbox"
+          aria-expanded={mentionOpen}
+          aria-controls={mentionOpen ? mentionListId : undefined}
+          aria-activedescendant={
+            mentionOpen ? mentionOptionId(mentionListId, mentionIndex) : undefined
+          }
           onChange={(e) => {
+            typedRef.current = e.target.value;
             setValue(e.target.value);
+            followCaret(e.target, true);
             emitTyping();
+          }}
+          onSelect={(e) => followCaret(e.currentTarget, false)}
+          onBlur={() => {
+            if (!mentionPressRef.current) setMention(null);
           }}
           onKeyDown={onKeyDown}
           onPaste={onPaste}
@@ -772,6 +882,18 @@ export function Composer({
         </div>
         {pickerOpen && (
           <PickerPopover onPick={pickAndPost} onClose={() => setPickerOpen(false)} />
+        )}
+        {mentionOpen && (
+          <MentionPopup
+            id={mentionListId}
+            items={matches}
+            activeIndex={mentionIndex}
+            onActive={(index) => setMention((m) => (m === null ? m : { ...m, index }))}
+            onPick={pickMention}
+            onPress={(down) => {
+              mentionPressRef.current = down;
+            }}
+          />
         )}
       </div>
     </div>

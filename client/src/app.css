@@ -1908,6 +1908,72 @@
   outline-offset: -2px;
 }
 
+/* ---- mention autocomplete ---- */
+
+.mention-popup {
+  position: absolute;
+  bottom: calc(100% + var(--space-2));
+  left: 0;
+  z-index: 31;
+  width: min(320px, 100%);
+  max-height: min(264px, 40vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--space-1);
+  background: var(--bg-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-l);
+  box-shadow: var(--shadow-raised);
+}
+
+.mention-option {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 36px;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-m);
+  color: var(--text-1);
+  cursor: pointer;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.mention-option.active {
+  background: var(--bg-3);
+  color: var(--text-0);
+}
+
+.mention-group {
+  width: 24px;
+  height: 24px;
+}
+
+.mention-name {
+  flex-shrink: 0;
+  max-width: 60%;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mention-hint {
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
+  color: var(--text-2);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (pointer: coarse) {
+  .mention-option {
+    min-height: 44px;
+  }
+}
+
 /* ---- modals ---- */
 
 .modal-backdrop {
