@@ -309,9 +309,10 @@ test('the socket counts others\' messages, not mine, and uncounts a deleted one'
   assert.equal(unreadOf(1), 1);
 
   frame({ type: 'message_create', message: message(1, 13, ALICE.id) });
+  frame({ type: 'channel_read', channel_id: 1, last_read_seq: 13 });
   await settle();
   assert.equal(unreadOf(1), 0);
-  assert.deepEqual(reads, [[1, 13]]);
+  assert.deepEqual(reads, []);
 
   frame({ type: 'message_create', message: message(9, 4) });
   assert.equal(unreadOf(9), 1);

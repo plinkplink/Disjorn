@@ -259,13 +259,16 @@ export class DisjornSocket {
         // Viewing the channel with the window focused => instantly read. So
         // is my own message from another tab or device: posting reads it.
         const me = useSession.getState().user;
+        const mine =
+          message.author_type === "user" && message.author_id === me?.id;
         const isRead =
-          (message.author_type === "user" && message.author_id === me?.id) ||
+          mine ||
           (useChannels.getState().activeChannelId === message.channel_id &&
             document.hasFocus());
         this.chime(message, isRead);
         useChannels.getState().onMessageCreate(message, isRead);
-        if (isRead) {
+        // The server moved my cursor when it stored my own message.
+        if (isRead && !mine) {
           void useChannels.getState().markRead(message.channel_id, message.seq);
         }
         return;

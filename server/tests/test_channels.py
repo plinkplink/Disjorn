@@ -236,6 +236,41 @@ async def test_read_state_lazy_row_and_monotonic(client):
     assert (await client.put(f"/channels/{main}/read", json={"seq": -1})).status_code == 422
 
 
+async def test_posting_moves_the_authors_cursor_and_no_one_elses(client):
+    uid_a = await make_user("alice")
+    uid_b = await make_user("bob")
+    await login(client, "alice")
+    main = await main_feed_id()
+    dm_id = (await client.post("/dms", json={"user_id": uid_b})).json()["id"]
+    await insert_message(main, 1, "earlier", author_id=uid_b)
+
+    for cid in (main, dm_id):
+        r = await client.post(f"/channels/{cid}/messages", json={"content": "mine"})
+        assert r.status_code == 200, r.text
+        assert (await member_row(cid, "user", uid_a))["last_read_seq"] == r.json()["seq"]
+    for row in (await client.get("/channels")).json():
+        assert row["unread"] == 0
+        assert row["last_read_seq"] == (2 if row["id"] == main else 1)
+
+    assert await member_row(main, "user", uid_b) is None
+    assert (await member_row(dm_id, "user", uid_b))["last_read_seq"] == 0
+    await login(client, "bob")
+    assert [r["unread"] for r in (await client.get("/channels")).json()] == [1, 1]
+
+
+async def test_a_cursor_write_never_makes_a_member_of_a_private_channel(client):
+    await make_user("alice")
+    uid_b = await make_user("bob")
+    await login(client, "alice")
+    r = await client.post("/channels", json={"name": "backroom", "visibility": "private"})
+    cid = r.json()["id"]
+    await insert_message(cid, 1, "one")
+
+    async with db.transaction():
+        assert await channels.raise_read_cursor(cid, uid_b, 1) is None
+    assert await member_row(cid, "user", uid_b) is None
+
+
 async def test_read_state_rejects_non_member_dm(client):
     await make_user("alice")
     uid_b = await make_user("bob")

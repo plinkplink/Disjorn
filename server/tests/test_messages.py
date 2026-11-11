@@ -93,10 +93,12 @@ async def test_create_message_payload_and_event(client):
     assert msg["privacy_flags"] == {} and msg["emote_refs"] == []
     assert msg["attachments"] == []  # join always present, even before WP6
 
-    assert len(captured) == 1
-    event = captured[0]
+    event, read = captured
     assert event["type"] == "message_create" and event["channel_id"] == main
     assert event["message"] == msg  # full materialized payload on the bus
+    assert read == {
+        "type": "channel_read", "channel_id": main, "user_id": uid, "last_read_seq": 1,
+    }
 
 
 async def test_create_membership_and_unknown_channel(client):
