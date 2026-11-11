@@ -5,6 +5,7 @@ import asyncio
 import base64
 import io
 import json
+import logging
 
 import httpx
 import pytest
@@ -68,8 +69,22 @@ class House:
         await self.say(f"/files-safe #{channel} {' '.join(words)}")
         await asyncio.sleep(0.005)
 
-    async def read(self, attachment_id: int) -> httpx.Response:
-        return await self.bot.get(f"/bot/attachments/{attachment_id}")
+    async def read(self, attachment_id: int, key: str = BOT_KEY, **params) -> httpx.Response:
+        return await self.bot.get(
+            f"/bot/attachments/{attachment_id}", params=params, headers={"X-Api-Key": key})
+
+    async def add_bot(self, name: str, key: str, *channels: int) -> int:
+        cur = await db.execute(
+            "INSERT INTO bots (name, api_key_hash) VALUES (?, ?)",
+            (name, auth.hash_api_key(key)))
+        for channel_id in channels:
+            await self.join(cur.lastrowid, channel_id)
+        return cur.lastrowid
+
+    async def join(self, bot_id: int, channel_id: int) -> None:
+        await db.execute(
+            "INSERT INTO channel_members (channel_id, member_type, member_id)"
+            " VALUES (?, 'bot', ?)", (channel_id, bot_id))
 
     async def listed(self, channel=None, **params) -> list[dict]:
         r = await self.bot.get(f"/channels/{channel or self.room}/messages", params=params)
@@ -530,6 +545,121 @@ async def test_no_stored_file_is_opened_for_a_hidden_attachment(house, monkeypat
     assert opened == []
 
 
+# --------------------------------------------------------------- membership
+
+async def test_a_bot_outside_a_private_channel_cannot_read_its_files(house, monkeypatch):
+    den = (await house.client.post(
+        "/channels", json={"name": "den", "visibility": "private"})).json()["id"]
+    await house.flip("on", channel="den")
+    _, (att,) = await house.say("in the den", txt(), channel=den)
+    opened = []
+    real = bot_files._stored
+    monkeypatch.setattr(bot_files, "_stored", lambda *a: opened.append(a) or real(*a))
+
+    assert (await house.read(att)).status_code == 404
+    assert opened == []
+    await house.join(house.bot_id, den)
+    assert (await house.read(att)).status_code == 200
+
+
+async def test_a_bot_that_has_not_joined_a_public_channel_cannot_read_its_files(house):
+    main = (await db.fetch_one("SELECT id FROM channels WHERE type = 'main_feed'"))["id"]
+    await house.flip("on", channel="main")
+    _, (att,) = await house.say("in main", txt(), channel=main)
+
+    assert (await house.bot.get(f"/channels/{main}/messages")).status_code == 403
+    answer = await house.read(att)
+    assert answer.status_code == 404
+    assert answer.json() == (await house.read(999_999)).json()
+    await house.join(house.bot_id, main)
+    assert (await house.read(att)).status_code == 200
+
+
+async def test_the_relay_reads_as_the_resident_whose_seat_it_names(house):
+    await house.flip("on")
+    _, (att,) = await house.say("x", txt())
+    await house.add_bot("broker", "relay-key")
+    await house.add_bot("otto", "otto-key")
+    await house.add_bot("Gamma", "gamma-key", house.room)
+
+    assert (await house.read(att, "relay-key", on_behalf_of="res-claw")).status_code == 200
+    assert (await house.read(att, "relay-key", on_behalf_of="res-gamma")).status_code == 200
+    assert (await house.read(att, "relay-key", on_behalf_of="res-otto")).status_code == 404
+    assert (await house.read(att, "relay-key")).status_code == 404
+
+
+@pytest.mark.parametrize("label", [
+    "res-nobody", "claw", "res-", "", "RES-CLAW", "res-claw ", "res-claw%", "res-" + "a" * 80,
+    "res-dup",
+])
+async def test_a_seat_that_maps_to_no_one_bot_reads_nothing(house, label):
+    await house.flip("on")
+    _, (att,) = await house.say("x", txt())
+    await house.add_bot("broker", "relay-key", house.room)
+    await house.add_bot("dup", "k1", house.room)
+    await house.add_bot("Dup", "k2", house.room)
+
+    assert (await house.read(att, "relay-key")).status_code == 200
+    assert (await house.read(att, "relay-key", on_behalf_of=label)).status_code == 404
+
+
+async def test_a_bot_that_is_not_the_relay_gains_nothing_by_naming_a_seat(house):
+    await house.flip("on")
+    _, (att,) = await house.say("x", txt())
+    await house.add_bot("otto", "otto-key")
+
+    assert (await house.read(att, "otto-key", on_behalf_of="res-claw")).status_code == 404
+    assert (await house.read(att, on_behalf_of="res-claw")).status_code == 404
+    assert (await house.read(att)).status_code == 200
+
+
+async def test_every_read_attempt_is_logged_without_the_file(house, caplog):
+    await house.flip("on")
+    _, (att,) = await house.say("x", txt(f"{CANARY}.txt", CANARY.encode()))
+    relay = await house.add_bot("broker", "relay-key")
+    caplog.set_level(logging.INFO, logger="app.routers.bot_files")
+
+    await house.read(att)
+    await house.read(att, "relay-key", on_behalf_of="res-claw")
+    await house.read(att, "relay-key")
+    await house.read(999_999)
+
+    lines = [r.getMessage() for r in caplog.records if r.name == "app.routers.bot_files"]
+    assert lines == [
+        f"bot attachment read: caller=bot:{house.bot_id} reader_bot={house.bot_id}"
+        f" attachment={att} allowed",
+        f"bot attachment read: caller=bot:{relay} reader_bot={house.bot_id}"
+        f" attachment={att} allowed",
+        f"bot attachment read: caller=bot:{relay} reader_bot={relay}"
+        f" attachment={att} refused",
+        f"bot attachment read: caller=bot:{house.bot_id} reader_bot={house.bot_id}"
+        " attachment=999999 refused",
+    ]
+    assert CANARY not in caplog.text
+
+
+async def test_a_private_channel_is_opened_only_by_an_admin_who_is_in_it(house, client):
+    den = (await client.post(
+        "/channels", json={"name": "den", "visibility": "private"})).json()["id"]
+    await db.execute(
+        "INSERT INTO users (username, password_hash, display_name, is_admin)"
+        " VALUES ('eve', ?, 'Eve', 1)", (auth.hash_password(PASSWORD),))
+    await client.post("/auth/login", json={"username": "eve", "password": PASSWORD})
+    main = (await db.fetch_one("SELECT id FROM channels WHERE type = 'main_feed'"))["id"]
+
+    await house.say("/files-safe #den on --include-history", channel=main)
+
+    assert (await channel(den))["files_safe"] == 0
+    replies = [m["content"] for m in (await client.get(f"/channels/{main}/messages")).json()
+               if m["author_type"] == "bot"]
+    assert replies == [slash.FILES_SAFE_NO_CHANNEL]
+    assert "den" not in slash.FILES_SAFE_NO_CHANNEL
+
+    await client.post("/auth/login", json={"username": "ada", "password": PASSWORD})
+    await house.say("/files-safe #den on", channel=main)
+    assert (await channel(den))["files_safe"] == 1
+
+
 # -------------------------------------------------------------- enumeration
 
 async def test_unknown_and_hidden_ids_answer_alike(house):
@@ -626,6 +756,22 @@ async def test_a_pdf_comes_back_as_its_text_page_by_page(house, monkeypatch):
     set_env(monkeypatch, "BOT_READ_BYTES", 20)
     assert (await house.read(att)).json()["text"] == (
         "[page 1]\nfirst page \n[truncated: page 1 of 2]")
+
+
+async def test_a_long_pdf_stops_at_the_page_cap(house, monkeypatch):
+    await house.flip("on")
+    monkeypatch.setattr(bot_files, "PDF_MAX_PAGES", 2)
+    _, (words, scan, exact) = await house.say(
+        "docs",
+        ("words.pdf", pdf("one", "two", "three"), "application/pdf"),
+        ("scan.pdf", blank_pdf(3), "application/pdf"),
+        ("exact.pdf", pdf("one", "two"), "application/pdf"))
+
+    assert (await house.read(words)).json()["text"] == (
+        "[page 1]\none\n[page 2]\ntwo\n[truncated: page 2 of 3]")
+    assert (await house.read(scan)).json()["text"] == (
+        "[page 1]\n\n[page 2]\n[truncated: page 2 of 3]")
+    assert (await house.read(exact)).json()["text"] == "[page 1]\none\n[page 2]\ntwo\n"
 
 
 async def test_a_pdf_with_no_text_says_so(house):

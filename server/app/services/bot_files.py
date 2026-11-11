@@ -10,6 +10,7 @@ from .. import db, privacy
 from ..config import get_settings
 
 PDF_MIME = "application/pdf"
+PDF_MAX_PAGES = 200
 VARIANT_MIME = "image/webp"
 _ALLOWED_PREFIXES = ("text/", "image/")
 _ALLOWED_MIMES = frozenset({
@@ -55,6 +56,16 @@ async def visible_to_bots(att: dict[str, Any]) -> bool:
         return 0 <= att["size_bytes"] <= get_settings().MAX_UPLOAD_BYTES
     except Exception:
         return False
+
+
+async def channel_of(attachment_id: int) -> Optional[int]:
+    """The channel a claimed attachment's message is in; None for an unknown or staged id."""
+    row = await db.fetch_one(
+        """SELECT m.channel_id FROM attachments a JOIN messages m ON m.id = a.message_id
+            WHERE a.id = ?""",
+        (attachment_id,),
+    )
+    return row["channel_id"] if row is not None else None
 
 
 async def for_bot(payload: dict[str, Any]) -> dict[str, Any]:
@@ -154,6 +165,10 @@ def _image_shape(att: dict[str, Any], cap: int) -> dict[str, Any]:
 
 
 def _pdf_shape(path: Path, cap: int) -> dict[str, Any]:
+    """Extraction stops at the byte cap or PDF_MAX_PAGES, whichever comes first.
+
+    A worker thread cannot be cancelled, so the bound is on the work asked for.
+    """
     # Imported here so a host without pypdf loses PDF reads, not the server.
     from pypdf import PdfReader
 
@@ -161,12 +176,12 @@ def _pdf_shape(path: Path, cap: int) -> dict[str, Any]:
     total = len(reader.pages)
     out = b""
     has_text = False
-    for number, page in enumerate(reader.pages, 1):
-        body = (page.extract_text() or "").strip()
+    for number in range(1, min(total, PDF_MAX_PAGES) + 1):
+        body = (reader.pages[number - 1].extract_text() or "").strip()
         has_text = has_text or bool(body)
         out += f"[page {number}]\n{body}\n".encode("utf-8", errors="replace")
-        if len(out) > cap:
-            text = out[:cap].decode("utf-8", errors="ignore")
+        if len(out) > cap or (number == PDF_MAX_PAGES and total > number):
+            text = out[:cap].decode("utf-8", errors="ignore").rstrip("\n")
             return {"kind": "text",
                     "text": f"{text}\n[truncated: page {number} of {total}]"}
     if not has_text:
@@ -177,7 +192,8 @@ def _pdf_shape(path: Path, cap: int) -> dict[str, Any]:
 async def read(attachment_id: int) -> Optional[dict[str, Any]]:
     """One file in its bot shape, or None for an id that is unknown, hidden or unreadable.
 
-    No stored byte is opened before `visible_to_bots` passes for the row.
+    No stored byte is opened before `visible_to_bots` passes for the row. The
+    caller owns the reading bot's channel membership.
     """
     try:
         att = await db.fetch_one("SELECT * FROM attachments WHERE id = ?", (attachment_id,))

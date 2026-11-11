@@ -61,6 +61,7 @@ from ..models import BacklogItem
 from ..services import backlog as backlog_service, bot_files, broker_client
 from .approval import RESIDENT_PRINCIPAL_RE
 from .auth import Actor, get_actor
+from .channels import is_member
 from .messages import deliver_message
 
 logger = logging.getLogger(__name__)
@@ -701,7 +702,7 @@ async def _files_safe(ctx: Ctx) -> Optional[str]:
         "SELECT id FROM channels WHERE name = ? AND type IN ('main_feed', 'text')",
         (name,),
     )
-    if len(rows) != 1:
+    if len(rows) != 1 or not await is_member(rows[0]["id"], "user", user.id):
         return FILES_SAFE_NO_CHANNEL
     target = rows[0]["id"]
     on, history = parts[1] == "on", len(parts) == 3
