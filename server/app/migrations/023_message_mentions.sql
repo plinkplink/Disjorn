@@ -1,4 +1,4 @@
--- 022_message_mentions.sql — which bots a message addressed with an explicit @.
+-- 023_message_mentions.sql — which bots a message addressed with an explicit @.
 --
 -- SPECS/2026-11-11-at-bots-mention.md.
 --

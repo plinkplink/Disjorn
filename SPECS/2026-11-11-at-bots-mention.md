@@ -53,7 +53,7 @@ Governing plan: BUILD-LOOP.md. Style: COMMS.md. Backlog #57.
 - No field listed the bots a message addressed. This build adds one.
 
 **Server** (custodian lane)
-- Migration `022_message_mentions.sql`:
+- Migration `023_message_mentions.sql`:
   `ALTER TABLE messages ADD COLUMN mentioned_bot_ids TEXT NOT NULL DEFAULT '[]'`.
   A JSON array of bot ids. Old rows read `[]` and are not re-read.
 - Stored, not computed per frame. The list is resolved once, from the
@@ -198,9 +198,9 @@ code, and the regexes do not.
 - What bounds it today:
   - Gable: his daily session cap (`[budget] daily_session_cap`,
     `harness/residency/budget.py`), spent per summon whoever called.
-  - Claudette: no per-day cap in her adapter; a turn is bounded by her tool
-    round cap and wall clock.
-  - CAVEMAN: no per-day cap; a turn is one model call with a 60 s timeout.
+  - Claudette: no per-day cap found in `disjorn_bot.py` or `core.py`; a turn
+    is bounded by her tool round cap and wall clock.
+  - CAVEMAN: no per-day cap; a turn is bounded by a 60 s timeout.
   - The server has no rate limit on posting messages.
 - No limiter is added. The bound per message is the number of answering bots
   in the room, three at most on this house.
@@ -220,7 +220,7 @@ code, and the regexes do not.
 - **Applies**: yes.
 - **Surfaces by lane**:
   - custodian: `server/app/mentions.py`, `server/app/ws.py`,
-    `server/app/routers/messages.py`, `server/app/config.py`, migration 022,
+    `server/app/routers/messages.py`, `server/app/config.py`, migration 023,
     `server/tests/`, `client/`, `sdk/README.md`, and the patch to her own
     adapter above → review owner Claudette
   - builder: `harness/residency/detector.py`,
@@ -245,7 +245,7 @@ One keyboard session.
 
 ## Deploy recipe
 1. Back up the DB (`sqlite3 .backup`).
-2. `systemctl restart disjorn`, which applies 022.
+2. `systemctl restart disjorn`, which applies 023.
 3. Client build.
 4. Restart `gable-summon`.
 5. Apply the patch to claudette.git, run her tests, `claudette-update.sh`.

@@ -320,7 +320,7 @@ async def test_the_migration_gives_existing_rows_an_empty_list(tmp_path, monkeyp
         await conn.execute("""CREATE TABLE schema_migrations (
             filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)""")
         for path in sorted(db.MIGRATIONS_DIR.glob("*.sql")):
-            if path.name == "022_message_mentions.sql":
+            if path.name == "023_message_mentions.sql":
                 continue
             await conn.executescript(path.read_text(encoding="utf-8"))
             await conn.execute(
@@ -332,7 +332,7 @@ async def test_the_migration_gives_existing_rows_an_empty_list(tmp_path, monkeyp
             "INSERT INTO messages (channel_id, seq, author_type, author_id, content)"
             " VALUES (1, 1, 'user', 1, '@bots from before')")
 
-        assert await db.run_migrations() == ["022_message_mentions.sql"]
+        assert await db.run_migrations() == ["023_message_mentions.sql"]
 
         row = await db.fetch_one("SELECT * FROM messages WHERE id = 1")
         assert (await message_payload(row))["mentioned_bot_ids"] == []
