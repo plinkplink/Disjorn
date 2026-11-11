@@ -81,7 +81,7 @@
 "harness/residency/summary.py" = 5671
 "harness/residency/tests/stub_launch.py" = 1406
 "harness/residency/wake.py" = 12916
-"sdk/disjorn_sdk/client.py" = 11304
+"sdk/disjorn_sdk/client.py" = 11300
 "sdk/disjorn_sdk/events.py" = 3792
 "sdk/examples/echo_bot.py" = 1126
 "server/app/apps_grant.py" = 5863

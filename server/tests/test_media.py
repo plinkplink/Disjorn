@@ -384,6 +384,7 @@ async def test_bot_can_upload_and_claim(client):
         "INSERT OR IGNORE INTO channel_members (channel_id, member_type, member_id) VALUES (?, 'bot', ?)",
         (main, bot_id),
     )
+    await db.execute("UPDATE channels SET files_safe = 1 WHERE id = ?", (main,))
     client.cookies.clear()
     headers = {"X-Api-Key": BOT_KEY}
 

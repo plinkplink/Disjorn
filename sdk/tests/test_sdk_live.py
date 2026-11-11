@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import sqlite3
 from typing import Any, AsyncIterator, Callable
 
 import httpx
@@ -182,10 +183,41 @@ async def test_backlog_pagination(server, alice, main_id, bot):
     assert exc.value.response.status_code == 422
 
 
-async def test_upload_attaches_media_to_a_bot_message(server, alice, main_id, bot, tmp_path):
+def _set_files_safe(server, channel_id: int, on: bool) -> None:
+    """Stands in for an admin's /files-safe: the scratch house has no admin."""
+    with sqlite3.connect(server.db_path, timeout=10) as conn:
+        conn.execute(
+            "UPDATE channels SET files_safe = ?, files_safe_since = ? WHERE id = ?",
+            (1, "2000-01-01T00:00:00.000Z", channel_id) if on else (0, None, channel_id),
+        )
+
+
+@pytest.fixture
+def files_safe_main(server, main_id):
+    _set_files_safe(server, main_id, True)
+    yield main_id
+    _set_files_safe(server, main_id, False)
+
+
+async def test_a_bot_attaches_no_file_outside_a_files_safe_channel(server, main_id, bot):
+    msg = await bot.send(main_id, "chart incoming")
+    with pytest.raises(httpx.HTTPStatusError) as exc:
+        await bot.upload([("chart.png", PNG_1PX, "image/png")], message_id=msg["id"])
+    assert exc.value.response.status_code == 403
+    staged = await bot.upload([("chart.png", PNG_1PX, "image/png")])
+    with pytest.raises(httpx.HTTPStatusError) as exc:
+        await bot.attach(msg["id"], [staged[0]["id"]])
+    assert exc.value.response.status_code == 403
+    assert "files-safe" in exc.value.response.json()["detail"]
+
+
+async def test_upload_attaches_media_to_a_bot_message(
+    server, alice, files_safe_main, bot, tmp_path
+):
     """The DEFERRED sdk gap: attaching media used to mean hand-rolling
     /upload + /attachments/claim. Both documented flows must work end to end,
     and the result must be visible to a *user* fetching history."""
+    main_id = files_safe_main
     # Flow 1 — post, then upload straight onto the bot's own message.
     msg = await bot.send(main_id, "chart incoming")
     atts = await bot.upload([("chart.png", PNG_1PX, "image/png")], message_id=msg["id"])
@@ -201,8 +233,7 @@ async def test_upload_attaches_media_to_a_bot_message(server, alice, main_id, bo
     fetched = next(
         m for m in await bot.get_messages(main_id, before_seq=msg["seq"] + 1) if m["id"] == msg["id"]
     )
-    # main is not files-safe, so a bot's read of it lists no attachments at all.
-    assert "attachments" not in fetched
+    assert [a["id"] for a in fetched["attachments"]] == [att["id"]]
 
     # The signed URL needs no credentials — that is what makes it pasteable.
     async with httpx.AsyncClient(base_url=server.base_url, timeout=10) as anon:
