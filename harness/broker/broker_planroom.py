@@ -371,14 +371,16 @@ class PlanroomVerbs:
                 {"backlog_filed": True})
 
     def _verb_read_attachment(self, resident: str, args: dict) -> tuple[dict, str]:
-        """One channel file in the shape the server gives a bot; the server
-        alone decides whether this id is readable."""
+        """One channel file in the shape the server gives a bot. The server
+        decides whether the calling seat may read it, from the seat label
+        stamped here out of its peer identity, never from `args`."""
         _reject_unknown(args, {"attachment_id"})
         if "attachment_id" not in args:
             raise _bad("missing required arg: attachment_id")
         attachment_id = _check_int(args, "attachment_id", 0, 1, MAX_SEQ)
         result = self.planroom_api(
-            self.disjorn, "GET", f"/bot/attachments/{attachment_id}")
+            self.disjorn, "GET",
+            f"/bot/attachments/{attachment_id}?on_behalf_of={_urlq(resident)}")
         return result, f"attachment read {attachment_id}"
 
     def _count_backlog_filed(self, resident: str, today: str) -> int:

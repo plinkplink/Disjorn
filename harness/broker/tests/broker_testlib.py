@@ -1068,7 +1068,8 @@ def harness(tmp_path: Path):
         if path.startswith("/backlog"):
             return _stub_backlog(planroom_state, method, path, payload)
         if path.startswith("/bot/attachments/"):
-            found = planroom_state.get("attachments", {}).get(path.rsplit("/", 1)[1])
+            wanted = path.rsplit("/", 1)[1].split("?", 1)[0]
+            found = planroom_state.get("attachments", {}).get(wanted)
             if found is None:
                 raise VerbError("exec-failure", "Not found", status=404)
             return found

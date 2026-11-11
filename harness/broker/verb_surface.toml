@@ -755,7 +755,8 @@ announce_preface = false
 description = """\
 Read one file attached to a message, by the attachment id the message listing \
 gave you, via the house broker. A message lists attachments only in a channel an \
-admin has marked files-safe. Text and code come back as text, cut at the read \
+admin has marked files-safe, and you can read a file only in a channel you are a \
+member of. Text and code come back as text, cut at the read \
 cap with a '[truncated: N of M bytes]' line. A PDF comes back as its extracted \
 text with a '[page N]' line per page, or '[no text layer: N pages]'. An image \
 comes back as a base64 WebP preview, never the original. An id you may not read \
