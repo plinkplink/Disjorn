@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # run-resident.sh: podman run wrapper for one resident container, run as the res-* user (SO_PEERCRED keys on it).
-# Usage: run-resident.sh <resident-name> [command...]. The spine, credential and reaper blocks are byte-identical in run-build.sh (test-enforced).
+# Usage: run-resident.sh <resident-name> [command...]. The spine and credential blocks are byte-identical in run-build.sh (test-enforced); the reaper blocks differ by contract.
 # Res-* users cannot read /home/plink: the unit must point at a world-readable copy.
 set -euo pipefail
 
@@ -14,6 +14,7 @@ HOME_VOL="${RESIDENT_HOME_VOL:-$HOME/resident-home}"
 CONFIG_DIR="${RESIDENT_CONFIG_DIR:-/home/plink/resident-config/$NAME}"
 BROKER_SOCK="${RESIDENT_BROKER_SOCKET:-/run/disjorn-broker/broker.sock}"
 HOUSE_MEMORY="${RESIDENT_HOUSE_MEMORY:-/home/plink/Disjorn/Disjorn/harness/house_memory}"
+# pasta is plumbing, not the wall: egress is the host nftables rule on the res-* uid.
 NETWORK="${RESIDENT_NETWORK:-pasta}"
 
 [ -d "$HOME_VOL" ] || { echo "run-resident: home volume missing: $HOME_VOL" >&2; exit 1; }

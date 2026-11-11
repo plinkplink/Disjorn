@@ -16,8 +16,8 @@
 "harness/cc/apps/config/entrypoint.sh" = 869
 "harness/cc/apps/run-apps.sh" = 3484
 "harness/cc/config-template/hooks/pre-tool-use.py" = 1337
-"harness/cc/run-build.sh" = 6654
-"harness/cc/run-resident.sh" = 3205
+"harness/cc/run-build.sh" = 6896
+"harness/cc/run-resident.sh" = 3321
 "harness/cc/tests/test_apps_harvest.py" = 21824
 "harness/cc/tests/test_apps_launch.py" = 32741
 "harness/cc/tests/test_build_harvest.py" = 9599

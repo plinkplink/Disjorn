@@ -18,6 +18,7 @@ CONTAINER_NAME="disjorn-build-$SLUG"
 HOME_VOL="${RESIDENT_HOME_VOL:-$HOME/build-home}"
 CONFIG_DIR="${RESIDENT_CONFIG_DIR:-/home/plink/build-config/$NAME}"
 HOUSE_MEMORY="${RESIDENT_HOUSE_MEMORY:-/home/plink/Disjorn/Disjorn/harness/house_memory}"
+# pasta is plumbing, not the wall: egress is the host nftables rule on the res-* uid.
 NETWORK="${RESIDENT_NETWORK:-pasta}"
 # Copied to ~/.claude/CLAUDE.md: no bootstrap runs before claude.
 # bootstrap.py would overwrite this copy once the spine is wired in (BUILD-SEAT-CONTRACT.md § Kernel).
@@ -66,7 +67,7 @@ for _repo in "${ENTITLED[@]}"; do
     exit 1; }
 
   # Quarantine: a clone holding loop/* commits that no gatehouse ref reaches is moved aside, never deleted.
-  # Reachability is checked against gatehouse refs: object existence decays under gc.
+  # Reachability is checked against gatehouse refs: a push can land every object and die at the ref update, and object existence decays under gc.
   if [ -d "$_dest/.git" ]; then
     _q_branches=""
     while IFS= read -r _wbranch; do
@@ -345,6 +346,7 @@ if [ "$DETACHED" = "1" ]; then
 fi
 
 # Foreground, not exec: this wrapper must outlive the container to publish. & and wait let the trap fire.
+# <&0 stays: bash points a background command's stdin at /dev/null, and stdin carries the spec.
 podman "${args[@]}" <&0 &
 _podman_pid=$!
 _container_rc=0
