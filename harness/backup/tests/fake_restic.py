@@ -35,7 +35,7 @@ if cmd == "backup":
         (shutil.copytree if p.is_dir() else shutil.copy2)(p, dest)
     when = os.environ.get("FAKE_RESTIC_TIME") or dt.datetime.now(dt.timezone.utc).strftime(
         "%Y-%m-%dT%H:%M:%S.123456789Z")
-    (snaps / f"{sid}.json").write_text(json.dumps({"id": sid, "time": when, "tags": [opts["--tag"]]}))
+    (snaps / f"{sid}.json").write_text(json.dumps({"id": sid, "time": when, "tags": opts["--tag"].split(",")}))
 elif cmd == "snapshots":
     print(json.dumps([json.loads(p.read_text()) for p in snaps.glob("*.json")]))
 elif cmd == "restore":

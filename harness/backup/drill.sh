@@ -82,11 +82,18 @@ for pair in "${BUNDLES[@]}"; do
     [[ "$heads" == "$(mget "$m" "bundles.$name")" ]] || fail "bundle $name: branch HEADs differ from manifest"
 done
 
+word=PASS
+if apps="$(python3 "$HERE/apps.py" verify --stage "$stage/apps" --manifest "$m" --scratch "$scratch/apps" 2>&1)"; then
+    [[ "$apps" != *PARTIAL* ]] || word=PARTIAL
+else
+    while IFS= read -r line; do fail "$line"; done <<<"$apps"
+fi
+
 if ((${#fails[@]})); then
     { printf 'backup drill RED on snapshot %s (%d failed):\n' "${snap:0:8}" "${#fails[@]}"
       printf -- '- %s\n' "${fails[@]}"; } | post
     exit 1
 fi
-printf 'backup drill PASS on snapshot %s (%s): db ok, %s messages, migration %s; claudette %s memories round-trip%s; gable %s memory files; %d bundles verified\n' \
-    "${snap:0:8}" "$(mget "$m" created_at)" "$messages" "$(mget "$m" migration)" \
-    "$c_count" "$d_note" "$g_files" "$n_bundles" | post
+printf 'backup drill %s on snapshot %s (%s): db ok, %s messages, migration %s; claudette %s memories round-trip%s; gable %s memory files; %d bundles verified; %s\n' \
+    "$word" "${snap:0:8}" "$(mget "$m" created_at)" "$messages" "$(mget "$m" migration)" \
+    "$c_count" "$d_note" "$g_files" "$n_bundles" "$apps" | post

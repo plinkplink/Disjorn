@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Nightly: stage the DB copy, Claudette's export, git bundles and the manifest, then restic backup + prune.
+# Nightly: stage the DB copy, Claudette's export, git bundles, the apps and the manifest, then restic backup + prune.
 set -euo pipefail
 . "$(dirname "$(readlink -f "$0")")/lib.sh"
 
@@ -38,6 +38,9 @@ for pair in "${BUNDLES[@]}"; do
     git bundle list-heads "$STAGE/bundles/$name.bundle" > "$STAGE/bundles/$name.heads"
 done
 
+python3 "$HERE/apps.py" stage --git-root "$APPS_GIT_ROOT" --www-root "$APPS_WWW_ROOT" --out "$STAGE/apps" \
+    --timeout "$BACKUP_CHILD_TIMEOUT"
+
 facts="$(gable_facts "$GABLE_MEMORY")"
 read -r gable_files gable_sha <<<"$facts"
 
@@ -59,12 +62,20 @@ manifest = {
                           if (discord := stage / "claudette" / "discord-export.json").exists()
                           else None),
     "gable": {"memory_files": int(gable_files), "memory_md_sha256": gable_sha},
+    "apps": json.loads((stage / "apps" / "apps.json").read_text()),
 }
 (stage / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
 PY
 
 mapfile -t paths < <(backup_paths)
-restic backup --retry-lock 30m --tag "$BACKUP_TAG" "${paths[@]}"
+tags="$BACKUP_TAG"
+lost_roots="$(mget "$STAGE/manifest.json" apps.lost_roots)"
+[[ -z "$(mget "$STAGE/manifest.json" apps.warnings)$lost_roots" ]] || tags+=",apps-partial"
+restic backup --retry-lock 30m --tag "$tags" "${paths[@]}"
 restic forget --retry-lock 30m --tag "$BACKUP_TAG" --prune \
     --keep-daily 7 --keep-weekly 4 --keep-monthly 12
 rm -rf "$STAGE"
+if [[ -n "$lost_roots" ]]; then
+    printf 'snapshot taken WITHOUT the apps: an apps root could not be read (%s)\n' "${lost_roots//$'\n'/; }" >&2
+    exit 1
+fi

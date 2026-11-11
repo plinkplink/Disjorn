@@ -12,9 +12,12 @@
 : "${CLAUDETTE_PY:=/home/plink/bots/claudette/.venv/bin/python}"
 : "${POST_PY:=$DISJORN/server/.venv/bin/python}"
 : "${BROKER_CONFIG:=/etc/disjorn-broker/broker.toml}"
+: "${APPS_GIT_ROOT:=/srv/apps-git}"
+: "${APPS_WWW_ROOT:=/srv/apps-www}"
 : "${STAGE:=/var/lib/disjorn-backup/stage}"
 : "${BACKUP_TAG:=disjorn-nightly}"
 : "${FRESH_HOURS:=26}"
+: "${BACKUP_CHILD_TIMEOUT:=120}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -43,6 +46,14 @@ backup_paths() {
 
 git_() { git -c safe.directory='*' "$@"; }
 
+# Our environment holds the offsite credentials: a child run as another user gets a built one, and a deadline.
+as_user() {
+    local user="$1" tool
+    tool="$(command -v "$2")"
+    shift 2
+    runuser -u "$user" -- env -i PATH=/usr/bin:/bin timeout -k 5 "$BACKUP_CHILD_TIMEOUT" "$tool" "$@"
+}
+
 # `.backup` of a live sqlite database as its owner: sqlite may create -wal/-shm
 # beside the source, and root-owned ones lock that owner out of it.
 backup_live_db() {
@@ -51,11 +62,11 @@ backup_live_db() {
         sqlite3 "$src" ".backup '$dest'"
         return
     fi
-    need runuser
+    need runuser timeout
     owner="$(stat -c %U "$src")"
     tmp="$(mktemp -d)"
     chown "$owner" "$tmp"
-    if ! runuser -u "$owner" -- sqlite3 "$src" ".backup '$tmp/copy.db'"; then
+    if ! as_user "$owner" sqlite3 "$src" ".backup '$tmp/copy.db'"; then
         rm -rf "$tmp"
         return 1
     fi
@@ -114,7 +125,7 @@ print(n, hashlib.sha256((d / "MEMORY.md").read_bytes()).hexdigest())
 PY
 }
 
-# Newest snapshot with our tag as "<id> <age-hours>"; empty if there is none.
+# Newest snapshot with our tag as "<id> <age-hours> [apps-partial]"; empty if there is none.
 latest_snapshot() {
     restic snapshots --json --tag "$BACKUP_TAG" --retry-lock 30m | python3 -c '
 import datetime as dt, json, re, sys
@@ -125,6 +136,6 @@ def when(s):
 if snaps:
     s = max(snaps, key=when)
     age = (dt.datetime.now(dt.timezone.utc) - when(s)).total_seconds() / 3600
-    print(s["id"], f"{age:.1f}")
+    print(s["id"], f"{age:.1f}", "apps-partial" if "apps-partial" in (s.get("tags") or []) else "")
 '
 }
