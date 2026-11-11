@@ -4,26 +4,26 @@
 `get_summarizer()` returns None when no engine matches or the engine lacks its
 credential; the router turns that into a 503.
 
-Also hosts the page-fetch + main-text-extraction helpers used by
-POST /summarize (trafilatura with a crude stdlib tag-strip fallback), kept
-here so tests can monkeypatch `fetch_page` without touching the router.
+Also hosts the page fetch (monkeypatched in tests), the main-text extraction
+and the `summary_cache` table behind POST /summarize.
 """
 
 import logging
 import re
 from html.parser import HTMLParser
 from typing import Callable, Optional, Protocol
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
+from .. import db
 from ..config import get_settings
+from . import unfurl
 
 logger = logging.getLogger(__name__)
 
 PAGE_MAX_BYTES = 2 * 1024 * 1024
-PAGE_FETCH_TIMEOUT = 10.0
 SUMMARIZE_TIMEOUT = 30.0
-USER_AGENT = "Mozilla/5.0 (compatible; Disjorn/1.0; summarizer)"
 MAX_INPUT_CHARS = 16_000  # bounds per-summary cost and local-model context
 ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
@@ -123,29 +123,61 @@ class PageFetchError(Exception):
     """Page could not be fetched (network error, bad status, non-HTTP URL)."""
 
 
-async def fetch_page(url: str) -> str:
+REFUSED = (
+    "This link points at a private, loopback or tailnet address; "
+    "only pages on the public internet are summarized."
+)
+
+
+class PageRefused(PageFetchError):
+    def __init__(self) -> None:
+        super().__init__(REFUSED)
+
+
+async def fetch_page(url: str, transport: Optional[httpx.AsyncBaseTransport] = None) -> str:
     """Fetch up to PAGE_MAX_BYTES of a page as text. Raises PageFetchError."""
     if not url.startswith(("http://", "https://")):
         raise PageFetchError(f"unsupported URL scheme: {url!r}")
     try:
-        async with httpx.AsyncClient(
-            timeout=PAGE_FETCH_TIMEOUT,
-            follow_redirects=True,
-            headers={"User-Agent": USER_AGENT},
-        ) as client:
-            async with client.stream("GET", url) as resp:
-                resp.raise_for_status()
-                chunks: list[bytes] = []
-                total = 0
-                async for chunk in resp.aiter_bytes():
-                    chunks.append(chunk)
-                    total += len(chunk)
-                    if total >= PAGE_MAX_BYTES:
-                        break
-                body = b"".join(chunks)[:PAGE_MAX_BYTES]
-                return body.decode(resp.charset_encoding or "utf-8", errors="replace")
-    except httpx.HTTPError as exc:
+        _, html = await unfurl.fetch_head(url, transport, max_bytes=PAGE_MAX_BYTES)
+    except unfurl.NonPublicAddress as exc:
+        raise PageRefused() from exc
+    except httpx.HTTPStatusError as exc:
+        raise PageFetchError(f"the site answered HTTP {exc.response.status_code}") from exc
+    except (httpx.HTTPError, httpx.InvalidURL, OSError, ValueError) as exc:
         raise PageFetchError(str(exc) or exc.__class__.__name__) from exc
+    return html
+
+
+def normalize_url(url: str) -> str:
+    """Cache key: host case, default port and fragment never change the page."""
+    try:
+        parts = urlsplit(url.strip())
+    except ValueError:
+        return url.strip()
+    scheme = parts.scheme.lower()
+    hostport = parts.netloc.rpartition("@")[2]
+    hostport = hostport.lower().removesuffix({"http": ":80", "https": ":443"}.get(scheme, ""))
+    return urlunsplit((scheme, hostport, parts.path or "/", parts.query, ""))
+
+
+async def cached_summary(url: str, engine: str, model: str) -> Optional[str]:
+    row = await db.fetch_one(
+        "SELECT summary FROM summary_cache WHERE url = ? AND engine = ? AND model = ?"
+        " AND created_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)",
+        (url, engine, model, f"-{get_settings().SUMMARIZE_CACHE_TTL} seconds"),
+    )
+    return row["summary"] if row is not None else None
+
+
+async def store_summary(url: str, engine: str, model: str, summary: str) -> None:
+    await db.execute(
+        """INSERT INTO summary_cache (url, engine, model, summary, created_at)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(url, engine, model) DO UPDATE SET
+               summary = excluded.summary, created_at = excluded.created_at""",
+        (url, engine, model, summary, db.utc_now()),
+    )
 
 
 class _TextStripper(HTMLParser):
