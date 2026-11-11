@@ -825,7 +825,7 @@ async def test_a_page_that_cannot_be_fetched_does_not_spend_the_cap(
     ("https://Example.COM:443/a?b=1#frag", "https://example.com/a?b=1"),
     ("http://example.com", "http://example.com/"),
     ("http://example.com:8080/Path", "http://example.com:8080/Path"),
-    ("https://User:Pw@Example.com/", "https://User:Pw@example.com/"),
+    ("https://User:Pw@Example.com/", "https://example.com/"),
     ("http://[::1", "http://[::1"),
 ])
 def test_normalize_url_folds_only_what_cannot_change_the_page(url, key):

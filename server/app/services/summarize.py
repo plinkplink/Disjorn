@@ -156,9 +156,9 @@ def normalize_url(url: str) -> str:
     except ValueError:
         return url.strip()
     scheme = parts.scheme.lower()
-    userinfo, at, hostport = parts.netloc.rpartition("@")
+    hostport = parts.netloc.rpartition("@")[2]
     hostport = hostport.lower().removesuffix({"http": ":80", "https": ":443"}.get(scheme, ""))
-    return urlunsplit((scheme, userinfo + at + hostport, parts.path or "/", parts.query, ""))
+    return urlunsplit((scheme, hostport, parts.path or "/", parts.query, ""))
 
 
 async def cached_summary(url: str, engine: str, model: str) -> Optional[str]:
