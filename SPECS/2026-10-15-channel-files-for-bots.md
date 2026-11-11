@@ -87,10 +87,13 @@ Tier 2 — touches the privacy wall (`privacy.py` callers), a migration, broker 
 - The spec's "migration 022" is `023_channel_files_for_bots.sql` on the branch; main took 022 for another change.
 - `server/app/services/bot_files.py`: `visible_to_bots(att)` (async, the conjunction above with size ≤ `MAX_UPLOAD_BYTES`), `for_bot(payload)` (the bot listing), `set_channel_safe`, `read(attachment_id)` (the three read shapes under `BOT_READ_BYTES`).
 - `server/app/routers/bot_files.py`: `GET /bot/attachments/{id}`. 404 for an id that is unknown, hidden, or has no readable shape (an image with no stored variant under the cap, a PDF pypdf cannot open).
+- The read route requires the reading bot's membership of the file's channel, by the same `is_member` rule as the message reads, and answers 404 without it. The broker sends `?on_behalf_of=<seat>` stamped from the seat's peer credentials; the server takes it only from a bot on `FILES_RELAY_BOT_NAMES` (default `broker`), reads `res-<name>` as the bot named `<name>`, and checks that bot's membership. Any other bot sending the field gets 404. Each attempt is one server log line: caller, reading bot, attachment id, allowed or refused.
+- Accepted inference: when a file is attached, a bot in the channel still receives a `message_edit` frame whose content is unchanged, so it can infer that something was attached, never what.
+- `/files-safe` on a private channel requires the admin's own membership of it; otherwise the reply is the no-such-channel refusal.
 - Bot listing `[{id, mime_type, size_bytes}]` on `GET /channels/{id}/messages`, `GET /search` and the WS `message_create` / `message_edit` frames sent to bots. Attachments are not indexed by search.
 - `/files-safe #channel on|off [--include-history]` in `slash.py`; the channel is `#main` or a named text channel.
 - Broker verb `read-attachment`, OFF in both seat sections of the `verbs.toml` template (the template lists every seat verb in every seat section); audit summary `attachment read <id>`.
-- A truncated PDF ends `[truncated: page P of T]`; a page marker is `[page N]`.
+- A truncated PDF ends `[truncated: page P of T]`; a page marker is `[page N]`. Extraction stops at `BOT_READ_BYTES` or 200 pages, whichever comes first.
 - Tests: `server/tests/test_bot_files.py`, `harness/broker/tests/test_broker_attachments.py`.
 
 ## Status
