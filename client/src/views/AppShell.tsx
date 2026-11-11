@@ -615,9 +615,11 @@ export function AppShell() {
   }, [pendingSessionId]);
 
   /* The store decides whether a repo build may take the screen, and this is
-     the only thing that tells it a modal is already up. */
+     the only thing that tells it a modal is already up. A modal that closed
+     uncovers the channel: what arrived under it is read now. */
   useEffect(() => {
     useApps.getState().setOpenBuildSession(buildSessionId);
+    if (buildSessionId === null) socket.readActive();
   }, [buildSessionId]);
 
   // Default to #main once channels arrive (unless a deep link chose one).
@@ -701,12 +703,13 @@ export function AppShell() {
 
   // Overlay open/close: while a full-panel view (settings, the Plan Room) is
   // up the user is not reading the channel, so drop server-side focus (pushes
-  // for it resume).
+  // for it resume). Closing it puts the channel back in front of them.
   useEffect(() => {
     if (overlay !== "none") {
       socket.sendFocus(null);
     } else {
       socket.sendFocus(useChannels.getState().activeChannelId);
+      socket.readActive();
     }
   }, [overlay]);
 
@@ -716,21 +719,9 @@ export function AppShell() {
     const onBlur = () => socket.sendFocus(null);
     const onFocus = () => {
       if (overlayRef.current !== "none") return; // overlay = no channel focused
-      const st = useChannels.getState();
-      socket.sendFocus(st.activeChannelId);
-      // Returning to the window reads the visible channel.
-      const channel = st.channels.find((c) => c.id === st.activeChannelId);
-      if (
-        channel !== undefined &&
-        isChannelMember(channel) &&
-        channel.unread > 0
-      ) {
-        const seq = Math.max(
-          useMessages.getState().lastSeq(channel.id),
-          channel.last_message?.seq ?? 0,
-        );
-        if (seq > 0) void st.markRead(channel.id, seq);
-      }
+      socket.sendFocus(useChannels.getState().activeChannelId);
+      // Returning to the window reads the channel, if its newest message is on screen.
+      socket.readActive();
     };
     // A phone backgrounding the app hides the page without always blurring
     // the window, and the socket can outlive that by minutes.

@@ -24,6 +24,7 @@ function nodeModules() {
 
 const ENTRY = `
 export * from "../src/lib/unread";
+export { useApps } from "../src/stores/apps";
 export { useChannels } from "../src/stores/channels";
 export { useSession } from "../src/stores/session";
 export { DisjornSocket } from "../src/ws";
@@ -128,7 +129,9 @@ beforeEach(() => {
     throw new Error(`unexpected ${init.method} ${path}`);
   };
   m.useSession.setState({ user: ALICE });
-  m.useChannels.setState({ channels: [], unreadState: {}, activeChannelId: null, loaded: false });
+  m.useChannels.setState({ channels: [], unreadState: {}, activeChannelId: null,
+    atBottom: {}, loaded: false });
+  m.useApps.setState({ openBuildSessionId: null });
 });
 
 test('the title is the sum of the rows the sidebar draws, and nothing else', () => {
@@ -422,4 +425,63 @@ test('a read inside the range the list counted asks the server what is left', as
   answerNextList([at(row(1, 1, 10), 9)]);
   await settle();
   assert.equal(unreadOf(1), 1);
+});
+
+test('a channel is being read only with its list on screen, uncovered and at the bottom', () => {
+  const facts = { windowFocused: true, activeChannelId: 1, focusedChannelId: 1,
+    buildModalOpen: false, atBottom: true };
+  assert.equal(m.isReading(1, facts), true);
+  assert.equal(m.isReading(2, facts), false);
+  for (const off of [{ windowFocused: false }, { activeChannelId: 2 },
+    { focusedChannelId: null }, { focusedChannelId: 9 }, { buildModalOpen: true },
+    { atBottom: false }]) {
+    assert.equal(m.isReading(1, { ...facts, ...off }), false, JSON.stringify(off));
+  }
+});
+
+test('a message is read on arrival only in front of the reader, and later once it is', async () => {
+  await load([row(1, 0, 10)]);
+  const st = m.useChannels.getState();
+  st.setActive(1);
+  focused = true;
+  const { socket, frame } = openSocket();
+  socket.sendFocus(1);
+  st.setAtBottom(1, true);
+  let seq = 10;
+  const sent = [];
+
+  frame({ type: 'message_create', message: message(1, ++seq) });
+  await settle();
+  sent.push([1, seq]);
+  assert.equal(unreadOf(1), 0);
+  assert.deepEqual(reads, sent);
+
+  /* Each pair hides the newest message from the reader, then shows it again:
+     scrolled up, Settings or the Plan Room, the build modal, another window. */
+  const covers = [
+    [() => st.setAtBottom(1, false), () => st.setAtBottom(1, true)],
+    [() => socket.sendFocus(null), () => socket.sendFocus(1)],
+    [() => m.useApps.setState({ openBuildSessionId: 5 }),
+      () => m.useApps.setState({ openBuildSessionId: null })],
+    [() => { focused = false; }, () => { focused = true; }],
+  ];
+  for (const [cover, uncover] of covers) {
+    cover();
+    frame({ type: 'message_create', message: message(1, ++seq) });
+    await settle();
+    assert.equal(unreadOf(1), 1);
+    assert.equal(title(), '(1) Disjorn');
+    assert.equal(socket.readActive(), false);
+    assert.deepEqual(reads, sent);
+
+    uncover();
+    assert.equal(socket.readActive(), true);
+    await settle();
+    sent.push([1, seq]);
+    assert.equal(unreadOf(1), 0);
+    assert.equal(title(), 'Disjorn');
+    assert.deepEqual(reads, sent);
+    assert.equal(socket.readActive(), false);
+  }
+  socket.disconnect();
 });

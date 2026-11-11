@@ -112,6 +112,31 @@ export function readRefused(
   return { ...state, read: previous };
 }
 
+/** Where the reader is looking, as the shell and the message list report it. */
+export interface ReadingFacts {
+  windowFocused: boolean;
+  /** The channel the shell has open. */
+  activeChannelId: number | null;
+  /** The channel the socket last reported as focused: none under Settings,
+      the Plan Room or a blurred window. */
+  focusedChannelId: number | null;
+  /** The app build modal is drawn over the channel. */
+  buildModalOpen: boolean;
+  /** The channel's message list is mounted and scrolled to its bottom. */
+  atBottom: boolean;
+}
+
+/** Whether a channel's newest message is in front of the reader. */
+export function isReading(channelId: number, facts: ReadingFacts): boolean {
+  return (
+    facts.windowFocused &&
+    facts.activeChannelId === channelId &&
+    facts.focusedChannelId === channelId &&
+    !facts.buildModalOpen &&
+    facts.atBottom
+  );
+}
+
 /** A build chat's only door is its modal, so it is never a sidebar row. */
 export function isSidebarRow(row: Pick<ChannelListItem, "type">): boolean {
   return row.type !== "app_build";

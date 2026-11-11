@@ -57,6 +57,8 @@ interface ChannelsState {
   channels: ChannelListItem[];
   unreadState: Record<number, UnreadState>;
   activeChannelId: number | null;
+  /** Channels whose mounted message list is scrolled to its bottom. MessageList writes it. */
+  atBottom: Record<number, true>;
   loaded: boolean;
   /** The first load gave up; the shell offers a retry instead of an empty list. */
   loadFailed: boolean;
@@ -67,6 +69,7 @@ interface ChannelsState {
   ensureLoaded: () => Promise<void>;
   /** Switch channels. Side effects (hash, focus op, mark-read) live in AppShell/ws. */
   setActive: (channelId: number | null) => void;
+  setAtBottom: (channelId: number, atBottom: boolean) => void;
   /** Open (or create) the 1:1 DM with a user; returns the channel id. */
   openDm: (userId: number) => Promise<number>;
   /** Open (or create) the 1:1 DM with a bot; returns the channel id. */
@@ -109,6 +112,7 @@ export const useChannels = create<ChannelsState>()((set, get) => ({
   channels: [],
   unreadState: {},
   activeChannelId: null,
+  atBottom: {},
   loaded: false,
   loadFailed: false,
 
@@ -154,6 +158,14 @@ export const useChannels = create<ChannelsState>()((set, get) => ({
   },
 
   setActive: (channelId) => set({ activeChannelId: channelId }),
+
+  setAtBottom: (channelId, atBottom) => {
+    if ((get().atBottom[channelId] === true) === atBottom) return;
+    const next = { ...get().atBottom };
+    if (atBottom) next[channelId] = true;
+    else delete next[channelId];
+    set({ atBottom: next });
+  },
 
   openDm: async (userId) => {
     const existing = get().channels.find((c) => c.dm_user_id === userId);

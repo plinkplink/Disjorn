@@ -12,7 +12,7 @@ export interface SoundFacts {
   myNames: string[];
   /** Undefined when the sidebar does not list the channel yet. */
   channelType: ChannelType | undefined;
-  /** The same test that marks the message read on arrival: active channel, window focused. */
+  /** The same test that marks the message read on arrival: it landed in front of the reader. */
   readOnArrival: boolean;
   windowFocused: boolean;
   /** This device holds a push subscription, so the server alerts it while unfocused. */
