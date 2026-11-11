@@ -458,8 +458,25 @@ def test_the_lifted_lines_are_capped_at_300_characters(ah, turn):
     of a key past the end of a needle that no longer matches."""
     write_result_line(turn, "FLAG: " + "f" * 400 + "\n" + "s" * 400)
     result = do_harvest(ah, turn, exit_code=0)
-    assert result["summary"] == "s" * 300
-    assert result["flag"] == "f" * 300
+    assert result["summary"] == "s" * 299 + "\u2026"
+    assert result["flag"] == "f" * 299 + "\u2026"
+
+
+def test_a_capped_line_ends_on_a_whole_word_when_one_is_near(ah):
+    words = "abcdefg " * 80
+    summary, flag = ah.runner_report("FLAG: " + words + "\n" + words, [])
+    assert summary == flag == ("abcdefg " * 37).rstrip() + "\u2026"
+    assert len(summary) <= ah.REPORT_LINE_MAX
+
+
+def test_a_line_of_exactly_the_cap_is_left_alone(ah):
+    summary, _ = ah.runner_report("s" * 300, [])
+    assert summary == "s" * 300
+
+
+def test_a_cut_that_lands_between_words_drops_no_word(ah):
+    summary, _ = ah.runner_report("a" * 299 + " tail", [])
+    assert summary == "a" * 299 + "\u2026"
 
 
 def test_control_characters_never_leave_the_harvest(ah, turn):
