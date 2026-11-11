@@ -212,9 +212,10 @@ Tier 2 — the apps image, its managed settings and its brief.
 One build hand, one session.
 
 ## Confirm record
-- **Confirmed by**: pending
-- **#custodian seq**: pending
-- **Confirmed at**: pending
+- **Confirmed by**: plink
+- **#custodian seq**: 3507
+- **Confirmed at**: 2026-11-11
+- **Review**: PASS by Gable #3496 at 4fbf278; his tsconfig note verified on the pinned binary and folded at ed45283.
 
 ## Status
 `built@loop/2026-11-11-apps-shelf-phaser-typescript`
