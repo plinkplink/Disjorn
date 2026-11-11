@@ -91,10 +91,15 @@ nothing it did not already have as itself.
     delete <app>     remove everything the seat holds for one app: its served
                      roots first, then its staging leftovers, work tree, git
                      dir, and each turn result dir whose own record names it.
-                     Only a real directory the seat owns is removed; anything
-                     else at one of those names is left and the run fails.
+                     A real directory the seat owns is removed. A symlink at
+                     one of those names is unlinked, never followed, so nothing
+                     is served through it. Anything else there is left and the
+                     run fails. A directory a build left closed inside such a
+                     tree gets its owner's rwx bits back so it can be removed;
+                     no mode changes outside the tree or through a link.
                      Refused, with the served roots already gone, while a turn
-                     of that app runs. The quarantine root is never opened.
+                     of that app runs, and also when systemd cannot say whether
+                     one does. The quarantine root is never opened.
 
 NOTHING HERE IS POLICY. The session lock, the quota, the token ceiling and the
 seat→bot map all live in the broker (slice ii); who may press Live, who owns an
@@ -1338,6 +1343,44 @@ def _turn_dirs_of(turns_root, app_id: str) -> "list":
     return found
 
 
+def _rmtree_own(top: str) -> None:
+    """rmtree for a tree a build may have left closed to its owner.
+
+    On a permission error the directory in the way gets the owner's rwx bits
+    and that entry is removed again. Only real directories at or below `top`
+    are chmodded: never a symlink's target, never `top`'s parent."""
+    seen = set()
+
+    def reopen(_func, failing, exc):
+        failing = os.fspath(failing)
+        if not isinstance(exc, PermissionError) or failing in seen:
+            raise exc
+        seen.add(failing)
+        for name in (os.path.dirname(failing), failing):
+            if not _under(top, name):
+                continue
+            try:
+                mode = os.lstat(name).st_mode
+            except OSError:
+                continue
+            if stat.S_ISDIR(mode):
+                os.chmod(name, stat.S_IMODE(mode) | stat.S_IRWXU)
+        try:
+            mode = os.lstat(failing).st_mode
+        except FileNotFoundError:
+            return
+        if stat.S_ISDIR(mode):
+            shutil.rmtree(failing, **handler)
+        else:
+            os.unlink(failing)
+
+    if sys.version_info >= (3, 12):
+        handler = {"onexc": reopen}
+    else:                                                # pragma: no cover
+        handler = {"onerror": lambda f, p, info: reopen(f, p, info[1])}
+    shutil.rmtree(top, **handler)
+
+
 def delete_app(apps_root, www_root, app_id: str, *, git_root=GIT_ROOT,
                turns_root=TURNS_ROOT, systemctl_bin: str = SYSTEMCTL,
                uid: "int | None" = None) -> dict:
@@ -1352,15 +1395,26 @@ def delete_app(apps_root, www_root, app_id: str, *, git_root=GIT_ROOT,
             st = os.lstat(path)
         except FileNotFoundError:
             return
-        if not stat.S_ISDIR(st.st_mode) or st.st_uid != uid:
+        if stat.S_ISLNK(st.st_mode):
+            os.unlink(path)
+        elif not stat.S_ISDIR(st.st_mode) or st.st_uid != uid:
             left.append(str(path))
             return
-        shutil.rmtree(path)
+        else:
+            _rmtree_own(os.path.abspath(path))
         removed.append(str(path))
 
     take(Path(www_root) / app_id)
-    unit = active_turn_for_app(app_id, systemctl_bin=systemctl_bin)
-    if unit is None:
+    try:
+        unit = active_turn_for_app(app_id, systemctl_bin=systemctl_bin,
+                                   strict=True)
+        busy = (f"{app_id} has a turn running ({unit}); its pages are gone, "
+                f"delete it again when the turn has ended") if unit else ""
+    except TurnQueryFailed as exc:
+        busy = (f"cannot tell whether a build of {app_id} is still running "
+                f"({exc}); its pages are gone, finish deleting it when no "
+                f"build is running")
+    if not busy:
         take(Path(www_root) / STAGING_NAME / app_id)
         take(Path(apps_root) / app_id)
         take(app_git_dir(git_root, app_id))
@@ -1373,9 +1427,8 @@ def delete_app(apps_root, www_root, app_id: str, *, git_root=GIT_ROOT,
     if left:
         fail(f"not a directory of the seat's own, left in place: "
              f"{', '.join(left)}")
-    if unit is not None:
-        die(f"{app_id} has a turn running ({unit}); its pages are gone, "
-            f"delete it again when the turn has ended")
+    if busy:
+        die(busy)
     return {"mode": "delete", "app": app_id, "removed": removed}
 
 
@@ -1386,7 +1439,12 @@ def delete_app(apps_root, www_root, app_id: str, *, git_root=GIT_ROOT,
 # common refusals cost a stat instead of a transient service, and so the house
 # gets its one sentence back in milliseconds.
 
-def active_turn_for_app(app_id: str, *, systemctl_bin: str = SYSTEMCTL) -> "str | None":
+class TurnQueryFailed(Exception):
+    """systemd did not say, in full, which turns are running."""
+
+
+def active_turn_for_app(app_id: str, *, systemctl_bin: str = SYSTEMCTL,
+                        strict: bool = False) -> "str | None":
     """The name of a RUNNING turn unit of this app, or None.
 
     A turn's unit name is `disjorn-apps-<session>-<turn>` and carries no app
@@ -1401,31 +1459,46 @@ def active_turn_for_app(app_id: str, *, systemctl_bin: str = SYSTEMCTL) -> "str 
     that is a clear refusal rather than a half-copied `live`. But systemd not
     answering is not evidence of a running turn, so a query that fails at all
     reports None and says so: the failure mode of guessing "yes" is a Live
-    button that never works, and that is worse than the race this closes."""
+    button that never works, and that is worse than the race this closes.
+
+    `strict` is for `delete`, where the costs are the other way round: a wrong
+    "no" removes a work tree under a running turn. Any part of the query that
+    fails, or a line that is not a unit of ours, raises TurnQueryFailed."""
+    def unanswered(why) -> None:
+        if strict:
+            raise TurnQueryFailed(" ".join(str(why).split()) or "no reason given")
+
     try:
         listing = subprocess.run(
             [systemctl_bin, "list-units", "--no-legend", "--no-pager",
              "--plain", "--state=active", f"{UNIT_PREFIX}*.service"],
             capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.SubprocessError) as exc:
+        unanswered(exc)
         warn(f"cannot ask systemd which turns are running ({exc}); "
              f"going on without that check")
         return None
     if listing.returncode != 0:
+        unanswered(listing.stderr or f"systemctl exited {listing.returncode}")
         warn("cannot ask systemd which turns are running "
              f"({(listing.stderr or '').strip()}); going on without that check")
         return None
     for line in listing.stdout.splitlines():
         unit = line.split()[0] if line.split() else ""
         if not unit.startswith(UNIT_PREFIX) or not unit.endswith(".service"):
+            if line.strip():
+                unanswered(f"not a unit line: {line.strip()[:80]}")
             continue
         try:
             shown = subprocess.run(
                 [systemctl_bin, "show", "--property=Description", "--value",
                  unit], capture_output=True, text=True, timeout=10)
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, subprocess.SubprocessError) as exc:
+            unanswered(exc)
             continue
-        if shown.returncode == 0 and f"({app_id})" in shown.stdout:
+        if shown.returncode != 0:
+            unanswered(shown.stderr or f"systemctl show exited {shown.returncode}")
+        elif f"({app_id})" in shown.stdout:
             return unit
     return None
 

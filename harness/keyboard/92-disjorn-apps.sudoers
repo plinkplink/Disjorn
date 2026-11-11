@@ -53,8 +53,11 @@
 #   the turn result dirs under /srv/apps-turns whose own record names <app>.
 #   Same shape as the serving modes: root validates the one id and starts the
 #   unit, the removal runs as res-appsbuilding. It takes no path and no
-#   session id, removes only real directories the seat owns, and never opens
-#   /srv/apps-quarantine.
+#   session id, removes only real directories the seat owns, unlinks a symlink
+#   found at one of those names without following it, gives the owner's rwx
+#   bits back to a closed directory inside a tree it is removing, and never
+#   opens /srv/apps-quarantine. It stops after the served root when a turn of
+#   the app is running or systemd cannot say.
 #
 # THE SERVER IS NOW A CALLER OF THIS FILE — the first one that is not the
 # broker. `POST /apps/sessions/{sid}/live`, `/apps/{id}/revert`,

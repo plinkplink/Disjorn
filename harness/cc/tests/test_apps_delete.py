@@ -91,6 +91,17 @@ def srv(tmp_path):
         tmp_path, "busy-a", f"Disjorn apps turn 12/3 ({APP_A})")
     roots["turn of b"] = fake_systemctl(
         tmp_path, "busy-b", f"Disjorn apps turn 12/3 ({APP_B})")
+    unit = "disjorn-apps-12-3.service loaded active running x"
+    for name, script in {
+        "exits 3": "exit 3",
+        "not a unit line": 'echo "Failed to connect to bus"',
+        "show fails": f'[ "$1" = list-units ] && echo "{unit}" || exit 1',
+        "missing": None,
+    }.items():
+        roots[name] = tmp_path / f"systemctl-{name.replace(' ', '-')}"
+        if script is not None:
+            roots[name].write_text(f"#!/bin/sh\n{script}\n", encoding="utf-8")
+            roots[name].chmod(0o755)
     return roots
 
 
@@ -252,21 +263,45 @@ def test_a_session_keeps_the_turns_another_app_recorded(launcher, srv):
 
 
 @pytest.mark.parametrize("which", [0, 1, 2, 3])
-def test_a_symlink_where_a_tree_belongs_is_left_and_never_followed(
-        launcher, srv, which, capsys):
+def test_a_symlink_where_a_tree_belongs_is_unlinked_and_never_followed(
+        launcher, srv, which):
     path = app_paths(srv, APP_A)[which]
     launcher.shutil.rmtree(path)
     path.symlink_to(srv["outside"], target_is_directory=True)
     outside = snapshot(srv["outside"])
 
-    with pytest.raises(SystemExit) as exc:
-        delete(launcher, srv)
+    out = delete(launcher, srv)
 
-    assert exc.value.code == 1
-    assert str(path) in capsys.readouterr().err
-    assert path.is_symlink() and snapshot(srv["outside"]) == outside
-    for other in app_paths(srv, APP_A):
-        assert other == path or not os.path.lexists(other)
+    assert str(path) in out["removed"]
+    assert snapshot(srv["outside"]) == outside
+    assert not any(os.path.lexists(p) for p in app_paths(srv, APP_A))
+
+
+@pytest.mark.parametrize("root", ["live", "preview", "live.prev"])
+def test_a_symlinked_served_root_goes_with_the_app_and_its_target_stays(
+        launcher, srv, root):
+    served = srv["www"] / APP_A / root
+    launcher.shutil.rmtree(served)
+    served.symlink_to(srv["outside"], target_is_directory=True)
+    outside = snapshot(srv["outside"])
+
+    delete(launcher, srv)
+
+    assert not os.path.lexists(srv["www"] / APP_A)
+    assert snapshot(srv["outside"]) == outside
+
+
+def test_a_dangling_symlink_at_the_web_root_is_unlinked_while_a_turn_runs(
+        launcher, srv):
+    www = srv["www"] / APP_A
+    launcher.shutil.rmtree(www)
+    www.symlink_to(srv["outside"] / "nowhere")
+
+    with pytest.raises(SystemExit) as exc:
+        delete(launcher, srv, systemctl="turn of a")
+
+    assert exc.value.code == 64 and not os.path.lexists(www)
+    assert (srv["apps"] / APP_A).is_dir()
 
 
 @pytest.mark.parametrize("level", ["session", "turn"])
@@ -311,6 +346,70 @@ def test_a_running_turn_costs_the_served_roots_and_nothing_else(
     assert "has a turn running (disjorn-apps-12-3.service)" in capsys.readouterr().err
     assert not www.exists()
     assert [snapshot(p) for p in (staging, work, git_dir, srv["turns"])] == kept
+
+
+@pytest.mark.parametrize("systemctl", ["exits 3", "not a unit line",
+                                       "show fails", "missing"])
+def test_a_turn_query_that_fails_costs_the_served_roots_and_nothing_else(
+        launcher, srv, systemctl, capsys):
+    www, staging, work, git_dir = app_paths(srv, APP_A)
+    kept = [snapshot(p) for p in (staging, work, git_dir, srv["turns"])]
+
+    with pytest.raises(SystemExit) as exc:
+        delete(launcher, srv, systemctl=systemctl)
+
+    assert exc.value.code == 64
+    said = capsys.readouterr().err
+    assert "cannot tell whether a build" in said and len(said.splitlines()) == 1
+    assert not www.exists()
+    assert [snapshot(p) for p in (staging, work, git_dir, srv["turns"])] == kept
+
+
+def test_publish_still_reads_a_failed_turn_query_as_no_turn(launcher, srv):
+    assert launcher.active_turn_for_app(
+        APP_A, systemctl_bin=str(srv["exits 3"])) is None
+    with pytest.raises(launcher.TurnQueryFailed):
+        launcher.active_turn_for_app(
+            APP_A, systemctl_bin=str(srv["exits 3"]), strict=True)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root is not stopped by a mode")
+def test_a_tree_a_build_left_closed_is_removed_and_nothing_outside_is_touched(
+        launcher, srv):
+    work = srv["apps"] / APP_A
+    kept = srv["outside"] / "keep.txt"
+    kept.chmod(0o400)
+    closed_outside = srv["outside"] / "closed"
+    closed_outside.mkdir()
+    (closed_outside / "inner.txt").write_text("stays\n", encoding="utf-8")
+    closed_outside.chmod(0o555)
+    for name in ("readonly", "closed", "top"):
+        (work / name / "deep").mkdir(parents=True)
+        (work / name / "deep" / "f.txt").write_text("x\n", encoding="utf-8")
+        (work / name / "to-file").symlink_to(kept)
+        (work / name / "to-dir").symlink_to(closed_outside)
+    (work / "readonly" / "deep" / "f.txt").chmod(0o444)
+    (work / "readonly" / "deep").chmod(0o555)
+    (work / "readonly").chmod(0o555)
+    (work / "closed" / "deep").chmod(0o000)
+    (work / "closed").chmod(0o000)
+    (srv["git"] / f"{APP_A}.git").chmod(0o000)
+    work.chmod(0o555)
+    try:
+        with pytest.raises(PermissionError):
+            launcher.shutil.rmtree(work)
+
+        out = delete(launcher, srv)
+
+        assert not any(os.path.lexists(p) for p in app_paths(srv, APP_A))
+        assert str(work) in out["removed"]
+        assert (kept.stat().st_mode & 0o777, kept.read_text()) == (
+            0o400, "not an app's\n")
+        assert closed_outside.stat().st_mode & 0o777 == 0o555
+        assert (closed_outside / "inner.txt").read_text() == "stays\n"
+        assert (srv["apps"] / APP_B / "src" / "app.js").is_file()
+    finally:
+        closed_outside.chmod(0o755)
 
 
 def test_a_turn_of_another_app_does_not_hold_a_delete(launcher, srv):
