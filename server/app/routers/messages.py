@@ -36,7 +36,7 @@ from typing import Annotated, Any, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .. import db, events, privacy
+from .. import db, events, mentions, privacy
 from ..models import User
 from . import channels
 from .auth import Actor, get_actor, get_current_user
@@ -174,13 +174,14 @@ async def _author_info(author_type: str, author_id: int) -> dict[str, Any]:
 
 
 async def message_payload(row: dict[str, Any]) -> dict[str, Any]:
-    """Full materialized payload for a messages-table row (dict from db helpers).
+    """Full payload for a messages-table row.
 
     Shape:
         {id, channel_id, seq, author_type, author_id,
          author: {type, id, name, username?, avatar_path, avatar_url},
          content, created_at, edited_at, deleted_at, reply_to_id,
-         privacy_flags: {}, emote_refs: [], attribution: {}, trace, attachments: [
+         privacy_flags: {}, emote_refs: [], attribution: {}, trace,
+         mentioned_bot_ids: [], attachments: [
              {id, original_filename, mime_type, size_bytes, width, height,
               url, thumb_url, orig_url}]}
 
@@ -228,6 +229,7 @@ async def message_payload(row: dict[str, Any]) -> dict[str, Any]:
         "emote_refs": json.loads(row["emote_refs"] or "[]"),
         "attribution": json.loads(row["attribution"] or "{}"),
         "trace": _stored_trace(row["trace"]),
+        "mentioned_bot_ids": json.loads(row["mentioned_bot_ids"] or "[]"),
         "attachments": attachments,
     }
 
@@ -291,6 +293,11 @@ async def deliver_message(
     NO membership/authorization checks — callers own that. Returns the full
     materialized payload. Does NOT run slash dispatch, so it never recurses.
     """
+    mentioned = (
+        []
+        if privacy.hidden_from_bots(flags)
+        else await mentions.mentioned_bot_ids(channel_id, author_type, content)
+    )
     async with db.transaction():
         seq_row = await db.fetch_one(
             "SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq FROM messages WHERE channel_id = ?",
@@ -300,8 +307,9 @@ async def deliver_message(
         cur = await db.execute(
             """INSERT INTO messages
                    (channel_id, seq, author_type, author_id, content, created_at,
-                    reply_to_id, privacy_flags, emote_refs, attribution, trace)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    reply_to_id, privacy_flags, emote_refs, attribution, trace,
+                    mentioned_bot_ids)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 channel_id,
                 seq_row["next_seq"],
@@ -314,6 +322,7 @@ async def deliver_message(
                 json.dumps(emote_refs or []),
                 json.dumps(attribution or {}),
                 json.dumps(trace or {}),
+                json.dumps(mentioned),
             ),
             commit=False,
         )

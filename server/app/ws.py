@@ -79,8 +79,8 @@ listed members only) and to connected bots that are EXPLICIT members
 secret/off_the_record message reaches no bot in any form, not even the
 tombstone of its deletion. A receiving bot's copy of a message_create gets a
 "context" block (Architecture §8.3) when the bot is addressed, and the block's
-`addressed_by` says how: "mention" when the text names it (`@name` or its name
-as a word, case-insensitive), "always" when its membership row is
+`addressed_by` says how: "mention" when `mentioned_bot_ids` lists it or the
+text has its name as a word, "always" when its membership row is
 reply_mode='always' (never in a MENTION_ONLY_CHANNEL_IDS room) and a user wrote
 the message.
 
@@ -633,7 +633,9 @@ async def handle_bus_event(event: dict[str, Any]) -> None:
                 )
             else:
                 name = bot_names.get(bot_id)
-                if name and _mentions_bot(message.get("content") or "", name):
+                if bot_id in message.get("mentioned_bot_ids", ()) or (
+                    name and _mentions_bot(message.get("content") or "", name)
+                ):
                     addressed_by = "mention"
                 elif bot_id in always_bots and message.get("author_type") == "user":
                     # Never bot-authored: two always-on bots would answer each

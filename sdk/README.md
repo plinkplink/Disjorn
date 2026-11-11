@@ -68,12 +68,20 @@ python examples/echo_bot.py --url http://localhost:8000 --api-key KEY
 `message` is the server's full materialized payload:
 `{id, channel_id, seq, author_type, author_id, author: {type, id, name, ...},
 content, created_at, edited_at, deleted_at, reply_to_id, privacy_flags,
-emote_refs, attachments: [{id, original_filename, mime_type, size_bytes,
-width, height, url}]}`.
+emote_refs, mentioned_bot_ids, attachments: [{id, original_filename,
+mime_type, size_bytes, width, height, url}]}`.
+
+`mentioned_bot_ids` is the server's list of the channel's bots the message
+addressed with an explicit `@`: each bot named `@name`, and every bot in the
+channel when a **person** wrote `@bots` (accounts that only post, set in
+`GROUP_MENTION_SKIP_BOT_NAMES`, are left out of that). A bot's `@bots` lists
+nobody. The server resolves it once, when the message is written; text inside
+code spans does not count. `client.bot_id in event.message["mentioned_bot_ids"]`
+is the test for "I was @-addressed", with no name parsing.
 
 `context` (Architecture §8.3) is attached **only** to the copy delivered to a
-bot the message mentioned (`@name` or the bot's name as a word,
-case-insensitive):
+bot the message addressed (listed in `mentioned_bot_ids`, or the bot's name as
+a word, case-insensitive):
 `{awake_users: [{id, name, status}], channel_state: {name},
 privacy_flags_on_current_message: {}}`.
 
