@@ -394,7 +394,8 @@ def _write_manifest(folder: Path, entries: list[dict[str, Any]]) -> None:
             _write_atomic(manifest, [body])
     except OSError:
         logger.exception("bot file export: could not write %s", manifest)
-        _remove(str(manifest))
+        if not _remove(str(manifest), str(folder)):
+            raise OSError("a manifest that could not be rewritten is still there")
 
 
 def _reconcile(seat_dir: Path, wanted: dict[int, dict[str, tuple[Path, dict[str, Any]]]]) -> None:
@@ -429,6 +430,10 @@ def _reconcile(seat_dir: Path, wanted: dict[int, dict[str, tuple[Path, dict[str,
         except OSError:
             logger.exception("bot file export: could not create %s", folder)
             continue
+        if _shut(str(folder)):
+            logger.warning(
+                "bot file export: %s was made closed to its seat; check the server's umask", folder
+            )
         try:
             known = {e["file"]: e["sha256"] for e in json.loads((folder / MANIFEST).read_bytes())}
         except (OSError, ValueError, TypeError, KeyError):

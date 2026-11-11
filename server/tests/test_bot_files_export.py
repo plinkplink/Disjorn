@@ -1337,3 +1337,29 @@ async def test_only_the_seat_itself_is_answered_from_its_key(house, poster):
     r = await poster.post(key=BOT_KEY, idempotency_key=KEY)
 
     assert (r.status_code, r.json()["detail"]) == (403, "no seat to post as")
+
+
+def test_a_manifest_that_can_neither_be_rewritten_nor_removed_raises(tmp_path, monkeypatch):
+    folder = tmp_path / "7"
+    folder.mkdir(mode=0o750)
+    (folder / bot_files.MANIFEST).write_bytes(b"[]")
+
+    def refuse(*args, **kwargs):
+        raise OSError("disk says no")
+
+    monkeypatch.setattr(bot_files, "_write_atomic", refuse)
+    monkeypatch.setattr(bot_files, "_remove", lambda path, holder=None: False)
+    with pytest.raises(OSError):
+        bot_files._write_manifest(folder, [{"attachment_id": 1, "file": "1_a.txt", "sha256": "x"}])
+
+
+def test_a_folder_the_umask_closes_to_the_seat_is_said_out_loud(tmp_path, caplog):
+    seat = tmp_path / "res-otto"
+    seat.mkdir(mode=0o750)
+    old = os.umask(0o077)
+    try:
+        with caplog.at_level("WARNING"):
+            bot_files._reconcile(seat, {7: {}})
+    finally:
+        os.umask(old)
+    assert "check the server's umask" in caplog.text
