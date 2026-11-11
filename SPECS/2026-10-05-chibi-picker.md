@@ -69,4 +69,5 @@ Restart the server and build the client. `Aliases.txt` must be writable by the s
 - **Confirmed at**: 2026-10-06
 
 ## Status
-`confirmed`
+merged
+<!-- advanced from `confirmed` by `board --mark-merged` on 2026-11-11: build merged as 24074ad. The word `confirmed` on a merged spec made it indistinguishable from a buildable one. -->

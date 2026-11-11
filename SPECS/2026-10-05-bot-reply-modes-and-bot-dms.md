@@ -97,4 +97,5 @@ Moderate: one migration, two endpoints, one fan-out branch, three client compone
 - **Confirmed at**: 2026-10-06T01:02:58.475Z
 
 ## Status
-`confirmed`
+merged
+<!-- advanced from `confirmed` by `board --mark-merged` on 2026-11-11: build merged as a500cfc. The word `confirmed` on a merged spec made it indistinguishable from a buildable one. -->

@@ -86,5 +86,27 @@ One keyboard session.
 - **#custodian seq**: 3427
 - **Confirmed at**: 2026-11-11T17:58:54Z
 
+## Deploy record (2026-11-11)
+1. Resident image `30e77a795c61` and apps image `2f2e5ed98ceb`, both Claude
+   Code 2.1.322, loaded into every seat store. `10-appsbuilding.sh` reports
+   no drift.
+2. Probes, with modelUsage keys observed in each result event:
+   - build seat as res-gable under the new managed settings, one subagent
+     spawned: `claude-fable-5-2` only;
+   - apps image, plain call: `claude-fable-5-2` only. A subagent spawn was
+     not run in the apps image.
+   No `.credentials.json` in either home.
+3. `/srv/disjorn-build-config/{gable,claudette}/settings.json` equal the
+   repo (backups `.bak-pre-fable-5-2-20261111`).
+4. Live pins moved to `claude-fable-5-2`, with the same backup suffix beside
+   each file: `/etc/disjorn-broker/broker.toml` `[start_build]` and `[apps]`,
+   `/etc/disjorn-apps/launch.toml` `[runner]`,
+   `/srv/disjorn-resident-config/res-gable/summon.toml` `[container]`.
+5. The broker, `gable-summon` and `resident-cc` restarted at 18:09:56Z. Her
+   container runs `30e77a795c61`.
+6. Hail #3428, answer #3429: attribution `claude-fable-5-2`, verified.
+7. Gable's spine lines: owed, his to propose (#3429).
+
 ## Status
-built@loop/2026-11-11-seats-move-to-fable-5-2
+merged
+<!-- advanced from `built@loop/2026-11-11-seats-move-to-fable-5-2` by `board --mark-merged` on 2026-11-11: build merged as ef98618. The word `built@loop/2026-11-11-seats-move-to-fable-5-2` on a merged spec made it indistinguishable from a buildable one. -->

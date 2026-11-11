@@ -62,4 +62,5 @@ Tier 2 (a new write verb plus a relay endpoint).
 - **Confirmed at**: 2026-10-06
 
 ## Status
-`confirmed`
+merged
+<!-- advanced from `confirmed` by `board --mark-merged` on 2026-11-11: build merged as 196ee82. The word `confirmed` on a merged spec made it indistinguishable from a buildable one. -->

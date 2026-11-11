@@ -60,4 +60,5 @@ Tier 1. One bus event plus the client; the server is still dark until plink arms
 - **Confirmed at**: 8/26/2026 (parent)
 
 ## Status
-`confirmed`
+merged
+<!-- advanced from `confirmed` by `board --mark-merged` on 2026-11-11: build merged as 27152dc. The word `confirmed` on a merged spec made it indistinguishable from a buildable one. -->
