@@ -24,12 +24,12 @@ Signals, all from config, never from the message body:
 
 MENTION-ONLY CHANNELS (spec 2026-08-24-custodian-mention-summons). In
 #custodian a bare name is inert data: signals 2 and 3 are off there, and the
-server-attested context block is necessary but no longer sufficient — the
-content must also carry an explicit ``@name``. The server's own mention test
-(``server/app/ws.py:_mentions_bot``) matches ``@?name``, so a human typing
-"gable" mid-sentence attaches a context block; requiring the ``@`` on top of
-it is what makes that message inert. The extra test only ever NARROWS: a
-forged ``@`` in content with no server context still does not summon, so no
+server-attested context block is necessary but not sufficient: the content
+must also carry an explicit ``@name``, or a person's message must list this
+bot in ``mentioned_bot_ids`` (their ``@bots``). The server's bare-name test
+(``server/app/ws.py:_mentions_bot``) attaches a context block to "gable"
+mid-sentence; the extra test makes that message inert. It only ever NARROWS:
+a forged ``@`` in content with no server context does not summon, so no
 authority moves into chat.
 
 Backfilled history never summons: it is catch-up state, not a live request.
@@ -127,9 +127,12 @@ class Trigger:
     work_item: Optional[str] = None
     chain: bool = False
     chain_cap: Optional[int] = None
+    group: bool = False
 
     def describe(self) -> str:
         parts = [f"{self.mode} by {self.summoner} ({self.summoner_type})"]
+        if self.group:
+            parts.append("called with every bot in this room (@bots)")
         depth = f"chain depth {self.depth}"
         if self.chain and self.chain_cap:
             depth += f" of {self.chain_cap}"
@@ -190,19 +193,25 @@ class SummonDetector:
                            summoner_type="bot", depth=1,
                            work_item=find_work_item(content))
 
+        group = not addressed and self._listed(msg)
         if mention_only:
             return (
-                Trigger(mode=MODE_MENTION, summoner=summoner)
-                if has_context and addressed else None
+                Trigger(mode=MODE_MENTION, summoner=summoner, group=group)
+                if has_context and (addressed or group) else None
             )
 
         if has_context:
-            return Trigger(mode=MODE_MENTION, summoner=summoner)
+            return Trigger(mode=MODE_MENTION, summoner=summoner, group=group)
         if event.channel_id in self._trigger_channels:
             return Trigger(mode=MODE_CHANNEL, summoner=summoner)
         if any(p.search(content) for p in self._patterns):
             return Trigger(mode=MODE_PATTERN, summoner=summoner)
         return None
+
+    def _listed(self, msg: dict) -> bool:
+        ids = msg.get("mentioned_bot_ids")
+        return (self.own_bot_id is not None and isinstance(ids, list)
+                and self.own_bot_id in ids)
 
     def is_summon(self, event: MessageCreate) -> bool:
         return self.detect(event) is not None

@@ -72,7 +72,7 @@
 "harness/planroom/planroom.py" = 13311
 "harness/residency/adapter.py" = 7451
 "harness/residency/config.py" = 9454
-"harness/residency/detector.py" = 4613
+"harness/residency/detector.py" = 4608
 "harness/residency/hops.py" = 1429
 "harness/residency/launcher.py" = 14005
 "harness/residency/posts.py" = 1040
