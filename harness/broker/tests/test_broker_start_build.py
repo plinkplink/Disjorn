@@ -490,7 +490,7 @@ def test_start_build_template_section_parses():
     assert "sudo" not in sb["unit_state_command"]
     # WP-L5 pin, no fallback: the template must carry one, since the broker
     # refuses to build without it. The value is plink's.
-    assert sb["model"] == "claude-opus-5-5"
+    assert sb["model"] == "claude-fable-5-2"
     assert sb["session_argv"][-1] == "build-session"  # argv0 for the "$@" pin
     assert sb["specs_dir"].endswith("/SPECS")
     # 10, set by plink 2026-08-05. NOT a "ratified default" — the 2 this line
