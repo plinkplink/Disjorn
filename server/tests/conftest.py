@@ -6,6 +6,7 @@ db.py shared connection.
 """
 
 import json
+import threading
 
 import anyio
 import httpx
@@ -32,6 +33,31 @@ def _receive_with_deadline(self):
 
 
 WebSocketTestSession.receive = _receive_with_deadline
+
+_session_init = WebSocketTestSession.__init__
+_session_close = WebSocketTestSession.close
+
+
+def _init_noting_handler_return(self, app, *args, **kwargs):
+    self._handler_returned = threading.Event()
+
+    async def noting_return(scope, receive, send):
+        try:
+            await app(scope, receive, send)
+        finally:
+            self._handler_returned.set()
+
+    _session_init(self, noting_return, *args, **kwargs)
+
+
+def _close_and_wait_for_handler(self, code=1000, reason=None):
+    _session_close(self, code, reason)
+    if not self._handler_returned.wait(WS_RECEIVE_TIMEOUT):
+        raise TimeoutError("ws handler still running after the client's disconnect")
+
+
+WebSocketTestSession.__init__ = _init_noting_handler_return
+WebSocketTestSession.close = _close_and_wait_for_handler
 
 # Also the client's base_url, so every test request is same-origin: Secure
 # cookies flow (httpx returns them only over https) and the Origin wall sees an

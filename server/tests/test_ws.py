@@ -3,7 +3,9 @@
 The hub tests use starlette's sync TestClient as a context manager: its
 lifespan runs on a single portal event loop shared by REST calls, WS sessions,
 and our DB seeding (via `client.portal.call`), so ordering is deterministic:
-after a REST post returns, all fan-out frames are already buffered.
+after a REST post returns, all fan-out frames are already buffered. Closing a
+socket returns only after its handler has (conftest), so the frames a disconnect
+fans out are buffered too.
 
 Handshake protocol used throughout: every fresh user connection first receives
 {"type": "ready"} then its own presence broadcast; draining those (and the
