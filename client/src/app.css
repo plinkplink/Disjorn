@@ -1684,6 +1684,11 @@
   border-top-right-radius: 0;
 }
 
+.composer-wrap.dropping .composer {
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
+}
+
 .composer-input {
   flex: 1;
   min-width: 0;
