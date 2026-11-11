@@ -162,9 +162,9 @@ existing server backup already covers is entirely sufficient at this scale.
 | Unit (timer) | Cadence (UTC) | Posts to #custodian |
 |---|---|---|
 | `disjorn-backup-snapshot` | nightly 03:30 | on failure |
-| `disjorn-backup-drill` | weekly, Sun 05:00; on demand; after every DB migration | PASS or RED, every run |
+| `disjorn-backup-drill` | weekly, Sun 05:00; on demand; after every DB migration | PASS, PARTIAL (an app was not fully covered) or RED, every run |
 | `disjorn-backup-check` | monthly, 1st 06:00 | on failure |
-| `disjorn-backup-freshness` | daily 12:00 | when newest snapshot > 26h old |
+| `disjorn-backup-freshness` | daily 12:00 | when newest snapshot > 26h old, or its apps coverage was partial |
 
 Retention 7 daily / 4 weekly / 12 monthly. Scripts, units and install steps:
 `harness/backup/README.md`. Secrets: `/etc/disjorn-backup/restic.env`, root
