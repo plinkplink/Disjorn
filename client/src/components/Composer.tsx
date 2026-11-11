@@ -302,10 +302,6 @@ export interface ComposerProps {
       preview on this (stage 3, Round 5: nothing changes under the mouse) —
       it is the create, not the keystroke, so the seq it carries is real. */
   onSent?: (message: Message) => void;
-  /** Bump to put the caret in the box. A number rather than a ref because
-      "focus me" is an event, and two Change-something clicks in a row must
-      both land; the value itself means nothing. */
-  focusNonce?: number;
 }
 
 export function Composer({
@@ -317,7 +313,6 @@ export function Composer({
   onStartEdit,
   onCancelEdit,
   onSent,
-  focusNonce,
 }: ComposerProps) {
   const me = useSession((s) => s.user);
   const [value, setValue] = useState("");
@@ -334,12 +329,6 @@ export function Composer({
   const draftBeforeEditRef = useRef("");
 
   uploadsRef.current = uploads;
-
-  // "Change something" and anything else that wants the caret here.
-  useEffect(() => {
-    if (focusNonce === undefined || focusNonce === 0) return;
-    taRef.current?.focus();
-  }, [focusNonce]);
 
   // Auto-grow.
   useLayoutEffect(() => {
