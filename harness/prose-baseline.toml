@@ -12,7 +12,7 @@
 "harness/broker/tests/test_broker_start_build.py" = 12295
 "harness/broker/tests/test_broker_summon_hops.py" = 2863
 "harness/broker/tests/test_verb_surface.py" = 8701
-"harness/cc/apps/apps_harvest.py" = 38639
+"harness/cc/apps/apps_harvest.py" = 9281
 "harness/cc/apps/config/entrypoint.sh" = 869
 "harness/cc/apps/run-apps.sh" = 3484
 "harness/cc/config-template/hooks/pre-tool-use.py" = 1337
