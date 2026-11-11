@@ -44,9 +44,9 @@ you write outside `/work` is gone when the turn ends.
 
 ## 3. Static files only
 
-The app is served as **static files**. There is no server, no build step, no
-bundler, no package install, no framework CLI. What you write is what is
-served:
+The app is served as **static files**. There is no server, no package install,
+no framework CLI, and nothing is built after you stop. What is in `/work` when
+the turn ends is what is served:
 
 - **an `index.html` at the root of `/work`** — this is the entry point and it
   is not optional;
@@ -63,6 +63,25 @@ served:
 - **`preview/` at the root of `/work` is a reserved name.** The gate routes
   `<app>/preview/…` to the owner's preview tree, so a file of yours at that
   path is unreachable to a viewer.
+
+### TypeScript and Phaser
+
+TypeScript is the one build step, and you run it yourself, in this turn. Two
+commands are in the image: `esbuild` 0.28.2 and `tsc` (TypeScript 7.0.2).
+There is still no `npm`, no `npx` and nothing to install. Keep sources in
+`/work/src/` and write the bundle next to `index.html`:
+
+```sh
+tsc --noEmit src/main.ts                        # type-check; esbuild does not
+esbuild src/main.ts --bundle --outfile=app.js   # the file index.html loads
+```
+
+The page loads `app.js`, never `main.ts`: a turn that edits `src/` and does
+not rebuild has changed nothing the user can see. Phaser 3.90.0 is on the
+shelf at `/shelf/phaser/`, with its type definitions; its index entry (§8) has
+the files to copy, the two config keys it cannot run without here, and the
+type-check line. The result is the same static app as any other: every
+library is a file copied from `/shelf`, never an import from a URL.
 
 ## 4. The content security policy you will actually be served under
 

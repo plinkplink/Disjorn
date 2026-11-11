@@ -23,7 +23,9 @@
       "Bash(cp:*)",
       "Bash(mv:*)",
       "Bash(rm:*)",
-      "Bash(node:*)"
+      "Bash(node:*)",
+      "Bash(esbuild:*)",
+      "Bash(tsc:*)"
     ],
     "deny": [
       "WebFetch",
