@@ -222,11 +222,13 @@ async def test_unfurl_endpoint_and_cache(client, monkeypatch):
     assert row["fetched_at"] > "2020-01-01"
 
 
-async def test_unfurl_failure_returns_minimal_and_skips_cache(client, monkeypatch):
+async def test_unfurl_failure_returns_minimal_and_caches_it_for_the_empty_ttl(client, monkeypatch):
     await make_user()
     await login(client)
+    calls = []
 
     async def broken_fetch(url):
+        calls.append(url)
         raise httpx.ConnectError("no route to host")
 
     monkeypatch.setattr(unfurl_service, "fetch_head", broken_fetch)
@@ -238,9 +240,19 @@ async def test_unfurl_failure_returns_minimal_and_skips_cache(client, monkeypatc
         "description": None,
         "image_url": None,
     }
-    assert await db.fetch_one(
+    row = await db.fetch_one(
         "SELECT * FROM unfurl_cache WHERE url = ?", ("https://down.example/x",)
-    ) is None
+    )
+    assert (row["title"], row["description"], row["image_url"]) == (None, None, None)
+    await client.get("/unfurl", params={"url": "https://down.example/x"})
+    assert len(calls) == 1
+    await db.execute(
+        "UPDATE unfurl_cache SET fetched_at = ? WHERE url = ?",
+        (unfurl_service._cache_cutoff(unfurl_service.EMPTY_TTL + datetime.timedelta(minutes=1)),
+         "https://down.example/x"),
+    )
+    await client.get("/unfurl", params={"url": "https://down.example/x"})
+    assert len(calls) == 2
 
 
 async def _cached_row(url, age, image="https://cdn.example/signed.jpg?oe=1", title="Old"):

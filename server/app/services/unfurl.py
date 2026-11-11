@@ -7,9 +7,8 @@
 - Parses og:*/twitter:*/<title>/<meta name=description> via stdlib
   html.parser (no bs4 dependency).
 - Successful fetches are cached in `unfurl_cache` (migration
-  003_unfurl_cache.sql), TTL 7 days. Fetch failures are NOT cached, so a
-  transient outage doesn't pin an empty card for a week.
-- A row with no metadata at all lives EMPTY_TTL, not the week.
+  003_unfurl_cache.sql), TTL 7 days.
+- A row with no metadata lives EMPTY_TTL; a failed first fetch writes one.
 - `refresh=True` is a client saying the cached card failed to draw (a signed
   CDN image expires days before the row does): rows older than
   REFRESH_MIN_AGE are fetched again, and a fetch that fails or finds nothing
@@ -298,10 +297,17 @@ async def unfurl(url: str, refresh: bool = False) -> dict[str, Any]:
             logger.debug("unfurl failed for %s: %s", url, exc)
             if refresh and cached is not None:
                 return cached
+            if row is None:
+                await _store(url, _minimal(url))
             return {**_minimal(url), **extra}
     if refresh and cached is not None and not any(meta.values()):
         return cached
 
+    await _store(url, meta)
+    return {"url": url, **meta, **extra}
+
+
+async def _store(url: str, meta: dict[str, Any]) -> None:
     await db.execute(
         """INSERT INTO unfurl_cache (url, title, description, image_url, fetched_at)
            VALUES (?, ?, ?, ?, ?)
@@ -312,4 +318,3 @@ async def unfurl(url: str, refresh: bool = False) -> dict[str, Any]:
                fetched_at = excluded.fetched_at""",
         (url, meta["title"], meta["description"], meta["image_url"], db.utc_now()),
     )
-    return {"url": url, **meta, **extra}
