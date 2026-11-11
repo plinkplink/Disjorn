@@ -7,8 +7,12 @@
 - Parses og:*/twitter:*/<title>/<meta name=description> via stdlib
   html.parser (no bs4 dependency).
 - Successful fetches are cached in `unfurl_cache` (migration
-  003_unfurl_cache.sql), TTL 7 days. Fetch failures are NOT cached, so a
-  transient outage doesn't pin an empty card for a week.
+  003_unfurl_cache.sql), TTL 7 days.
+- A row with no metadata lives EMPTY_TTL; a failed first fetch writes one.
+- `refresh=True` is a client saying the cached card failed to draw (a signed
+  CDN image expires days before the row does): rows older than
+  REFRESH_MIN_AGE are fetched again, and a fetch that fails or finds nothing
+  answers with the row and leaves it in place.
 - Never raises on garbage input/pages — degrades to {"url": url, ...Nones}.
 - YouTube video URLs read YouTube's oEmbed endpoint instead (the page itself
   carries no usable meta tags) and gain an `embed` field for the inline player.
@@ -37,6 +41,8 @@ logger = logging.getLogger(__name__)
 UNFURL_MAX_BYTES = 256 * 1024
 FETCH_TIMEOUT = 10.0
 CACHE_TTL = datetime.timedelta(days=7)
+EMPTY_TTL = datetime.timedelta(hours=1)
+REFRESH_MIN_AGE = datetime.timedelta(minutes=10)
 MAX_REDIRECTS = 5
 
 YOUTUBE_HOSTS = frozenset(
@@ -236,23 +242,30 @@ def _minimal(url: str) -> dict[str, Any]:
     return {"url": url, "title": None, "description": None, "image_url": None}
 
 
-def _cache_cutoff() -> str:
-    """ISO timestamp CACHE_TTL ago; rows with fetched_at <= this are stale."""
+def _cache_cutoff(ttl: datetime.timedelta = CACHE_TTL) -> str:
+    """ISO timestamp `ttl` ago; rows with fetched_at <= this are stale."""
     return (
-        (datetime.datetime.now(datetime.timezone.utc) - CACHE_TTL)
+        (datetime.datetime.now(datetime.timezone.utc) - ttl)
         .strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
         + "Z"
     )
 
 
-def _serves_from_cache(row: Any, embed: Optional[dict[str, Any]]) -> bool:
-    if row is None or row["fetched_at"] <= _cache_cutoff():
+def _serves_from_cache(row: Any, embed: Optional[dict[str, Any]], refresh: bool) -> bool:
+    if row is None:
         return False
-    # An empty row for a recognised video is a past failure, not an answer.
-    return embed is None or any(row[k] for k in ("title", "description", "image_url"))
+    ttl = CACHE_TTL
+    if not any(row[k] for k in ("title", "description", "image_url")):
+        # An empty row for a recognised video is a past failure, not an answer.
+        if embed is not None:
+            return False
+        ttl = EMPTY_TTL
+    if refresh:
+        ttl = min(ttl, REFRESH_MIN_AGE)
+    return row["fetched_at"] > _cache_cutoff(ttl)
 
 
-async def unfurl(url: str) -> dict[str, Any]:
+async def unfurl(url: str, refresh: bool = False) -> dict[str, Any]:
     """Unfurl a URL, serving from the DB cache when fresh. Never raises."""
     if urlsplit(url).scheme not in ("http", "https"):
         return _minimal(url)
@@ -260,14 +273,15 @@ async def unfurl(url: str) -> dict[str, Any]:
     extra = {"embed": embed} if embed is not None else {}
 
     row = await db.fetch_one("SELECT * FROM unfurl_cache WHERE url = ?", (url,))
-    if _serves_from_cache(row, embed):
-        return {
-            "url": url,
-            "title": row["title"],
-            "description": row["description"],
-            "image_url": row["image_url"],
-            **extra,
-        }
+    cached = None if row is None else {
+        "url": url,
+        "title": row["title"],
+        "description": row["description"],
+        "image_url": row["image_url"],
+        **extra,
+    }
+    if _serves_from_cache(row, embed, refresh):
+        return cached
 
     meta = None
     if embed is not None:
@@ -281,8 +295,19 @@ async def unfurl(url: str) -> dict[str, Any]:
             meta = parse_meta(html, final_url)
         except Exception as exc:  # noqa: BLE001 — unfurl must never throw
             logger.debug("unfurl failed for %s: %s", url, exc)
+            if refresh and cached is not None:
+                return cached
+            if row is None:
+                await _store(url, _minimal(url))
             return {**_minimal(url), **extra}
+    if refresh and cached is not None and not any(meta.values()):
+        return cached
 
+    await _store(url, meta)
+    return {"url": url, **meta, **extra}
+
+
+async def _store(url: str, meta: dict[str, Any]) -> None:
     await db.execute(
         """INSERT INTO unfurl_cache (url, title, description, image_url, fetched_at)
            VALUES (?, ?, ?, ?, ?)
@@ -293,4 +318,3 @@ async def unfurl(url: str) -> dict[str, Any]:
                fetched_at = excluded.fetched_at""",
         (url, meta["title"], meta["description"], meta["image_url"], db.utc_now()),
     )
-    return {"url": url, **meta, **extra}

@@ -140,10 +140,18 @@ function CodeBlock({ lang, code }: { lang: string; code: string }) {
 }
 
 function UrlNode({ url }: { url: string }) {
-  if (isImageUrl(url)) {
+  const [deadUrl, setDeadUrl] = useState<string | null>(null);
+  // An image that will not load reads as the plain link it was posted as.
+  if (isImageUrl(url) && url !== deadUrl) {
     return (
       <a href={url} target="_blank" rel="noopener noreferrer">
-        <img className="md-inline-img" src={url} alt="" loading="lazy" />
+        <img
+          className="md-inline-img"
+          src={url}
+          alt=""
+          loading="lazy"
+          onError={() => setDeadUrl(url)}
+        />
       </a>
     );
   }
