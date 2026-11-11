@@ -557,6 +557,19 @@ VERB_SURFACE = {
             },
         },
     },
+    "read-attachment": {
+        "help": "read one channel file by its attachment id",
+        "args": {
+            "attachment_id": {
+                "flag": "--attachment-id",
+                "type": "integer",
+                "required": True,
+                "help": "The attachment's id, from a message's attachments list.",
+                "minimum": 1,
+                "maximum": 2147483647,
+            },
+        },
+    },
 }
 # ── END GENERATED VERB SURFACE ──────────────────────────────────────────
 

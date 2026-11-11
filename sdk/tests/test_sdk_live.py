@@ -201,7 +201,8 @@ async def test_upload_attaches_media_to_a_bot_message(server, alice, main_id, bo
     fetched = next(
         m for m in await bot.get_messages(main_id, before_seq=msg["seq"] + 1) if m["id"] == msg["id"]
     )
-    assert [a["id"] for a in fetched["attachments"]] == [att["id"]]
+    # main is not files-safe, so a bot's read of it lists no attachments at all.
+    assert "attachments" not in fetched
 
     # The signed URL needs no credentials — that is what makes it pasteable.
     async with httpx.AsyncClient(base_url=server.base_url, timeout=10) as anon:

@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     # Media (WP6)
     MAX_UPLOAD_BYTES: int = 200 * 1024 * 1024  # generous — trusted users
     MEDIA_URL_TTL: int = 3600  # seconds a signed media URL stays valid
+    BOT_READ_BYTES: int = 1024 * 1024
     # Picker assets are served raw and a whole tab loads at once, so this cap is
     # much tighter than MAX_UPLOAD_BYTES: one fat GIF degrades the grid.
     MAX_PICKER_BYTES: int = 8 * 1024 * 1024
@@ -74,6 +75,7 @@ class Settings(BaseSettings):
     APPROVAL_PRINCIPALS: str = "plink,res-claudette,res-gable"
     APPROVAL_RELAY_BOT_NAMES: list[str] = ["broker"]
     BACKLOG_RELAY_BOT_NAMES: list[str] = ["broker"]
+    FILES_RELAY_BOT_NAMES: list[str] = ["broker"]
 
     CUSTODIAN_CHANNEL_ID: int = 4
 

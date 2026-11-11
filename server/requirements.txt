@@ -12,3 +12,4 @@ pillow
 pillow-heif
 pywebpush
 trafilatura
+pypdf==7.0.1
