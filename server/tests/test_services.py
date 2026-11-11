@@ -645,7 +645,7 @@ class FakeTranscriber:
     def __init__(self):
         self.paths = []
 
-    async def transcribe(self, audio_path):
+    async def transcribe(self, audio_path, **upload):
         self.paths.append(audio_path)
         return "hello disjorn"
 

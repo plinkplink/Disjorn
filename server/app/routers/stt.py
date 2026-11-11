@@ -1,7 +1,7 @@
 """Voice-to-text endpoint.
 
     POST /stt  (user auth) — multipart field "audio" (webm/ogg/wav/mp3/m4a)
-               -> {"text": "..."}
+               -> {"text": "...", "engine": "..."}
 
 The mic button records with MediaRecorder and POSTs the blob; the text goes
 into the composer for the user to edit. The upload is written under
@@ -79,7 +79,11 @@ async def transcribe_audio(
         with tmp_path.open("wb") as fh:
             while chunk := await audio.read(CHUNK):
                 fh.write(chunk)
-        text = await transcriber.transcribe(str(tmp_path))
+        text = await transcriber.transcribe(
+            str(tmp_path),
+            filename=audio.filename or "",
+            content_type=audio.content_type or "",
+        )
     except stt_service.AudioError:
         raise HTTPException(
             status_code=400,
@@ -93,4 +97,5 @@ async def transcribe_audio(
         )
     finally:
         tmp_path.unlink(missing_ok=True)
-    return {"text": text}
+    engine = getattr(text, "engine", "")
+    return {"text": str(text), "engine": engine} if engine else {"text": text}

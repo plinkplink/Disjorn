@@ -7,6 +7,11 @@ extras in requirements-ml.txt); the router turns that into a 501.
 A local engine holds one model for the life of the process: loaded once under
 a lock, at startup when STT_PRELOAD is set and otherwise on first use, and
 decoded in a worker thread, one clip at a time.
+
+With STT_REMOTE_URL set, every clip is offered first to an OpenAI-compatible
+transcription server at that URL and the local engine answers whenever that
+server does not. The local model stays loaded either way.
+deploy/stt-gpu/reference_server.py is one server that speaks the contract.
 """
 
 import asyncio
@@ -14,7 +19,10 @@ import importlib.util
 import logging
 import threading
 import time
+from pathlib import Path
 from typing import Any, Callable, Optional, Protocol
+
+import httpx
 
 from ..config import get_settings
 
@@ -31,8 +39,25 @@ class AudioError(Exception):
     """The upload holds no decodable audio."""
 
 
+class RemoteError(Exception):
+    """The remote server gave no usable transcript."""
+
+
+class Transcript(str):
+    """A transcript that remembers which engine produced it."""
+
+    engine: str = ""
+
+    def __new__(cls, text: str, engine: str) -> "Transcript":
+        self = super().__new__(cls, text)
+        self.engine = engine
+        return self
+
+
 class Transcriber(Protocol):
-    async def transcribe(self, audio_path: str) -> str: ...
+    async def transcribe(
+        self, audio_path: str, *, filename: str = "", content_type: str = ""
+    ) -> str: ...
 
 
 def decode_audio(audio_path: str) -> Any:
@@ -43,7 +68,7 @@ def decode_audio(audio_path: str) -> Any:
     resampler = av.AudioResampler(format="s16", layout="mono", rate=SAMPLE_RATE)
     chunks = []
     try:
-        with av.open(audio_path, mode="r", metadata_errors="ignore") as container:
+        with av.open(audio_path, mode="r") as container:
             for frame in container.decode(audio=0):
                 chunks.extend(out.to_ndarray() for out in resampler.resample(frame))
             chunks.extend(out.to_ndarray() for out in resampler.resample(None))
@@ -119,15 +144,18 @@ class LocalTranscriber:
         )
         return text
 
-    async def transcribe(self, audio_path: str) -> str:
-        return await asyncio.to_thread(self._transcribe_sync, audio_path)
+    async def transcribe(
+        self, audio_path: str, *, filename: str = "", content_type: str = ""
+    ) -> str:
+        text = await asyncio.to_thread(self._transcribe_sync, audio_path)
+        return Transcript(text, self.engine)
 
 
 class OnnxAsrTranscriber(LocalTranscriber):
     """onnx-asr on onnxruntime: NVIDIA Parakeet and the other models it names."""
 
     engine = "onnx_asr"
-    default_model = "nemo-parakeet-tdt-0.6b-v3"
+    default_model = "nemo-parakeet-tdt-0.6b-v2"
 
     def _load(self) -> Any:
         import numpy as np
@@ -177,6 +205,114 @@ class FasterWhisperTranscriber(LocalTranscriber):
         return " ".join(seg.text.strip() for seg in segments).strip()
 
 
+class RemoteTranscriber:
+    """POST {STT_REMOTE_URL}/v1/audio/transcriptions, the OpenAI shape."""
+
+    engine = "remote"
+
+    def __init__(self, transport: Optional[httpx.AsyncBaseTransport] = None):
+        self._transport = transport
+
+    async def _post(self, audio_path: str, filename: str, content_type: str) -> httpx.Response:
+        settings = get_settings()
+        data = {"model": settings.STT_REMOTE_MODEL}
+        if settings.STT_LANGUAGE:
+            data["language"] = settings.STT_LANGUAGE
+        token = settings.STT_REMOTE_TOKEN
+        audio = await asyncio.to_thread(Path(audio_path).read_bytes)
+        # The audio goes to the configured host and nowhere else: a redirect
+        # is a failure, never a second destination.
+        async with httpx.AsyncClient(
+            transport=self._transport,
+            follow_redirects=False,
+            timeout=httpx.Timeout(
+                settings.STT_REMOTE_TIMEOUT, connect=settings.STT_REMOTE_CONNECT_TIMEOUT
+            ),
+        ) as client:
+            return await client.post(
+                settings.STT_REMOTE_URL.rstrip("/") + "/v1/audio/transcriptions",
+                data=data,
+                files={"file": (
+                    filename or Path(audio_path).name,
+                    audio,
+                    content_type or "application/octet-stream",
+                )},
+                headers={"Authorization": f"Bearer {token}"} if token else None,
+            )
+
+    async def transcribe(
+        self, audio_path: str, *, filename: str = "", content_type: str = ""
+    ) -> str:
+        try:
+            # httpx times each phase; this bounds the request as a whole.
+            response = await asyncio.wait_for(
+                self._post(audio_path, filename, content_type),
+                get_settings().STT_REMOTE_TIMEOUT,
+            )
+        except (httpx.HTTPError, httpx.InvalidURL, asyncio.TimeoutError, OSError) as exc:
+            raise RemoteError(exc.__class__.__name__) from exc
+        if response.status_code == 401:
+            logger.warning(
+                "stt remote refused the bearer token (401): STT_REMOTE_TOKEN does "
+                "not match the token the speech server expects"
+            )
+        if not response.is_success:
+            raise RemoteError(f"HTTP {response.status_code}")
+        try:
+            text = response.json()["text"]
+        except (ValueError, KeyError, TypeError) as exc:
+            raise RemoteError("no text in the answer") from exc
+        if not isinstance(text, str):
+            raise RemoteError("no text in the answer")
+        return Transcript(text.strip(), self.engine)
+
+
+class TieredTranscriber:
+    """The remote server first, the local engine whenever it does not answer.
+
+    A failure stops the remote being tried for STT_REMOTE_COOLDOWN seconds, so
+    a machine that is switched off costs one connect timeout and then nothing.
+    """
+
+    def __init__(self, remote: Transcriber, local: Optional[Transcriber]):
+        self.remote = remote
+        self.local = local
+        self.clock = time.monotonic
+        self._skip_until = 0.0
+
+    def warm(self) -> None:
+        warm = getattr(self.local, "warm", None)
+        if warm is not None:
+            warm()
+
+    async def transcribe(
+        self, audio_path: str, *, filename: str = "", content_type: str = ""
+    ) -> str:
+        if self.clock() >= self._skip_until:
+            started = time.monotonic()
+            try:
+                text = await self.remote.transcribe(
+                    audio_path, filename=filename, content_type=content_type
+                )
+            except RemoteError as exc:
+                cooldown = get_settings().STT_REMOTE_COOLDOWN
+                self._skip_until = self.clock() + cooldown
+                logger.warning(
+                    "stt tier=remote failed (%s) after %.2fs; local for the next %.0fs",
+                    exc, time.monotonic() - started, cooldown,
+                )
+            else:
+                self._skip_until = 0.0
+                logger.info(
+                    "stt tier=remote model=%s total_s=%.2f",
+                    get_settings().STT_REMOTE_MODEL, time.monotonic() - started,
+                )
+                return text
+        if self.local is None:
+            raise RemoteError("remote unavailable and no local engine installed")
+        return await self.local.transcribe(audio_path)
+
+
 def _make_onnx_asr() -> Optional[Transcriber]:
     if any(importlib.util.find_spec(m) is None for m in ("onnx_asr", "onnxruntime", "av")):
         return None
@@ -198,12 +334,16 @@ _instances: dict[str, Transcriber] = {}
 
 
 def get_transcriber() -> Optional[Transcriber]:
-    """Engine selected by STT_ENGINE; cached instance; None if unavailable."""
-    engine = get_settings().STT_ENGINE
+    """Engine selected by STT_ENGINE, behind the remote tier when
+    STT_REMOTE_URL is set; cached instance; None if unavailable."""
+    settings = get_settings()
+    engine = settings.STT_ENGINE
     if engine in _instances:
         return _instances[engine]
     factory = ENGINES.get(engine)
     instance = factory() if factory is not None else None
+    if settings.STT_REMOTE_URL:
+        instance = TieredTranscriber(RemoteTranscriber(), instance)
     if instance is not None:
         _instances[engine] = instance
     return instance

@@ -44,6 +44,12 @@ class Settings(BaseSettings):
     STT_QUANTIZATION: str = ""
     STT_LANGUAGE: str = "en"
     STT_PRELOAD: bool = False
+    STT_REMOTE_URL: str = ""
+    STT_REMOTE_MODEL: str = "large-v3"
+    STT_REMOTE_TOKEN: str = ""
+    STT_REMOTE_TIMEOUT: float = 20.0
+    STT_REMOTE_CONNECT_TIMEOUT: float = 0.5
+    STT_REMOTE_COOLDOWN: float = 60.0
     SUMMARIZE_ENGINE: str = "ollama"        # key into services.summarize.ENGINES
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_MODEL: str = "claude-haiku-5-5"

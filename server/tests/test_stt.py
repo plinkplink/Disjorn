@@ -9,6 +9,7 @@ import types
 import wave
 from pathlib import Path
 
+import httpx
 import pytest
 
 from app import db
@@ -189,7 +190,7 @@ def test_onnx_asr_loads_once_from_the_configured_directory(tmp_db_path, monkeypa
     assert engine._transcribe_sync("a.webm") == "Hello there."
     assert engine._transcribe_sync("b.webm") == "Hello there."
     assert calls == [
-        ("load", "nemo-parakeet-tdt-0.6b-v3", "/models/parakeet", "int8"),
+        ("load", "nemo-parakeet-tdt-0.6b-v2", "/models/parakeet", "int8"),
         ("recognize", 2.0),
         ("recognize", 2.0),
         ("recognize", 2.0),
@@ -281,3 +282,183 @@ def test_a_real_recording_decodes_to_16k_mono_and_junk_is_an_audio_error(
         bad.write_bytes(body)
         with pytest.raises(stt_service.AudioError):
             stt_service.decode_audio(str(bad))
+
+
+class Remote:
+    """A fake transcription server: answers with `reply`, counts what it saw."""
+
+    def __init__(self, reply=None):
+        self.reply = reply or (lambda request: httpx.Response(200, json={"text": " from the gpu "}))
+        self.requests = []
+
+    async def handle(self, request):
+        self.requests.append(request)
+        answer = self.reply(request)
+        return await answer if asyncio.iscoroutine(answer) else answer
+
+    def tier(self, monkeypatch, local, **env):
+        env = {"STT_REMOTE_URL": "http://gpu.test:8500/", **env}
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        reset_settings_cache()
+        remote = stt_service.RemoteTranscriber(transport=httpx.MockTransport(self.handle))
+        return stt_service.TieredTranscriber(remote, local)
+
+
+def refuse(request):
+    raise httpx.ConnectError("connection refused", request=request)
+
+
+async def test_the_remote_answers_first_and_is_sent_the_clip_in_the_openai_shape(
+    tmp_db_path, monkeypatch, tmp_path
+):
+    clip = tmp_path / "stt-1.webm"
+    clip.write_bytes(b"opus bytes")
+    remote, local = Remote(), FakeEngine()
+    tier = remote.tier(monkeypatch, local, STT_REMOTE_TOKEN="s3cret")
+    text = await tier.transcribe(
+        str(clip), filename="voice.webm", content_type="audio/webm;codecs=opus"
+    )
+    assert (text, text.engine) == ("from the gpu", "remote")
+    assert local.loads == 0
+    sent = remote.requests[0]
+    assert str(sent.url) == "http://gpu.test:8500/v1/audio/transcriptions"
+    assert sent.headers["authorization"] == "Bearer s3cret"
+    fields = sent.content.split(b"--" + sent.headers["content-type"].split("boundary=")[1].encode())
+    assert sorted(f.split(b'name="')[1].split(b'"')[0] for f in fields[1:-1]) == [
+        b"file", b"language", b"model",
+    ]
+    body = sent.content
+    assert b'name="model"\r\n\r\nlarge-v3' in body and b'name="language"\r\n\r\nen' in body
+    assert b'name="file"; filename="voice.webm"\r\nContent-Type: audio/webm;codecs=opus' in body
+    assert b"opus bytes" in body
+
+
+async def test_silence_from_the_remote_is_an_answer_and_no_language_means_none_is_sent(
+    tmp_db_path, monkeypatch, tmp_path
+):
+    clip = tmp_path / "a.webm"
+    clip.write_bytes(b"x")
+    remote = Remote(lambda request: httpx.Response(200, json={"text": "", "duration": 3.1}))
+    local = FakeEngine()
+    tier = remote.tier(monkeypatch, local, STT_LANGUAGE="")
+    text = await tier.transcribe(str(clip))
+    assert (text, text.engine) == ("", "remote")
+    assert local.loads == 0
+    assert b'name="language"' not in remote.requests[0].content
+    assert "authorization" not in remote.requests[0].headers
+
+
+async def test_a_401_falls_to_local_and_says_the_token_is_wrong_without_printing_it(
+    tmp_db_path, monkeypatch, tmp_path, caplog
+):
+    clip = tmp_path / "a.webm"
+    clip.write_bytes(b"x")
+    remote = Remote(lambda request: httpx.Response(401, json={"detail": "bad token"}))
+    tier = remote.tier(monkeypatch, FakeEngine(), STT_REMOTE_TOKEN="s3cret-value")
+    text = await tier.transcribe(str(clip))
+    assert text.engine == "fake"
+    assert "STT_REMOTE_TOKEN does not match" in caplog.text
+    assert "s3cret-value" not in caplog.text
+
+
+async def test_a_refused_connection_falls_to_local_and_the_remote_rests_for_the_cooldown(
+    tmp_db_path, monkeypatch, tmp_path, caplog
+):
+    clip = tmp_path / "a.webm"
+    clip.write_bytes(b"x")
+    remote, local = Remote(refuse), FakeEngine()
+    tier = remote.tier(monkeypatch, local)
+    now = [1000.0]
+    tier.clock = lambda: now[0]
+
+    text = await tier.transcribe(str(clip))
+    assert (text, text.engine) == ("the spoken secret", "fake")
+    assert "tier=remote failed (ConnectError)" in caplog.text
+
+    now[0] += 59
+    await tier.transcribe(str(clip))
+    assert len(remote.requests) == 1
+
+    now[0] += 2
+    remote.reply = lambda request: httpx.Response(200, json={"text": "back"})
+    assert await tier.transcribe(str(clip)) == "back"
+    assert await tier.transcribe(str(clip)) == "back"
+    assert len(remote.requests) == 3
+    assert "secret" not in caplog.text and "back" not in caplog.text
+
+
+async def slow(request):
+    await asyncio.sleep(5)
+    return httpx.Response(200, json={"text": "too late"})
+
+
+@pytest.mark.parametrize("reply", [
+    slow,
+    lambda request: httpx.Response(500, text="boom"),
+    lambda request: httpx.Response(503, json={"detail": "model loading"}),
+    lambda request: httpx.Response(400, json={"detail": "could not decode"}),
+    lambda request: httpx.Response(307, headers={"location": "http://elsewhere.test/"}),
+    lambda request: httpx.Response(200, text=""),
+    lambda request: httpx.Response(200, json={"words": []}),
+    lambda request: httpx.Response(200, json={"text": None}),
+], ids=["slow", "500", "503", "400", "redirect", "empty", "no-text", "null-text"])
+async def test_a_remote_that_gives_no_transcript_in_time_is_answered_locally(
+    tmp_db_path, monkeypatch, tmp_path, reply
+):
+    clip = tmp_path / "a.webm"
+    clip.write_bytes(b"x")
+    remote, local = Remote(reply), FakeEngine()
+    tier = remote.tier(monkeypatch, local, STT_REMOTE_TIMEOUT="0.2")
+    started = time.monotonic()
+    text = await tier.transcribe(str(clip))
+    assert (text, text.engine) == ("the spoken secret", "fake")
+    assert time.monotonic() - started < 2
+    assert [r.url.host for r in remote.requests] == ["gpu.test"]
+    await tier.transcribe(str(clip))
+    assert len(remote.requests) == 1
+
+
+async def test_with_no_remote_url_the_local_engine_is_the_whole_service(client, monkeypatch):
+    local = FakeEngine()
+    use_engine(monkeypatch, local)
+    assert stt_service.get_transcriber() is local
+    await signed_in(client)
+    r = await upload(client)
+    assert r.json() == {"text": "the spoken secret", "engine": "fake"}
+
+
+async def test_with_a_remote_url_the_endpoint_names_the_tier_and_preload_warms_local(
+    client, monkeypatch
+):
+    local = FakeEngine()
+    use_engine(monkeypatch, local, STT_REMOTE_URL="http://gpu.test:8500")
+    tier = stt_service.get_transcriber()
+    assert isinstance(tier, stt_service.TieredTranscriber) and tier.local is local
+    await stt_service.preload()
+    assert local.loads == 1
+
+    remote = Remote()
+    tier.remote = stt_service.RemoteTranscriber(transport=httpx.MockTransport(remote.handle))
+    await signed_in(client)
+    assert (await upload(client)).json() == {"text": "from the gpu", "engine": "remote"}
+    assert (
+        b'filename="clip.webm"\r\nContent-Type: audio/webm\r\n\r\nnot really audio'
+        in remote.requests[0].content
+    )
+    tier.remote = stt_service.RemoteTranscriber(transport=httpx.MockTransport(refuse))
+    assert (await upload(client)).json() == {"text": "the spoken secret", "engine": "fake"}
+    assert local.loads == 1
+
+
+async def test_a_dead_remote_with_no_local_engine_is_a_503(client, monkeypatch):
+    stt_service.ENGINES["testfake"] = lambda: None
+    monkeypatch.setenv("STT_ENGINE", "testfake")
+    monkeypatch.setenv("STT_REMOTE_URL", "http://gpu.test:8500")
+    reset_settings_cache()
+    stt_service.reset_transcriber_cache()
+    stt_service.get_transcriber().remote = stt_service.RemoteTranscriber(
+        transport=httpx.MockTransport(refuse)
+    )
+    await signed_in(client)
+    assert (await upload(client)).status_code == 503
