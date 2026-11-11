@@ -5,7 +5,8 @@
    Supported (Architecture §5.5): **bold**, *italic* / _italic_, __underline__
    (Discord-ism), ~~strike~~, `inline code`, ```fenced blocks``` (language
    label + copy button), > quotes, ||spoilers|| (click to reveal), links
-   (new tab, noopener), @mentions matched against channel member names, and
+   (new tab, noopener), @mentions matched against channel member names (and
+   `@bots` on a message the server fanned out to the channel's bots), and
    bare image/GIF URLs (picker files or image extensions) shown as inline
    images.
 
@@ -447,12 +448,16 @@ function escapeRe(s: string): string {
 }
 
 /** Build a case-insensitive `@Name` matcher; longest names win so
-    "@Ann Marie" beats "@Ann". Null when there is nobody to match. */
-export function buildMentionRe(names: string[] | undefined): RegExp | null {
-  if (names === undefined || names.length === 0) return null;
-  const parts = [...new Set(names.filter((n) => n.length > 0))]
+    "@Ann Marie" beats "@Ann". `withBots` adds `@bots` as a whole word, after
+    every name. Null when there is nothing to match. */
+export function buildMentionRe(
+  names: string[] | undefined,
+  withBots = false,
+): RegExp | null {
+  const parts = [...new Set((names ?? []).filter((n) => n.length > 0))]
     .sort((a, b) => b.length - a.length)
     .map(escapeRe);
+  if (withBots) parts.push("bots(?!\\w)");
   if (parts.length === 0) return null;
   return new RegExp(`@(?:${parts.join("|")})`, "i");
 }
@@ -461,6 +466,8 @@ interface MarkdownProps {
   content: string;
   /** Channel member display names + usernames for @mention highlighting. */
   mentionNames?: string[];
+  /** The server fanned this message's `@bots` out, so it is drawn as a mention. */
+  botsMention?: boolean;
   /** Chibi art available to this message's `[emotion: X]` tags, in order. */
   chibis?: ChibiEmote[];
   chibiSlot?: ChibiSlotRenderer;
@@ -471,11 +478,12 @@ const NO_CHIBIS: ChibiEmote[] = [];
 export const Markdown = memo(function Markdown({
   content,
   mentionNames,
+  botsMention = false,
   chibis = NO_CHIBIS,
   chibiSlot,
 }: MarkdownProps) {
   const ctx: Ctx = {
-    mentionRe: buildMentionRe(mentionNames),
+    mentionRe: buildMentionRe(mentionNames, botsMention),
     chibis,
     taken: { n: 0 },
     chibiSlot,

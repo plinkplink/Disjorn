@@ -160,6 +160,8 @@ class Settings(BaseSettings):
     MENTION_ONLY_CHANNEL_IDS: list[int] = []
     MENTION_ONLY_CHANNEL_NAMES: list[str] = ["custodian"]
 
+    GROUP_MENTION_SKIP_BOT_NAMES: list[str] = ["system", "broker", "BuildGable"]
+
     @property
     def db_path(self) -> Path:
         return Path(self.DB_PATH)
