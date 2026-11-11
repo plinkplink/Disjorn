@@ -361,7 +361,9 @@ export const APP_STAGE_LABELS: Record<AppStage, string> = {
 };
 
 export type AppVisibility = "private" | "shared" | "public";
-export type AppStatus = "draft" | "live" | "archived";
+/** `deleting` is not a stored status: it is how the house lists, to its owner
+    alone, an app whose delete did not finish. Nothing but DELETE answers. */
+export type AppStatus = "draft" | "live" | "archived" | "deleting";
 
 /** The live build session on an app, if there is one. `stage` is null until
     the first stage event lands (nothing publishes them in stage 1). */

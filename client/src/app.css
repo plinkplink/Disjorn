@@ -4296,6 +4296,19 @@
   }
 }
 
+/* A delete the house could not finish: the app is greyed, its one verb is
+   not. */
+.app-row.deleting .avatar,
+.app-row.deleting .name {
+  opacity: 0.5;
+}
+
+.app-finish {
+  flex-shrink: 0;
+  color: var(--danger);
+  font-size: var(--text-xs);
+}
+
 /* Delete sits apart from the card's other verbs, in the danger colour but
    without the filled button: the filled one is the confirm dialog's. */
 .app-card-delete {

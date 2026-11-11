@@ -384,19 +384,46 @@ function UserFooter({ onOpenSettings }: { onOpenSettings: () => void }) {
  * on a row with a session open, goes to the build modal, so without this the
  * card (and Delete on it) is out of reach for exactly the apps most often
  * deleted.
+ *
+ * A `deleting` row is a delete the house could not finish. It is greyed and
+ * its one verb is sending the delete again.
  */
 function AppRow({
   app,
   builder,
+  finishing,
   onOpen,
   onDetails,
 }: {
   app: App;
   builder: Builder | undefined;
+  finishing: boolean;
   onOpen: (app: App) => void;
   onDetails?: (app: App) => void;
 }) {
   const building = app.open_session !== null;
+  if (app.status === "deleting") {
+    return (
+      <button
+        className="channel-item app-row deleting"
+        disabled={finishing}
+        title="This app is deleted, but some of its files or build chats are still on the house's disk. Finish deleting removes them."
+        onClick={() => onOpen(app)}
+      >
+        <BotAvatar
+          src={builder?.avatar_url}
+          name={builder?.name ?? app.name}
+          size={20}
+        />
+        <span className="channel-item-text">
+          <span className="name">{app.name}</span>
+        </span>
+        <span className="app-finish">
+          {finishing ? "Deleting…" : "Finish deleting"}
+        </span>
+      </button>
+    );
+  }
   return (
     <div className="app-row-wrap">
       <button className="channel-item app-row" onClick={() => onOpen(app)}>
@@ -653,6 +680,8 @@ export function AppShell() {
   /* A copy, not an id: the row is gone from the list the moment the server
      hides the app, and the dialog may still have a retry to offer. */
   const [deletingApp, setDeletingApp] = useState<App | null>(null);
+  /** The `deleting` row whose delete this tab is re-sending. */
+  const [finishingAppId, setFinishingAppId] = useState<string | null>(null);
   const apps = useApps((s) => s.apps);
   const builders = useApps((s) => s.builders);
   const pendingSessionId = useApps((s) => s.pendingSessionId);
@@ -939,7 +968,9 @@ export function AppShell() {
   const shownDms = visibleRows(dms, collapsed.dms, activeChannelId);
   const builderFor = (app: App): Builder | undefined =>
     builders.find((b) => b.bot_id === app.builder_bot_id);
-  const cardApp = apps.find((a) => a.id === appCardId);
+  const cardApp = apps.find(
+    (a) => a.id === appCardId && a.status !== "deleting",
+  );
   const select = (id: number) => {
     if (overlayRef.current !== "none") closeOverlay();
     useChannels.getState().setActive(id);
@@ -984,6 +1015,25 @@ export function AppShell() {
     const action = appRowAction(app, me?.id ?? null);
     if (action.kind === "resume") {
       setBuildSessionId(action.sessionId);
+      return;
+    }
+    if (action.kind === "finish") {
+      if (finishingAppId !== null) return;
+      setFinishingAppId(app.id);
+      useApps
+        .getState()
+        .deleteApp(app.id)
+        .then(
+          () => setFinishingAppId(null),
+          (err: unknown) => {
+            setFinishingAppId(null);
+            window.alert(
+              err instanceof ApiError
+                ? err.detail
+                : "Could not finish deleting the app",
+            );
+          },
+        );
       return;
     }
     if (action.kind === "start") {
@@ -1123,6 +1173,7 @@ export function AppShell() {
                   key={a.id}
                   app={a}
                   builder={builderFor(a)}
+                  finishing={finishingAppId === a.id}
                   onOpen={openApp}
                   onDetails={
                     canDeleteApp(a, me?.id ?? null)

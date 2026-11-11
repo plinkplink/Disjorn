@@ -40,6 +40,7 @@ import {
   shareApp,
   startAppSession,
 } from "../api";
+import { useSession } from "./session";
 import type {
   App,
   AppCardData,
@@ -268,8 +269,9 @@ interface AppsState {
   stopTurn: (sessionId: number) => Promise<void>;
   renameApp: (appId: string, name: string) => Promise<void>;
   /** DELETE /apps/{id}. Rethrows the server's sentence. The list is re-read
-      on a failure too: the app can already be gone while its files are not,
-      and calling again finishes the job. */
+      on a failure too: the app can already be deleted while its files are
+      not, and the house then lists it to its owner as `deleting`. Calling
+      again finishes the job. */
   deleteApp: (appId: string) => Promise<void>;
   addToMenu: (appId: string) => Promise<void>;
   removeFromMenu: (appId: string) => Promise<void>;
@@ -348,12 +350,21 @@ export const useApps = create<AppsState>()((set, get) => {
     void get().loadCard(appId, true);
   };
 
-  /** Drop a deleted app from the menu and blank its card. Loaded sessions
-      stay: a modal showing one is closed by AppShell, not emptied here. */
+  /** An app the house has deleted: blank its card, and drop its row, or grey
+      it for its owner until the list says whether anything is left to finish.
+      Loaded sessions stay: a modal showing one is closed by AppShell. */
   const forgetApp = (appId: string): void => {
     const known = get().deletedAppIds;
+    const me = useSession.getState().user?.id ?? null;
+    const greyed: App[] = [];
+    for (const a of get().apps) {
+      if (a.id !== appId) greyed.push(a);
+      else if (a.owner_user_id === me) {
+        greyed.push({ ...a, status: "deleting", open_session: null });
+      }
+    }
     set({
-      apps: get().apps.filter((a) => a.id !== appId),
+      apps: greyed,
       cards: { ...get().cards, [appId]: { status: "missing", data: null } },
       deletedAppIds: known.includes(appId) ? known : [...known, appId],
     });
@@ -485,11 +496,14 @@ export const useApps = create<AppsState>()((set, get) => {
       try {
         await apiDeleteApp(appId);
       } catch (err) {
+        // A refusal before anything changed leaves the row as it was; a
+        // failure after the house deleted the app comes back as `deleting`.
         await get().refresh().catch(() => {});
         throw err;
       }
       forgetApp(appId);
-      // Closing an idle session can move the meter.
+      // The row is gone for good, and closing an idle session can move the
+      // meter: both are the list's to say.
       await get().refresh().catch(() => {});
     },
 
@@ -648,6 +662,11 @@ export const useApps = create<AppsState>()((set, get) => {
       patchAppEverywhere(app.id, () => app);
     },
 
-    onAppDelete: (frame) => forgetApp(frame.app_id),
+    onAppDelete: (frame) => {
+      forgetApp(frame.app_id);
+      // The owner gets this frame twice, when the app is deleted and when
+      // nothing is left to finish; the list tells the two apart.
+      void get().refresh().catch(() => {});
+    },
   };
 });

@@ -90,6 +90,16 @@ test('Delete is offered to the owner at every status and to nobody else', () => 
   }
 });
 
+test("an unfinished delete offers its owner one verb, and it is not a card", () => {
+  const row = app('deleting');
+  assert.deepEqual(m.appRowAction(row, ALICE), { kind: 'finish' });
+  assert.deepEqual(m.appRowAction(app('deleting', SESSION), ALICE), { kind: 'finish' });
+  assert.equal(m.canDeleteApp(row, ALICE), false);
+  assert.equal(m.canKeepBuilding(row, ALICE), false);
+  assert.equal(m.deleteReachLine(app('deleting', null, 'public')), null);
+  assert.deepEqual(m.appRowAction(row, BOB), { kind: 'card' });
+});
+
 test('the confirm dialog names who else loses a live app, and nobody for a draft', () => {
   for (const visibility of ['private', 'shared', 'public']) {
     assert.equal(m.deleteReachLine(app('draft', null, visibility)), null);

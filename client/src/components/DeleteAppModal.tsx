@@ -5,8 +5,9 @@
    shown verbatim.
 
    The dialog holds its own copy of the app. A delete that fails after the
-   server has hidden the app leaves no row to reopen it from, and the same
-   request sent again is what finishes the removal. */
+   server has deleted the app turns its row into a `deleting` one, which has
+   no card; the same request sent again, from here or from that row, is what
+   finishes the removal. */
 
 import { useEffect, useState } from "react";
 
@@ -24,7 +25,7 @@ export function DeleteAppModal({
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  /** The server hid the app but could not finish removing its files. */
+  /** The server deleted the app but could not finish removing its files. */
   const [unfinished, setUnfinished] = useState(false);
 
   useEffect(() => {
@@ -46,7 +47,11 @@ export function DeleteAppModal({
       setError(
         err instanceof ApiError ? err.detail : "Could not delete the app",
       );
-      setUnfinished(!useApps.getState().apps.some((a) => a.id === app.id));
+      setUnfinished(
+        useApps
+          .getState()
+          .apps.some((a) => a.id === app.id && a.status === "deleting"),
+      );
       return;
     }
     onClose();
@@ -89,9 +94,10 @@ export function DeleteAppModal({
         {error !== null && <p className="form-error">{error}</p>}
         {unfinished && (
           <p className="member-modal-note">
-            The app is deleted: it is off every list and no new link to it
-            can be made. Its files are still on the house&rsquo;s disk, so a
-            link opened earlier may still work. Try again to remove them.
+            The app is deleted: it is off everyone else&rsquo;s list and no
+            new link to it can be made. Some of its files are still on the
+            house&rsquo;s disk, so a link opened earlier may still work. Try
+            again here, or use Finish deleting on its row in your Apps list.
           </p>
         )}
 
