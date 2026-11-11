@@ -80,5 +80,21 @@ One keyboard session.
 - **Condition**: watch build costs; roll back to medium if `high` spends too much. Rollback is the same key set to `"medium"` (or removed) in the same three places, then steps 1 to 4.
 - **Review**: PASS by Gable #3451 at f24c9e8.
 
+## Deploy record (2026-11-11)
+1. Apps image rebuilt with the key baked in; `10-appsbuilding.sh` reports no
+   drift.
+2. `/srv/disjorn-build-config/{gable,claudette}/settings.json` equal the repo
+   (backups `.bak-pre-effort-high-20261111`).
+3. `"effortLevel": "high"` added in place to
+   `/srv/disjorn-resident-config/res-gable/settings.json`, same backup suffix.
+4. `gable-summon` restarted 19:28Z.
+5. Observed on the host, CLI 2.1.322, with each seat's live settings content
+   passed as `--settings`: the request carries `high` for the summon seat,
+   the build seat and the apps seat. NOT observed inside the images: the
+   resident uid cannot reach a capture endpoint through the egress wall. The
+   first in-image probe hung there and its container was removed.
+6. Hail #3460, answer #3461 on `claude-fable-5-2`, verified, in 27.7 s.
+
 ## Status
-built@loop/2026-11-11-fable-seats-effort-high
+merged
+<!-- advanced from `built@loop/2026-11-11-fable-seats-effort-high` by `board --mark-merged` on 2026-11-11: build merged as bdfd0aa. The word `built@loop/2026-11-11-fable-seats-effort-high` on a merged spec made it indistinguishable from a buildable one. -->
