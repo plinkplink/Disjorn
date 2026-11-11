@@ -82,5 +82,16 @@ Tier 2 — touches the privacy wall (`privacy.py` callers), a migration, broker 
 - **Confirmed at**: 2026-11-11
 <!-- No Confirm record → no build. This is the gate. -->
 
+## Build record, slice A
+- Branch `loop/2026-10-15-channel-files-for-bots`. Slice B (export sweep, `/files` and `/files-outbox` mounts, `post-file`, quota) is not built.
+- The spec's "migration 022" is `023_channel_files_for_bots.sql` on the branch; main took 022 for another change.
+- `server/app/services/bot_files.py`: `visible_to_bots(att)` (async, the conjunction above with size ≤ `MAX_UPLOAD_BYTES`), `for_bot(payload)` (the bot listing), `set_channel_safe`, `read(attachment_id)` (the three read shapes under `BOT_READ_BYTES`).
+- `server/app/routers/bot_files.py`: `GET /bot/attachments/{id}`. 404 for an id that is unknown, hidden, or has no readable shape (an image with no stored variant under the cap, a PDF pypdf cannot open).
+- Bot listing `[{id, mime_type, size_bytes}]` on `GET /channels/{id}/messages`, `GET /search` and the WS `message_create` / `message_edit` frames sent to bots. Attachments are not indexed by search.
+- `/files-safe #channel on|off [--include-history]` in `slash.py`; the channel is `#main` or a named text channel.
+- Broker verb `read-attachment`, OFF in both seat sections of the `verbs.toml` template (the template lists every seat verb in every seat section); audit summary `attachment read <id>`.
+- A truncated PDF ends `[truncated: page P of T]`; a page marker is `[page N]`.
+- Tests: `server/tests/test_bot_files.py`, `harness/broker/tests/test_broker_attachments.py`.
+
 ## Status
-`confirmed`
+`built@loop/2026-10-15-channel-files-for-bots (slice A)`
