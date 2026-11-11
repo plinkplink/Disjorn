@@ -929,6 +929,23 @@ SPECS/2026-10-05-backlog-from-resident-seats.md. Both go to the server's
 No triage verb exists here: a status change is a person's act
 (`services/backlog.py`). Both verbs ship OFF.
 
+### `read-attachment`
+
+SPECS/2026-10-15-channel-files-for-bots.md. Goes to the server's
+`GET /bot/attachments/{id}` as the broker's own bot.
+
+- args `{"attachment_id": int}`, required, 1 or more.
+- result, the server's answer unchanged: `{"id", "mime_type", "size_bytes",
+  "kind": "text", "text": str}` for text, code and PDF, or `{..., "kind":
+  "image", "media_type": "image/webp", "data": base64}` for an image.
+- The server decides visibility on every call. An id that is unknown, hidden or
+  has no readable shape is `exec-failure` with the server's `Not found`; the
+  broker cannot tell the three apart and neither can the caller.
+- The audit summary of a served read is `attachment read <id>`. The file's
+  content is never written to the audit log.
+
+Ships OFF.
+
 ### `apply-posted-write` — the fails-closed Tier-1 wall
 
 Same spec, item 2. The tiers spec's target state — "an unposted write fails

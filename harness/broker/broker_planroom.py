@@ -1,4 +1,4 @@
-"""Plan Room transport and the board, approval and backlog verbs."""
+"""Plan Room transport and the board, approval, backlog and attachment verbs."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ import json
 from typing import Optional
 
 from broker_common import (
-    MAX_REQUEST_BYTES, BOARD_SLUG_RE, VerbError, _bad, _check_int, _check_str,
-    _reject_unknown,
+    MAX_REQUEST_BYTES, MAX_SEQ, BOARD_SLUG_RE, VerbError, _bad, _check_int,
+    _check_str, _reject_unknown,
 )
 
 
@@ -65,6 +65,8 @@ def _api_label(path: str) -> str:
         return "approval API"
     if path.startswith("/backlog"):
         return "backlog API"
+    if path.startswith("/bot/attachments"):
+        return "attachment API"
     return "plan room API"
 
 
@@ -367,6 +369,17 @@ class PlanroomVerbs:
         return ({"row": row},
                 f"filed backlog #{row.get('id')} for {resident}",
                 {"backlog_filed": True})
+
+    def _verb_read_attachment(self, resident: str, args: dict) -> tuple[dict, str]:
+        """One channel file in the shape the server gives a bot; the server
+        alone decides whether this id is readable."""
+        _reject_unknown(args, {"attachment_id"})
+        if "attachment_id" not in args:
+            raise _bad("missing required arg: attachment_id")
+        attachment_id = _check_int(args, "attachment_id", 0, 1, MAX_SEQ)
+        result = self.planroom_api(
+            self.disjorn, "GET", f"/bot/attachments/{attachment_id}")
+        return result, f"attachment read {attachment_id}"
 
     def _count_backlog_filed(self, resident: str, today: str) -> int:
         n = 0
