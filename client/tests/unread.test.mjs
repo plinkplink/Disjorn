@@ -136,6 +136,45 @@ test('the title is the sum of the rows the sidebar draws, and nothing else', () 
   assert.deepEqual(rows.filter(m.isSidebarRow).map((r) => r.id), [1, 2, 3]);
 });
 
+test('the app badge is set to the total, cleared at zero, and left alone where unsupported', () => {
+  assert.equal(m.badgeCall(3, true), 'set');
+  assert.equal(m.badgeCall(0, true), 'clear');
+  assert.equal(m.badgeCall(3, false), null);
+  assert.equal(m.badgeCall(0, false), null);
+
+  const calls = [];
+  const nav = { setAppBadge: async (n) => { calls.push(['set', n]); },
+    clearAppBadge: async () => { calls.push(['clear']); } };
+  m.syncAppBadge(nav, 4);
+  m.syncAppBadge(nav, 0);
+  assert.deepEqual(calls, [['set', 4], ['clear']]);
+
+  m.syncAppBadge({}, 4);
+  m.syncAppBadge(undefined, 4);
+  m.syncAppBadge({ setAppBadge: nav.setAppBadge }, 4);
+  assert.equal(calls.length, 2);
+});
+
+test('a badge the platform refuses is dropped without a throw or a stray rejection', async () => {
+  const stray = [];
+  const onStray = (err) => stray.push(err);
+  process.on('unhandledRejection', onStray);
+  try {
+    const throws = () => { throw new Error('no'); };
+    const rejects = () => Promise.reject(new Error('no'));
+    m.syncAppBadge({ setAppBadge: throws, clearAppBadge: throws }, 2);
+    m.syncAppBadge({ setAppBadge: throws, clearAppBadge: throws }, 0);
+    m.syncAppBadge({ setAppBadge: rejects, clearAppBadge: rejects }, 2);
+    m.syncAppBadge({ setAppBadge: rejects, clearAppBadge: rejects }, 0);
+    m.syncAppBadge({ setAppBadge: () => undefined, clearAppBadge: () => undefined }, 2);
+    await settle();
+    await settle();
+  } finally {
+    process.off('unhandledRejection', onStray);
+  }
+  assert.deepEqual(stray, []);
+});
+
 test('a frame the list already counted is not counted twice', () => {
   const s = m.listed(undefined, row(1, 3, 10));
   assert.equal(m.unreadCount(m.created(s, 10, false)), 3);

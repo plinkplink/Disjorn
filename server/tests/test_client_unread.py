@@ -27,4 +27,4 @@ def test_the_tab_title_and_badges_count_each_unread_message_once(tmp_path):
     r = subprocess.run(["node", "--test", str(NODE_TEST)], capture_output=True,
                        text=True, timeout=180, env=env)
     assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]
-    assert "# pass 15" in r.stdout
+    assert "# pass 17" in r.stdout
