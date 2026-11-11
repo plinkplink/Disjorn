@@ -82,13 +82,13 @@
 "harness/residency/tests/stub_launch.py" = 1406
 "harness/residency/wake.py" = 12916
 "sdk/disjorn_sdk/client.py" = 11300
-"sdk/disjorn_sdk/events.py" = 3792
+"sdk/disjorn_sdk/events.py" = 1006
 "sdk/examples/echo_bot.py" = 1126
 "server/app/gate.py" = 9627
 "server/app/main.py" = 6402
 "server/app/origin_wall.py" = 1497
-"server/app/privacy.py" = 2353
-"server/app/routers/apps.py" = 51898
+"server/app/privacy.py" = 826
+"server/app/routers/apps.py" = 14338
 "server/app/routers/auth.py" = 7549
 "server/app/routers/bots_admin.py" = 3013
 "server/app/routers/channels.py" = 21877
