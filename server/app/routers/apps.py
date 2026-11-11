@@ -573,7 +573,7 @@ def _app_out(
         name=row["name"],
         description=row["description"],
         visibility=row["visibility"],
-        status=row["status"],
+        status=row["status"] if row["deleted_at"] is None else "deleting",
         owner_user_id=row["owner_user_id"],
         builder_bot_id=row["builder_bot_id"],
         parent_app_id=row["parent_app_id"],
@@ -967,12 +967,14 @@ async def list_apps(user: CurrentUser) -> dict[str, Any]:
     """
     rows = await db.fetch_all(
         """SELECT * FROM apps
-            WHERE deleted_at IS NULL
-              AND (owner_user_id = ?
-                   OR EXISTS (SELECT 1 FROM user_apps ua
-                               WHERE ua.app_id = apps.id AND ua.user_id = ?))
+            WHERE (deleted_at IS NULL
+                   AND (owner_user_id = ?
+                        OR EXISTS (SELECT 1 FROM user_apps ua
+                                    WHERE ua.app_id = apps.id AND ua.user_id = ?)))
+               OR (owner_user_id = ? AND deleted_at IS NOT NULL
+                   AND purged_at IS NULL)
             ORDER BY created_at, id""",
-        (user.id, user.id),
+        (user.id, user.id, user.id),
     )
     return {
         "apps": [a.model_dump() for a in await _apps_out(rows, user.id)],
@@ -2488,4 +2490,11 @@ async def delete_app(app_id: str, user: CurrentUser) -> dict[str, bool]:
     )
     for room in rooms:
         await channels.destroy_channel(room, user.id)
+    await db.execute(
+        "UPDATE apps SET purged_at = ? WHERE id = ? AND purged_at IS NULL",
+        (_now(), app_id),
+    )
+    await events.publish(
+        {"type": "app_delete", "app_id": app_id, "user_ids": [user.id]}
+    )
     return {"ok": True}

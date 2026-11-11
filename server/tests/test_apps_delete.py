@@ -56,6 +56,28 @@ async def listed(client) -> list[str]:
     return [a["id"] for a in (await client.get("/apps")).json()["apps"]]
 
 
+async def unfinished(client) -> list[str]:
+    """The ids GET /apps lists as deletes still to finish."""
+    return [a["id"] for a in (await client.get("/apps")).json()["apps"]
+            if a["status"] == "deleting"]
+
+
+async def other_verbs(client, app_id: str, builder: int) -> list:
+    """Every app verb but DELETE, each sent once."""
+    return [
+        await open_app(client, app_id),
+        await open_app(client, app_id, "preview"),
+        await client.get(f"/apps/{app_id}/card"),
+        await client.post(f"/apps/{app_id}/menu"),
+        await client.delete(f"/apps/{app_id}/menu"),
+        await client.post(f"/apps/{app_id}/remix"),
+        await client.patch(f"/apps/{app_id}", json={"name": "Back"}),
+        await client.post(f"/apps/{app_id}/revert"),
+        await client.post(f"/apps/{app_id}/share", json={"channel_id": 1}),
+        await start_session(client, builder, app_id=app_id),
+    ]
+
+
 async def deletion_records() -> list[dict]:
     return await db.fetch_all("SELECT * FROM channel_deletions ORDER BY id")
 
@@ -99,7 +121,8 @@ async def test_only_the_owner_deletes_and_a_bot_never_does(
     assert done.status_code == 200, done.text
     assert done.json() == {"ok": True}
     assert helper.argv == [*HELPER, "delete", app_id]
-    assert (await app_row(app_id))["deleted_at"] is not None
+    row = await app_row(app_id)
+    assert row["deleted_at"] is not None and row["purged_at"] is not None
     assert app_id not in await listed(client)
 
 
@@ -144,26 +167,15 @@ async def test_a_deleted_app_is_gone_from_every_list_card_and_grant(
     events.subscribe(lambda e: seen.append(e) if e["type"] == "app_delete" else None)
     await login(client, "alice")
     assert (await client.delete(f"/apps/{app_id}")).status_code == 200
-    assert seen == [{"type": "app_delete", "app_id": app_id,
-                     "user_ids": sorted([session["app"]["owner_user_id"], bob])}]
+    alice = session["app"]["owner_user_id"]
+    assert [e["user_ids"] for e in seen] == [sorted([alice, bob]), [alice]]
     assert carol not in seen[0]["user_ids"]
 
     for username in ("alice", "bob", "carol"):
         await login(client, username)
         assert app_id not in await listed(client)
         assert (await client.get("/apps/discover")).json()["apps"] == []
-        for r in (
-            await open_app(client, app_id),
-            await open_app(client, app_id, "preview"),
-            await client.get(f"/apps/{app_id}/card"),
-            await client.post(f"/apps/{app_id}/menu"),
-            await client.delete(f"/apps/{app_id}/menu"),
-            await client.post(f"/apps/{app_id}/remix"),
-            await client.patch(f"/apps/{app_id}", json={"name": "Back"}),
-            await client.post(f"/apps/{app_id}/revert"),
-            await client.post(f"/apps/{app_id}/share", json={"channel_id": 1}),
-            await start_session(client, builder, app_id=app_id),
-        ):
+        for r in await other_verbs(client, app_id, builder):
             assert r.status_code == 404, (username, r.request.url.path, r.text)
             assert r.json()["detail"] == "App not found"
     for table in ("app_shares", "user_apps"):
@@ -230,6 +242,30 @@ async def test_a_grant_minted_before_the_delete_opens_nothing_after_it(
     assert not (seat.roots["apps"] / app_id).exists()
     assert not (seat.roots["git"] / f"{app_id}.git").exists()
     assert (www / "zzz234567abc" / "live" / "index.html").is_file()
+
+
+@needs_the_launcher
+async def test_a_symlinked_web_root_stops_serving_and_its_target_is_kept(
+    client, app, settings_env, seat_toml, gate_env, monkeypatch, tmp_path
+):
+    session, _bob = await a_live_app_shared_with_bob(
+        client, settings_env, seat_toml, gate_env)
+    app_id, www = session["app"]["id"], gate_env.www
+    seat = SeatDelete(www, tmp_path)
+    monkeypatch.setattr(apps, "_run_launch_helper", seat)
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "live").mkdir(parents=True)
+    (elsewhere / "live" / "index.html").write_text("<html><body>linked</body></html>")
+    (www / app_id).symlink_to(elsewhere, target_is_directory=True)
+    url = (await open_app(client, app_id)).json()["url"]
+    assert "linked" in (await served(www, url)).text
+
+    assert (await client.delete(f"/apps/{app_id}")).status_code == 200
+
+    assert (await served(www, url)).status_code == 404
+    assert not (www / app_id).is_symlink()
+    assert (elsewhere / "live" / "index.html").is_file()
+    assert (await app_row(app_id))["purged_at"] is not None
 
 
 # ---- a build in progress -----------------------------------------------------
@@ -321,16 +357,33 @@ async def test_a_failed_helper_leaves_a_deleted_app_and_a_second_call_finishes(
     session, _bob = await a_live_app_shared_with_bob(
         client, settings_env, seat_toml, gate_env)
     app_id, sid, room = session["app"]["id"], session["id"], session["channel_id"]
+    builder = session["builder"]["bot_id"]
     await make_user("root", "Root", admin=True)
+    await db.execute("UPDATE apps SET visibility = 'public' WHERE id = ?", (app_id,))
+    await login(client, "bob")
+    assert (await client.post(f"/apps/{app_id}/menu")).status_code == 200
+    await login(client, "alice")
     helper.returncode = 1
     helper.stderr = "disjorn-apps-launch: FAILED: rmtree"
 
     failed = await client.delete(f"/apps/{app_id}")
     assert failed.status_code == 502, failed.text
-    assert (await app_row(app_id))["deleted_at"] is not None
-    assert app_id not in await listed(client)
-    assert (await open_app(client, app_id)).status_code == 404
+    row = await app_row(app_id)
+    assert row["deleted_at"] is not None and row["purged_at"] is None
     assert await deletion_records() == []
+
+    # The owner is shown the unfinished delete, and it answers to nothing else.
+    assert await listed(client) == [app_id] and await unfinished(client) == [app_id]
+    mine = (await client.get("/apps")).json()["apps"][0]
+    assert mine["open_session"] is None and mine["name"] == session["app"]["name"]
+    for r in await other_verbs(client, app_id, builder):
+        assert r.status_code == 404, (r.request.url.path, r.text)
+    assert (await client.get("/apps/builders")).json()[0]["builds_total"] == 0
+    for username in ("bob", "root"):
+        await login(client, username)
+        assert await listed(client) == []
+        assert (await client.get("/apps/discover")).json()["apps"] == []
+    await login(client, "alice")
     assert await db.fetch_one("SELECT 1 FROM channels WHERE id = ?", (room,))
 
     # The build chat is still there, and nothing can be built or read in it.
@@ -353,11 +406,15 @@ async def test_a_failed_helper_leaves_a_deleted_app_and_a_second_call_finishes(
     refused = await client.delete(f"/apps/{app_id}")
     assert refused.status_code == 409 and "turn running" in refused.json()["detail"]
 
+    assert await unfinished(client) == [app_id]
+
     helper.returncode = 0
     for _ in range(2):
         done = await client.delete(f"/apps/{app_id}")
         assert done.status_code == 200, done.text
+        assert await listed(client) == []
     assert helper.calls == [[*HELPER, "delete", app_id]] * 4
+    assert (await app_row(app_id))["purged_at"] is not None
     assert await db.fetch_one("SELECT 1 FROM channels WHERE id = ?", (room,)) is None
     assert len(await deletion_records()) == 1
 
@@ -514,6 +571,8 @@ def test_the_owner_and_listed_viewers_get_the_frame_and_a_stranger_gets_nothing(
             frame = member.receive_json()
             assert (frame["type"], frame["channel_id"]) == ("channel_delete", room)
             assert frame["by_user_id"] == alice
+        # Once more for the owner alone, when nothing is left to finish.
+        assert wa.receive_json() == gone
 
         post_msg(wsc, cookie(token), main, "sentinel")
         for socket in (wb, wc):
@@ -550,6 +609,7 @@ async def test_migration_025_leaves_every_existing_app_undeleted(tmp_path, monke
 
         row = await app_row("abc234567xyz")
         assert (row["deleted_at"], row["deleted_builds"]) == (None, 0)
+        assert row["purged_at"] is None
         assert (await apps._require_app("abc234567xyz"))["name"] == "Tips"
     finally:
         await db.close()

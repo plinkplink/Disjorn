@@ -10,5 +10,11 @@
 -- were sessions of this app. Those session rows go with the build chat, and
 -- the daily meter still has to count them.
 
+--
+-- `purged_at` is set once the host helper has removed the app's files and
+-- its build chats are gone. A row deleted but not purged is a delete that
+-- failed part way; its owner is still shown it, to finish.
+
 ALTER TABLE apps ADD COLUMN deleted_at TEXT;
 ALTER TABLE apps ADD COLUMN deleted_builds INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE apps ADD COLUMN purged_at TEXT;
