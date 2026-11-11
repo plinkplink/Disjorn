@@ -754,8 +754,8 @@ export function AppShell() {
   useEffect(() => {
     let hiddenAt: number | null = null;
     let listSyncedAt = 0;
-    /* A read or a post made on another device reaches this tab only through
-       the channel list, so coming back to the tab refetches it. */
+    /* A frame this tab missed while hidden reaches it only through the
+       channel list, so coming back to the tab refetches it. */
     const syncList = () => {
       const st = useChannels.getState();
       if (!st.loaded) {

@@ -10,7 +10,7 @@ Endpoints:
                                                     publishes channel_delete
     GET    /channels/deletions            (ADMIN) — deletion records, newest first
     POST   /dms {user_id} | {bot_id}      (user)  — idempotent get-or-create of the 1:1 DM channel
-    PUT    /channels/{id}/read {seq}      (user)  — monotonic last_read_seq upsert (no event published)
+    PUT    /channels/{id}/read {seq}      (user)  — monotonic last_read_seq upsert; publishes channel_read
     GET    /channels/{id}/members         (actor) — member listing, membership-gated
     POST   /channels/{id}/invite {user_id}(user)  — private channels; OWNER ONLY; member_add
     POST   /channels/{id}/join            (user)  — private channels are invite-only (403)
@@ -862,32 +862,74 @@ async def _create_or_get_bot_dm(bot_id: int, user: User) -> DmResponse:
 # PUT /channels/{id}/read — monotonic read-state upsert
 # ---------------------------------------------------------------------------
 
+async def raise_read_cursor(
+    channel_id: int, user_id: int, seq: int
+) -> Optional[tuple[int, bool]]:
+    """Raise the user's read cursor to `seq`: (the cursor now, whether it moved).
+
+    Call inside a transaction. Only a public channel gets a row made for it;
+    anywhere else a missing row is a removed member, and the answer is None.
+    """
+    row = await db.fetch_one(
+        """SELECT last_read_seq FROM channel_members
+           WHERE channel_id = ? AND member_type = 'user' AND member_id = ?""",
+        (channel_id, user_id),
+    )
+    if row is not None:
+        if seq <= row["last_read_seq"]:
+            return row["last_read_seq"], False
+        await db.execute(
+            """UPDATE channel_members SET last_read_seq = ?
+               WHERE channel_id = ? AND member_type = 'user' AND member_id = ?""",
+            (seq, channel_id, user_id),
+            commit=False,
+        )
+        return seq, True
+    channel = await db.fetch_one(
+        "SELECT type, visibility FROM channels WHERE id = ?", (channel_id,)
+    )
+    if (
+        channel is None
+        or channel["type"] not in IMPLICIT_MEMBER_TYPES
+        or channel["visibility"] != "public"
+    ):
+        return None
+    await db.execute(
+        """INSERT INTO channel_members (channel_id, member_type, member_id, last_read_seq)
+           VALUES (?, 'user', ?, ?)""",
+        (channel_id, user_id, seq),
+        commit=False,
+    )
+    return seq, seq > 0
+
+
+async def publish_read(channel_id: int, user_id: int, last_read_seq: int) -> None:
+    """Tell the user's own sockets, and nobody else's, where their cursor is."""
+    await events.publish(
+        {
+            "type": "channel_read",
+            "channel_id": channel_id,
+            "user_id": user_id,
+            "last_read_seq": last_read_seq,
+        }
+    )
+
+
 @router.put("/channels/{channel_id}/read")
 async def mark_read(channel_id: int, body: ReadRequest, user: CurrentUser) -> dict[str, int]:
     await _get_channel(channel_id)
     # Read state is a read path: a non-member must not learn a private
-    # channel's seq numbers, and the upsert below must never manufacture
-    # membership of a DM or a private channel. is_member is True without a row
-    # only for public main_feed/text, which is exactly where the lazy row is
-    # wanted.
+    # channel's seq numbers.
     if not await is_member(channel_id, "user", user.id):
         raise HTTPException(status_code=403, detail="Not a member of this channel")
-    # public main_feed / text: implicit membership — the row is created lazily
-    # here, solely to store last_read_seq. Monotonic: never lowered.
-    await db.execute(
-        """INSERT INTO channel_members (channel_id, member_type, member_id, last_read_seq)
-           VALUES (?, 'user', ?, ?)
-           ON CONFLICT (channel_id, member_type, member_id)
-           DO UPDATE SET last_read_seq = MAX(last_read_seq, excluded.last_read_seq)""",
-        (channel_id, user.id, body.seq),
-    )
-    row = await db.fetch_one(
-        """SELECT last_read_seq FROM channel_members
-           WHERE channel_id = ? AND member_type = 'user' AND member_id = ?""",
-        (channel_id, user.id),
-    )
-    assert row is not None
-    return {"channel_id": channel_id, "last_read_seq": row["last_read_seq"]}
+    async with db.transaction():
+        read = await raise_read_cursor(channel_id, user.id, body.seq)
+    if read is None:
+        raise HTTPException(status_code=403, detail="Not a member of this channel")
+    cursor, moved = read
+    if moved:
+        await publish_read(channel_id, user.id, cursor)
+    return {"channel_id": channel_id, "last_read_seq": cursor}
 
 
 # ---------------------------------------------------------------------------

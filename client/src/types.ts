@@ -699,6 +699,13 @@ export interface ApprovalUpdateFrame {
   proposal: ApprovalProposal;
 }
 
+/** This account's read cursor moved, on any device. The reader's sockets only. */
+export interface ChannelReadFrame {
+  type: "channel_read";
+  channel_id: number;
+  last_read_seq: number;
+}
+
 export type ServerFrame =
   | ReadyFrame
   | MessageCreateFrame
@@ -714,7 +721,8 @@ export type ServerFrame =
   | AppStageFrame
   | AppUpdateFrame
   | PongFrame
-  | ApprovalUpdateFrame;
+  | ApprovalUpdateFrame
+  | ChannelReadFrame;
 
 export interface PongFrame {
   type: "pong";

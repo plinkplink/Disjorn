@@ -82,6 +82,21 @@ export function markedRead(
   return { ...s, base: 0, live: [], read, top: read };
 }
 
+/** The server's cursor reached `seq`, from any device; an older cursor changes nothing. */
+export function readThrough(
+  prev: UnreadState | undefined,
+  seq: number,
+): UnreadState | undefined {
+  if (prev === undefined || seq <= prev.read) return prev;
+  return {
+    ...prev,
+    // Below `through` the list's count spans the cursor, and stays an overcount.
+    base: seq >= prev.through ? 0 : prev.base,
+    live: prev.live.filter((x) => x > seq),
+    read: seq,
+  };
+}
+
 /** A read the server never stored must not hide the next list's count. */
 export function readRefused(
   state: UnreadState | undefined,

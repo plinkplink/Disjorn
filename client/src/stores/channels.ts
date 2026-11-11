@@ -13,6 +13,7 @@ import {
   listed,
   markedRead,
   readRefused,
+  readThrough,
   unreadCount,
 } from "../lib/unread";
 import type { UnreadState } from "../lib/unread";
@@ -76,6 +77,8 @@ interface ChannelsState {
   onMessageCreate: (message: Message, isRead: boolean) => void;
   /** Live update from a message_delete frame: an unread arrival stops counting. */
   onMessageDelete: (channelId: number, seq: number) => void;
+  /** Live update from a channel_read frame: this account's cursor, from any device. */
+  onChannelRead: (channelId: number, seq: number) => void;
   /** Live update from a channel_create frame: add the new text channel row. */
   onChannelCreate: (channel: {
     id: number;
@@ -233,6 +236,15 @@ export const useChannels = create<ChannelsState>()((set, get) => ({
     if (next !== undefined && next !== before) {
       set(withUnread(get(), channelId, next));
     }
+  },
+
+  onChannelRead: (channelId, seq) => {
+    const before = get().unreadState[channelId];
+    const next = readThrough(before, seq);
+    if (next === undefined || next === before) return;
+    set(withUnread(get(), channelId, next));
+    // Only the server can count what is left below the list's newest message.
+    if (next.base > 0) void get().refresh().catch(() => {});
   },
 
   onChannelCreate: (channel) => {

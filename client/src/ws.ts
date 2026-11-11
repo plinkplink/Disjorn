@@ -320,6 +320,11 @@ export class DisjornSocket {
       case "approval_update":
         useApprovals.getState().onUpdate(frame);
         return;
+      case "channel_read":
+        useChannels
+          .getState()
+          .onChannelRead(frame.channel_id, frame.last_read_seq);
+        return;
     }
   }
 

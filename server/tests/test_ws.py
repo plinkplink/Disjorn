@@ -743,3 +743,59 @@ def test_a_ping_is_answered_with_a_pong_on_the_same_socket(wsc):
         wa = open_user(stack, wsc, ta, a)
         wa.send_json({"op": "ping"})
         assert wa.receive_json() == {"type": "pong"}
+
+
+# ---------------------------------------------------------------------------
+# Read cursor
+# ---------------------------------------------------------------------------
+
+def seed_messages(wsc, channel_id, author_id, count):
+    for seq in range(1, count + 1):
+        call(
+            wsc,
+            db.execute,
+            "INSERT INTO messages (channel_id, seq, author_type, author_id, content) "
+            "VALUES (?, ?, 'user', ?, ?)",
+            (channel_id, seq, author_id, f"m{seq}"),
+        )
+
+
+def put_read(wsc, token, channel_id, seq):
+    r = wsc.put(
+        f"/channels/{channel_id}/read", json={"seq": seq}, headers=cookie(token)
+    )
+    assert r.status_code == 200, r.text
+    return r.json()["last_read_seq"]
+
+
+def open_second_tab(stack, wsc, token, user_id):
+    ws = stack.enter_context(wsc.websocket_connect("/ws", headers=cookie(token)))
+    assert ws.receive_json() == {"type": "ready", "user_id": user_id}
+    return ws
+
+
+def test_a_read_reaches_every_socket_of_the_reader_and_nobody_else(wsc):
+    a, b = make_user(wsc, "alice"), make_user(wsc, "bob")
+    bot_id = make_bot(wsc, "claudette")
+    ta, tb = login(wsc, "alice"), login(wsc, "bob")
+    main = main_feed_id(wsc)
+    add_member(wsc, main, "bot", bot_id)
+    seed_messages(wsc, main, b, 3)
+    with ExitStack() as stack:
+        tab = open_user(stack, wsc, ta, a)
+        phone = open_second_tab(stack, wsc, ta, a)
+        wb = open_user(stack, wsc, tb, b, peers=[tab, phone])
+        bot = open_bot(stack, wsc, bot_id)
+
+        assert put_read(wsc, ta, main, 2) == 2
+        read = {"type": "channel_read", "channel_id": main, "last_read_seq": 2}
+        assert tab.receive_json() == read
+        assert phone.receive_json() == read
+
+        # A cursor that did not move is not announced.
+        assert put_read(wsc, ta, main, 1) == 2
+
+        tab.send_json({"op": "status", "status": "idle"})
+        idle = {"type": "presence", "user_id": a, "status": "idle"}
+        for ws in (tab, phone, wb, bot):
+            assert ws.receive_json() == idle

@@ -318,3 +318,54 @@ test('the socket counts others\' messages, not mine, and uncounts a deleted one'
   assert.equal(m.tabTitle(m.useChannels.getState().channels), 'Disjorn');
   socket.disconnect();
 });
+
+function openSocket() {
+  const socket = new m.DisjornSocket();
+  socket.connect();
+  const frame = (f) => FakeSocket.made[0].onmessage({ data: JSON.stringify(f) });
+  frame({ type: 'ready' });
+  return { socket, frame };
+}
+
+const title = () => m.tabTitle(m.useChannels.getState().channels);
+
+test('a read on another device leaves the messages above it; an older one is ignored', () => {
+  let s = m.listed(undefined, row(1, 2, 10));
+  for (const seq of [11, 12, 13]) s = m.created(s, seq, false);
+  const read = m.readThrough(s, 12);
+  assert.equal(m.unreadCount(read), 1);
+  assert.equal(m.readThrough(read, 12), read);
+  assert.equal(m.readThrough(read, 11), read);
+  assert.equal(m.readThrough(undefined, 5), undefined);
+});
+
+test('a channel_read frame drops the badge and the title on a tab nobody is looking at', async () => {
+  await load([row(1, 2, 10), row(2, 1, 4)]);
+  const { socket, frame } = openSocket();
+  frame({ type: 'message_create', message: message(1, 11) });
+  frame({ type: 'message_create', message: message(1, 12) });
+  assert.equal(title(), '(5) Disjorn');
+
+  frame({ type: 'channel_read', channel_id: 1, last_read_seq: 11 });
+  assert.equal(unreadOf(1), 1);
+  assert.equal(title(), '(2) Disjorn');
+  frame({ type: 'channel_read', channel_id: 1, last_read_seq: 10 });
+  assert.equal(unreadOf(1), 1);
+  frame({ type: 'channel_read', channel_id: 1, last_read_seq: 12 });
+  assert.equal(title(), '(1) Disjorn');
+  frame({ type: 'channel_read', channel_id: 7, last_read_seq: 3 });
+
+  assert.deepEqual(reads, []);
+  assert.equal(lists.length, 0);
+  socket.disconnect();
+});
+
+test('a read inside the range the list counted asks the server what is left', async () => {
+  const st = m.useChannels.getState();
+  await load([row(1, 3, 10)]);
+  st.onChannelRead(1, 9);
+  assert.equal(lists.length, 1);
+  answerNextList([row(1, 1, 10)]);
+  await settle();
+  assert.equal(unreadOf(1), 1);
+});
