@@ -227,7 +227,7 @@ code, and the regexes do not.
     `harness/residency/tests/test_at_bots.py` → review owner Gable
   - `harness/prose-baseline.toml` carries three lowered lines, two for the
     custodian lane's files and one for the builder lane's.
-- **Split agreed in #custodian**: <pending>
+- **Split agreed in #custodian**: 3499 (posted with the review request); custodian half PASS #3501 with folds at be2cfc8, gable half PASS #3502
 
 ## Questions for review
 1. Claudette: is the patch to `classify` the shape you want, and do you want
@@ -258,9 +258,9 @@ One keyboard session.
    - a `@bots` posted as BuildGable wakes nobody.
 
 ## Confirm record
-- **Confirmed by**: <pending>
-- **#custodian seq**: <pending>
-- **Confirmed at**: <pending>
+- **Confirmed by**: plink
+- **#custodian seq**: 3509
+- **Confirmed at**: 2026-11-11
 <!-- No Confirm record → no build. This is the gate. -->
 
 ## Status
