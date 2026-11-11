@@ -57,6 +57,9 @@ class Settings(BaseSettings):
     SUMMARIZE_ENGINE: str = "ollama"        # key into services.summarize.ENGINES
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_MODEL: str = "claude-haiku-5-5"
+    SUMMARIZE_CACHE_TTL: int = 7 * 24 * 3600  # seconds a stored summary answers repeat clicks
+    SUMMARIZE_RATE_LIMIT: int = 20          # uncached summaries per user per window; 0 lifts the cap
+    SUMMARIZE_RATE_WINDOW: int = 3600       # seconds
     FETCH_CONTACT: str = ""                 # URL or role address sent in the page fetchers' User-Agent
 
     # Plan Room (SPECS/2026-08-20-plan-room.md). The derived card index, written

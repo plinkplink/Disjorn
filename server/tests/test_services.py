@@ -2,6 +2,7 @@
 endpoint with mocked engines, STT 501 degradation + engine factory selection."""
 
 import asyncio
+import datetime
 import importlib.util
 import json
 import shutil
@@ -398,6 +399,7 @@ async def test_summarize_endpoint(client, monkeypatch):
     assert r.json() == {
         "url": "https://example.com/article",
         "summary": "A tidy three-sentence summary.",
+        "cached": False,
     }
     text, url = fake.calls[0]
     assert url == "https://example.com/article"
@@ -705,8 +707,130 @@ def test_pinning_swaps_only_the_host(url, ip, pinned):
 
 
 # ---------------------------------------------------------------------------
-# Summarize: public-only fetch
+# Summarize: cache, per-user cap, public-only fetch
 # ---------------------------------------------------------------------------
+
+@pytest.fixture
+async def summarizing(client, monkeypatch):
+    """A logged-in alice whose page fetch and engine are fakes; the fake records both."""
+    await make_user()
+    await login(client)
+    fake = FakeSummarizer()
+    fake.fetched = []
+
+    async def fake_fetch_page(url):
+        fake.fetched.append(url)
+        return CANNED_HTML
+
+    monkeypatch.setattr(summarize_service, "fetch_page", fake_fetch_page)
+    monkeypatch.setattr(summarize_service, "get_summarizer", lambda: fake)
+    return fake
+
+
+def _ago(**delta) -> str:
+    then = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(**delta)
+    return then.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+async def test_a_repeat_click_by_anyone_is_served_from_the_cache(client, summarizing):
+    first = await client.post("/summarize", json={"url": "https://Example.com:443/article#top"})
+    assert first.status_code == 200 and first.json()["cached"] is False
+
+    await make_user("bob")
+    await login(client, "bob")
+    again = await client.post("/summarize", json={"url": "https://example.com/article"})
+    assert again.json() == {
+        "url": "https://example.com/article",
+        "summary": "A tidy three-sentence summary.",
+        "cached": True,
+    }
+    assert len(summarizing.calls) == 1 and len(summarizing.fetched) == 1
+
+
+async def test_another_model_does_not_answer_from_this_models_cache(client, summarizing):
+    summarizing.model = "model-a"
+    await client.post("/summarize", json={"url": "https://example.com/a"})
+    summarizing.model = "model-b"
+    r = await client.post("/summarize", json={"url": "https://example.com/a"})
+    assert r.json()["cached"] is False and len(summarizing.calls) == 2
+
+
+async def test_a_summary_past_its_ttl_is_made_again(client, summarizing):
+    body = {"url": "https://example.com/a"}
+    await client.post("/summarize", json=body)
+
+    await db.execute("UPDATE summary_cache SET created_at = ?", (_ago(days=6, hours=23),))
+    assert (await client.post("/summarize", json=body)).json()["cached"] is True
+    assert len(summarizing.calls) == 1
+
+    await db.execute("UPDATE summary_cache SET created_at = ?", (_ago(days=7, minutes=1),))
+    assert (await client.post("/summarize", json=body)).json()["cached"] is False
+    assert len(summarizing.calls) == 2
+    row = await db.fetch_one("SELECT created_at FROM summary_cache")
+    assert row["created_at"] > _ago(minutes=1)
+
+
+async def test_a_failed_summary_is_not_cached(client, summarizing, monkeypatch):
+    class Failing:
+        async def summarize(self, text, url):
+            raise httpx.ConnectError("down")
+
+    monkeypatch.setattr(summarize_service, "get_summarizer", lambda: Failing())
+    assert (await client.post("/summarize", json={"url": "https://example.com/a"})).status_code == 503
+    assert await db.fetch_one("SELECT 1 FROM summary_cache") is None
+
+    monkeypatch.setattr(summarize_service, "get_summarizer", lambda: summarizing)
+    r = await client.post("/summarize", json={"url": "https://example.com/a"})
+    assert r.json()["cached"] is False and len(summarizing.calls) == 1
+
+
+async def test_the_cap_on_uncached_summaries_answers_429_and_says_when(
+        client, summarizing, monkeypatch):
+    monkeypatch.setenv("SUMMARIZE_RATE_LIMIT", "2")
+    reset_settings_cache()
+    for n in (1, 2):
+        r = await client.post("/summarize", json={"url": f"https://example.com/{n}"})
+        assert r.status_code == 200
+
+    capped = await client.post("/summarize", json={"url": "https://example.com/3"})
+    assert capped.status_code == 429
+    assert 3590 < int(capped.headers["retry-after"]) <= 3600
+    assert "Try again in 60 minutes" in capped.json()["detail"]
+    assert len(summarizing.calls) == 2 and len(summarizing.fetched) == 2
+
+    cached = await client.post("/summarize", json={"url": "https://example.com/1"})
+    assert cached.status_code == 200 and cached.json()["cached"] is True
+
+    await make_user("bob")
+    await login(client, "bob")
+    assert (await client.post("/summarize", json={"url": "https://example.com/3"})).status_code == 200
+
+
+async def test_a_page_that_cannot_be_fetched_does_not_spend_the_cap(
+        client, summarizing, monkeypatch):
+    monkeypatch.setenv("SUMMARIZE_RATE_LIMIT", "1")
+    reset_settings_cache()
+    working = summarize_service.fetch_page
+
+    async def broken(url):
+        raise summarize_service.PageFetchError("the site answered HTTP 403")
+
+    monkeypatch.setattr(summarize_service, "fetch_page", broken)
+    assert (await client.post("/summarize", json={"url": "https://example.com/a"})).status_code == 502
+    monkeypatch.setattr(summarize_service, "fetch_page", working)
+    assert (await client.post("/summarize", json={"url": "https://example.com/a"})).status_code == 200
+
+
+@pytest.mark.parametrize("url, key", [
+    ("https://Example.COM:443/a?b=1#frag", "https://example.com/a?b=1"),
+    ("http://example.com", "http://example.com/"),
+    ("http://example.com:8080/Path", "http://example.com:8080/Path"),
+    ("https://User:Pw@Example.com/", "https://User:Pw@example.com/"),
+    ("http://[::1", "http://[::1"),
+])
+def test_normalize_url_folds_only_what_cannot_change_the_page(url, key):
+    assert summarize_service.normalize_url(url) == key
+
 
 def _never_fetched(request):
     raise AssertionError(f"fetched {request.url}")
@@ -778,3 +902,33 @@ async def test_fetch_page_reports_the_sites_status_not_the_pinned_address():
     with pytest.raises(summarize_service.PageFetchError, match="^the site answered HTTP 403$"):
         await summarize_service.fetch_page(
             "https://93.184.215.14/a", transport=httpx.MockTransport(handler))
+
+
+async def test_the_summary_cache_migration_applies_to_an_existing_database(tmp_path, monkeypatch):
+    migration = "022_summary_cache.sql"
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "old.db"))
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    reset_settings_cache()
+    await db.close()
+    conn = await db.connect()
+    try:
+        await conn.execute("""CREATE TABLE schema_migrations (
+            filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)""")
+        for path in sorted(db.MIGRATIONS_DIR.glob("*.sql")):
+            if path.name == migration:
+                continue
+            await conn.executescript(path.read_text(encoding="utf-8"))
+            await conn.execute(
+                "INSERT INTO schema_migrations (filename, applied_at) VALUES (?, ?)",
+                (path.name, db.utc_now()))
+        await conn.commit()
+
+        assert await db.run_migrations() == [migration]
+
+        key = ("https://example.com/", "anthropic", "claude-haiku-5-5")
+        await summarize_service.store_summary(*key, "first")
+        await summarize_service.store_summary(*key, "second")
+        assert await summarize_service.cached_summary(*key) == "second"
+    finally:
+        await db.close()
+        reset_settings_cache()
