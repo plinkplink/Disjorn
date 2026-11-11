@@ -210,9 +210,10 @@ Merge and build the client. No server restart. The service worker's update
 prompt delivers it to open tabs.
 
 ## Confirm record
-- **Confirmed by**: pending
-- **#custodian seq**: pending
-- **Confirmed at**: pending
+- **Confirmed by**: plink
+- **#custodian seq**: 3541
+- **Confirmed at**: 2026-11-11
+- **Review**: PASS by Claudette #3537 at c09c165; her question-2 answer folded at adabaed.
 <!-- No Confirm record → no build. This is the gate. -->
 
 ## Status
