@@ -603,46 +603,80 @@ def refuse_writing(monkeypatch, name: str) -> None:
     monkeypatch.setattr(os, "open", opening)
 
 
-def content(path) -> bytes:
-    try:
-        return path.read_bytes()
-    except OSError:
+def as_the_seat_lists(folder) -> list[str]:
+    """The seat is the folder's group at most, never its owner."""
+    if not folder.exists() or stat.S_IMODE(folder.stat().st_mode) & 0o077 == 0:
+        return []
+    return os.listdir(folder)
+
+
+def as_the_seat_reads(path) -> bytes:
+    if not path.exists() or stat.S_IMODE(path.lstat().st_mode) & 0o077 == 0:
         return b""
+    return path.read_bytes()
 
 
-async def test_a_file_that_cannot_be_unlinked_loses_its_content(house, export, monkeypatch):
+def errors(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR
+            and r.name == "app.services.bot_files" and "must go" in r.getMessage()]
+
+
+STUCK = "bot file export: 1 entries that must go are still in the export of res-claw;" \
+        " the next sweep retries"
+
+
+async def test_a_file_that_cannot_be_unlinked_is_neither_readable_nor_listed_to_the_seat(
+    house, export, monkeypatch, caplog
+):
+    export.chmod(0o2750)
     await house.flip("on")
     message, _, path = await shown(house, export, "plan.txt", CANARY.encode())
     _, _, other = await shown(house, export, "other.txt", b"other")
-    refuse_unlink(monkeypatch, path.split("/")[1])
+    room, name = export / str(house.room), path.split("/")[1]
+    assert name in as_the_seat_lists(room)
+    refuse_unlink(monkeypatch, name)
 
     r = await house.client.patch(f"/messages/{message['id']}", json={"content": "keep this secret"})
 
     assert r.status_code == 200
-    assert (export / path).exists() and content(export / path) == b""
-    assert stat.S_IMODE((export / path).lstat().st_mode) == 0
-    assert (export / other).read_bytes() == b"other"
-    assert [e["file"] for e in manifest(export, house.room)] == [other.split("/")[1]]
+    assert as_the_seat_lists(room) == [] and as_the_seat_reads(export / path) == b""
+    assert (export / path).stat().st_size == 0
+    assert stat.S_IMODE((export / path).stat().st_mode) == 0
+    assert exported(export) == {path}
+    assert errors(caplog) == [STUCK]
+    assert name not in caplog.text and "plan" not in caplog.text
+
+    await bot_files.export_sweep()
+    assert as_the_seat_lists(room) == [] and errors(caplog) == [STUCK, STUCK]
 
     monkeypatch.undo()
     await bot_files.export_sweep()
-    assert exported(export) == {other}
+    assert stat.S_IMODE(export.stat().st_mode) == 0o2750
+    assert stat.S_IMODE(room.stat().st_mode) == stat.S_ISGID | bot_files.EXPORT_DIR_MODE
+    assert sorted(as_the_seat_lists(room)) == sorted([other.split("/")[1], "manifest.json"])
+    assert (export / other).read_bytes() == b"other"
+    assert [e["file"] for e in manifest(export, house.room)] == [other.split("/")[1]]
+    assert errors(caplog) == [STUCK, STUCK]
 
 
-async def test_a_directory_that_cannot_be_removed_loses_every_files_content(
-    house, export, monkeypatch
+async def test_a_directory_that_cannot_be_removed_is_closed_with_every_file_emptied(
+    house, export, monkeypatch, caplog
 ):
     await house.flip("on")
     _, _, path = await shown(house, export, "plan.txt", CANARY.encode())
     _, _, other = await shown(house, export, "other.txt", CANARY.encode())
+    room = export / str(house.room)
     refuse_unlink(monkeypatch, path.split("/")[1])
 
     await house.say("/files-safe #files off")
 
-    assert content(export / path) == b"" and content(export / other) == b""
+    assert as_the_seat_lists(room) == []
+    assert (export / path).stat().st_size == 0 and not (export / other).exists()
+    assert errors(caplog) == [STUCK]
+    assert stat.S_IMODE(export.stat().st_mode) & 0o050 == 0o050
 
 
-async def test_content_that_cannot_be_removed_empties_the_seat_and_is_reported(
+async def test_a_file_that_can_be_neither_unlinked_nor_emptied_is_closed_and_reported(
     house, export, monkeypatch, caplog
 ):
     await house.flip("on")
@@ -655,10 +689,9 @@ async def test_content_that_cannot_be_removed_empties_the_seat_and_is_reported(
     assert (await house.client.delete(f"/messages/{message['id']}")).status_code == 200
 
     assert exported(export) == {path}
-    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
-    assert errors[-1] == (
-        "bot file export: 1 entries that must go are still readable in the export of"
-        " res-claw; the next sweep retries")
+    assert stat.S_IMODE((export / path).stat().st_mode) == 0
+    assert as_the_seat_lists(export / str(house.room)) == []
+    assert errors(caplog) == [STUCK]
     assert name not in caplog.text and "plan" not in caplog.text
 
     monkeypatch.undo()
@@ -666,20 +699,73 @@ async def test_content_that_cannot_be_removed_empties_the_seat_and_is_reported(
     assert exported(export) == {other}
 
 
+async def test_a_file_without_its_owner_write_bit_is_still_closed_and_emptied(
+    house, export, monkeypatch
+):
+    await house.flip("on")
+    message, _, path = await shown(house, export, "plan.txt", CANARY.encode())
+    (export / path).chmod(0o440)
+    refuse_unlink(monkeypatch, path.split("/")[1])
+    await db.execute("UPDATE messages SET deleted_at = 'x' WHERE id = ?", (message["id"],))
+    await bot_files.export_sweep()
+
+    assert stat.S_IMODE((export / path).stat().st_mode) == 0
+    assert (export / path).stat().st_size == 0
+
+
+async def test_an_entry_linked_to_another_file_is_closed_but_never_emptied(
+    house, export, tmp_path, monkeypatch, caplog
+):
+    await house.flip("on")
+    message, _, path = await shown(house, export, "plan.txt", CANARY.encode())
+    original = tmp_path / "original.txt"
+    original.write_text(CANARY)
+    (export / path).unlink()
+    os.link(original, export / path)
+    refuse_unlink(monkeypatch, path.split("/")[1])
+    await db.execute("UPDATE messages SET deleted_at = 'x' WHERE id = ?", (message["id"],))
+
+    await bot_files.export_sweep()
+
+    assert original.read_text() == CANARY
+    assert stat.S_IMODE(original.stat().st_mode) == 0o600
+    assert as_the_seat_reads(export / path) == b""
+    assert as_the_seat_lists(export / str(house.room)) == []
+    assert errors(caplog) == [STUCK]
+
+
 async def test_a_link_that_cannot_be_unlinked_is_never_written_through(
-    house, export, tmp_path, monkeypatch
+    house, export, tmp_path, monkeypatch, caplog
 ):
     await house.flip("on")
     await shown(house, export)
     outside = tmp_path / "outside.txt"
     outside.write_text("outside")
+    before = stat.S_IMODE(outside.stat().st_mode)
     (export / str(house.room) / "link.txt").symlink_to(outside)
     refuse_unlink(monkeypatch, "link.txt")
 
     await bot_files.export_sweep()
 
-    assert outside.read_text() == "outside" and stat.S_IMODE(outside.stat().st_mode) != 0
+    assert outside.read_text() == "outside" and stat.S_IMODE(outside.stat().st_mode) == before
     assert exported(export) == {f"{house.room}/link.txt"}
+    assert as_the_seat_lists(export / str(house.room)) == [] and errors(caplog) == [STUCK]
+
+
+async def test_an_entry_stuck_at_the_top_is_reported_and_the_seat_folder_keeps_its_mode(
+    house, export, monkeypatch, caplog
+):
+    await house.flip("on")
+    await shown(house, export)
+    (export / "stray.txt").write_text(CANARY)
+    before = stat.S_IMODE(export.stat().st_mode)
+    refuse_unlink(monkeypatch, "stray.txt")
+
+    await bot_files.export_sweep()
+
+    assert (export / "stray.txt").stat().st_size == 0
+    assert stat.S_IMODE(export.stat().st_mode) == before
+    assert errors(caplog) == [STUCK]
 
 
 # ------------------------------------------------------------ the sweep's cost

@@ -269,40 +269,51 @@ def export_name(att: dict[str, Any]) -> str:
     return f"{int(att['id'])}_{slug}{'.' + ext.lower() if ext else ''}"
 
 
+EXPORT_SHUT_MODE = 0o700
+
+
 def _blank(path: str) -> None:
-    """Empty a file and close it to every reader, through a descriptor that follows no link."""
+    """Close a file to the seat, then empty it; never through a link.
+
+    The first open is read-only, so a file without its owner write bit is
+    still closed. An inode with another link is closed to group and other and
+    keeps its bytes: the other name may be a stored original.
+    """
     try:
-        fd = os.open(path, os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
         return
     try:
-        for close_off in (os.ftruncate, os.fchmod):
+        if os.fstat(fd).st_nlink != 1:
+            os.fchmod(fd, 0o600)
+            return
+        os.fchmod(fd, 0o200)
+        try:
+            again = os.open(path, os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
             try:
-                close_off(fd, 0)
-            except OSError:
-                pass
+                if os.path.samestat(os.fstat(fd), os.fstat(again)):
+                    os.ftruncate(again, 0)
+            finally:
+                os.close(again)
+        finally:
+            os.fchmod(fd, 0)
+    except OSError:
+        pass
     finally:
         os.close(fd)
 
 
-def _readable(path: str) -> bool:
-    """False for nothing, an empty regular file, or a directory holding only those."""
-    try:
-        st = os.lstat(path)
-        if stat.S_ISDIR(st.st_mode):
-            return any(_readable(entry.path) for entry in os.scandir(path))
-        return not (stat.S_ISREG(st.st_mode) and st.st_size == 0)
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return True
+def _shut(folder: str) -> bool:
+    return stat.S_IMODE(os.lstat(folder).st_mode) & 0o077 == 0
 
 
-def _remove(path: str) -> bool:
-    """False if something readable is still at the path.
+def _remove(path: str, holder: Optional[str] = None) -> bool:
+    """False if anything is still at the path, whatever its size or mode.
 
-    What will not unlink is emptied and the next sweep unlinks it. No log line
-    here names a file: the name of a hidden file is itself hidden.
+    The name of a hidden file is itself hidden. So what will not unlink is
+    closed and emptied, and then the folder that lists it is shut to the seat:
+    the path itself when it is a directory, else `holder`. No log line here
+    names a file.
     """
     is_dir = os.path.isdir(path) and not os.path.islink(path)
     try:
@@ -314,7 +325,7 @@ def _remove(path: str) -> bool:
     except FileNotFoundError:
         return True
     except OSError as exc:
-        logger.warning("bot file export: an entry of %s would not unlink (%s); emptying it",
+        logger.warning("bot file export: an entry of %s would not unlink (%s)",
                        os.path.dirname(path), type(exc).__name__)
     if is_dir:
         for folder, _dirs, names in os.walk(path):
@@ -327,11 +338,18 @@ def _remove(path: str) -> bool:
             os.unlink(path)
         except OSError:
             pass
-    return not _readable(path)
+    if not os.path.lexists(path):
+        return True
+    try:
+        if is_dir or holder is not None:
+            os.chmod(path if is_dir else holder, EXPORT_SHUT_MODE)
+    except OSError:
+        pass
+    return False
 
 
 def _empty(seat_dir: Path) -> int:
-    """How many entries are still readable afterwards; a directory that cannot be listed is one."""
+    """How many entries are still there afterwards; a directory that cannot be listed is one."""
     try:
         return sum(not _remove(entry.path) for entry in os.scandir(seat_dir))
     except OSError:
@@ -380,20 +398,28 @@ def _write_manifest(folder: Path, entries: list[dict[str, Any]]) -> None:
 
 
 def _reconcile(seat_dir: Path, wanted: dict[int, dict[str, tuple[Path, dict[str, Any]]]]) -> None:
-    """Removals, then pruned manifests, then copies: a failure leaves too little, never too much."""
+    """Removals, then pruned manifests, then copies: a failure leaves too little, never too much.
+
+    A channel folder an earlier pass shut is removed whole and made again, never
+    chmodded back: it takes its group and setgid bit from the seat directory
+    when it is made, and a chmod by a server outside that group drops the bit.
+    The seat directory's own mode is never changed.
+    """
     folders = {str(channel_id): files for channel_id, files in wanted.items()}
     stuck = 0
     for entry in os.scandir(seat_dir):
-        keep = folders.get(entry.name) if entry.is_dir(follow_symlinks=False) else None
+        keep = None
+        if entry.is_dir(follow_symlinks=False) and not _shut(entry.path):
+            keep = folders.get(entry.name)
         if keep is None:
             stuck += not _remove(entry.path)
             continue
         for item in os.scandir(entry.path):
             listed = item.name in keep or item.name == MANIFEST
             if not (listed and item.is_file(follow_symlinks=False)):
-                stuck += not _remove(item.path)
+                stuck += not _remove(item.path, entry.path)
     if stuck:
-        raise OSError(f"{stuck} entries that must go are still readable")
+        raise OSError(f"{stuck} entries that must go are still there")
 
     copies = []
     for name, files in folders.items():
@@ -508,7 +534,7 @@ async def export_sweep() -> None:
     """Make each seat's export hold exactly the files `visible_to_bots` passes for its bot now.
 
     Never raises: a seat whose sweep cannot finish has its export emptied, and
-    what even that leaves readable is an ERROR line for the next sweep to retry.
+    what even that leaves behind is an ERROR line for the next sweep to retry.
     A seat directory that does not exist is a seat with no export.
     """
     try:
@@ -527,8 +553,8 @@ async def export_sweep() -> None:
                     left = _empty(seat_dir)
                     if left:
                         logger.error(
-                            "bot file export: %d entries that must go are still readable in"
-                            " the export of %s; the next sweep retries", left, seat)
+                            "bot file export: %d entries that must go are still in the"
+                            " export of %s; the next sweep retries", left, seat)
     except Exception:
         logger.exception("bot file export: sweep could not run")
 
