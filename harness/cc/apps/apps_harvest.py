@@ -185,6 +185,7 @@ FLAG_PREFIX = "FLAG:"
 # number for the room line, and the same bound on `flag` keeps a narration to
 # #custodian one sentence rather than a pasted transcript.
 REPORT_LINE_MAX = 300
+REPORT_WORD_BACKOFF = 40
 
 
 def _now_iso() -> str:
@@ -1059,7 +1060,13 @@ def _one_line(text: str, patterns: list[tuple[str, bytes]]) -> str:
     that no longer matches.
     """
     clean = "".join(c for c in text if c >= " " and c != "\x7f").strip()
-    return redact_text(clean, patterns)[:REPORT_LINE_MAX]
+    line = redact_text(clean, patterns)
+    if len(line) <= REPORT_LINE_MAX:
+        return line
+    head = line[:REPORT_LINE_MAX]
+    space = head.rfind(" ", REPORT_LINE_MAX - 1 - REPORT_WORD_BACKOFF)
+    head = head[:space].rstrip() if space > 0 else head[:REPORT_LINE_MAX - 1]
+    return head + "\u2026"
 
 
 def runner_report(text: str | None,
