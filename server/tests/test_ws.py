@@ -235,6 +235,14 @@ def assert_msg_frame(frame, *, type="message_create", channel_id, content=None):
     return frame["message"]
 
 
+def assert_read_frame(ws, channel_id, seq):
+    assert ws.receive_json() == {
+        "type": "channel_read",
+        "channel_id": channel_id,
+        "last_read_seq": seq,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Auth
 # ---------------------------------------------------------------------------
@@ -400,6 +408,7 @@ def test_message_fanout_channel_members_only(wsc):
         # DM message: only the two participants receive it.
         post_msg(wsc, ta, dm, "psst bob")
         assert_msg_frame(wa.receive_json(), channel_id=dm, content="psst bob")
+        assert_read_frame(wa, dm, 1)
         assert_msg_frame(wb.receive_json(), channel_id=dm, content="psst bob")
 
         # main_feed message: everyone. Carol's FIRST frame is this one —
@@ -407,11 +416,13 @@ def test_message_fanout_channel_members_only(wsc):
         post_msg(wsc, ta, main, "hello everyone")
         for ws in (wa, wb, wc):
             assert_msg_frame(ws.receive_json(), channel_id=main, content="hello everyone")
+        assert_read_frame(wa, main, 1)
 
         # Edit fans out with the updated payload.
         msg = post_msg(wsc, ta, main, "tpyo")
         for ws in (wa, wb, wc):
             assert_msg_frame(ws.receive_json(), channel_id=main, content="tpyo")
+        assert_read_frame(wa, main, 2)
         r = wsc.patch(
             f"/messages/{msg['id']}", json={"content": "typo"}, headers=cookie(ta)
         )
@@ -501,6 +512,7 @@ def test_text_channel_fanout_and_channel_create_frame(wsc):
         post_msg(wsc, ta, cid, "custodial matters")
         for ws in (wa, wb, wcl):
             assert_msg_frame(ws.receive_json(), channel_id=cid, content="custodial matters")
+        assert_read_frame(wa, cid, 1)
 
         # Sentinel: otto's NEXT frame is main_feed traffic — the text-channel
         # message never reached it.
@@ -743,3 +755,97 @@ def test_a_ping_is_answered_with_a_pong_on_the_same_socket(wsc):
         wa = open_user(stack, wsc, ta, a)
         wa.send_json({"op": "ping"})
         assert wa.receive_json() == {"type": "pong"}
+
+
+# ---------------------------------------------------------------------------
+# Read cursor
+# ---------------------------------------------------------------------------
+
+def seed_messages(wsc, channel_id, author_id, count):
+    for seq in range(1, count + 1):
+        call(
+            wsc,
+            db.execute,
+            "INSERT INTO messages (channel_id, seq, author_type, author_id, content) "
+            "VALUES (?, ?, 'user', ?, ?)",
+            (channel_id, seq, author_id, f"m{seq}"),
+        )
+
+
+def put_read(wsc, token, channel_id, seq):
+    r = wsc.put(
+        f"/channels/{channel_id}/read", json={"seq": seq}, headers=cookie(token)
+    )
+    assert r.status_code == 200, r.text
+    return r.json()["last_read_seq"]
+
+
+def open_second_tab(stack, wsc, token, user_id):
+    ws = stack.enter_context(wsc.websocket_connect("/ws", headers=cookie(token)))
+    assert ws.receive_json() == {"type": "ready", "user_id": user_id}
+    return ws
+
+
+def test_a_read_reaches_every_socket_of_the_reader_and_nobody_else(wsc):
+    a, b = make_user(wsc, "alice"), make_user(wsc, "bob")
+    bot_id = make_bot(wsc, "claudette")
+    ta, tb = login(wsc, "alice"), login(wsc, "bob")
+    main = main_feed_id(wsc)
+    add_member(wsc, main, "bot", bot_id)
+    seed_messages(wsc, main, b, 3)
+    with ExitStack() as stack:
+        tab = open_user(stack, wsc, ta, a)
+        phone = open_second_tab(stack, wsc, ta, a)
+        wb = open_user(stack, wsc, tb, b, peers=[tab, phone])
+        bot = open_bot(stack, wsc, bot_id)
+
+        assert put_read(wsc, ta, main, 2) == 2
+        read = {"type": "channel_read", "channel_id": main, "last_read_seq": 2}
+        assert tab.receive_json() == read
+        assert phone.receive_json() == read
+
+        # A cursor that did not move is not announced.
+        assert put_read(wsc, ta, main, 1) == 2
+
+        tab.send_json({"op": "status", "status": "idle"})
+        idle = {"type": "presence", "user_id": a, "status": "idle"}
+        for ws in (tab, phone, wb, bot):
+            assert ws.receive_json() == idle
+
+
+def test_posting_tells_the_authors_sockets_their_cursor_and_nobody_elses(wsc):
+    a, b = make_user(wsc, "alice"), make_user(wsc, "bob")
+    bot_id = make_bot(wsc, "claudette")
+    ta, tb = login(wsc, "alice"), login(wsc, "bob")
+    main = main_feed_id(wsc)
+    add_member(wsc, main, "bot", bot_id)
+    with ExitStack() as stack:
+        tab = open_user(stack, wsc, ta, a)
+        phone = open_second_tab(stack, wsc, ta, a)
+        wb = open_user(stack, wsc, tb, b, peers=[tab, phone])
+        bot = open_bot(stack, wsc, bot_id)
+
+        post_msg(wsc, ta, main, "hello")
+        for ws in (tab, phone, wb, bot):
+            assert_msg_frame(ws.receive_json(), channel_id=main, content="hello")
+        assert_read_frame(tab, main, 1)
+        assert_read_frame(phone, main, 1)
+
+        # Bob's and the bot's next frame is Bob's own message.
+        post_msg(wsc, tb, main, "hi back")
+        for ws in (wb, bot, tab, phone):
+            assert_msg_frame(ws.receive_json(), channel_id=main, content="hi back")
+        assert_read_frame(wb, main, 2)
+
+        # A bot's post moves nobody's cursor.
+        r = wsc.post(
+            f"/channels/{main}/messages",
+            json={"content": "beep"},
+            headers={"X-Api-Key": BOT_KEY},
+        )
+        assert r.status_code == 200, r.text
+        post_msg(wsc, ta, main, "after the bot")
+        for ws in (tab, phone, wb, bot):
+            assert_msg_frame(ws.receive_json(), channel_id=main, content="beep")
+            assert_msg_frame(ws.receive_json(), channel_id=main, content="after the bot")
+        assert_read_frame(tab, main, 4)

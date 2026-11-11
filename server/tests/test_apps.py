@@ -1026,9 +1026,11 @@ def test_stage_events_reach_the_owner_alone_and_live_flips_the_app(
         # ordinary traffic that follows, so no app_stage arrived in between.
         post_msg(wsc, cookie(ta), main, "sentinel")
         assert wa.receive_json()["message"]["content"] == "sentinel"
+        assert wa.receive_json()["type"] == "channel_read"
         assert wc.receive_json()["message"]["content"] == "sentinel"
         post_msg(wsc, cookie(ta), session["channel_id"], "still here")
         assert wa.receive_json()["message"]["content"] == "still here"
+        assert wa.receive_json()["type"] == "channel_read"
         assert wbot.receive_json()["message"]["content"] == "still here"
 
         # `live` is the app's done state, so it moves the registry too.

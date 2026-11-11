@@ -70,6 +70,8 @@ Server -> client frames (Architecture §8.2; ephemeral events carry no seq):
                                             went live — same owner-only
                                             audience, same reason. `app` is the
                                             AppOut payload from routers/apps.py.
+    {"type": "channel_read", "channel_id", "last_read_seq"}
+                                            to that user's sockets, never a bot's
 
 Fan-out (bus subscriber, registered idempotently by init() from the app
 lifespan): message events go to connected users who are members of the channel
@@ -431,9 +433,7 @@ async def _send_to_members(
 async def _send_to_user(user_id: Optional[int], frame: dict[str, Any]) -> None:
     """Every socket of ONE user, and nothing else.
 
-    Used by the app frames, whose audience is the session/app owner alone. A
-    missing owner id delivers to nobody, which is the fail-closed answer: an
-    unroutable owner-only frame must not degrade into a broadcast.
+    A missing id delivers to nobody, never to everybody.
     """
     if not isinstance(user_id, int):
         return
@@ -519,6 +519,16 @@ async def handle_bus_event(event: dict[str, Any]) -> None:
         # change on their next GET /apps.
         await _send_to_user(
             event.get("owner_user_id"), {"type": "app_update", "app": event["app"]}
+        )
+        return
+    if etype == "channel_read":
+        await _send_to_user(
+            event.get("user_id"),
+            {
+                "type": "channel_read",
+                "channel_id": event["channel_id"],
+                "last_read_seq": event["last_read_seq"],
+            },
         )
         return
     if etype == "approval_update":

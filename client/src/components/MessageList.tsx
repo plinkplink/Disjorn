@@ -18,6 +18,7 @@ import { useMembers } from "../stores/members";
 import { useMessages } from "../stores/messages";
 import { useSession } from "../stores/session";
 import type { Attachment, Message } from "../types";
+import { socket } from "../ws";
 import { AppCard, appIdFromUrl } from "./AppCard";
 import { Avatar, BotAvatar } from "./Avatar";
 import { ChibiPicker } from "./ChibiPicker";
@@ -677,24 +678,24 @@ export function MessageList({
       .finally(() => setFillingSeq(null));
   };
 
-  // WP11: scrolling to the bottom of the active channel with the window
-  // focused reads it (AppShell only marks read on channel switch / refocus).
+  // The shell and the socket read this to tell whether the newest message is
+  // on screen; an unmounted list is not at its bottom.
+  const markAtBottom = (atBottom: boolean) => {
+    atBottomRef.current = atBottom;
+    useChannels.getState().setAtBottom(channelId, atBottom);
+  };
+  useEffect(
+    () => () => useChannels.getState().setAtBottom(channelId, false),
+    [channelId],
+  );
+
+  // Reaching the bottom of the active channel reads it, when nothing covers it.
   const lastMarkAtRef = useRef(0);
   const maybeMarkRead = () => {
-    if (!document.hasFocus()) return;
-    const st = useChannels.getState();
-    if (st.activeChannelId !== channelId) return;
-    const channel = st.channels.find((c) => c.id === channelId);
-    if (channel === undefined || channel.unread === 0) return;
+    if (useChannels.getState().activeChannelId !== channelId) return;
     const now = Date.now();
     if (now - lastMarkAtRef.current < MARK_READ_THROTTLE_MS) return;
-    const seq = Math.max(
-      useMessages.getState().lastSeq(channelId),
-      channel.last_message?.seq ?? 0,
-    );
-    if (seq <= 0) return;
-    lastMarkAtRef.current = now;
-    void st.markRead(channelId, seq);
+    if (socket.readActive()) lastMarkAtRef.current = now;
   };
 
   const onScroll = () => {
@@ -702,7 +703,7 @@ export function MessageList({
     if (el === null) return;
     const atBottom =
       el.scrollHeight - el.scrollTop - el.clientHeight < BOTTOM_STICK_PX;
-    atBottomRef.current = atBottom;
+    markAtBottom(atBottom);
     if (atBottom && showJump) setShowJump(false);
     if (atBottom) maybeMarkRead();
     if (el.scrollTop < TOP_FETCH_PX) maybeFetchOlder();
@@ -713,7 +714,7 @@ export function MessageList({
     const el = containerRef.current;
     if (el === null) return;
     el.scrollTop = el.scrollHeight;
-    atBottomRef.current = true;
+    markAtBottom(true);
     prependRef.current = null;
     lastSeqRef.current = list[list.length - 1]?.seq ?? 0;
     setShowJump(false);
@@ -756,7 +757,7 @@ export function MessageList({
     if (el === null) return false;
     // Un-stick from the bottom so the ResizeObserver doesn't yank us back
     // down while late images load mid-jump.
-    atBottomRef.current = false;
+    markAtBottom(false);
     el.scrollIntoView({ behavior: "smooth", block: "center" });
     el.classList.add("flash");
     setTimeout(() => el.classList.remove("flash"), 1600);

@@ -193,6 +193,8 @@ export interface ChannelListItem {
   /** No bot may be set to answer every message here (server setting). */
   mention_only?: boolean;
   unread: number;
+  /** My read cursor as the server had it when it counted `unread`. */
+  last_read_seq?: number;
   last_message: LastMessage | null;
   /* The three fields below arrived with per-channel membership. All optional
      (not merely nullable) so a payload from a server that predates the spec is
@@ -699,6 +701,13 @@ export interface ApprovalUpdateFrame {
   proposal: ApprovalProposal;
 }
 
+/** This account's read cursor moved, on any device. The reader's sockets only. */
+export interface ChannelReadFrame {
+  type: "channel_read";
+  channel_id: number;
+  last_read_seq: number;
+}
+
 export type ServerFrame =
   | ReadyFrame
   | MessageCreateFrame
@@ -714,7 +723,8 @@ export type ServerFrame =
   | AppStageFrame
   | AppUpdateFrame
   | PongFrame
-  | ApprovalUpdateFrame;
+  | ApprovalUpdateFrame
+  | ChannelReadFrame;
 
 export interface PongFrame {
   type: "pong";

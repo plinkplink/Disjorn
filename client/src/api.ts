@@ -78,6 +78,14 @@ export function setUnauthenticatedHandler(fn: () => void): void {
   onUnauthenticated = fn;
 }
 
+/** Counts changes of signed-in account; a request remembers the one it was made under. */
+let account = 0;
+
+/** The account changed: an answer to a request made before now reaches nobody. */
+export function abandonPendingRequests(): void {
+  account += 1;
+}
+
 export class ApiError extends Error {
   readonly status: number;
   /**
@@ -123,6 +131,9 @@ async function request<T>(
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
 
+  const askedUnder = account;
+  const abandoned = () => new ApiError(0, "Signed out before the answer came");
+
   let res: Response;
   try {
     res = await send();
@@ -142,6 +153,8 @@ async function request<T>(
       throw new ApiError(0, "Network error — server unreachable");
     }
   }
+  // Before the status is read: the last account's 401 must not sign this one out.
+  if (askedUnder !== account) throw abandoned();
   if (!res.ok) {
     let detail = res.statusText || "Request failed";
     try {
@@ -166,7 +179,9 @@ async function request<T>(
     if (res.status === 401 && path !== "/auth/login") onUnauthenticated();
     throw new ApiError(res.status, detail);
   }
-  return (await res.json()) as T;
+  const data = (await res.json()) as T;
+  if (askedUnder !== account) throw abandoned();
+  return data;
 }
 
 /* ---- auth ---- */

@@ -13,6 +13,7 @@ import {
   listed,
   markedRead,
   readRefused,
+  readThrough,
   unreadCount,
 } from "../lib/unread";
 import type { UnreadState } from "../lib/unread";
@@ -56,6 +57,8 @@ interface ChannelsState {
   channels: ChannelListItem[];
   unreadState: Record<number, UnreadState>;
   activeChannelId: number | null;
+  /** Channels whose mounted message list is scrolled to its bottom. MessageList writes it. */
+  atBottom: Record<number, true>;
   loaded: boolean;
   /** The first load gave up; the shell offers a retry instead of an empty list. */
   loadFailed: boolean;
@@ -66,6 +69,7 @@ interface ChannelsState {
   ensureLoaded: () => Promise<void>;
   /** Switch channels. Side effects (hash, focus op, mark-read) live in AppShell/ws. */
   setActive: (channelId: number | null) => void;
+  setAtBottom: (channelId: number, atBottom: boolean) => void;
   /** Open (or create) the 1:1 DM with a user; returns the channel id. */
   openDm: (userId: number) => Promise<number>;
   /** Open (or create) the 1:1 DM with a bot; returns the channel id. */
@@ -76,6 +80,8 @@ interface ChannelsState {
   onMessageCreate: (message: Message, isRead: boolean) => void;
   /** Live update from a message_delete frame: an unread arrival stops counting. */
   onMessageDelete: (channelId: number, seq: number) => void;
+  /** Live update from a channel_read frame: this account's cursor, from any device. */
+  onChannelRead: (channelId: number, seq: number) => void;
   /** Live update from a channel_create frame: add the new text channel row. */
   onChannelCreate: (channel: {
     id: number;
@@ -106,6 +112,7 @@ export const useChannels = create<ChannelsState>()((set, get) => ({
   channels: [],
   unreadState: {},
   activeChannelId: null,
+  atBottom: {},
   loaded: false,
   loadFailed: false,
 
@@ -152,6 +159,14 @@ export const useChannels = create<ChannelsState>()((set, get) => ({
 
   setActive: (channelId) => set({ activeChannelId: channelId }),
 
+  setAtBottom: (channelId, atBottom) => {
+    if ((get().atBottom[channelId] === true) === atBottom) return;
+    const next = { ...get().atBottom };
+    if (atBottom) next[channelId] = true;
+    else delete next[channelId];
+    set({ atBottom: next });
+  },
+
   openDm: async (userId) => {
     const existing = get().channels.find((c) => c.dm_user_id === userId);
     if (existing !== undefined) {
@@ -180,16 +195,16 @@ export const useChannels = create<ChannelsState>()((set, get) => ({
     const before = get().unreadState[channelId];
     const next = markedRead(before, seq);
     set(withUnread(get(), channelId, next));
+    // The server may store less than it was asked to, or nothing.
+    let stored = before?.read ?? 0;
     try {
-      await apiMarkRead(channelId, next.read);
+      stored = (await apiMarkRead(channelId, next.read)).last_read_seq;
     } catch {
-      const now = readRefused(
-        get().unreadState[channelId],
-        next.read,
-        before?.read ?? 0,
-      );
-      if (now !== undefined) set(withUnread(get(), channelId, now));
+      /* `stored` stands */
     }
+    if (stored >= next.read) return;
+    const now = readRefused(get().unreadState[channelId], next.read, stored);
+    if (now !== undefined) set(withUnread(get(), channelId, now));
   },
 
   onMessageCreate: (message, isRead) => {
@@ -233,6 +248,15 @@ export const useChannels = create<ChannelsState>()((set, get) => ({
     if (next !== undefined && next !== before) {
       set(withUnread(get(), channelId, next));
     }
+  },
+
+  onChannelRead: (channelId, seq) => {
+    const before = get().unreadState[channelId];
+    const next = readThrough(before, seq);
+    if (next === undefined || next === before) return;
+    set(withUnread(get(), channelId, next));
+    // Only the server can count what is left below the list's newest message.
+    if (next.base > 0) void get().refresh().catch(() => {});
   },
 
   onChannelCreate: (channel) => {

@@ -1,6 +1,6 @@
 /* Unread bookkeeping. Pure: a channel's count is the server's count as of the
    last channel list plus the live arrivals above it, keyed by seq, so a frame
-   the list already counted and a list older than a local read cannot skew it. */
+   the list already counted and a list older than a known read cannot skew it. */
 
 import type { ChannelListItem } from "../types";
 
@@ -10,7 +10,7 @@ export interface UnreadState {
   through: number;
   /** Unread seqs above `through` that arrived live. */
   live: number[];
-  /** Highest seq this client has marked read. */
+  /** Highest seq known read: marked here, or the server's cursor. */
   read: number;
   /** Highest seq known to exist, deleted or not. */
   top: number;
@@ -25,17 +25,22 @@ export function unreadCount(state: UnreadState | undefined): number {
 /** Fold a GET /channels row into what this client already knows. */
 export function listed(
   prev: UnreadState | undefined,
-  row: Pick<ChannelListItem, "unread" | "last_message">,
+  row: Pick<ChannelListItem, "unread" | "last_message" | "last_read_seq">,
 ): UnreadState {
   const s = prev ?? NONE;
   const through = row.last_message?.seq ?? 0;
+  const cursor = row.last_read_seq ?? 0;
+  const top = Math.max(s.top, through);
+  /* A list computed before a read known here counted messages already read.
+     What was counted above that read stands; `through` stays put so a frame
+     still in flight is counted when it lands. */
+  if (cursor < s.read) return { ...s, top };
   return {
-    // The list may have been computed before a read of ours reached the server.
-    base: s.read >= through ? 0 : row.unread,
+    base: row.unread,
     through,
     live: s.live.filter((seq) => seq > through),
-    read: s.read,
-    top: Math.max(s.top, through),
+    read: cursor,
+    top,
   };
 }
 
@@ -82,6 +87,21 @@ export function markedRead(
   return { ...s, base: 0, live: [], read, top: read };
 }
 
+/** The server's cursor reached `seq`, from any device; an older cursor changes nothing. */
+export function readThrough(
+  prev: UnreadState | undefined,
+  seq: number,
+): UnreadState | undefined {
+  if (prev === undefined || seq <= prev.read) return prev;
+  return {
+    ...prev,
+    // Below `through` the list's count spans the cursor, and stays an overcount.
+    base: seq >= prev.through ? 0 : prev.base,
+    live: prev.live.filter((x) => x > seq),
+    read: seq,
+  };
+}
+
 /** A read the server never stored must not hide the next list's count. */
 export function readRefused(
   state: UnreadState | undefined,
@@ -90,6 +110,31 @@ export function readRefused(
 ): UnreadState | undefined {
   if (state === undefined || state.read !== attempted) return state;
   return { ...state, read: previous };
+}
+
+/** Where the reader is looking, as the shell and the message list report it. */
+export interface ReadingFacts {
+  windowFocused: boolean;
+  /** The channel the shell has open. */
+  activeChannelId: number | null;
+  /** The channel the socket last reported as focused: none under Settings,
+      the Plan Room or a blurred window. */
+  focusedChannelId: number | null;
+  /** The app build modal is drawn over the channel. */
+  buildModalOpen: boolean;
+  /** The channel's message list is mounted and scrolled to its bottom. */
+  atBottom: boolean;
+}
+
+/** Whether a channel's newest message is in front of the reader. */
+export function isReading(channelId: number, facts: ReadingFacts): boolean {
+  return (
+    facts.windowFocused &&
+    facts.activeChannelId === channelId &&
+    facts.focusedChannelId === channelId &&
+    !facts.buildModalOpen &&
+    facts.atBottom
+  );
 }
 
 /** A build chat's only door is its modal, so it is never a sidebar row. */

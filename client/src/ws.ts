@@ -19,6 +19,7 @@
      and reconnect catch-up arrive over HTTP and never pass through here. */
 
 import { soundFor } from "./lib/messageSound";
+import { isReading } from "./lib/unread";
 import { usePush } from "./push";
 import { playSound, useSoundSettings } from "./sounds";
 import { useApprovals } from "./stores/approvals";
@@ -31,6 +32,7 @@ import { useMessages } from "./stores/messages";
 import { usePresence } from "./stores/presence";
 import { useSession } from "./stores/session";
 import type { Message, ServerFrame, SettableStatus } from "./types";
+import { isChannelMember } from "./types";
 
 const BACKOFF_MIN_MS = 1000;
 const BACKOFF_MAX_MS = 30000;
@@ -136,6 +138,43 @@ export class DisjornSocket {
   sendFocus(channelId: number | null): void {
     this.focusedChannelId = channelId;
     this.send({ op: "focus", channel_id: channelId });
+  }
+
+  /** Whether a message in this channel is in front of the reader right now. */
+  isReading(channelId: number): boolean {
+    const channels = useChannels.getState();
+    return isReading(channelId, {
+      windowFocused: document.hasFocus(),
+      activeChannelId: channels.activeChannelId,
+      focusedChannelId: this.focusedChannelId,
+      buildModalOpen: useApps.getState().openBuildSessionId !== null,
+      atBottom: channels.atBottom[channelId] === true,
+    });
+  }
+
+  /**
+   * Mark the active channel read if the reader is looking at its newest
+   * message. Called when that may have just become true: the window refocused,
+   * a view covering the channel closed, the list reached its bottom.
+   */
+  readActive(): boolean {
+    const st = useChannels.getState();
+    const channel = st.channels.find((c) => c.id === st.activeChannelId);
+    if (
+      channel === undefined ||
+      !isChannelMember(channel) ||
+      channel.unread === 0 ||
+      !this.isReading(channel.id)
+    ) {
+      return false;
+    }
+    const seq = Math.max(
+      useMessages.getState().lastSeq(channel.id),
+      channel.last_message?.seq ?? 0,
+    );
+    if (seq <= 0) return false;
+    void st.markRead(channel.id, seq);
+    return true;
   }
 
   /* ---- internals ---- */
@@ -256,16 +295,16 @@ export class DisjornSocket {
         usePresence
           .getState()
           .typingStopped(message.channel_id, message.author_type, message.author_id);
-        // Viewing the channel with the window focused => instantly read. So
-        // is my own message from another tab or device: posting reads it.
+        // A message that lands in front of the reader is read at once. So is
+        // my own message from another tab or device: posting reads it.
         const me = useSession.getState().user;
-        const isRead =
-          (message.author_type === "user" && message.author_id === me?.id) ||
-          (useChannels.getState().activeChannelId === message.channel_id &&
-            document.hasFocus());
+        const mine =
+          message.author_type === "user" && message.author_id === me?.id;
+        const isRead = mine || this.isReading(message.channel_id);
         this.chime(message, isRead);
         useChannels.getState().onMessageCreate(message, isRead);
-        if (isRead) {
+        // The server moved my cursor when it stored my own message.
+        if (isRead && !mine) {
           void useChannels.getState().markRead(message.channel_id, message.seq);
         }
         return;
@@ -319,6 +358,11 @@ export class DisjornSocket {
         return;
       case "approval_update":
         useApprovals.getState().onUpdate(frame);
+        return;
+      case "channel_read":
+        useChannels
+          .getState()
+          .onChannelRead(frame.channel_id, frame.last_read_seq);
         return;
     }
   }

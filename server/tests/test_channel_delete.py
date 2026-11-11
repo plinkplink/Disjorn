@@ -112,12 +112,12 @@ async def test_owner_deletes_channel_and_everything_in_it(client):
            VALUES (?, 'uploads/x.png', 'x.png', 'image/png', 10)""",
         (msg["id"],),
     )
-    # Bob reads it, which lazily creates his channel_members row.
+    # Alice's post and Bob's read each lazily create a channel_members row.
     r = await client.put(
         f"/channels/{cid}/read", json={"seq": msg["seq"]}, headers=cookie(tb)
     )
     assert r.status_code == 200, r.text
-    assert await count("SELECT 1 FROM channel_members WHERE channel_id = ?", (cid,)) == 1
+    assert await count("SELECT 1 FROM channel_members WHERE channel_id = ?", (cid,)) == 2
 
     r = await client.delete(f"/channels/{cid}", headers=cookie(ta))
     assert r.status_code == 200, r.text

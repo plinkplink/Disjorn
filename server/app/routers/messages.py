@@ -293,11 +293,12 @@ async def deliver_message(
 ) -> dict[str, Any]:
     """Allocate a per-channel seq, insert the message, publish message_create.
 
-    The shared insert path used by the HTTP create endpoint AND by server-side
-    features that author messages directly (WP-L2's slash framework posts its
-    server-rendered replies through here, as the seeded 'system' bot). It does
-    NO membership/authorization checks — callers own that. Returns the full
-    materialized payload. Does NOT run slash dispatch, so it never recurses.
+    A user author's read cursor moves to the new seq in the same transaction.
+
+    The shared insert path for the HTTP create endpoint AND for server-side
+    features that author messages directly. It does NO membership checks —
+    callers own that. Returns the full materialized payload. Does NOT run slash
+    dispatch, so it never recurses.
     """
     mentioned = (
         []
@@ -333,6 +334,11 @@ async def deliver_message(
             commit=False,
         )
         message_id = cur.lastrowid
+        read = (
+            await channels.raise_read_cursor(channel_id, author_id, seq_row["next_seq"])
+            if author_type == "user"
+            else None
+        )
 
     row = await _require_message(message_id)
     payload = await message_payload(row)
@@ -341,6 +347,8 @@ async def deliver_message(
     await events.publish(
         {"type": "message_create", "channel_id": channel_id, "message": payload}
     )
+    if read is not None and read[1]:
+        await channels.publish_read(channel_id, author_id, read[0])
     return payload
 
 
