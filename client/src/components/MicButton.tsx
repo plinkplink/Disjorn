@@ -6,16 +6,17 @@
                     stops; releases under 300ms cancel with a "hold" hint.
      coarse pointer tap-to-toggle — one tap starts, another stops.
 
-   States: idle -> recording -> transcribing -> idle. A 501 from /stt means no
-   STT engine is installed server-side: the button disables permanently for
-   this page load with the server's detail as the title. Mic permission
-   denials keep the button enabled (the user can grant and retry) with a hint
-   in the title. The component renders nothing when MediaRecorder/getUserMedia
-   are unavailable (the reserved slot simply disappears). */
+   States: idle -> recording -> transcribing -> idle, the last one labelled
+   beside the button. A 501 from /stt means no STT engine is installed
+   server-side: the button disables permanently for this page load with the
+   server's detail as the title. Every other failure goes to the composer's
+   error bar as well as the title, because a touch screen never shows a
+   title. The component renders nothing when MediaRecorder/getUserMedia are
+   unavailable (the reserved slot simply disappears). */
 
 import { useEffect, useRef, useState } from "react";
 
-import { ApiError, transcribeAudio } from "../api";
+import { ApiError, transcribeAudio, transcribeTimeoutMs } from "../api";
 
 const MIN_RECORD_MS = 300;
 
@@ -60,8 +61,9 @@ export interface MicButtonProps {
   disabled: boolean;
   /** Transcribed text ready to insert at the cursor. */
   onText: (text: string) => void;
-  /** Brief inline error (network/server failure) — composer error bar. */
-  onError: (detail: string) => void;
+  /** Anything that stopped a dictation — composer error bar. A new
+      recording clears it with null. */
+  onError: (detail: string | null) => void;
 }
 
 export function MicButton({ disabled, onText, onError }: MicButtonProps) {
@@ -106,20 +108,29 @@ export function MicButton({ disabled, onText, onError }: MicButtonProps) {
     }
   };
 
-  const finishRecording = (blob: Blob, mime: string) => {
+  const fail = (detail: string) => {
+    setHint(detail);
+    onError(detail);
+  };
+
+  const finishRecording = (blob: Blob, mime: string, recordedMs: number) => {
     if (!mountedRef.current) return;
     if (blob.size === 0) {
       setState("idle");
       return;
     }
     setState("transcribing");
-    transcribeAudio(blob, filenameFor(mime)).then(
+    transcribeAudio(
+      blob,
+      filenameFor(mime),
+      transcribeTimeoutMs(recordedMs),
+    ).then(
       ({ text }) => {
         if (!mountedRef.current) return;
         setState("idle");
         const trimmed = text.trim();
         if (trimmed.length > 0) onText(trimmed);
-        else setHint("Nothing was transcribed — try speaking closer to the mic");
+        else fail("Nothing was transcribed — try speaking closer to the mic");
       },
       (err: unknown) => {
         if (!mountedRef.current) return;
@@ -138,6 +149,7 @@ export function MicButton({ disabled, onText, onError }: MicButtonProps) {
   const start = async () => {
     if (state !== "idle" || disabled || unavailable !== null) return;
     setHint(null);
+    onError(null);
     let stream: MediaStream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -145,7 +157,7 @@ export function MicButton({ disabled, onText, onError }: MicButtonProps) {
       const denied =
         err instanceof DOMException &&
         (err.name === "NotAllowedError" || err.name === "SecurityError");
-      setHint(
+      fail(
         denied
           ? "Microphone access denied — allow the mic for this site, then try again"
           : "Could not open the microphone",
@@ -166,7 +178,7 @@ export function MicButton({ disabled, onText, onError }: MicButtonProps) {
       );
     } catch {
       stopTracks();
-      setHint("Recording is not supported in this browser");
+      fail("Recording is not supported in this browser");
       return;
     }
     chunksRef.current = [];
@@ -185,7 +197,7 @@ export function MicButton({ disabled, onText, onError }: MicButtonProps) {
         if (mountedRef.current) setState("idle");
         return;
       }
-      finishRecording(blob, type);
+      finishRecording(blob, type, Date.now() - startedAtRef.current);
     };
     recorderRef.current = recorder;
     startedAtRef.current = Date.now();
@@ -207,7 +219,7 @@ export function MicButton({ disabled, onText, onError }: MicButtonProps) {
         // A toggle tap can't be "released too early" — only hold-mode is.
         cancelledRef.current = false;
       } else {
-        setHint("Hold the mic button while you speak");
+        fail("Hold the mic button while you speak");
       }
     }
     recorder.stop();
@@ -250,6 +262,11 @@ export function MicButton({ disabled, onText, onError }: MicButtonProps) {
       {recording && (
         <span className="mic-elapsed" aria-live="polite">
           {clock}
+        </span>
+      )}
+      {state === "transcribing" && (
+        <span className="mic-elapsed mic-status" aria-live="polite">
+          Transcribing…
         </span>
       )}
       <button
