@@ -86,7 +86,6 @@
 "sdk/examples/echo_bot.py" = 1126
 "server/app/gate.py" = 9627
 "server/app/main.py" = 6402
-"server/app/models.py" = 7466
 "server/app/origin_wall.py" = 1497
 "server/app/privacy.py" = 2353
 "server/app/routers/apps.py" = 51898

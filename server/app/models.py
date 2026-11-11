@@ -1,9 +1,6 @@
-"""Shared pydantic schemas: core entities + WS event payloads.
+"""Pydantic schemas for entities and WS event payloads.
 
-These mirror the DB schema (migrations/001_init.sql) and Architecture.md §4/§8.
-DB rows store privacy_flags / emote_refs / keys_json as JSON text; routers are
-responsible for json.loads/dumps at the boundary — these models hold the parsed
-Python values.
+Routers parse DB JSON text at the boundary; these hold Python values.
 """
 
 from typing import Any, Literal, Optional, Union
@@ -11,38 +8,24 @@ from typing import Any, Literal, Optional, Union
 from pydantic import BaseModel, Field
 
 MemberType = Literal["user", "bot"]
-# 'app_build' is the modal build chat for an app (SPECS/2026-08-30-apps-tab-v1).
-# It is an ordinary channel in every mechanical sense — messages, seq, history,
-# WS fan-out, typing, the privacy filter — and explicit-membership-only, with
-# exactly two members: the session's owner and the builder bot.
+# 'app_build': explicit membership of exactly the owner and the builder bot.
 ChannelType = Literal["main_feed", "dm_1to1", "text", "app_build"]
-# 'public': every user in the house is a member (implicit membership).
-# 'private': channel_members is the wall — non-members read nothing.
+# 'private': channel_members is the wall; non-members read nothing.
 ChannelVisibility = Literal["public", "private"]
 UserStatus = Literal["online", "idle", "dnd", "offline"]
 ReplyMode = Literal["mention", "always"]
-# 'duplicate' is the honest word for a row filed twice by UI error — distinct
-# from 'rejected', which is a decision about the request rather than about the
-# row. Row 3 took 'rejected' on 2026-08-23 for want of it (migration 010).
+# 'duplicate' is a filing error; 'rejected' is a decision about the request.
 BacklogStatus = Literal["open", "spec'd", "built", "rejected", "duplicate"]
-# The five build stages, FIXED (Amendment A edit 4). There is no percent and
-# never will be: a builder's estimate of its own progress is self-report, and
-# rendering self-report as a number is how a progress bar starts lying.
+# Five fixed build stages. No percent: self-report shown as a number lies.
 AppStage = Literal["scoped", "scaffolded", "files_written", "deployed", "live"]
 AppVisibility = Literal["private", "shared", "public"]
 AppStatus = Literal["draft", "live", "archived", "deleting"]
 
 
-# ---------------------------------------------------------------------------
 # Core entities
-# ---------------------------------------------------------------------------
 
 class User(BaseModel):
-    """Public user shape — never includes password_hash.
-
-    `avatar_url` mirrors Bot.avatar_url: the versioned serving URL
-    (`/avatars/{id}?v={mtime}`) or None when there is no avatar.
-    """
+    """Public user shape; never includes password_hash."""
 
     id: int
     username: str
@@ -60,8 +43,7 @@ class Channel(BaseModel):
     name: Optional[str] = None
     created_at: str
     visibility: ChannelVisibility = "public"
-    # The owner (creator) of a text channel; only they may invite or kick.
-    # NULL for main_feed and DMs, which have no creator.
+    # Owner only may invite or kick. NULL for main_feed and DMs.
     created_by: Optional[int] = None
 
 
@@ -102,22 +84,7 @@ class Message(BaseModel):
 
 
 class BacklogItem(BaseModel):
-    """A feature request filed via `/backlog <text>` (WP-L2).
-
-    `text` is stored verbatim; `author` is the poster's label (username or bot
-    name). Triage happens through `/backlog reject|duplicate|spec'd|built <id>`
-    or the Plan Room's reject button, which are the same write reached two ways
-    (services/backlog.py).
-
-    `spec_ref` is the spec SLUG, not a path — the path is derivable from the
-    slug, and a stored path is wrong the day `SPECS/` is reorganised.
-
-    `status_by_type` / `status_by_id` / `status_at` are who changed the status
-    and when, TYPED — the same shape `messages` uses for an author, not a prose
-    label. `author` above is already prose and one prose channel is enough. All
-    three are None on a row nobody has triaged, and on every row filed before
-    migration 010, which is the truthful answer rather than an invented one.
-    """
+    """A feature request from `/backlog`. spec_ref is a slug, never a path."""
 
     id: int
     text: str
@@ -131,13 +98,7 @@ class BacklogItem(BaseModel):
 
 
 class Bot(BaseModel):
-    """Public bot shape — never includes api_key_hash.
-
-    `avatar_url` is the versioned serving URL (`/bots/{id}/avatar?v={mtime}`,
-    routers/media.py) or None when the bot has no avatar — consumers use the
-    None to skip a request that would 404, and the `?v=` to avoid a stale
-    cached face after a re-upload.
-    """
+    """Public bot shape; never includes api_key_hash."""
 
     id: int
     name: str
@@ -149,13 +110,7 @@ class Bot(BaseModel):
 
 
 class OpenSessionRef(BaseModel):
-    """The live build session on an app, if it has one.
-
-    Present only while the session is genuinely open — not ended, and its lock
-    not lapsed. A lapsed lock reads as no open session, which is the same
-    answer every other reader gives (there is no sweeper to make it true
-    later).
-    """
+    """A live build session. A lapsed lock reads as no session; nothing sweeps it."""
 
     id: int
     channel_id: int
@@ -164,13 +119,7 @@ class OpenSessionRef(BaseModel):
 
 
 class AppOut(BaseModel):
-    """One app as the API and the `app_update` frame carry it.
-
-    The `apps` row plus two facts that are about the CALLER rather than about
-    the app: `on_menu` (is it in this user's APPS group) and `open_session`
-    (is someone building it right now). Both are recomputed per request; a row
-    read straight out of the table cannot answer either.
-    """
+    """One app as the API and app_update carry it, per-caller fields included."""
 
     id: str
     name: str
@@ -194,9 +143,7 @@ class PushSubscription(BaseModel):
     created_at: str
 
 
-# ---------------------------------------------------------------------------
-# WS / bus events (full materialized payloads; persisted events carry seq)
-# ---------------------------------------------------------------------------
+# WS and bus events. Persisted events carry seq.
 
 class MessageCreateEvent(BaseModel):
     type: Literal["message_create"] = "message_create"
@@ -218,7 +165,7 @@ class MessageDeleteEvent(BaseModel):
 
 
 class TypingStartEvent(BaseModel):
-    """Ephemeral — no seq."""
+    """Ephemeral; no seq."""
 
     type: Literal["typing_start"] = "typing_start"
     channel_id: int
@@ -227,7 +174,7 @@ class TypingStartEvent(BaseModel):
 
 
 class PresenceEvent(BaseModel):
-    """Ephemeral — no seq, no channel."""
+    """Ephemeral; no seq, no channel."""
 
     type: Literal["presence"] = "presence"
     channel_id: None = None
@@ -236,13 +183,7 @@ class PresenceEvent(BaseModel):
 
 
 class ChannelCreateRef(BaseModel):
-    """Minimal channel payload carried by channel_create / channel_delete /
-    member events.
-
-    `name` is None only for a DM, which a member event can now name (a bot
-    added to a DM) even though channel_create never does — channel_create fires
-    for named text channels only.
-    """
+    """Channel payload for channel and member events. name is None only for a DM."""
 
     id: int
     type: ChannelType
@@ -251,12 +192,7 @@ class ChannelCreateRef(BaseModel):
 
 
 class ChannelCreateEvent(BaseModel):
-    """A named text channel was created.
-
-    Broadcast to all users and bots for a public channel; for a private one it
-    reaches only that channel's members (the channel still exists as far as
-    GET /channels is concerned — this is fan-out scoping, not hiding).
-    """
+    """A named text channel was created. Public: everyone. Private: members only."""
 
     type: Literal["channel_create"] = "channel_create"
     channel_id: int
@@ -264,19 +200,10 @@ class ChannelCreateEvent(BaseModel):
 
 
 class ChannelDeleteEvent(BaseModel):
-    """A text channel was deleted, along with everything in it.
+    """A text channel was deleted with its contents.
 
-    Fanned out to everyone who could see the channel a moment ago — every
-    connected user and bot for a public one; for a private one its members,
-    whoever deleted it, and every admin (an admin's sidebar carries a private
-    channel they are not in as a bare row, which now has to go). That audience
-    has to be computed before the row is deleted, because afterwards
-    `is_member` answers False for everybody; the router carries it on the bus
-    event and the WS hub delivers to exactly that list, which never reaches
-    the wire.
-
-    `channel` describes the channel that just stopped existing, so a client can
-    say "#backroom was deleted" without having kept its own copy of the name.
+    Compute the audience before the row is deleted: afterwards is_member is False
+    for all. Private: members and admins.
     """
 
     type: Literal["channel_delete"] = "channel_delete"
@@ -286,13 +213,7 @@ class ChannelDeleteEvent(BaseModel):
 
 
 class MemberAddEvent(BaseModel):
-    """Someone joined a channel (invite accepted for them, or a bot added).
-
-    Fanned out to the channel's members plus the affected member themselves.
-
-    `by_user_id` is the user who performed the action — the difference between
-    "alice added you to #backroom" and a room that silently changed shape.
-    """
+    """A user or bot joined a channel. Fanned out to members and the new member."""
 
     type: Literal["member_add"] = "member_add"
     channel_id: int
@@ -303,14 +224,7 @@ class MemberAddEvent(BaseModel):
 
 
 class MemberRemoveEvent(BaseModel):
-    """Someone left a channel or was kicked from it.
-
-    Same fan-out as member_add — including the removed member, whose client
-    needs to know its access just ended.
-
-    `by_user_id` distinguishes a kick from a walk-out: on /leave it is the
-    leaving member themselves (equal to `member_id`), on /kick it is the owner.
-    """
+    """A user or bot left or was kicked. by_user_id: the leaver on /leave, the owner on /kick."""
 
     type: Literal["member_remove"] = "member_remove"
     channel_id: int
@@ -321,7 +235,7 @@ class MemberRemoveEvent(BaseModel):
 
 
 class MemberUpdateEvent(BaseModel):
-    """A bot's reply mode in a channel changed; same audience as member_add."""
+    """A bot's reply mode changed; same audience as member_add."""
 
     type: Literal["member_update"] = "member_update"
     channel_id: int
@@ -333,25 +247,10 @@ class MemberUpdateEvent(BaseModel):
 
 
 class AppStageEvent(BaseModel):
-    """A build session reached one of the five fixed stages.
+    """A build session reached a fixed stage.
 
-    AUDIENCE: every socket of the session's OWNER, and nobody else. Not the
-    builder bot (a resident must not read the harness's attestation about its
-    own build as if it were chat), not other users, not admins. The owner is
-    the only person the modal is open for, and the stage bar is the only
-    consumer.
-
-    Fan-out needs the owner's user id, which this frame deliberately does not
-    carry — the bus event does, alongside it, the way channel_delete carries
-    its recipient list. The routing fact stays off the wire.
-
-    `detail` is a bounded JSON object (filenames, a note). There is no percent
-    field and adding one would be a spec change, not a feature.
-
-    The publisher in stage 1 is the REST endpoint alone, and nothing in
-    production calls it yet: this is a subscription interface with the
-    subscriber written first. A second subscriber must be addable without
-    touching a publisher.
+    Audience: the owner's sockets only, never the builder bot. The bus event
+    carries the owner id; the frame must not.
     """
 
     type: Literal["app_stage"] = "app_stage"
@@ -364,14 +263,7 @@ class AppStageEvent(BaseModel):
 
 
 class AppUpdateEvent(BaseModel):
-    """An app's own record changed (renamed, re-described, gone live).
-
-    AUDIENCE: every socket of the app's OWNER, and nobody else — the same wall
-    as app_stage, for the same reason. Members who merely have the app on their
-    menu learn about a rename on their next GET /apps; a push to them is a
-    later stage's problem, and inventing one now would fan an owner's private
-    draft name out to people the owner has not shared with.
-    """
+    """An app's record changed. Audience: the owner's sockets only, as for app_stage."""
 
     type: Literal["app_update"] = "app_update"
     channel_id: None = None
