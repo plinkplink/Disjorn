@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 
 import { UpdateToast } from "./components/UpdateToast";
+import "./stores/perUser"; // empties every per-user store when the account changes
 import { useSession } from "./stores/session";
 import { AppShell } from "./views/AppShell";
 import { ChangePasswordPage } from "./views/ChangePasswordPage";
@@ -35,7 +36,9 @@ export function App() {
   if (bootUnreachable) screen = <UnreachablePage />;
   else if (user === null) screen = <LoginPage />;
   else if (mustChangePassword) screen = <ChangePasswordPage />;
-  else screen = <AppShell />;
+  // Keyed by account: a session that changes hands remounts the shell, and
+  // with it the socket and every component's own state.
+  else screen = <AppShell key={user.id} />;
 
   return (
     <>
