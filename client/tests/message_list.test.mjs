@@ -157,6 +157,23 @@ test('everyone else sees the chibi alone', () => {
   assert.ok(!html.includes('chibi-fix'), html);
 });
 
+test('an @bots the server fanned out is drawn as a mention, once, outside code', () => {
+  const html = render([{ ...botMessage(1, {
+    content: '@Bots status? not @botswana and not `@bots`' }),
+  author_type: 'user', author_id: 1, mentioned_bot_ids: [1, 2] }]);
+  assert.equal(html.split('class="md-mention"').length - 1, 1, html);
+  assert.ok(html.includes('<span class="md-mention">@Bots</span>'), html);
+  assert.ok(html.includes('<code class="md-inline-code">@bots</code>'), html);
+});
+
+test('an @bots that summoned nobody is plain text', () => {
+  for (const mentioned_bot_ids of [undefined, []]) {
+    const html = render([{ ...botMessage(1, { content: '@bots wake up' }), mentioned_bot_ids }]);
+    assert.ok(html.includes('@bots wake up'), html);
+    assert.ok(!html.includes('md-mention'), html);
+  }
+});
+
 const STEP = { kind: 'read', label: 'read_repo_file server/app/ws.py',
   outcome: 'ok', reason: null, ms: 41 };
 const REFUSED = { kind: 'broker', label: 'broker changed-files main...loop/x',

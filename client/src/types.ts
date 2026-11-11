@@ -128,6 +128,10 @@ export interface Message {
   /** The bot's own account of the steps behind the message, written by its
       adapter and not verified by the server; null on every other message. */
   trace?: MessageTrace | null;
+  /** The channel's bots this message addressed with an `@`, as the server
+      resolved it when the message was written: each `@name`, and all of them
+      for a person's `@bots`. */
+  mentioned_bot_ids?: number[];
   attachments: Attachment[];
 }
 

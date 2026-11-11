@@ -523,6 +523,7 @@ function MessageRow({
               <Markdown
                 content={message.content}
                 mentionNames={mentionNames}
+                botsMention={(message.mentioned_bot_ids?.length ?? 0) > 0}
                 chibis={chibis}
                 chibiSlot={chibiSlot}
               />
