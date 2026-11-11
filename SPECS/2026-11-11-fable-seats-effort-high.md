@@ -35,6 +35,10 @@ Effort is not in the result event, so it was read off the request body, with
   and `harness/cc/config-template/settings.json` (Gable's summon seat). Not
   `modelSettings`: that is keyed by model id and would stop applying, silently,
   at the next pin move.
+- **The template is shared** (Gable #3451). `config-template/settings.json`
+  is installed for Claudette's resident seat too. Her live file is not
+  touched by this deploy, but a re-provision from the template would carry
+  the key to her Opus 5.5 seat. Whether it should is her call.
 - **Test**: the assertion that no effort key exists becomes one that all three
   files carry `high`, and that neither other spelling is present.
 - **Cost**: `high` spends more tokens per turn than `medium`. Not measured
@@ -70,8 +74,11 @@ Tier 2 — managed settings of every seat.
 One keyboard session.
 
 ## Confirm record
-- **Confirmed by**: pending
-- **#custodian seq**: pending
+- **Confirmed by**: plink
+- **#custodian seq**: 3453
+- **Confirmed at**: 2026-11-11
+- **Condition**: watch build costs; roll back to medium if `high` spends too much. Rollback is the same key set to `"medium"` (or removed) in the same three places, then steps 1 to 4.
+- **Review**: PASS by Gable #3451 at f24c9e8.
 
 ## Status
 built@loop/2026-11-11-fable-seats-effort-high
