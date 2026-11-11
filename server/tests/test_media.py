@@ -178,11 +178,12 @@ async def test_non_image_upload_stored_without_preview(client):
     body = await upload(client, "notes.txt", b"hello disjorn", "text/plain")
     (att,) = body["attachments"]
     assert att["width"] is None and att["has_preview"] is False
-    # display variant falls back to serving the original file
+    # display variant falls back to serving the original file, as a download
     r = await client.get(att["url"])
     assert r.status_code == 200
     assert r.content == b"hello disjorn"
-    assert r.headers["content-type"].startswith("text/plain")
+    assert r.headers["content-type"] == "application/octet-stream"
+    assert r.headers["content-disposition"] == "attachment; filename*=UTF-8''notes.txt"
 
 
 async def test_heic_upload_converted(client):

@@ -1,6 +1,6 @@
-/* Full-size image preview modal (Architecture §6): display variant, link to
-   the preserved original when the server offers one, filename. Esc or backdrop
-   click closes. */
+/* Full-size image preview modal (Architecture §6): display variant, download
+   of the preserved original when the server offers one, filename. Esc or
+   backdrop click closes. */
 
 import { useEffect } from "react";
 
@@ -51,11 +51,10 @@ export function ImageModal({ src, origUrl, filename, onClose }: ImageModalProps)
             <a
               className="image-modal-orig"
               href={origUrl ?? src}
-              target="_blank"
-              rel="noopener noreferrer"
+              download={filename}
               title="The file exactly as uploaded, before web conversion"
             >
-              View original
+              Download original
             </a>
           )}
           <button className="icon-btn" aria-label="Close" onClick={onClose}>

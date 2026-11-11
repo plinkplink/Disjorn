@@ -12,6 +12,7 @@ import { useEffect } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 
 import { ApiError, deleteMessage } from "../api";
+import { attachmentKind } from "../lib/attachmentKind";
 import { useApps } from "../stores/apps";
 import { useChannels } from "../stores/channels";
 import { useMembers } from "../stores/members";
@@ -228,7 +229,8 @@ function AttachmentItem({
   att: Attachment;
   onOpenImage: (att: Attachment) => void;
 }) {
-  if (att.mime_type.startsWith("image/") && att.url !== null) {
+  const kind = attachmentKind(att);
+  if (kind === "image" && att.url !== null) {
     return (
       <button
         className="attachment-image"
@@ -239,12 +241,15 @@ function AttachmentItem({
       </button>
     );
   }
+  const plays = kind === "media";
   return (
     <a
       className="attachment-file"
       href={att.url ?? undefined}
-      target="_blank"
-      rel="noopener noreferrer"
+      title={plays ? att.original_filename : `Download ${att.original_filename}`}
+      target={plays ? "_blank" : undefined}
+      rel={plays ? "noopener noreferrer" : undefined}
+      download={plays ? undefined : att.original_filename}
     >
       <span className="attachment-file-icon" aria-hidden>
         📄

@@ -46,11 +46,9 @@ ENDPOINTS
   posture of MAX_UPLOAD_BYTES — the picker is a shared shelf, not per-user.
   Tighten to `user.is_admin` here if that ever stops being true.
 
-  Because GET /picker/file is unauthenticated, an added file becomes publicly
-  readable at a guessable URL. So add_picker_item decodes every upload with
-  Pillow and derives the extension from the DETECTED format, never from the
-  client filename — that is what stops the directory being used to serve
-  arbitrary (or scriptable, e.g. SVG/HTML) content.
+  GET /picker/file is unauthenticated, so add_picker_item decodes every
+  upload with Pillow and names it by the DETECTED format, never by the client
+  filename.
 
 SIGNED URLS
   sign_media_url(attachment_id, variant="display", expires_in=None) -> str  (sync)
@@ -60,7 +58,8 @@ SIGNED URLS
   Variant fallback on GET: thumb -> display -> original; display -> original.
   Bad/expired signature -> 403. The signature IS the auth (no cookie/API key
   needed) so <img> tags and bots can fetch alike; DM attachments stay
-  unguessable.
+  unguessable. Stored bytes are served only through services/media_serve,
+  which types them by their bytes, not by what the upload said.
 
 STORAGE (relative paths under DATA_DIR are what's stored in the DB)
   uploads/originals/{attachment_id}_{slug}{ext}   original, metadata intact
@@ -87,7 +86,7 @@ from pydantic import BaseModel, Field
 from .. import db, events
 from ..config import get_settings
 from ..models import User
-from ..services import media_convert
+from ..services import media_convert, media_serve
 from ..services.media_convert import UnsupportedFormat
 from .auth import Actor, get_actor, get_current_user
 from .messages import message_payload
@@ -355,22 +354,20 @@ async def get_media(
     if att is None:
         raise HTTPException(status_code=404, detail="Attachment not found")
 
-    # Variant fallback: thumb -> display -> orig; display -> orig.
-    rel, mime = att["file_path"], att["mime_type"]
+    variant = None
     if v == "thumb" and att["thumb_path"]:
-        rel, mime = att["thumb_path"], "image/webp"
+        variant = att["thumb_path"]
     elif v in ("display", "thumb") and att["display_path"]:
-        rel, mime = att["display_path"], "image/webp"
+        variant = att["display_path"]
 
-    path = _data_dir() / rel
+    path = _data_dir() / (variant or att["file_path"])
     if not path.is_file():
         raise HTTPException(status_code=404, detail="File missing on disk")
-    return FileResponse(
-        path,
-        media_type=mime,
-        filename=att["original_filename"] if v == "orig" else None,
-        content_disposition_type="inline",
-        headers={"Cache-Control": f"private, max-age={max(0, exp - now)}"},
+    cache = {"Cache-Control": f"private, max-age={max(0, exp - now)}"}
+    if variant:
+        return media_serve.image(path, "image/webp", cache)
+    return media_serve.upload(
+        path, att["original_filename"], att["mime_type"], att["width"] is not None, cache
     )
 
 
@@ -457,11 +454,7 @@ def avatar_response(rel_path: str) -> FileResponse:
     path = _data_dir() / rel_path
     if not path.is_file():
         raise HTTPException(status_code=404, detail="No avatar")
-    return FileResponse(
-        path,
-        media_type="image/webp",
-        headers={"Cache-Control": "public, max-age=300"},
-    )
+    return media_serve.image(path, "image/webp", {"Cache-Control": "public, max-age=300"})
 
 
 @router.post("/me/avatar")
@@ -567,12 +560,7 @@ async def get_picker_file(tab: str, name: str) -> FileResponse:
     path = _picker_path(tab, name)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Not found")
-    mime, _ = mimetypes.guess_type(name)
-    return FileResponse(
-        path,
-        media_type=mime or "application/octet-stream",
-        headers={"Cache-Control": "public, max-age=3600"},
-    )
+    return media_serve.upload(path, name, "", True, {"Cache-Control": "public, max-age=3600"})
 
 
 @router.post("/picker/add")
