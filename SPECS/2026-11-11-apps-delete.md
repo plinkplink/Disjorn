@@ -491,9 +491,10 @@ alias is installed.
    build changed.
 
 ## Confirm record
-- **Confirmed by**: pending
-- **#custodian seq**: pending
-- **Confirmed at**: pending
+- **Confirmed by**: plink
+- **#custodian seq**: 3576
+- **Confirmed at**: 2026-11-11
+- **Reviews**: custodian half PASS #3573, gable half PASS #3574, both at 2cc45df; their four folds are the commits after it.
 <!-- No Confirm record → no build. This is the gate. -->
 
 ## Status
