@@ -38,6 +38,14 @@ destroys data.
 - **Who removes**: `res-appsbuilding`, inside a transient unit, exactly as
   publish, revert and remix do. Root validates the one id, builds a fixed
   `systemd-run` argv and execs. Root removes nothing.
+- **What the seat does besides removing**: it unlinks a symlink found at one
+  of those names, without following it, and it adds the owner's rwx bits to
+  real directories inside a tree it is removing when a build left them
+  closed. It changes no mode outside that tree and none through a link.
+- **Not serialised in the launcher**: a delete, a publish and a remix of one
+  app run in units with different names, so the launcher does not keep them
+  apart. That rests on the server: `_mark_app_deleted` refuses while a
+  publish claim is held, and no publish or remix can start on a deleted row.
 
 ## Agreed UX
 Proposed. Nothing below has been agreed in #custodian yet.
@@ -45,7 +53,7 @@ Proposed. Nothing below has been agreed in #custodian yet.
 **Who**
 - The app's owner, and nobody else. Not an admin: no owner verb in
   `routers/apps.py` has an admin override, and this build adds none
-  (question 1). Never a bot.
+  (answer 1). Never a bot.
 
 **Where**
 - The app's card gets **Delete app…** for its owner, set apart from the
@@ -72,9 +80,20 @@ Proposed. Nothing below has been agreed in #custodian yet.
 - Buttons: Cancel, and **Delete app** in the destructive style. No typing to
   confirm.
 - A refusal or a failure is shown in the server's words and the button
-  becomes **Try again**. If the server had already hidden the app, the dialog
-  says so: off every list, no new link can be made, files still on disk, a
-  link opened earlier may still work.
+  becomes **Try again**. If the server had already deleted the app, the
+  dialog says so: off everyone else's list, no new link can be made, files
+  still on disk, a link opened earlier may still work, and the row in the
+  Apps list now offers Finish deleting.
+
+**A delete that did not finish**
+- The app stays in its owner's Apps list, greyed, with one action in place
+  of the status chip: **Finish deleting**. It is there on every device and
+  after a reload, until the delete has finished.
+- A click sends the delete again. The label reads "Deleting…" meanwhile; a
+  refusal is said out loud in the server's words, as a failed session start
+  already is.
+- Nobody else is shown the row. It has no card, no `⋯`, and nothing but the
+  delete answers for it.
 
 **After**
 - The row leaves the owner's list in every tab and on every device, by a
@@ -108,6 +127,8 @@ Proposed. Nothing below has been agreed in #custodian yet.
   and no undelete.
 - The row keeps its name, status and visibility as they were. Its
   `app_shares` and `user_apps` rows are deleted.
+- `apps.purged_at` is set once the helper has succeeded and the build chats
+  are gone. Deleted and not purged is a delete that stopped part way.
 
 ### Order, in the request
 1. **One transaction** (`_mark_app_deleted`):
@@ -126,11 +147,23 @@ Proposed. Nothing below has been agreed in #custodian yet.
    and leaving a bot DM already use. Each writes its `channel_deletions` row
    attributed to the user and publishes `channel_delete` to the owner and the
    builder bot. The cascade removes the app's sessions and stage events.
-5. `{"ok": true}`.
+5. Set `purged_at`, publish `app_delete` once more to the owner alone, and
+   answer `{"ok": true}`.
 
-A failure at 3 or 4 leaves the app deleted in the database. The owner's next
-DELETE skips step 1 and runs 3 and 4 again. A deleted app answers 404 to
+A failure at 3 or 4 leaves the app deleted and not purged. The owner's next
+DELETE skips step 1 and runs 3 to 5 again. A deleted app answers 404 to
 everyone else.
+
+### The unfinished delete, as the owner sees it
+- `GET /apps` returns the caller's own deleted, unpurged rows beside their
+  living apps, with `status: "deleting"`. That status is made in `_app_out`
+  and is never stored. The stored status keeps its CHECK.
+- No other read changed. `_require_app` still skips every deleted row, so a
+  `deleting` app is 404 on open, card, menu, remix, share, revert, rename and
+  a new session, for its owner too. Discover and the builder counts skip it.
+  Share and menu rows went in step 1, so no viewer's query can reach it.
+- The owner's clients learn of both moments from the same frame and re-read
+  the list: after step 1 the row is `deleting`, after step 5 it is absent.
 
 ### What stops answering, and when
 - After step 1: `_require_app` filters `deleted_at`, so open, card, menu,
@@ -154,9 +187,11 @@ everyone else.
   already loaded the page, and non-HTML files in that browser's private cache
   for up to 60 seconds (`Cache-Control: private, max-age=60`).
 - If the helper fails before the web root goes (not installed, unit did not
-  start, the root is not a real directory of the seat's): the response is an
-  error, not success, and earlier grants work until they expire or the
-  delete is repeated. The dialog says this.
+  start, the name holds a file or another owner's directory): the response
+  is an error, not success, and earlier grants work until they expire or the
+  delete is finished. The dialog says this, and the `deleting` row stays.
+- A symlink at the web root no longer keeps anything served: the seat
+  unlinks the link and goes on.
 
 ### Why a running turn refuses instead of being stopped
 `end` records a stop and closes the session in one transaction; the unit is
@@ -174,7 +209,14 @@ The remaining race is a turn the broker has spawned and not yet reported.
 The helper's seat half catches it: after removing the web root it asks
 systemd for a running turn of this app and refuses (64, shown as 409). The
 app is then deleted in the database, its pages are gone, and the other trees
-wait for a second DELETE.
+wait for Finish deleting.
+
+If systemd cannot answer, the delete stops at the same place with the same
+64: "cannot tell whether a build of <id> is still running (…); its pages are
+gone, finish deleting it when no build is running". Publish reads a failed
+query as "no turn", because there a wrong yes is a Live button that never
+works. Here a wrong no removes a work tree and a git dir under a running
+turn, and a wrong yes costs one more click.
 
 ### The helper's `delete` mode (builder lane)
 `harness/cc/apps/disjorn-apps-launch`, `delete_app` and `main_op`.
@@ -185,15 +227,25 @@ wait for a second DELETE.
 - **The seat's half** (`delete-as-seat`, refuses to run as root, named by no
   sudoers line):
   1. remove `<www>/<id>`;
-  2. ask systemd for a running turn of the app (`active_turn_for_app`,
-     advisory as it is for publish);
-  3. if none: remove `<www>/.staging/<id>`, `<apps>/<id>`, `<git>/<id>.git`,
-     and each matching turn dir, then `rmdir` a session dir left empty.
-- **What "remove" means**: `lstat` the name. Absent is fine. A real
-  directory owned by the seat is `rmtree`d, which never follows a link
-  inside it. Anything else (a symlink, a file, another owner's directory) is
-  left exactly as it is and the run exits 1 naming it, after the other names
-  are done.
+  2. ask systemd for a running turn of the app (`active_turn_for_app` with
+     `strict=True`). A failed `list-units`, a failed `show`, an exception or
+     a line that is not one of our units raises `TurnQueryFailed`;
+  3. only on a clean "none": remove `<www>/.staging/<id>`, `<apps>/<id>`,
+     `<git>/<id>.git`, and each matching turn dir, then `rmdir` a session dir
+     left empty. Otherwise exit 64.
+- **What "remove" means**: `lstat` the name.
+  - Absent is fine.
+  - A symlink is unlinked. The link goes, its target is not opened.
+  - A real directory owned by the seat is removed by `_rmtree_own`.
+  - Anything else (a file, another owner's directory) is left exactly as it
+    is and the run exits 1 naming it, after the other names are done.
+- **`_rmtree_own`**: `shutil.rmtree`, which never follows a link inside the
+  tree, with an `onexc` handler (`onerror` under Python older than 3.12; the
+  house runs 3.13). On a `PermissionError` it adds the owner's rwx bits to
+  the failing path and its parent, when each is a real directory by `lstat`
+  and lies at or below the tree's top, then removes that entry again. A
+  second failure on the same path is raised. A directory the seat does not
+  own cannot be chmodded by the seat, so that still ends in exit 1.
 - **Idempotent**: a second run finds nothing and exits 0.
 - **Turn dirs, and why no session ids are passed**: turn dirs are keyed
   `<session>/<turn>` and carry no app id in their path. The seat finds them
@@ -211,14 +263,23 @@ wait for a second DELETE.
 - **Never touched**: `/srv/apps-quarantine/<id>`. Quarantined files are
   evidence of a credential write and stay for the admin.
 - `active_turn_for_app`'s two warnings now say "going on without that
-  check" instead of "publishing without that check".
+  check" instead of "publishing without that check". Publish's behaviour is
+  unchanged.
+- **A revert racing the delete** is possible and is not claimed against.
+  Revert takes no session claim. If its three renames overlap the delete's
+  `rmtree`, one of the two fails: the revert answers 502, or the delete does
+  and the row stays `deleting` for a retry. The losing revert can leave its
+  swap tree under `<www>/.staging/<id>`, which is not served; a second
+  delete removes it.
 
 ### Server (custodian lane)
 - `server/app/migrations/025_apps_delete.sql`: `deleted_at`,
-  `deleted_builds`. 025 was the next free number; another branch in flight
+  `deleted_builds`, `purged_at`. 025 was the next free number; another branch in flight
   may want it and the orchestrator renumbers at merge.
 - `server/app/routers/apps.py`: `DELETE /apps/{app_id}`,
-  `_mark_app_deleted`; the filters and the two in-transaction guards above.
+  `_mark_app_deleted`; the filters and the two in-transaction guards above;
+  the owner's `deleting` rows in `list_apps`.
+- `server/app/models.py`: `AppStatus` gains `deleting`.
 - `server/app/routers/channels.py`: `_destroy_channel` renamed
   `destroy_channel`, because a second router now calls it.
 - `server/app/ws.py`: the `app_delete` fan-out, one `_send_to_user` per
@@ -227,7 +288,8 @@ wait for a second DELETE.
   living app, the sentence the other owner verbs use; 404 a non-owner of a
   deleted app; 401 a bot; 400 the platform's own `disjornrepo2` row, whose
   repo sessions borrow real channels; 409 a running turn, a publish in
-  flight, or the helper's refusal; 502 the helper failed.
+  flight, or the helper's refusal (a turn running, or systemd not saying);
+  502 the helper failed.
 - **The meter**: the daily count reads `app_sessions`, and those rows go
   with the chat. So the transaction stores, in `deleted_builds`, how many of
   the app's sessions started today had spent a turn, and `_quota_for` adds
@@ -242,18 +304,21 @@ wait for a second DELETE.
   tombstone, whose card is 404.
 
 ### Client (custodian lane)
-- `lib/appRow.ts`: `canDeleteApp`, `deleteReachLine`.
+- `lib/appRow.ts`: `canDeleteApp`, `deleteReachLine`, and the `finish`
+  action for a `deleting` row.
 - `components/DeleteAppModal.tsx`: the dialog. It holds its own copy of the
-  app, because the row is gone once the server hides it.
-- `stores/apps.ts`: `deleteApp`, `onAppDelete`, `deletedAppIds`.
-- `views/AppShell.tsx`: the row's `⋯`, the card's button, the dialog, and
-  closing a build modal whose app was deleted.
+  app, because the row turns `deleting` once the server deletes it.
+- `stores/apps.ts`: `deleteApp`, `onAppDelete`, `deletedAppIds`. On the
+  frame the owner's row is greyed at once and the list is re-read.
+- `views/AppShell.tsx`: the row's `⋯`, the card's button, the dialog, the
+  `deleting` row and its Finish deleting, and closing a build modal whose
+  app was deleted.
 - `api.ts`, `types.ts`, `ws.ts`, `app.css`: the call, the frame, the case,
   the styles.
 
 ## Verification
 **By test**
-- `server/tests/test_apps_delete.py` (13):
+- `server/tests/test_apps_delete.py` (14):
   - owner only: 403 for a shared viewer and a stranger, 401 for the builder
     and the broker, 404 for an unknown id;
   - the platform row is refused and its channel survives;
@@ -267,35 +332,51 @@ wait for a second DELETE.
     closed;
   - a publish in flight refuses; a delete that lands inside a publish or
     inside `create_session` wins;
-  - a failed helper leaves a deleted app; the second call finishes; a third
-    is still 200;
+  - a failed helper leaves a deleted, unpurged app: listed to its owner
+    alone as `deleting`, not to a menu holder or an admin, 404 on the ten
+    other verbs; a refusal keeps it listed; the next call purges it and it
+    is gone; one more call is still 200;
+  - the real gate again: a grant that served through a symlinked web root
+    answers 404 after the delete, and the link's target is intact;
   - each build chat's `channel_deletions` row and `channel_delete` event;
   - a remix and a remix of the remix after their parents are deleted;
   - the meter, including the failed-helper state;
-  - the frames on real sockets: owner and menu holder, not a stranger;
+  - the frames on real sockets: owner and menu holder, then the owner
+    alone at the purge, never a stranger;
   - migration 025 through `run_migrations`.
-- `harness/cc/tests/test_apps_delete.py` (55):
+- `harness/cc/tests/test_apps_delete.py` (65):
   - root's argv byte for byte, and root removes nothing;
   - thirteen bad ids and six wrong argument lists refused by both halves;
   - the alias's regex: one argument string admitted, eight refused;
     `visudo -cf`;
   - exactly one app's paths removed, a sibling app, an unrecorded turn dir,
     the staging root and the quarantine untouched;
-  - idempotent; a symlink at each of the four names; a symlinked session
-    and turn dir; another owner; a file at the name;
+  - idempotent; a symlink at each of the four names and at each served
+    root is unlinked with its target untouched; a symlinked session and turn
+    dir is skipped; another owner and a file at the name are left, exit 1;
   - a running turn of this app and of another;
+  - a turn query that fails four ways (non-zero exit, a line that is no
+    unit, a failed `show`, no `systemctl`): only the web root goes, exit 64;
+    publish still reads the same failure as no turn;
+  - a tree with 0555 and 0000 directories and a read-only file is removed,
+    and a file and a 0555 directory outside it, linked from inside, keep
+    their modes and content;
   - the seat half as a subprocess;
   - a record written by the real harvest is found.
 - `harness/cc/tests/test_apps_launch.py`: the alias pin names six.
-- `client/tests/app_row.test.mjs`: who is offered Delete, and what the
-  dialog says about reach.
+- `client/tests/app_row.test.mjs`: who is offered Delete, what the dialog
+  says about reach, and that a `deleting` row offers its owner `finish` and
+  nothing else.
 
 **Not run**
 - The helper through real `sudo` and `systemd-run`. Every test runs it
   under the dry-run switch or calls the seat's function directly.
 - `systemctl list-units` from inside the transient unit as
-  `res-appsbuilding`. The same query answers for an unprivileged user on
-  this box; if it fails there, the check warns and the delete goes on.
+  `res-appsbuilding`. It is the first systemctl call the seat makes there.
+  The same query answers for an unprivileged user on this box. If it fails
+  for the seat, every delete stops after the web root with the "cannot
+  tell" sentence and the row stays `deleting`. Manual check 2 is where that
+  shows.
 - Anything in a browser. The client was typechecked and built.
 
 ## Manual checks before merge
@@ -304,13 +385,20 @@ wait for a second DELETE.
    is refused by sudo.
 2. Delete a stale draft remix: `⋯`, Delete app…, Delete app. The row goes;
    `/srv/apps/<id>`, `/srv/apps-git/<id>.git`, `/srv/apps-www/<id>` and its
-   turn dirs are gone; `GET /channels/deletions` shows its build chats.
+   turn dirs are gone; `GET /channels/deletions` shows its build chats. If
+   the answer is "cannot tell whether a build … is still running", the seat
+   cannot query systemd from its unit and no delete will finish until that
+   is fixed.
 3. Delete a live shared app with its page open in another browser: a reload
    there answers 404.
 4. A second device's list drops the row without a reload.
 5. Delete a parent whose remix is live: the remix opens, builds and remixes.
 6. Start a turn, press Delete: the 409 sentence, nothing removed.
 7. Phone: the `⋯` is visible and the dialog fits.
+8. Finish deleting: move `/usr/local/lib/disjorn/disjorn-apps-launch` aside,
+   delete an app (502), close the dialog and reload. The row is greyed with
+   Finish deleting, on a second device too. Put the launcher back and click
+   it: the row goes everywhere.
 
 ## Follow-ups (not built)
 1. **Bulk cleanup.** Multi-select delete in the Apps list, and "delete all
@@ -325,9 +413,7 @@ wait for a second DELETE.
 5. A turn whose terminal event never arrived, or a publish claim left by a
    killed process, blocks the delete until an admin clears it. The same
    stuck session already blocks Live.
-6. A directory a build left unreadable makes `rmtree` fail; the delete
-   answers 502 until it is fixed by hand.
-7. The platform's `disjornrepo2` row shows in its owner's Apps list and
+6. The platform's `disjornrepo2` row shows in its owner's Apps list and
    offers a Delete the server refuses. The client has no way to know that
    id.
 
@@ -352,21 +438,29 @@ wait for a second DELETE.
     `harness/cc/tests/test_apps_launch.py` → review owner Gable
   - `harness/keyboard/10-appsbuilding.sh` is not changed. It already
     installs and drift-checks both builder files.
-  - `harness/prose-baseline.toml`: four lines lowered, two in each lane.
+  - `harness/prose-baseline.toml`: lines lowered, never raised, in both
+    lanes.
 - **Split agreed in #custodian**: pending.
 
-## Questions for review
-1. Owner only, or may an admin delete someone else's app, as an admin may
-   delete someone else's channel?
-2. Is refusing during a running turn right, or should Delete stop the turn
-   and finish when it has ended?
-3. Turn dirs found by their own record, with a record-less one left behind:
-   acceptable, or should the server pass session ids?
-4. A name that is not a real directory of the seat's is left and the run
-   fails. For a symlinked web root that means earlier grants keep working
-   until someone looks. Should the link itself be unlinked instead?
-5. Should the tombstone record who deleted it? Today only the owner can, and
-   `channel_deletions` names them once per chat.
+## Answers from review
+1. **Owner only.** Confirmed. No admin override.
+2. **409 during a running turn.** Confirmed. Delete does not stop a turn.
+3. **No who-deleted record on the tombstone.** Only the owner can delete, and
+   `channel_deletions` names them once per build chat. A column is added the
+   day an admin override exists.
+4. **A symlinked web root.** Changed after review: the link is unlinked and
+   the delete goes on. A file or another owner's directory still stops it.
+5. **A half-finished delete.** Changed after review: `purged_at`, the
+   owner's `deleting` row and Finish deleting.
+6. **A failed turn query.** Changed after review: it stops the delete after
+   the web root.
+7. **A closed directory in a tree.** Changed after review: `_rmtree_own`.
+8. **A revert racing the delete.** Noted, not claimed against: it ends in a
+   502 on one side and a retry.
+
+## Question still open
+1. Turn dirs are found by their own record, and one with no record is left
+   behind. Acceptable, or should the server pass session ids?
 
 ## Expected diff tier
 Tier 2: a new sudoers alias, a destructive mode in a root-installed helper, a
@@ -377,8 +471,9 @@ One keyboard session, spent. The branch is built.
 
 ## Deploy recipe
 Order matters: the helper and the alias go in before the server that calls
-them. A server restarted first hides a deleted app and answers 502 because
-sudo refuses the mode; the same DELETE succeeds once the alias is installed.
+them. A server restarted first deletes the app and answers 502 because sudo
+refuses the mode; the row shows Finish deleting, which succeeds once the
+alias is installed.
 1. Merge.
 2. Back up the DB (`sqlite3 .backup`).
 3. At the keyboard, from the production tree:
