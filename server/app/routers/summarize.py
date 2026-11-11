@@ -133,8 +133,9 @@ async def summarize_url(body: SummarizeRequest, user: CurrentUser) -> dict[str, 
 # ---------------------------------------------------------------------------
 
 @router.get("/unfurl")
-async def unfurl(actor: CurrentActor, url: str = Query(min_length=1)) -> dict[str, Any]:
-    return await unfurl_service.unfurl(url)
+async def unfurl(actor: CurrentActor, url: str = Query(min_length=1),
+                 refresh: bool = False) -> dict[str, Any]:
+    return await unfurl_service.unfurl(url, refresh=refresh)
 
 
 # ---------------------------------------------------------------------------

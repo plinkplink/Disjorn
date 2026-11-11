@@ -243,6 +243,83 @@ async def test_unfurl_failure_returns_minimal_and_skips_cache(client, monkeypatc
     ) is None
 
 
+async def _cached_row(url, age, image="https://cdn.example/signed.jpg?oe=1", title="Old"):
+    await db.execute(
+        "INSERT INTO unfurl_cache (url, title, description, image_url, fetched_at)"
+        " VALUES (?, ?, NULL, ?, ?)",
+        (url, title, image, unfurl_service._cache_cutoff(age)),
+    )
+
+
+async def test_a_refresh_refetches_a_row_older_than_the_minimum_age(client, monkeypatch):
+    await make_user()
+    await login(client)
+    link = "https://example.com/reel"
+    await _cached_row(link, datetime.timedelta(days=5))
+    calls = []
+
+    async def fake_fetch(url):
+        calls.append(url)
+        return url, CANNED_HTML
+
+    monkeypatch.setattr(unfurl_service, "fetch_head", fake_fetch)
+    plain = await client.get("/unfurl", params={"url": link})
+    assert plain.json()["image_url"] == "https://cdn.example/signed.jpg?oe=1"
+    assert calls == []
+
+    fresh = await client.get("/unfurl", params={"url": link, "refresh": "1"})
+    assert fresh.json()["image_url"] == "https://example.com/img/thumb.png"
+    assert calls == [link]
+
+    await client.get("/unfurl", params={"url": link, "refresh": "1"})
+    assert calls == [link]
+    assert (await client.get("/unfurl", params={"url": link})).json()["title"] == "OG Title"
+
+
+@pytest.mark.parametrize("page", [None, "<html><body>log in to continue</body></html>"])
+async def test_a_refresh_that_fails_or_finds_nothing_keeps_the_cached_row(
+        client, monkeypatch, page):
+    await make_user()
+    await login(client)
+    link = "https://example.com/reel"
+    await _cached_row(link, datetime.timedelta(days=5))
+
+    async def fake_fetch(url):
+        if page is None:
+            raise httpx.ConnectError("no route to host")
+        return url, page
+
+    monkeypatch.setattr(unfurl_service, "fetch_head", fake_fetch)
+    r = await client.get("/unfurl", params={"url": link, "refresh": "1"})
+    assert r.json() == {
+        "url": link,
+        "title": "Old",
+        "description": None,
+        "image_url": "https://cdn.example/signed.jpg?oe=1",
+    }
+    row = await db.fetch_one("SELECT title FROM unfurl_cache WHERE url = ?", (link,))
+    assert row["title"] == "Old"
+
+
+async def test_an_empty_row_is_served_for_an_hour_not_the_week(client, monkeypatch):
+    await make_user()
+    await login(client)
+    calls = []
+
+    async def fake_fetch(url):
+        calls.append(url)
+        return url, CANNED_HTML
+
+    monkeypatch.setattr(unfurl_service, "fetch_head", fake_fetch)
+    young, old = "https://example.com/young", "https://example.com/old"
+    await _cached_row(young, datetime.timedelta(minutes=30), image=None, title=None)
+    await _cached_row(old, datetime.timedelta(hours=2), image=None, title=None)
+
+    assert (await client.get("/unfurl", params={"url": young})).json()["title"] is None
+    assert (await client.get("/unfurl", params={"url": old})).json()["title"] == "OG Title"
+    assert calls == [old]
+
+
 async def test_unfurl_rejects_non_http_schemes(client):
     await make_user()
     await login(client)
