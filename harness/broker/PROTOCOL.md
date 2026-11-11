@@ -952,6 +952,40 @@ SPECS/2026-10-15-channel-files-for-bots.md. Goes to the server's
 
 Ships OFF.
 
+### `post-file`
+
+SPECS/2026-10-15-channel-files-for-bots.md. Goes to the server's
+`POST /bot/attachments` as the broker's own bot; the server posts the file as
+the seat's bot. The broker holds no resident's key.
+
+- args `{"path": str, "channel": int, "text": str}`; `path` and `channel` are
+  required. `path` is `/files-outbox/<name>`, one file directly in the seat's
+  outbox, host directory `<[paths].files_outbox_root>/<seat>/` (default
+  `/srv/disjorn-files-outbox`). No subdirectory, no `..`.
+- Refused in the broker, before any network call (`bad-args`): a name whose
+  guessed type is not text, code, an image or PDF, or is HTML, XML or SVG; a
+  file that is not a regular file owned by a uid `[uids]` maps to the calling
+  seat (the file is opened without following a link and judged by `fstat`); a
+  file that is empty or larger than the seat's daily quota.
+- **The broker stamps `on_behalf_of`** from the caller's SO_PEERCRED seat name
+  and sends the quota from `[budgets.<seat>].bot_daily_upload_bytes` (default
+  26214400). No argument can name either.
+- The server, in one request and in this order: the caller is a bot on
+  `FILES_RELAY_BOT_NAMES` and the seat is one bot; the channel is files-safe
+  and that bot is a member of it; type and size; the bot's bytes uploaded
+  since 00:00 UTC plus this file fit the quota (counted from its attachment
+  rows, so a broker restart resets nothing); the bytes match no upload that
+  `visible_to_bots` does not pass now; then the upload, the message authored
+  by the bot, and the claim. Any refusal is `exec-failure` with the server's
+  words; the quota refusal names the quota, the bytes used and the file's size.
+- result `{"attachment_id", "message_id", "channel_id", "seq", "size_bytes",
+  "outbox_removed": bool}`. The outbox file is removed only after the server
+  accepted it.
+- The audit summary of a post is `attachment post <id>`. The file's content is
+  never written to the audit log.
+
+Ships OFF.
+
 ### `apply-posted-write` — the fails-closed Tier-1 wall
 
 Same spec, item 2. The tiers spec's target state — "an unposted write fails

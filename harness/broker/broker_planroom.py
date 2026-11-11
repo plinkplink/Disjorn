@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import base64
 import datetime as _dt
 import json
+import mimetypes
+import os
+import stat
 from typing import Optional
 
 from broker_common import (
@@ -31,6 +35,18 @@ MAX_BACKLOG_LIST_ROWS = 50
 BACKLOG_TEXT_CLIP = 300
 BACKLOG_PAGE = 200
 BACKLOG_DAILY_FILE_CAP = 10
+# Mirrors what server/app/services/bot_files.py lets a bot post; the two must not drift.
+POSTABLE_MIME_PREFIXES = ("text/", "image/")
+POSTABLE_MIMES = frozenset({
+    "application/pdf", "application/json", "application/xml",
+    "application/javascript", "application/x-javascript", "application/x-sh",
+    "application/x-python", "application/yaml", "application/x-yaml",
+    "application/toml", "application/sql",
+})
+UNPOSTABLE_MIMES = frozenset({"text/html", "text/xml", "application/xml", "image/svg+xml"})
+SEAT_OUTBOX = "/files-outbox/"
+DEFAULT_OUTBOX_ROOT = "/srv/disjorn-files-outbox"
+DEFAULT_DAILY_UPLOAD_BYTES = 25 * 1024 * 1024
 
 
 def format_approval_line(proposal: dict) -> str:
@@ -382,6 +398,84 @@ class PlanroomVerbs:
             self.disjorn, "GET",
             f"/bot/attachments/{attachment_id}?on_behalf_of={_urlq(resident)}")
         return result, f"attachment read {attachment_id}"
+
+    def _verb_post_file(self, resident: str, args: dict) -> tuple[dict, str]:
+        """One outbox file, posted by the server as the calling seat's own bot.
+
+        The name's type and the file's owner and size are judged here, before
+        any network call; the channel, the quota and the content are the
+        server's one decision. The seat label is the caller's peer identity.
+        """
+        _reject_unknown(args, {"path", "channel", "text"})
+        path = _check_str(args, "path", required=True, max_len=300)
+        assert path is not None
+        if "channel" not in args:
+            raise _bad("missing required arg: channel")
+        channel = _check_int(args, "channel", 0, 1, MAX_SEQ)
+        text = _check_str(args, "text", max_len=MAX_REQUEST_BYTES) or ""
+        name = path.removeprefix(SEAT_OUTBOX)
+        if (not path.startswith(SEAT_OUTBOX) or "/" in name or name in ("", ".", "..")
+                or any(ch < " " or ch == "\x7f" for ch in name)):
+            raise _bad("path must name a file directly in /files-outbox")
+        mime = (mimetypes.guess_type(name)[0] or "").lower()
+        if mime in UNPOSTABLE_MIMES or not (
+                mime.startswith(POSTABLE_MIME_PREFIXES) or mime in POSTABLE_MIMES):
+            raise _bad(f"a bot may not post a file of this type "
+                       f"({mime or 'unknown'}): text, code, images and PDF only")
+        per = self.budgets.get(resident)
+        quota = (per.get("bot_daily_upload_bytes", DEFAULT_DAILY_UPLOAD_BYTES)
+                 if isinstance(per, dict) else DEFAULT_DAILY_UPLOAD_BYTES)
+        if not isinstance(quota, int) or isinstance(quota, bool) or quota < 0:
+            raise VerbError("internal", "bot_daily_upload_bytes must be a whole "
+                                        "number of bytes")
+        root = self.paths.get("files_outbox_root", DEFAULT_OUTBOX_ROOT)
+        try:
+            outbox = os.open(os.path.join(root, resident),
+                             os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except OSError:
+            raise VerbError("exec-failure",
+                            f"no outbox is set up for {resident}") from None
+        try:
+            data = self._read_outbox_file(resident, outbox, name, quota)
+            result = self.planroom_api(
+                self.disjorn, "POST", "/bot/attachments",
+                {"on_behalf_of": resident, "channel_id": channel,
+                 "filename": name, "data": base64.b64encode(data).decode("ascii"),
+                 "text": text, "daily_quota_bytes": quota})
+            try:
+                os.unlink(name, dir_fd=outbox)
+                removed = True
+            except OSError:
+                removed = False
+        finally:
+            os.close(outbox)
+        return ({**result, "outbox_removed": removed},
+                f"attachment post {result.get('attachment_id')}")
+
+    def _read_outbox_file(self, resident: str, outbox: int, name: str,
+                          cap: int) -> bytes:
+        """The file is judged by what was opened, never by what its name points at."""
+        uids = {uid for uid, who in self.uid_map.items() if who == resident}
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                         dir_fd=outbox)
+        except OSError:
+            raise _bad(f"no readable file {name} in /files-outbox") from None
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_uid not in uids:
+                raise _bad("an outbox file must be a regular file the seat "
+                           "itself wrote")
+            if not 0 < st.st_size <= cap:
+                raise _bad(f"{name} is {st.st_size} bytes; a posted file must be "
+                           f"1 to {cap} bytes, the seat's daily upload quota")
+            with open(fd, "rb", closefd=False) as fh:
+                data = fh.read(cap + 1)
+        finally:
+            os.close(fd)
+        if len(data) != st.st_size:
+            raise _bad(f"{name} changed while it was read; nothing was posted")
+        return data
 
     def _count_backlog_filed(self, resident: str, today: str) -> int:
         n = 0

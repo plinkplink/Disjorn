@@ -771,6 +771,43 @@ minimum = 1
 maximum = 2147483647
 description = "The attachment's id, from a message's attachments list."
 
+# ── post-file ────────────────────────────────────────────────────────────
+[verbs.post-file]
+tool_name = "post_file"
+cli_help = "post one file from /files-outbox as an attachment on your own message"
+announce_preface = false
+description = """\
+Post one file from your outbox, /files-outbox, as an attachment on a new message \
+of your own, via the house broker. The channel must be one an admin has marked \
+files-safe and you are a member of. Text, code, images and PDF only; the type is \
+read from the file's name. Each seat has a daily upload quota in bytes, and a \
+refusal names the figures. A file whose bytes match an upload bots may not read \
+is refused: a hidden file is not posted back. On success the outbox copy is \
+removed. There is no edit and no delete of anyone's upload.\
+"""
+
+[verbs.post-file.args.path]
+type = "string"
+required = true
+max_len = 300
+pattern = "^/files-outbox/[^/]+$"
+no_dotdot = true
+no_nul = true
+description = "The file to post, as /files-outbox/<name>. No subdirectories."
+
+[verbs.post-file.args.channel]
+type = "integer"
+required = true
+minimum = 1
+maximum = 2147483647
+description = "The id of the channel to post into."
+
+[verbs.post-file.args.text]
+type = "string"
+max_len = 16000
+no_nul = true
+description = "The message the file is attached to. May be omitted."
+
 # ══ ADAPTER TOOLS ═════════════════════════════════════════════════════════
 #
 # Everything above this line is a BROKER VERB. Everything below it is not.

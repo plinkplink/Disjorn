@@ -10,6 +10,7 @@ Nothing here touches the real service, port 8399, or /etc.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import socket
@@ -35,7 +36,7 @@ ALL_VERBS = [
     "board-list", "board-card", "board-search", "board-flag", "board-comment",
     "summon-hop", "apps-build", "build", "merge",
     "approval-list", "approval-show", "approval-act", "apply-posted-write",
-    "backlog-list", "backlog-file", "read-attachment",
+    "backlog-list", "backlog-file", "read-attachment", "post-file",
 ]
 
 RECORD_STUB = textwrap.dedent("""\
@@ -1067,6 +1068,13 @@ def harness(tmp_path: Path):
             return _stub_approval(approval_state, method, path, payload)
         if path.startswith("/backlog"):
             return _stub_backlog(planroom_state, method, path, payload)
+        if path == "/bot/attachments":
+            refusal = planroom_state.get("post_refusal")
+            if refusal:
+                raise VerbError("exec-failure", refusal, status=403)
+            return {"attachment_id": 41, "message_id": 9, "seq": 3,
+                    "channel_id": payload["channel_id"],
+                    "size_bytes": len(base64.b64decode(payload["data"]))}
         if path.startswith("/bot/attachments/"):
             wanted = path.rsplit("/", 1)[1].split("?", 1)[0]
             found = planroom_state.get("attachments", {}).get(wanted)
