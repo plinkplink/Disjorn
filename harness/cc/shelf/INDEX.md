@@ -77,7 +77,8 @@ tsc --noEmit --skipLibCheck /shelf/phaser/types/phaser.d.ts src/main.ts
 
 This is tsc 7: `strict` is on unless you turn it off, and options removed
 after TypeScript 5 (`--moduleResolution node`, `--target es5`, `--outFile`)
-are errors. The two commands above need no `tsconfig.json`.
+are errors. Write no `tsconfig.json`: tsc refuses file
+arguments beside one (TS5112).
 
 **chart — Chart.js 4.5.1 UMD, 208 KB, MIT.** Script tag, global `Chart`, all
 controllers registered.
