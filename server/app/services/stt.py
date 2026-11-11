@@ -43,6 +43,10 @@ class RemoteError(Exception):
     """The remote server gave no usable transcript."""
 
 
+class RemoteRejected(RemoteError):
+    """The remote server refused this clip; the server itself is up."""
+
+
 class Transcript(str):
     """A transcript that remembers which engine produced it."""
 
@@ -256,6 +260,8 @@ class RemoteTranscriber:
                 "stt remote refused the bearer token (401): STT_REMOTE_TOKEN does "
                 "not match the token the speech server expects"
             )
+        if response.status_code in (400, 413, 415, 422):
+            raise RemoteRejected(f"HTTP {response.status_code}")
         if not response.is_success:
             raise RemoteError(f"HTTP {response.status_code}")
         try:
@@ -294,6 +300,8 @@ class TieredTranscriber:
                 text = await self.remote.transcribe(
                     audio_path, filename=filename, content_type=content_type
                 )
+            except RemoteRejected as exc:
+                logger.info("stt tier=remote refused the clip (%s); local for this one", exc)
             except RemoteError as exc:
                 cooldown = get_settings().STT_REMOTE_COOLDOWN
                 self._skip_until = self.clock() + cooldown

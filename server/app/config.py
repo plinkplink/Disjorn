@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     STT_QUANTIZATION: str = ""
     STT_LANGUAGE: str = "en"
     STT_PRELOAD: bool = False
+    STT_MAX_BYTES: int = 32 * 1024 * 1024
     STT_REMOTE_URL: str = ""
     STT_REMOTE_MODEL: str = "large-v3"
     STT_REMOTE_TOKEN: str = ""

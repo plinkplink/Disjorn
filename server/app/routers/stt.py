@@ -77,13 +77,22 @@ async def transcribe_audio(
     tmp_path = tmp_dir / f"stt-{uuid.uuid4().hex}{suffix or '.webm'}"
     try:
         with tmp_path.open("wb") as fh:
+            size = 0
             while chunk := await audio.read(CHUNK):
+                size += len(chunk)
+                if size > get_settings().STT_MAX_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail="That recording is too long to transcribe — try a shorter one",
+                    )
                 fh.write(chunk)
         text = await transcriber.transcribe(
             str(tmp_path),
             filename=audio.filename or "",
             content_type=audio.content_type or "",
         )
+    except HTTPException:
+        raise
     except stt_service.AudioError:
         raise HTTPException(
             status_code=400,

@@ -145,6 +145,15 @@ async def test_an_upload_that_is_not_audio_is_refused_with_415(client, monkeypat
     assert r.status_code == 415
 
 
+async def test_a_recording_over_the_size_cap_is_a_413_and_is_never_decoded(client, monkeypatch):
+    engine = FakeEngine()
+    use_engine(monkeypatch, engine, STT_MAX_BYTES="8")
+    await signed_in(client)
+    r = await upload(client)
+    assert r.status_code == 413 and "too long" in r.json()["detail"]
+    assert engine.loads == 0
+
+
 async def test_undecodable_audio_is_a_400_the_user_can_read(client, monkeypatch):
     def refuse(path):
         raise stt_service.AudioError("no audio frames")
@@ -397,12 +406,11 @@ async def slow(request):
     slow,
     lambda request: httpx.Response(500, text="boom"),
     lambda request: httpx.Response(503, json={"detail": "model loading"}),
-    lambda request: httpx.Response(400, json={"detail": "could not decode"}),
     lambda request: httpx.Response(307, headers={"location": "http://elsewhere.test/"}),
     lambda request: httpx.Response(200, text=""),
     lambda request: httpx.Response(200, json={"words": []}),
     lambda request: httpx.Response(200, json={"text": None}),
-], ids=["slow", "500", "503", "400", "redirect", "empty", "no-text", "null-text"])
+], ids=["slow", "500", "503", "redirect", "empty", "no-text", "null-text"])
 async def test_a_remote_that_gives_no_transcript_in_time_is_answered_locally(
     tmp_db_path, monkeypatch, tmp_path, reply
 ):
@@ -417,6 +425,19 @@ async def test_a_remote_that_gives_no_transcript_in_time_is_answered_locally(
     assert [r.url.host for r in remote.requests] == ["gpu.test"]
     await tier.transcribe(str(clip))
     assert len(remote.requests) == 1
+
+
+async def test_a_clip_the_remote_refuses_is_answered_locally_and_the_remote_stays_in_use(
+    tmp_db_path, monkeypatch, tmp_path
+):
+    clip = tmp_path / "a.webm"
+    clip.write_bytes(b"x")
+    remote = Remote(lambda request: httpx.Response(400, json={"detail": "could not decode"}))
+    tier = remote.tier(monkeypatch, FakeEngine())
+    text = await tier.transcribe(str(clip))
+    assert (text, text.engine) == ("the spoken secret", "fake")
+    await tier.transcribe(str(clip))
+    assert len(remote.requests) == 2
 
 
 async def test_with_no_remote_url_the_local_engine_is_the_whole_service(client, monkeypatch):
