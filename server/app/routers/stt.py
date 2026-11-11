@@ -1,18 +1,18 @@
-"""Voice-to-text endpoint (WP8).
+"""Voice-to-text endpoint.
 
     POST /stt  (user auth) — multipart field "audio" (webm/ogg/wav/mp3/m4a)
                -> {"text": "..."}
 
-The client (WP12 mic button) records via MediaRecorder and POSTs the blob;
-the returned text is inserted into the composer for the user to edit.
+The mic button records with MediaRecorder and POSTs the blob; the text goes
+into the composer for the user to edit. The upload is written under
+DATA_DIR/tmp, transcribed by services.stt.get_transcriber() and deleted.
 
-Audio is written to a temp file under DATA_DIR/tmp, transcribed by the
-engine from services.stt.get_transcriber() (STT_ENGINE config, default
-faster_whisper), then deleted. When no engine is available (faster-whisper
-is an optional extra in requirements-ml.txt) the endpoint returns 501 with
-a clear message instead of failing at import time.
+Every failure carries a sentence the composer can show: 501 when no engine is
+installed, 415 for a type that is not audio, 400 when the audio cannot be
+decoded, 503 when the engine itself fails.
 """
 
+import logging
 import uuid
 from pathlib import Path
 from typing import Annotated
@@ -25,6 +25,7 @@ from ..services import stt as stt_service
 from .auth import get_current_user
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 CurrentUser = Annotated[User, Depends(get_current_user)]
 
@@ -79,6 +80,17 @@ async def transcribe_audio(
             while chunk := await audio.read(CHUNK):
                 fh.write(chunk)
         text = await transcriber.transcribe(str(tmp_path))
+    except stt_service.AudioError:
+        raise HTTPException(
+            status_code=400,
+            detail="That recording could not be read — try recording again",
+        )
+    except Exception:
+        logger.exception("stt engine failed")
+        raise HTTPException(
+            status_code=503,
+            detail="Speech-to-text failed on the server — try again in a moment",
+        )
     finally:
         tmp_path.unlink(missing_ok=True)
     return {"text": text}
