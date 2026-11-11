@@ -748,7 +748,15 @@ def test_every_build_seat_and_its_subagents_share_one_model_pin():
         settings = json.loads((CC_DIR / rel).read_text(encoding="utf-8"))
         assert settings["env"]["CLAUDE_CODE_SUBAGENT_MODEL"] == pin, rel
         assert settings["env"]["CLAUDE_CODE_SUBAGENT_MODEL_FORCE"] == "1", rel
-        assert "modelSettings" not in settings and "effortLevel" not in settings, rel
+
+
+def test_every_fable_seat_pins_effort_high_in_one_place():
+    for rel in ("build-config/settings.json", "apps/config/settings.json",
+                "config-template/settings.json"):
+        settings = json.loads((CC_DIR / rel).read_text(encoding="utf-8"))
+        assert settings.get("effortLevel") == "high", rel
+        assert "modelSettings" not in settings, rel
+        assert "CLAUDE_CODE_EFFORT_LEVEL" not in settings.get("env", {}), rel
 
 
 # ───────────────────────────────────────── the prompt rides stdin, root writes nothing ──
