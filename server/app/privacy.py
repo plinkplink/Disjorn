@@ -1,28 +1,19 @@
-"""Privacy (WP5): flag detection + bot-visibility filtering.
+"""Privacy flag detection and bot-visibility filtering.
 
-Single source of truth (BUILD-PLAN convention): every bot-facing code path —
-REST reads (routers/messages.py), the WS event stream (app/ws.py), and context
-injection — decides visibility through this module. Architecture §4.2 / §8.2:
-messages flagged `secret` or `off_the_record` never reach a bot in any form
-(no content, no tombstone, no context).
-
-NL trigger detection is deliberately cheap: compiled word-boundary regexes at
-module import, ASCII phrases with flexible whitespace and straight/curly
-apostrophes. Runs server-side before insert/fan-out, so the flag exists before
-any bot could see the message.
+Every bot-facing path decides visibility here. `secret` and `off_the_record`
+messages never reach a bot in any form: no content, tombstone or context.
+Detection runs before insert and fan-out, so the flag exists first.
 """
 
 import re
 from typing import Any, Optional
 
-# Flags that hide a message from bots entirely.
 BOT_HIDDEN_FLAGS = ("secret", "off_the_record")
 
-# Event types whose payload is (or refers to) a persisted message.
 _MESSAGE_EVENT_TYPES = ("message_create", "message_edit", "message_delete")
 
 _SECRET_PHRASES = (
-    "don't tell anyone",   # matcher also covers "dont" / curly-apostrophe "don’t"
+    "don't tell anyone",
     "just between us",
     "between you and me",
     "keep this secret",
@@ -32,13 +23,7 @@ _OFF_THE_RECORD_PHRASES = ("off the record",)
 
 
 def _phrase_pattern(phrases: tuple[str, ...]) -> re.Pattern[str]:
-    """One compiled alternation for a phrase list.
-
-    - case-insensitive
-    - word-boundary aware on both ends ("scoff the record" doesn't match)
-    - spaces match any whitespace run
-    - "'" matches straight/curly apostrophe or nothing ("dont tell anyone")
-    """
+    """One case-insensitive, word-bounded alternation over a phrase list."""
     alts = []
     for phrase in phrases:
         pat = re.escape(phrase)
@@ -53,11 +38,7 @@ _OFF_THE_RECORD_RE = _phrase_pattern(_OFF_THE_RECORD_PHRASES)
 
 
 def detect_flags(content: str) -> dict[str, Any]:
-    """NL trigger detection: map message content to privacy flags.
-
-    Returns {} when nothing triggers; callers merge the result into
-    caller-supplied flags (flags only ever accumulate — WP4 semantics).
-    """
+    """Map message content to privacy flags. Callers merge; flags only accumulate."""
     flags: dict[str, Any] = {}
     if _SECRET_RE.search(content):
         flags["secret"] = True
@@ -76,31 +57,17 @@ def hidden_from_bots(privacy_flags: Optional[dict[str, Any]]) -> bool:
 def visible_to_bot(
     message: dict[str, Any], bot_id: int, *, channel_is_bot_member: bool
 ) -> bool:
-    """May this bot see this message payload?
-
-    Pure/sync by design: the caller resolves channel membership (an async DB
-    question) and passes it in; this module owns only the policy. `bot_id` is
-    part of the signature for future per-bot policy; today visibility is
-    uniform across bots.
-    """
+    """May this bot see this payload? `bot_id` is unused: visibility is uniform."""
     if not channel_is_bot_member:
         return False
     return not hidden_from_bots(message.get("privacy_flags"))
 
 
 def filter_event_for_bot(event: dict[str, Any]) -> Optional[dict[str, Any]]:
-    """Bus event -> bot-safe event, or None if bots must not see it at all.
+    """Bus event to a bot-safe event, or None if bots must not see it.
 
-    - Non-message events (typing_start, presence, ...) pass through untouched.
-    - message_create / message_edit: hidden when the embedded message payload
-      carries a bot-hidden flag.
-    - message_delete: carries no payload, so the caller must enrich the event
-      with the deleted message's flags under "privacy_flags" (soft delete keeps
-      the row). A hidden message's delete is also hidden — bots that never saw
-      the message get no tombstone for it.
-
-    Membership scoping stays with the caller (visible_to_bot / channel fan-out);
-    this function only enforces the flag policy.
+    message_delete has no payload, so the caller must put the deleted
+    message's flags under "privacy_flags". A hidden message's delete is hidden.
     """
     if event.get("type") not in _MESSAGE_EVENT_TYPES:
         return event
