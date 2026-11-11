@@ -1,8 +1,6 @@
-"""Typed event dataclasses yielded by :meth:`DisjornClient.events`.
+"""Event dataclasses yielded by DisjornClient.events().
 
-Frame shapes mirror the server WS protocol (server/app/ws.py, Architecture
-§8.2). Persisted events carry ``seq`` (per channel); ephemeral events
-(:class:`TypingStart`, :class:`Presence`) do not and cannot be backfilled.
+Ephemeral events carry no seq and cannot be backfilled.
 """
 
 from __future__ import annotations
@@ -27,12 +25,7 @@ __all__ = [
 
 @dataclass(slots=True)
 class Ready:
-    """Connection established and authenticated.
-
-    Yielded once per successful (re)connect. ``reconnected`` is False for the
-    first connection of a client's lifetime, True afterwards — a True value
-    means a REST backfill of every known channel follows immediately.
-    """
+    """Connected and authenticated; ``reconnected`` True means a REST backfill follows."""
 
     bot_id: int
     reconnected: bool = False
@@ -40,21 +33,9 @@ class Ready:
 
 @dataclass(slots=True)
 class MessageCreate:
-    """A new message in a channel the bot is a member of.
+    """Message in a channel the bot is in. ``context`` is set only for an @mentioned bot.
 
-    ``message`` is the server's full materialized payload dict:
-    ``{id, channel_id, seq, author_type, author_id, author: {...}, content,
-    created_at, edited_at, deleted_at, reply_to_id, privacy_flags,
-    emote_refs, attachments}``.
-
-    ``context`` is the structured context-injection block (Architecture §8.3:
-    ``{awake_users, channel_state, privacy_flags_on_current_message}``) — set
-    only on the copy delivered to a bot that was @mentioned (or name-matched)
-    by the message, None otherwise. Backfilled events never carry context.
-
-    ``backfilled`` is True for synthetic events produced by the reconnect
-    backfill; such messages are in *current* state (an edit that happened
-    while disconnected is already applied — no separate MessageEdit follows).
+    ``backfilled`` messages are already current; no MessageEdit follows.
     """
 
     channel_id: int
@@ -66,8 +47,7 @@ class MessageCreate:
 
 @dataclass(slots=True)
 class MessageEdit:
-    """An existing message was edited; ``message`` is the full updated payload
-    (``edited_at`` set). ``seq`` is the original message's seq."""
+    """Edit; ``message`` is the full updated payload, ``seq`` the original's."""
 
     channel_id: int
     seq: int
@@ -76,7 +56,7 @@ class MessageEdit:
 
 @dataclass(slots=True)
 class MessageDelete:
-    """A message was (soft-)deleted. Only ids travel — no content."""
+    """Soft delete; ids only, no content."""
 
     channel_id: int
     id: int
@@ -85,7 +65,7 @@ class MessageDelete:
 
 @dataclass(slots=True)
 class TypingStart:
-    """Someone started typing (ephemeral, no seq, rate-limited server-side)."""
+    """Someone is typing; rate-limited server-side."""
 
     channel_id: int
     author_type: str  # "user" | "bot"
@@ -94,7 +74,7 @@ class TypingStart:
 
 @dataclass(slots=True)
 class Presence:
-    """A user's presence changed (ephemeral, no seq)."""
+    """A user's presence changed."""
 
     user_id: int
     status: str  # "online" | "idle" | "dnd" | "offline"
@@ -102,32 +82,16 @@ class Presence:
 
 @dataclass(slots=True)
 class ChannelCreate:
-    """A named text channel was created (ephemeral, no seq).
-
-    ``channel`` is ``{id, type, name, visibility}`` — for this event ``type``
-    is always ``"text"``. A ``"public"`` channel's creation is broadcast to
-    everyone; a ``"private"`` one reaches only its members, so a bot that is
-    not a member never sees this event for it at all. Receiving this does NOT
-    make the bot a member: bots must be added explicitly (POST
-    /channels/{id}/bots) before any of the channel's messages reach them.
-    """
+    """Text channel created. Bots are not members until added (POST /channels/{id}/bots)."""
 
     channel: dict[str, Any]
 
 
 @dataclass(slots=True)
 class ChannelDelete:
-    """A text channel was deleted, with everything in it (ephemeral, no seq).
+    """Text channel deleted with its contents.
 
-    Reaches the same audience :class:`ChannelCreate` did: everyone for a public
-    channel, its members for a private one — so a bot that was in the channel
-    hears about it, and one that never was does not. ``channel`` is
-    ``{id, type, name, visibility}`` describing what is gone, and
-    ``by_user_id`` is the user (its owner, or an admin) who deleted it.
-
-    The delete is HARD on the server: the channel's messages are not coming
-    back, and no MessageDelete tombstones are sent for them. Drop any state you
-    keep for ``channel_id`` on receipt — a backfill of it will 404.
+    HARD delete: no tombstones, and a backfill 404s. Drop state kept for ``channel_id``.
     """
 
     channel_id: int
@@ -137,15 +101,7 @@ class ChannelDelete:
 
 @dataclass(slots=True)
 class MemberAdd:
-    """A user or bot was added to a channel (ephemeral, no seq).
-
-    Reaches the channel's members plus the member it happened to, so a bot
-    hears both "someone joined a room I am in" and "I was just added
-    somewhere". ``channel`` is ``{id, type, name, visibility}`` as on
-    :class:`ChannelCreate`; ``member_type`` is ``"user"`` or ``"bot"`` and
-    ``member_id`` identifies the subject in that namespace. ``by_user_id`` is
-    the user who did it (None if nothing acted).
-    """
+    """User or bot added to a channel. ``by_user_id`` is None if nothing acted."""
 
     channel_id: int
     member_type: str  # "user" | "bot"
@@ -156,12 +112,7 @@ class MemberAdd:
 
 @dataclass(slots=True)
 class MemberRemove:
-    """A user or bot left a channel or was removed from it (ephemeral, no seq).
-
-    Same audience as :class:`MemberAdd`, the subject included — for a bot that
-    is itself the subject, this frame is the last thing it hears about that
-    channel. ``by_user_id`` is the kicker, or the leaving member themselves.
-    """
+    """User or bot left or was removed. For a bot, the last frame for that channel."""
 
     channel_id: int
     member_type: str  # "user" | "bot"
