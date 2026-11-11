@@ -451,7 +451,7 @@ class Refused(Exception):
 
 
 def _postable(mime: str) -> bool:
-    return mime not in _UNPOSTABLE_MIMES and (
+    return mime not in _UNPOSTABLE_MIMES and not mime.endswith("+xml") and (
         mime.startswith(_ALLOWED_PREFIXES) or mime in _ALLOWED_MIMES
     )
 

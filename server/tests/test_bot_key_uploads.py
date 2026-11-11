@@ -100,6 +100,7 @@ async def test_a_bot_links_no_file_where_it_may_not_read_files(house, why):
     ("page.html", HTML, "text/plain"),
     ("notes.txt", HTML, "text/html"),
     ("pic.svg", b"<svg/>", "image/svg+xml"),
+    ("a.txt", b"<x/>", "text/x+xml"),
     ("clip.txt", b"\x00\x00\x00\x18ftypmp42", "video/mp4"),
     ("tool.exe", b"MZ", "application/octet-stream"),
     ("blob", b"x", "text/plain"),
