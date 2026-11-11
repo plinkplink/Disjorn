@@ -592,6 +592,34 @@ def test_the_files_directories_default_to_the_seat_s_own_under_srv():
     assert 'FILES_OUTBOX="${RESIDENT_FILES_OUTBOX:-/srv/disjorn-files-outbox/res-$NAME}"' in wrapper
 
 
+STAMP = {"DISJORN_SUMMON_MODEL": "claude-x", "DISJORN_SUMMONER": "Ada of the house"}
+
+
+def env_flags(argv) -> list[str]:
+    return [argv[i + 1] for i, a in enumerate(argv[:-1]) if a in ("-e", "--env")]
+
+
+def test_resident_seat_passes_the_launcher_s_stamp_by_name(rig):
+    proc, argv, environ, envfile = rig("run-resident.sh", "BROKER_DISABLE=1\n", STAMP)
+    assert proc.returncode == 0, proc.stderr
+    assert [f for f in env_flags(argv) if f.startswith("DISJORN_")] == list(STAMP)
+    assert not any(value in " ".join(argv) for value in STAMP.values())
+    assert {k: environ[k] for k in STAMP} == STAMP
+
+
+@pytest.mark.parametrize("stamp", [{}, {"DISJORN_SUMMON_MODEL": "", "DISJORN_SUMMONER": ""}])
+def test_a_stamp_the_launcher_did_not_set_is_not_passed(rig, stamp):
+    proc, argv, environ, envfile = rig("run-resident.sh", "BROKER_DISABLE=1\n", stamp)
+    assert proc.returncode == 0, proc.stderr
+    assert not any("DISJORN_" in a for a in argv)
+
+
+def test_build_seat_passes_no_stamp(rig):
+    proc, argv, environ, envfile = rig("run-build.sh", "BROKER_DISABLE=1\n", STAMP)
+    assert proc.returncode == 0, proc.stderr
+    assert not any("DISJORN_SUMM" in a for a in argv)
+
+
 def test_build_seat_gets_neither_files_mount(rig, files_dirs):
     proc, argv, environ, envfile = rig("run-build.sh", "BROKER_DISABLE=1\n", files_dirs)
     assert proc.returncode == 0, proc.stderr

@@ -579,6 +579,288 @@ async def test_a_file_whose_original_is_gone_is_not_exported(house, export):
     assert exported(export) == set()
 
 
+# ------------------------------------------------------- a removal that fails
+
+def refuse_unlink(monkeypatch, name: str) -> None:
+    real = os.unlink
+
+    def unlink(path, *args, **kwargs):
+        if os.path.basename(os.fspath(path)) == name:
+            raise PermissionError(1, "Operation not permitted")
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", unlink)
+
+
+def refuse_writing(monkeypatch, name: str) -> None:
+    real = os.open
+
+    def opening(path, flags, *args, **kwargs):
+        if os.path.basename(os.fspath(path)) == name and flags & os.O_WRONLY:
+            raise PermissionError(1, "Operation not permitted")
+        return real(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", opening)
+
+
+def as_the_seat_lists(folder) -> list[str]:
+    """The seat is the folder's group at most, never its owner."""
+    if not folder.exists() or stat.S_IMODE(folder.stat().st_mode) & 0o077 == 0:
+        return []
+    return os.listdir(folder)
+
+
+def as_the_seat_reads(path) -> bytes:
+    if not path.exists() or stat.S_IMODE(path.lstat().st_mode) & 0o077 == 0:
+        return b""
+    return path.read_bytes()
+
+
+def errors(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR
+            and r.name == "app.services.bot_files" and "must go" in r.getMessage()]
+
+
+STUCK = "bot file export: 1 entries that must go are still in the export of res-claw;" \
+        " the next sweep retries"
+
+
+async def test_a_file_that_cannot_be_unlinked_is_neither_readable_nor_listed_to_the_seat(
+    house, export, monkeypatch, caplog
+):
+    export.chmod(0o2750)
+    await house.flip("on")
+    message, _, path = await shown(house, export, "plan.txt", CANARY.encode())
+    _, _, other = await shown(house, export, "other.txt", b"other")
+    room, name = export / str(house.room), path.split("/")[1]
+    assert name in as_the_seat_lists(room)
+    refuse_unlink(monkeypatch, name)
+
+    r = await house.client.patch(f"/messages/{message['id']}", json={"content": "keep this secret"})
+
+    assert r.status_code == 200
+    assert as_the_seat_lists(room) == [] and as_the_seat_reads(export / path) == b""
+    assert (export / path).stat().st_size == 0
+    assert stat.S_IMODE((export / path).stat().st_mode) == 0
+    assert exported(export) == {path}
+    assert errors(caplog) == [STUCK]
+    assert name not in caplog.text and "plan" not in caplog.text
+
+    await bot_files.export_sweep()
+    assert as_the_seat_lists(room) == [] and errors(caplog) == [STUCK, STUCK]
+
+    monkeypatch.undo()
+    await bot_files.export_sweep()
+    assert stat.S_IMODE(export.stat().st_mode) == 0o2750
+    assert stat.S_IMODE(room.stat().st_mode) == stat.S_ISGID | bot_files.EXPORT_DIR_MODE
+    assert sorted(as_the_seat_lists(room)) == sorted([other.split("/")[1], "manifest.json"])
+    assert (export / other).read_bytes() == b"other"
+    assert [e["file"] for e in manifest(export, house.room)] == [other.split("/")[1]]
+    assert errors(caplog) == [STUCK, STUCK]
+
+
+async def test_a_directory_that_cannot_be_removed_is_closed_with_every_file_emptied(
+    house, export, monkeypatch, caplog
+):
+    await house.flip("on")
+    _, _, path = await shown(house, export, "plan.txt", CANARY.encode())
+    _, _, other = await shown(house, export, "other.txt", CANARY.encode())
+    room = export / str(house.room)
+    refuse_unlink(monkeypatch, path.split("/")[1])
+
+    await house.say("/files-safe #files off")
+
+    assert as_the_seat_lists(room) == []
+    assert (export / path).stat().st_size == 0 and not (export / other).exists()
+    assert errors(caplog) == [STUCK]
+    assert stat.S_IMODE(export.stat().st_mode) & 0o050 == 0o050
+
+
+async def test_a_file_that_can_be_neither_unlinked_nor_emptied_is_closed_and_reported(
+    house, export, monkeypatch, caplog
+):
+    await house.flip("on")
+    message, _, path = await shown(house, export, "plan.txt", CANARY.encode())
+    _, _, other = await shown(house, export, "other.txt", b"other")
+    name = path.split("/")[1]
+    refuse_unlink(monkeypatch, name)
+    refuse_writing(monkeypatch, name)
+
+    assert (await house.client.delete(f"/messages/{message['id']}")).status_code == 200
+
+    assert exported(export) == {path}
+    assert stat.S_IMODE((export / path).stat().st_mode) == 0
+    assert as_the_seat_lists(export / str(house.room)) == []
+    assert errors(caplog) == [STUCK]
+    assert name not in caplog.text and "plan" not in caplog.text
+
+    monkeypatch.undo()
+    await bot_files.export_sweep()
+    assert exported(export) == {other}
+
+
+async def test_a_file_without_its_owner_write_bit_is_still_closed_and_emptied(
+    house, export, monkeypatch
+):
+    await house.flip("on")
+    message, _, path = await shown(house, export, "plan.txt", CANARY.encode())
+    (export / path).chmod(0o440)
+    refuse_unlink(monkeypatch, path.split("/")[1])
+    await db.execute("UPDATE messages SET deleted_at = 'x' WHERE id = ?", (message["id"],))
+    await bot_files.export_sweep()
+
+    assert stat.S_IMODE((export / path).stat().st_mode) == 0
+    assert (export / path).stat().st_size == 0
+
+
+async def test_an_entry_linked_to_another_file_is_closed_but_never_emptied(
+    house, export, tmp_path, monkeypatch, caplog
+):
+    await house.flip("on")
+    message, _, path = await shown(house, export, "plan.txt", CANARY.encode())
+    original = tmp_path / "original.txt"
+    original.write_text(CANARY)
+    (export / path).unlink()
+    os.link(original, export / path)
+    refuse_unlink(monkeypatch, path.split("/")[1])
+    await db.execute("UPDATE messages SET deleted_at = 'x' WHERE id = ?", (message["id"],))
+
+    await bot_files.export_sweep()
+
+    assert original.read_text() == CANARY
+    assert stat.S_IMODE(original.stat().st_mode) == 0o600
+    assert as_the_seat_reads(export / path) == b""
+    assert as_the_seat_lists(export / str(house.room)) == []
+    assert errors(caplog) == [STUCK]
+
+
+async def test_a_link_that_cannot_be_unlinked_is_never_written_through(
+    house, export, tmp_path, monkeypatch, caplog
+):
+    await house.flip("on")
+    await shown(house, export)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside")
+    before = stat.S_IMODE(outside.stat().st_mode)
+    (export / str(house.room) / "link.txt").symlink_to(outside)
+    refuse_unlink(monkeypatch, "link.txt")
+
+    await bot_files.export_sweep()
+
+    assert outside.read_text() == "outside" and stat.S_IMODE(outside.stat().st_mode) == before
+    assert exported(export) == {f"{house.room}/link.txt"}
+    assert as_the_seat_lists(export / str(house.room)) == [] and errors(caplog) == [STUCK]
+
+
+async def test_an_entry_stuck_at_the_top_is_reported_and_the_seat_folder_keeps_its_mode(
+    house, export, monkeypatch, caplog
+):
+    await house.flip("on")
+    await shown(house, export)
+    (export / "stray.txt").write_text(CANARY)
+    before = stat.S_IMODE(export.stat().st_mode)
+    refuse_unlink(monkeypatch, "stray.txt")
+
+    await bot_files.export_sweep()
+
+    assert (export / "stray.txt").stat().st_size == 0
+    assert stat.S_IMODE(export.stat().st_mode) == before
+    assert errors(caplog) == [STUCK]
+
+
+# ------------------------------------------------------------ the sweep's cost
+
+async def test_a_sweep_asks_the_database_no_more_for_more_files(house, export, monkeypatch):
+    asked = []
+    for name in ("fetch_one", "fetch_all"):
+        real = getattr(db, name)
+
+        async def counted(*args, _real=real, **kwargs):
+            asked.append(1)
+            return await _real(*args, **kwargs)
+
+        monkeypatch.setattr(db, name, counted)
+    await house.flip("on")
+    await house.say("x", txt("a.txt", b"a"))
+    asked.clear()
+    await bot_files.export_sweep()
+    for_one = len(asked)
+    await house.say("x", *(txt(f"{n}.txt", b"b") for n in range(5)))
+    await house.say("x", txt("s.txt", b"s"), flags={"secret": True})
+    asked.clear()
+
+    await bot_files.export_sweep()
+
+    assert len(asked) == for_one
+    assert len(exported(export)) == 6
+
+
+async def test_the_one_query_decides_every_row_as_visible_to_bots_does(house, monkeypatch):
+    den = (await house.client.post("/channels", json={"name": "den"})).json()["id"]
+    yard = (await house.client.post("/channels", json={"name": "yard"})).json()["id"]
+    _, (early, kept) = await house.say("x", txt("early.txt"), txt("kept.txt"))
+    await house.flip("on")
+    await house.flip("on", channel="yard")
+    await db.execute("UPDATE attachments SET bot_history_ok = 1 WHERE id = ?", (kept,))
+    _, (plain, typed) = await house.say(
+        "x", txt(), ("typed.txt", b"t", "text/plain; charset=utf-8"))
+    _, (elsewhere,) = await house.say("x", txt(), channel=yard)
+    await house.say("x", txt(), flags={"secret": True})
+    await house.say("x", txt(), flags={"off_the_record": True})
+    await house.say("x", txt(), channel=den)
+    await house.say("x", ("a.zip", b"PK", "application/zip"))
+    gone, _ = await house.say("x", txt())
+    await house.client.delete(f"/messages/{gone['id']}")
+    for flags in ("not json", "[]", '{"secret": 1}'):
+        message, _ = await house.say("x", txt())
+        await db.execute(
+            "UPDATE messages SET privacy_flags = ? WHERE id = ?", (flags, message["id"]))
+    for size in (-1, 10 ** 12):
+        _, (att,) = await house.say("x", txt())
+        await db.execute("UPDATE attachments SET size_bytes = ? WHERE id = ?", (size, att))
+    await house.client.post("/upload", files=[("files", ("staged.txt", b"s", "text/plain"))])
+
+    every = await db.fetch_all("SELECT * FROM attachments")
+    one_by_one = {a["id"] for a in every if await bot_files.visible_to_bots(a)}
+    at_once = {a["id"] for a in await bot_files.visible_rows()}
+
+    assert at_once == one_by_one == {kept, plain, typed, elsewhere}
+    assert len(every) == 16
+
+
+# ------------------------------------------------------------------ the ceiling
+
+async def test_an_export_over_its_ceiling_keeps_the_newest_files_that_fit(
+    house, export, monkeypatch, caplog
+):
+    await house.flip("on")
+    _, (old, big, new) = await house.say(
+        "x", txt("old.txt", b"o" * 100), txt("big.txt", b"b" * 800), txt("new.txt", b"n" * 300))
+    set_env(monkeypatch, "BOT_FILES_EXPORT_MAX_BYTES", 500)
+
+    await bot_files.export_sweep()
+    await bot_files.export_sweep()
+
+    assert exported(export) == {f"{house.room}/{old}_old.txt", f"{house.room}/{new}_new.txt"}
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings == [
+        "bot file export: res-claw is over its ceiling of 500 bytes; 1 files (800 bytes)"
+        " are left out and 400 bytes are exported"]
+
+
+async def test_a_lowered_ceiling_removes_what_no_longer_fits(house, export, monkeypatch):
+    await house.flip("on")
+    _, (old, new) = await house.say("x", txt("old.txt", b"o" * 300), txt("new.txt", b"n" * 300))
+    await bot_files.export_sweep()
+    assert len(exported(export)) == 2
+
+    set_env(monkeypatch, "BOT_FILES_EXPORT_MAX_BYTES", 500)
+    await bot_files.export_sweep()
+
+    assert exported(export) == {f"{house.room}/{new}_new.txt"}
+    assert [e["attachment_id"] for e in manifest(export, house.room)] == [new]
+
+
 # --------------------------------------------------------------------- post
 
 class Poster:
@@ -586,7 +868,8 @@ class Poster:
         self.house, self.relay = house, relay
 
     async def post(self, name="report.md", body=b"# report", *, channel=None, key=RELAY_KEY,
-                   seat=SEAT, quota=QUOTA, text="here it is", raw=None) -> httpx.Response:
+                   seat=SEAT, quota=QUOTA, text="here it is", raw=None,
+                   **more) -> httpx.Response:
         return await self.house.bot.post(
             "/bot/attachments",
             headers={"X-Api-Key": key},
@@ -597,6 +880,7 @@ class Poster:
                 "data": raw if raw is not None else base64.b64encode(body).decode(),
                 "text": text,
                 "daily_quota_bytes": quota,
+                **more,
             },
         )
 
@@ -876,3 +1160,206 @@ async def test_a_posted_file_reaches_the_seats_own_export_on_the_next_sweep(
     await bot_files.export_sweep()
 
     assert exported(export) == {f"{house.room}/{att}_report.md"}
+
+
+# ---------------------------------------------------------------- attribution
+
+async def test_a_posted_file_carries_what_the_seat_said_produced_it_unverified(house, poster):
+    await house.flip("on")
+
+    r = await poster.post(attribution={"model": "claude-x", "summoner": "Ada", "verified": True})
+
+    stated = {"model": "claude-x", "verified": False, "summoner": "Ada"}
+    seen = await house.seen_by_user(r.json()["message_id"])
+    assert seen["attribution"] == stated
+    (frame,) = [f for f in house.wire.frames if f.get("type") == "message_create"
+                and f["message"]["id"] == r.json()["message_id"]]
+    assert frame["message"]["attribution"] == stated
+
+
+@pytest.mark.parametrize("given, stored", [
+    (None, {}),
+    ({}, {}),
+    ({"model": None, "summoner": None}, {}),
+    ({"summoner": "Ada"}, {"model": None, "verified": False, "summoner": "Ada"}),
+    ({"model": "claude-x"}, {"model": "claude-x", "verified": False, "summoner": None}),
+])
+async def test_a_post_that_names_no_model_or_summoner_is_unattributed(
+    house, poster, given, stored
+):
+    await house.flip("on")
+    more = {} if given is None else {"attribution": given}
+
+    r = await poster.post(**more)
+
+    assert (await house.seen_by_user(r.json()["message_id"]))["attribution"] == stored
+
+
+@pytest.mark.parametrize("bad", [
+    {"model": "m" * 101}, {"summoner": "s" * 101}, {"model": 7}, {"verified": "yes"},
+    {"model": "claude-x", "note": "a side channel"}, "claude-x",
+])
+async def test_an_attribution_the_message_route_would_refuse_posts_nothing(house, poster, bad):
+    await house.flip("on")
+    before = await poster.stored()
+
+    r = await poster.post(attribution=bad)
+
+    assert r.status_code == 422
+    assert await poster.stored() == before
+
+
+# ---------------------------------------------------------------- idempotency
+
+KEY = "ab" * 32
+
+
+async def test_migration_026_adds_the_empty_post_record(tmp_path, tmp_db_path, monkeypatch):
+    earlier = tmp_path / "migrations"
+    earlier.mkdir()
+    for path in db.MIGRATIONS_DIR.glob("*.sql"):
+        if path.name != "026_bot_file_posts.sql":
+            (earlier / path.name).write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    real = db.MIGRATIONS_DIR
+    await db.close()
+    await db.connect()
+    try:
+        monkeypatch.setattr(db, "MIGRATIONS_DIR", earlier)
+        assert "024_message_mentions.sql" in await db.run_migrations()
+        monkeypatch.setattr(db, "MIGRATIONS_DIR", real)
+        assert await db.run_migrations() == ["026_bot_file_posts.sql"]
+        assert await db.fetch_all("SELECT * FROM bot_file_posts") == []
+        assert await bot_files.posted_before(1, KEY) is None
+    finally:
+        await db.close()
+
+
+async def test_the_same_key_twice_is_one_post_and_one_answer(house, poster):
+    await house.flip("on")
+    before = await poster.stored()
+
+    first = await poster.post(body=b"a" * 600, idempotency_key=KEY)
+    again = await poster.post(body=b"a" * 600, idempotency_key=KEY)
+
+    assert first.status_code == again.status_code == 200
+    assert again.json() == first.json()
+    assert await poster.stored() == (before[0] + 1, before[1] + 1)
+
+
+async def test_two_posts_of_one_key_at_once_are_one_post(house, poster):
+    await house.flip("on")
+    before = await poster.stored()
+
+    first, again = await asyncio.gather(
+        poster.post(idempotency_key=KEY), poster.post(idempotency_key=KEY))
+
+    assert again.json() == first.json() and first.status_code == 200
+    assert await poster.stored() == (before[0] + 1, before[1] + 1)
+
+
+async def test_another_key_or_no_key_is_a_new_post(house, poster):
+    await house.flip("on")
+    first = (await poster.post(idempotency_key=KEY)).json()
+
+    other = (await poster.post(text="said differently", idempotency_key="cd" * 32)).json()
+    bare = (await poster.post()).json()
+    bare_again = (await poster.post()).json()
+
+    assert len({first["message_id"], other["message_id"], bare["message_id"],
+                bare_again["message_id"]}) == 4
+
+
+async def test_a_key_is_one_bots_own(house, poster):
+    await house.flip("on")
+    await house.add_bot("otto", "otto-key", house.room)
+
+    mine = (await poster.post(idempotency_key=KEY)).json()
+    his = (await poster.post(seat="res-otto", idempotency_key=KEY)).json()
+
+    assert his["message_id"] != mine["message_id"]
+    author = await db.fetch_one(
+        "SELECT author_id FROM messages WHERE id = ?", (his["message_id"],))
+    assert author["author_id"] != house.bot_id
+
+
+@pytest.mark.parametrize("change", ["a_day_old", "message_deleted"])
+async def test_a_key_stops_answering_after_a_day_or_once_its_message_is_gone(
+    house, poster, change
+):
+    await house.flip("on")
+    first = (await poster.post(idempotency_key=KEY)).json()
+    if change == "a_day_old":
+        await db.execute("UPDATE bot_file_posts SET created_at = '2020-01-01T00:00:00.000Z'")
+    else:
+        r = await house.bot.delete(f"/messages/{first['message_id']}")
+        assert r.status_code == 200
+
+    again = (await poster.post(body=b"# report 2", idempotency_key=KEY)).json()
+
+    assert again["message_id"] != first["message_id"]
+    rows = await db.fetch_all("SELECT message_id FROM bot_file_posts")
+    assert [r["message_id"] for r in rows] == [again["message_id"]]
+
+
+async def test_a_post_whose_key_cannot_be_kept_is_still_answered(house, poster, monkeypatch):
+    await house.flip("on")
+
+    async def broken(*_args, **_kwargs):
+        raise RuntimeError("database is gone")
+
+    monkeypatch.setattr(bot_files, "remember_post", broken)
+    r = await poster.post(idempotency_key=KEY)
+
+    assert r.status_code == 200
+    assert (await row(r.json()["attachment_id"]))["message_id"] == r.json()["message_id"]
+
+
+async def test_a_refused_post_leaves_its_key_free(house, poster):
+    await house.flip("on")
+    assert (await poster.post("a.zip", idempotency_key=KEY)).status_code == 403
+
+    assert (await poster.post(idempotency_key=KEY)).status_code == 200
+
+
+@pytest.mark.parametrize("key", ["", "short", "AB" * 32, "ab" * 33, 7])
+async def test_a_key_that_is_not_a_sha256_posts_nothing(house, poster, key):
+    await house.flip("on")
+    before = await poster.stored()
+
+    assert (await poster.post(idempotency_key=key)).status_code == 422
+    assert await poster.stored() == before
+
+
+async def test_only_the_seat_itself_is_answered_from_its_key(house, poster):
+    await house.flip("on")
+    assert (await poster.post(idempotency_key=KEY)).status_code == 200
+
+    r = await poster.post(key=BOT_KEY, idempotency_key=KEY)
+
+    assert (r.status_code, r.json()["detail"]) == (403, "no seat to post as")
+
+
+def test_a_manifest_that_can_neither_be_rewritten_nor_removed_raises(tmp_path, monkeypatch):
+    folder = tmp_path / "7"
+    folder.mkdir(mode=0o750)
+    (folder / bot_files.MANIFEST).write_bytes(b"[]")
+
+    def refuse(*args, **kwargs):
+        raise OSError("disk says no")
+
+    monkeypatch.setattr(bot_files, "_write_atomic", refuse)
+    monkeypatch.setattr(bot_files, "_remove", lambda path, holder=None: False)
+    with pytest.raises(OSError):
+        bot_files._write_manifest(folder, [{"attachment_id": 1, "file": "1_a.txt", "sha256": "x"}])
+
+
+def test_a_folder_the_umask_closes_to_the_seat_is_said_out_loud(tmp_path, caplog):
+    seat = tmp_path / "res-otto"
+    seat.mkdir(mode=0o750)
+    old = os.umask(0o077)
+    try:
+        with caplog.at_level("WARNING"):
+            bot_files._reconcile(seat, {7: {}})
+    finally:
+        os.umask(old)
+    assert "check the server's umask" in caplog.text

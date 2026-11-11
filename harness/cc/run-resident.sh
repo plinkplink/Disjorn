@@ -171,6 +171,10 @@ unset _cred_value _oauth_value _apikey_value
 
 # Set after the env file so /config cannot reclassify a summon. Must differ from run-build.sh.
 args+=( -e "RESIDENT_SEAT=resident" )
+for _stamp in DISJORN_SUMMON_MODEL DISJORN_SUMMONER; do
+  if [ -n "${!_stamp:-}" ]; then args+=( -e "$_stamp" ); fi  # by name: the value is the launcher's and stays out of argv
+done
+unset _stamp
 
 # Summons feed the prompt on stdin, which podman drops without -i.
 if [ -n "${RESIDENT_STDIN:-}" ]; then

@@ -88,6 +88,7 @@ def test_the_verb_is_described_to_both_kinds_of_seat():
 
 import ast
 import base64
+import hashlib
 import os
 from pathlib import Path
 
@@ -112,6 +113,11 @@ def posts(harness) -> list[dict]:
 
 def post(harness, name="report.md", **more) -> dict:
     return harness.call("post-file", {"path": f"/files-outbox/{name}", "channel": 3, **more})
+
+
+def key_of(channel: int, name: str, text: str, body: bytes) -> str:
+    return hashlib.sha256(json.dumps(
+        [channel, name, text, hashlib.sha256(body).hexdigest()]).encode()).hexdigest()
 
 
 def test_post_file_ships_off(harness, tmp_path):
@@ -139,7 +145,8 @@ def test_a_post_sends_the_file_as_the_calling_seat_and_empties_the_outbox(harnes
     assert (call["method"], call["payload"]) == ("POST", {
         "on_behalf_of": "res-test", "channel_id": 3, "filename": "report.md",
         "data": base64.b64encode(BODY).decode(), "text": "the figures",
-        "daily_quota_bytes": 25 * 1024 * 1024})
+        "daily_quota_bytes": 25 * 1024 * 1024,
+        "idempotency_key": key_of(3, "report.md", "the figures", BODY)})
     assert list(outbox.iterdir()) == []
     (line,) = harness.audit_lines()
     assert (line["verb"], line["allowed"], line["result_summary"]) == (
@@ -225,6 +232,10 @@ def test_a_path_that_is_not_one_file_in_the_outbox_never_reaches_the_server(
     {"channel": 3, "on_behalf_of": "res-other"}, {"channel": 3, "resident": "res-other"},
     {"channel": 3, "daily_quota_bytes": 10 ** 12}, {"channel": 3, "filename": "x.md"},
     {"channel": 3, "text": 7}, {"channel": 3, "text": ""},
+    {"channel": 3, "model": 7}, {"channel": 3, "model": ""},
+    {"channel": 3, "model": "m" * 101}, {"channel": 3, "summoner": "s" * 101},
+    {"channel": 3, "attribution": {"model": "x"}}, {"channel": 3, "verified": True},
+    {"channel": 3, "idempotency_key": "ab" * 32},
 ])
 def test_malformed_post_args_never_reach_the_server(harness, outbox, args):
     (outbox / "report.md").write_bytes(BODY)
@@ -316,8 +327,100 @@ def test_post_file_is_described_to_both_kinds_of_seat():
     surface = gen.load_surface()
     args = gen.cli_table(surface)["post-file"]["args"]
     assert {k: (v["type"], v["required"]) for k, v in args.items()} == {
-        "path": ("string", True), "channel": ("integer", True), "text": ("string", False)}
+        "path": ("string", True), "channel": ("integer", True), "text": ("string", False),
+        "model": ("string", False), "summoner": ("string", False)}
+    assert {k: v["env"] for k, v in args.items() if "env" in v} == {
+        "model": "DISJORN_SUMMON_MODEL", "summoner": "DISJORN_SUMMONER"}
     tool, = [t for t in gen.tool_schemas(
         gen.seat_surface(gen.VERBS_TOML, "res-gable")) if t["verb"] == "post-file"]
     assert tool["name"] == "post_file"
     assert tool["input_schema"]["required"] == ["path", "channel"]
+    assert sorted(tool["input_schema"]["properties"]) == ["channel", "path", "text"]
+    assert "posts nothing twice" in " ".join(tool["description"].split())
+
+
+# ------------------------------------------------- a retry, and who is posting
+
+def test_a_retry_after_a_failed_call_sends_the_same_key(harness, outbox):
+    (outbox / "report.md").write_bytes(BODY)
+    harness.planroom_state["http_error"] = "attachment API unreachable: timed out"
+    assert post(harness, text="the figures")["error"]["code"] == "exec-failure"
+    assert (outbox / "report.md").read_bytes() == BODY
+    harness.planroom_state["http_error"] = None
+
+    assert post(harness, text="the figures")["ok"] is True
+
+    first, again = (c["payload"]["idempotency_key"] for c in posts(harness))
+    assert first == again == key_of(3, "report.md", "the figures", BODY)
+
+
+@pytest.mark.parametrize("change", ["text", "channel", "bytes", "name"])
+def test_a_different_post_sends_a_different_key(harness, outbox, change):
+    (outbox / "report.md").write_bytes(BODY)
+    assert post(harness, text="the figures")["ok"] is True
+    name = "other.md" if change == "name" else "report.md"
+    (outbox / name).write_bytes(BODY + b"!" if change == "bytes" else BODY)
+
+    assert harness.call("post-file", {
+        "path": f"/files-outbox/{name}", "channel": 4 if change == "channel" else 3,
+        "text": "said differently" if change == "text" else "the figures"})["ok"] is True
+
+    first, second = (c["payload"]["idempotency_key"] for c in posts(harness))
+    assert first != second
+
+
+@pytest.mark.parametrize("said, sent", [
+    ({"model": "claude-x", "summoner": "plink"}, {"model": "claude-x", "summoner": "plink"}),
+    ({"summoner": "plink"}, {"model": None, "summoner": "plink"}),
+    ({"model": "claude-x"}, {"model": "claude-x", "summoner": None}),
+])
+def test_what_the_seat_says_produced_the_file_is_passed_on_unverified(
+    harness, outbox, said, sent
+):
+    (outbox / "report.md").write_bytes(BODY)
+
+    assert post(harness, **said)["ok"] is True
+
+    assert posts(harness)[0]["payload"]["attribution"] == sent
+
+
+def test_a_post_that_says_nothing_of_its_origin_sends_no_attribution(harness, outbox):
+    (outbox / "report.md").write_bytes(BODY)
+
+    assert post(harness)["ok"] is True
+
+    assert "attribution" not in posts(harness)[0]["payload"]
+
+
+class Answer:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self) -> bytes:
+        return b"{}"
+
+
+@pytest.mark.parametrize("cfg, method, path, expected", [
+    ({}, "POST", "/bot/attachments", 120),
+    ({"file_post_timeout_sec": 300}, "POST", "/bot/attachments", 300),
+    ({"file_post_timeout_sec": 300}, "GET", "/bot/attachments/7?on_behalf_of=res-test", 20),
+    ({"file_post_timeout_sec": 300}, "POST", "/backlog", 20),
+])
+def test_only_a_file_post_waits_longer_for_the_server(
+    tmp_path, monkeypatch, cfg, method, path, expected
+):
+    import urllib.request
+
+    (tmp_path / "key").write_text("k")
+    waited = []
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda req, timeout: waited.append(timeout) or Answer())
+
+    broker_planroom._planroom_http(
+        {"url": "http://127.0.0.1:1", "api_key_path": str(tmp_path / "key"), **cfg},
+        method, path, {} if method == "POST" else None)
+
+    assert waited == [expected]

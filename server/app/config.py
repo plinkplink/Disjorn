@@ -80,6 +80,7 @@ class Settings(BaseSettings):
     BOT_FILES_EXPORT_ROOT: str = "/srv/disjorn-files-ro"
     BOT_FILES_EXPORT_SEATS: list[str] = ["res-gable"]
     BOT_FILES_SWEEP_SECONDS: float = 60  # 0 runs no timer
+    BOT_FILES_EXPORT_MAX_BYTES: int = 2 * 1024 ** 3  # per seat; the newest files that fit
 
     CUSTODIAN_CHANNEL_ID: int = 4
 

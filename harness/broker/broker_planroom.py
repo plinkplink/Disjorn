@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import datetime as _dt
+import hashlib
 import json
 import mimetypes
 import os
@@ -22,6 +23,8 @@ MAX_BOARD_COMMENT_CHARS = 4000
 MAX_BOARD_REASON_CHARS = 500
 MAX_BOARD_SEARCH_CHARS = 200
 PLANROOM_HTTP_TIMEOUT = 20
+# A file post carries the whole file and the server stores it before it answers.
+FILE_POST_HTTP_TIMEOUT = 120
 # The approval object (same spec, item 1). Three verbs over the server's
 # /approval surface, as the broker's own bot identity — the board verbs' idiom,
 # and for the board verbs' reason: one composer, one state of record.
@@ -47,6 +50,7 @@ UNPOSTABLE_MIMES = frozenset({"text/html", "text/xml", "application/xml", "image
 SEAT_OUTBOX = "/files-outbox/"
 DEFAULT_OUTBOX_ROOT = "/srv/disjorn-files-outbox"
 DEFAULT_DAILY_UPLOAD_BYTES = 25 * 1024 * 1024
+MAX_ATTRIBUTION_CHARS = 100
 
 
 def format_approval_line(proposal: dict) -> str:
@@ -107,8 +111,11 @@ def _planroom_http(disjorn_cfg: dict, method: str, path: str,
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(base + path, data=data, method=method,
                                  headers=headers)
+    timeout = PLANROOM_HTTP_TIMEOUT
+    if (method, path) == ("POST", "/bot/attachments"):
+        timeout = disjorn_cfg.get("file_post_timeout_sec", FILE_POST_HTTP_TIMEOUT)
     try:
-        with urllib.request.urlopen(req, timeout=PLANROOM_HTTP_TIMEOUT) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = ""
@@ -405,14 +412,19 @@ class PlanroomVerbs:
         The name's type and the file's owner and size are judged here, before
         any network call; the channel, the quota and the content are the
         server's one decision. The seat label is the caller's peer identity.
+        The key is the same for a retry of the same file, channel and text, so
+        the server answers a retry with the first post. `model` and `summoner`
+        are the seat's own word and are passed on as such.
         """
-        _reject_unknown(args, {"path", "channel", "text"})
+        _reject_unknown(args, {"path", "channel", "text", "model", "summoner"})
         path = _check_str(args, "path", required=True, max_len=300)
         assert path is not None
         if "channel" not in args:
             raise _bad("missing required arg: channel")
         channel = _check_int(args, "channel", 0, 1, MAX_SEQ)
         text = _check_str(args, "text", max_len=MAX_REQUEST_BYTES) or ""
+        said = {key: _check_str(args, key, max_len=MAX_ATTRIBUTION_CHARS)
+                for key in ("model", "summoner")}
         name = path.removeprefix(SEAT_OUTBOX)
         if (not path.startswith(SEAT_OUTBOX) or "/" in name or name in ("", ".", "..")
                 or any(ch < " " or ch == "\x7f" for ch in name)):
@@ -437,11 +449,15 @@ class PlanroomVerbs:
                             f"no outbox is set up for {resident}") from None
         try:
             data = self._read_outbox_file(resident, outbox, name, quota)
-            result = self.planroom_api(
-                self.disjorn, "POST", "/bot/attachments",
-                {"on_behalf_of": resident, "channel_id": channel,
-                 "filename": name, "data": base64.b64encode(data).decode("ascii"),
-                 "text": text, "daily_quota_bytes": quota})
+            key = hashlib.sha256(json.dumps(
+                [channel, name, text, hashlib.sha256(data).hexdigest()]
+            ).encode("utf-8")).hexdigest()
+            payload = {"on_behalf_of": resident, "channel_id": channel,
+                       "filename": name, "data": base64.b64encode(data).decode("ascii"),
+                       "text": text, "daily_quota_bytes": quota, "idempotency_key": key}
+            if any(said.values()):
+                payload["attribution"] = said
+            result = self.planroom_api(self.disjorn, "POST", "/bot/attachments", payload)
             try:
                 os.unlink(name, dir_fd=outbox)
                 removed = True

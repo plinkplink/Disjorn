@@ -20,7 +20,7 @@ from ..services import bot_files
 from . import media
 from .auth import Actor, get_actor
 from .channels import is_member
-from .messages import MAX_MESSAGE_CHARS, deliver_message
+from .messages import MAX_MESSAGE_CHARS, Attribution, deliver_message
 
 logger = logging.getLogger(__name__)
 
@@ -81,12 +81,29 @@ class FilePost(BaseModel):
     data: str
     text: str = Field(default="", max_length=MAX_MESSAGE_CHARS)
     daily_quota_bytes: int = Field(ge=0)
+    idempotency_key: Optional[str] = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    attribution: Optional[Attribution] = None
+
+
+def _attribution(body: FilePost) -> dict[str, Any]:
+    """What the seat says produced the file, never verified: the relay cannot check it."""
+    said = body.attribution
+    if said is None or (said.model is None and said.summoner is None):
+        return {}
+    return {"model": said.model, "verified": False, "summoner": said.summoner}
 
 
 async def _post(poster: Optional[int], body: FilePost) -> dict[str, Any]:
-    """Every check, in the spec's order, then the write; nothing is stored before the last check."""
+    """Every check, in the spec's order, then the write; nothing is stored before the last check.
+
+    A key this bot already posted under is answered with that post, before any check.
+    """
     if poster is None:
         raise bot_files.Refused("no seat to post as")
+    if body.idempotency_key is not None:
+        earlier = await bot_files.posted_before(poster, body.idempotency_key)
+        if earlier is not None:
+            return earlier
     await bot_files.check_channel(poster, body.channel_id, "seat")
     mime = bot_files.postable_mime(body.filename)
     if mime is None:
@@ -109,13 +126,22 @@ async def _post(poster: Optional[int], body: FilePost) -> dict[str, Any]:
     staged = await media.upload_files(bot, files=[upload], message_id=None, message_id_q=None)
     attachment_id = staged["attachments"][0]["id"]
     try:
-        message = await deliver_message(body.channel_id, "bot", poster, body.text)
+        message = await deliver_message(
+            body.channel_id, "bot", poster, body.text, attribution=_attribution(body)
+        )
         await media.claim_attachments(
             media.ClaimRequest(attachment_ids=[attachment_id], message_id=message["id"]), bot
         )
     except BaseException:
         await bot_files.discard_staged(attachment_id)
         raise
+    if body.idempotency_key is not None:
+        try:
+            await bot_files.remember_post(
+                poster, body.idempotency_key, attachment_id, message["id"]
+            )
+        except Exception:
+            logger.exception("bot attachment post: no key kept for attachment %s", attachment_id)
     return {
         "attachment_id": attachment_id,
         "message_id": message["id"],
@@ -132,11 +158,13 @@ async def post_attachment(
     """A relay bot posts a file as the bot of the seat it names; nobody else posts here.
 
     `on_behalf_of` is a required string, so `_reader` never answers with the caller itself.
+    One post at a time, so a retry that arrives during its first attempt waits for that answer.
     """
     poster, out, why = None, None, "error"
     try:
         poster = await _reader(actor, body.on_behalf_of)
-        out = await _post(poster, body)
+        async with bot_files.post_lock:
+            out = await _post(poster, body)
     except bot_files.Refused as exc:
         why = str(exc)
         raise HTTPException(status_code=403, detail=why) from None

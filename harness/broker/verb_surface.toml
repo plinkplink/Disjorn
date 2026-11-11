@@ -783,7 +783,9 @@ files-safe and you are a member of. Text, code, images and PDF only; the type is
 read from the file's name. Each seat has a daily upload quota in bytes, and a \
 refusal names the figures. A file whose bytes match an upload bots may not read \
 is refused: a hidden file is not posted back. On success the outbox copy is \
-removed. There is no edit and no delete of anyone's upload.\
+removed. If a post times out, post the same file to the same channel with the \
+same text again: within a day the retry answers with the first post and posts \
+nothing twice. There is no edit and no delete of anyone's upload.\
 """
 
 [verbs.post-file.args.path]
@@ -807,6 +809,22 @@ type = "string"
 max_len = 16000
 no_nul = true
 description = "The message the file is attached to. May be omitted."
+
+[verbs.post-file.args.model]
+type = "string"
+seats = ["cli"]
+env = "DISJORN_SUMMON_MODEL"
+max_len = 100
+no_nul = true
+description = "The model this session was launched with, shown unverified on the post."
+
+[verbs.post-file.args.summoner]
+type = "string"
+seats = ["cli"]
+env = "DISJORN_SUMMONER"
+max_len = 100
+no_nul = true
+description = "Who summoned this session, shown on the post."
 
 # ══ ADAPTER TOOLS ═════════════════════════════════════════════════════════
 #

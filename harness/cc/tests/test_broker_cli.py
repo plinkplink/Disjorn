@@ -146,3 +146,40 @@ def test_transport_failure_exit_3(broker_cli, capsys):
                         ["--socket", "/nonexistent/broker.sock", "read-metrics"])
     assert code == 3
     assert out["error"]["code"] == "transport"
+
+
+# ── an arg the harness stamps through the environment ────────────────────
+
+POST_FILE = ["post-file", "--path", "/files-outbox/report.md", "--channel", "3"]
+
+
+def stamped(broker_cli, environ: dict) -> dict:
+    parser = broker_cli.build_parser()
+    return broker_cli.build_request("post-file", parser.parse_args(POST_FILE),
+                                    environ)["args"]
+
+
+def test_post_file_takes_model_and_summoner_from_the_environment(broker_cli):
+    args = stamped(broker_cli, {"DISJORN_SUMMON_MODEL": "claude-x",
+                                "DISJORN_SUMMONER": "plink"})
+    assert args == {"path": "/files-outbox/report.md", "channel": 3,
+                    "model": "claude-x", "summoner": "plink"}
+
+
+@pytest.mark.parametrize("environ", [
+    {}, {"DISJORN_SUMMON_MODEL": "", "DISJORN_SUMMONER": ""},
+    {"DISJORN_SUMMON_MODEL": "m" * 101, "DISJORN_SUMMONER": "a\x00b"},
+    {"MODEL": "claude-x", "SUMMONER": "plink"},
+])
+def test_an_absent_or_unusable_stamp_is_left_out_and_the_call_still_goes(
+        broker_cli, environ):
+    assert stamped(broker_cli, environ) == {
+        "path": "/files-outbox/report.md", "channel": 3}
+
+
+@pytest.mark.parametrize("flag", ["--model", "--summoner"])
+def test_a_stamped_arg_has_no_flag(broker_cli, capsys, flag):
+    with pytest.raises(SystemExit) as exc:
+        broker_cli.main(POST_FILE + [flag, "claude-x"], environ={})
+    assert exc.value.code == 2
+    capsys.readouterr()
