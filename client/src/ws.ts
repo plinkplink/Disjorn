@@ -256,10 +256,13 @@ export class DisjornSocket {
         usePresence
           .getState()
           .typingStopped(message.channel_id, message.author_type, message.author_id);
-        // Viewing the channel with the window focused => instantly read.
+        // Viewing the channel with the window focused => instantly read. So
+        // is my own message from another tab or device: posting reads it.
+        const me = useSession.getState().user;
         const isRead =
-          useChannels.getState().activeChannelId === message.channel_id &&
-          document.hasFocus();
+          (message.author_type === "user" && message.author_id === me?.id) ||
+          (useChannels.getState().activeChannelId === message.channel_id &&
+            document.hasFocus());
         this.chime(message, isRead);
         useChannels.getState().onMessageCreate(message, isRead);
         if (isRead) {
@@ -272,6 +275,7 @@ export class DisjornSocket {
         return;
       case "message_delete":
         useMessages.getState().applyDelete(frame.channel_id, frame.id, frame.seq);
+        useChannels.getState().onMessageDelete(frame.channel_id, frame.seq);
         return;
       case "typing_start":
         usePresence

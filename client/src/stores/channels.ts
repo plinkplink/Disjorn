@@ -7,6 +7,15 @@ import {
   openBotDm as apiOpenBotDm,
   openDm as apiOpenDm,
 } from "../api";
+import {
+  created,
+  deleted,
+  listed,
+  markedRead,
+  readRefused,
+  unreadCount,
+} from "../lib/unread";
+import type { UnreadState } from "../lib/unread";
 import type { ChannelListItem, ChannelVisibility, Message } from "../types";
 
 /** Backoff between first-load attempts that got no answer or a 5xx. */
@@ -17,6 +26,8 @@ function retryable(err: unknown): boolean {
 }
 
 let firstLoad: Promise<void> | null = null;
+let listsRequested = 0;
+let listApplied = 0;
 
 function sortChannels(channels: ChannelListItem[]): ChannelListItem[] {
   // main_feed pinned first; text channels alphabetically; DMs by most recent
@@ -33,11 +44,17 @@ function sortChannels(channels: ChannelListItem[]): ChannelListItem[] {
         a.last_message?.created_at ?? "",
       ),
     );
-  return [...main, ...texts, ...dms];
+  // Rows the sidebar never draws (build chats) still carry state: keep them.
+  const rest = channels.filter(
+    (c) => c.type !== "main_feed" && c.type !== "text" && c.type !== "dm_1to1",
+  );
+  return [...main, ...texts, ...dms, ...rest];
 }
 
 interface ChannelsState {
+  /** Each row's `unread` is unreadCount of its `unreadState` entry, never set apart from it. */
   channels: ChannelListItem[];
+  unreadState: Record<number, UnreadState>;
   activeChannelId: number | null;
   loaded: boolean;
   /** The first load gave up; the shell offers a retry instead of an empty list. */
@@ -57,6 +74,8 @@ interface ChannelsState {
   markRead: (channelId: number, seq: number) => Promise<void>;
   /** Live update from a message_create frame: unread badge + last_message + order. */
   onMessageCreate: (message: Message, isRead: boolean) => void;
+  /** Live update from a message_delete frame: an unread arrival stops counting. */
+  onMessageDelete: (channelId: number, seq: number) => void;
   /** Live update from a channel_create frame: add the new text channel row. */
   onChannelCreate: (channel: {
     id: number;
@@ -70,15 +89,40 @@ interface ChannelsState {
   mainFeedId: () => number | null;
 }
 
+function withUnread(
+  state: ChannelsState,
+  channelId: number,
+  next: UnreadState,
+): Pick<ChannelsState, "channels" | "unreadState"> {
+  return {
+    unreadState: { ...state.unreadState, [channelId]: next },
+    channels: state.channels.map((c) =>
+      c.id === channelId ? { ...c, unread: unreadCount(next) } : c,
+    ),
+  };
+}
+
 export const useChannels = create<ChannelsState>()((set, get) => ({
   channels: [],
+  unreadState: {},
   activeChannelId: null,
   loaded: false,
   loadFailed: false,
 
   refresh: async () => {
-    const channels = await listChannels();
-    set({ channels, loaded: true, loadFailed: false });
+    const request = ++listsRequested;
+    const rows = await listChannels();
+    // A list landing after a newer one would undo it.
+    if (request < listApplied) return;
+    listApplied = request;
+    const known = get().unreadState;
+    const unreadState: Record<number, UnreadState> = {};
+    for (const row of rows) unreadState[row.id] = listed(known[row.id], row);
+    const channels = rows.map((row) => ({
+      ...row,
+      unread: unreadCount(unreadState[row.id]),
+    }));
+    set({ channels, unreadState, loaded: true, loadFailed: false });
   },
 
   ensureLoaded: () => {
@@ -133,15 +177,18 @@ export const useChannels = create<ChannelsState>()((set, get) => ({
   },
 
   markRead: async (channelId, seq) => {
-    set({
-      channels: get().channels.map((c) =>
-        c.id === channelId ? { ...c, unread: 0 } : c,
-      ),
-    });
+    const before = get().unreadState[channelId];
+    const next = markedRead(before, seq);
+    set(withUnread(get(), channelId, next));
     try {
-      await apiMarkRead(channelId, seq);
+      await apiMarkRead(channelId, next.read);
     } catch {
-      /* badge will self-correct on next refresh */
+      const now = readRefused(
+        get().unreadState[channelId],
+        next.read,
+        before?.read ?? 0,
+      );
+      if (now !== undefined) set(withUnread(get(), channelId, now));
     }
   },
 
@@ -152,11 +199,16 @@ export const useChannels = create<ChannelsState>()((set, get) => ({
       void get().refresh();
       return;
     }
+    const next = created(
+      get().unreadState[message.channel_id],
+      message.seq,
+      isRead,
+    );
     const channels = get().channels.map((c) => {
       if (c.id !== message.channel_id) return c;
       return {
         ...c,
-        unread: isRead ? 0 : c.unread + 1,
+        unread: unreadCount(next),
         last_message: {
           seq: message.seq,
           snippet:
@@ -169,7 +221,18 @@ export const useChannels = create<ChannelsState>()((set, get) => ({
         },
       };
     });
-    set({ channels: sortChannels(channels) });
+    set({
+      channels: sortChannels(channels),
+      unreadState: { ...get().unreadState, [message.channel_id]: next },
+    });
+  },
+
+  onMessageDelete: (channelId, seq) => {
+    const before = get().unreadState[channelId];
+    const next = deleted(before, seq);
+    if (next !== undefined && next !== before) {
+      set(withUnread(get(), channelId, next));
+    }
   },
 
   onChannelCreate: (channel) => {
@@ -200,8 +263,14 @@ export const useChannels = create<ChannelsState>()((set, get) => ({
     });
   },
 
-  removeChannel: (channelId) =>
-    set({ channels: get().channels.filter((c) => c.id !== channelId) }),
+  removeChannel: (channelId) => {
+    const unreadState = { ...get().unreadState };
+    delete unreadState[channelId];
+    set({
+      channels: get().channels.filter((c) => c.id !== channelId),
+      unreadState,
+    });
+  },
 
   mainFeedId: () => get().channels.find((c) => c.type === "main_feed")?.id ?? null,
 }));
