@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 
 import { ApiError } from "../api";
 import { AddMembersModal } from "../components/AddMembersModal";
@@ -22,8 +23,15 @@ import {
 } from "../hashRoute";
 import { appRowAction, canKeepBuilding } from "../lib/appRow";
 import { POPUP_BLOCKED_NOTE, openMinted } from "../lib/openMinted";
+import {
+  badgeText,
+  collapsedBadge,
+  visibleRows,
+} from "../lib/sidebarSections";
+import type { SectionId } from "../lib/sidebarSections";
 import { isSidebarRow, syncAppBadge, tabTitle, totalUnread } from "../lib/unread";
 import { usePush } from "../push";
+import { useSidebarSections } from "../sidebar";
 import { useApprovals } from "../stores/approvals";
 import { useApps } from "../stores/apps";
 import { useChannels } from "../stores/channels";
@@ -243,6 +251,54 @@ function ChannelRow({
         )}
       </span>
     </button>
+  );
+}
+
+function sectionBodyId(id: SectionId): string {
+  return `sidebar-section-${id}`;
+}
+
+/** A section's header: the fold toggle, then the section's own action as a
+    sibling button so that pressing it never folds the list. */
+function SectionHeader({
+  id,
+  label,
+  badge,
+  children,
+}: {
+  id: SectionId;
+  label: string;
+  badge: number;
+  children: ReactNode;
+}) {
+  const collapsed = useSidebarSections((s) => s.collapsed[id]);
+  return (
+    <div className="channel-section channel-section-row collapsible">
+      <button
+        type="button"
+        className="section-toggle"
+        aria-expanded={!collapsed}
+        aria-controls={sectionBodyId(id)}
+        onClick={() => useSidebarSections.getState().toggle(id)}
+      >
+        <svg
+          className="section-chevron"
+          viewBox="0 0 8 8"
+          width="8"
+          height="8"
+          aria-hidden
+        >
+          <path d="M2.5 1 5.5 4 2.5 7" />
+        </svg>
+        <span className="section-label">{label}</span>
+        {badge > 0 && (
+          <span className="unread-badge" title={`${badge} unread`}>
+            {badgeText(badge)}
+          </span>
+        )}
+      </button>
+      {children}
+    </div>
   );
 }
 
@@ -547,6 +603,7 @@ export function AppShell() {
   const loaded = useChannels((s) => s.loaded);
   const loadFailed = useChannels((s) => s.loadFailed);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const collapsed = useSidebarSections((s) => s.collapsed);
   const [overlay, setOverlay] = useState<Overlay>(() => overlayFromHash());
   const showSettings = overlay === "settings";
   const showPlanRoom = overlay === "planroom";
@@ -831,6 +888,10 @@ export function AppShell() {
   const listable = channels.filter(isSidebarRow);
   const dms = listable.filter((c) => c.type === "dm_1to1");
   const mains = listable.filter((c) => c.type !== "dm_1to1"); // main_feed + text
+  /* A folded section keeps the channel you would return to even while an
+     overlay covers it, so opening Settings does not reflow the list. */
+  const shownMains = visibleRows(mains, collapsed.channels, activeChannelId);
+  const shownDms = visibleRows(dms, collapsed.dms, activeChannelId);
   const builderFor = (app: App): Builder | undefined =>
     builders.find((b) => b.bot_id === app.builder_bot_id);
   const cardApp = apps.find((a) => a.id === appCardId);
@@ -953,8 +1014,11 @@ export function AppShell() {
               />
             )}
           </button>
-          <div className="channel-section channel-section-row">
-            <span>Channels</span>
+          <SectionHeader
+            id="channels"
+            label="Channels"
+            badge={collapsedBadge(mains, collapsed.channels, activeChannelId)}
+          >
             <button
               className="icon-btn add-channel-btn"
               title="Create channel"
@@ -963,35 +1027,36 @@ export function AppShell() {
             >
               +
             </button>
+          </SectionHeader>
+          <div id={sectionBodyId("channels")} className="channel-section-body">
+            {!loaded && (
+              <span className="channel-section" style={{ textTransform: "none" }}>
+                {loadFailed ? (
+                  <>
+                    Couldn&rsquo;t load.{" "}
+                    <button
+                      className="link-btn"
+                      type="button"
+                      onClick={() => void useChannels.getState().ensureLoaded()}
+                    >
+                      Retry
+                    </button>
+                  </>
+                ) : (
+                  "Loading…"
+                )}
+              </span>
+            )}
+            {shownMains.map((c) => (
+              <ChannelRow
+                key={c.id}
+                channel={c}
+                active={c.id === activeChannelId && overlay === "none"}
+                onSelect={select}
+              />
+            ))}
           </div>
-          {!loaded && (
-            <span className="channel-section" style={{ textTransform: "none" }}>
-              {loadFailed ? (
-                <>
-                  Couldn&rsquo;t load.{" "}
-                  <button
-                    className="link-btn"
-                    type="button"
-                    onClick={() => void useChannels.getState().ensureLoaded()}
-                  >
-                    Retry
-                  </button>
-                </>
-              ) : (
-                "Loading…"
-              )}
-            </span>
-          )}
-          {mains.map((c) => (
-            <ChannelRow
-              key={c.id}
-              channel={c}
-              active={c.id === activeChannelId && overlay === "none"}
-              onSelect={select}
-            />
-          ))}
-          <div className="channel-section channel-section-row">
-            <span>Apps</span>
+          <SectionHeader id="apps" label="Apps" badge={0}>
             <button
               className="icon-btn add-channel-btn"
               title="Add or build an app"
@@ -1000,22 +1065,28 @@ export function AppShell() {
             >
               +
             </button>
+          </SectionHeader>
+          <div id={sectionBodyId("apps")} className="channel-section-body">
+            {!collapsed.apps && apps.length === 0 && (
+              <span className="channel-section" style={{ textTransform: "none" }}>
+                No apps yet
+              </span>
+            )}
+            {!collapsed.apps &&
+              apps.map((a) => (
+                <AppRow
+                  key={a.id}
+                  app={a}
+                  builder={builderFor(a)}
+                  onOpen={openApp}
+                />
+              ))}
           </div>
-          {apps.length === 0 && (
-            <span className="channel-section" style={{ textTransform: "none" }}>
-              No apps yet
-            </span>
-          )}
-          {apps.map((a) => (
-            <AppRow
-              key={a.id}
-              app={a}
-              builder={builderFor(a)}
-              onOpen={openApp}
-            />
-          ))}
-          <div className="channel-section channel-section-row">
-            <span>Direct messages</span>
+          <SectionHeader
+            id="dms"
+            label="Direct messages"
+            badge={collapsedBadge(dms, collapsed.dms, activeChannelId)}
+          >
             <button
               className="icon-btn add-channel-btn"
               title="New direct message"
@@ -1024,20 +1095,22 @@ export function AppShell() {
             >
               +
             </button>
+          </SectionHeader>
+          <div id={sectionBodyId("dms")} className="channel-section-body">
+            {!collapsed.dms && loaded && dms.length === 0 && (
+              <span className="channel-section" style={{ textTransform: "none" }}>
+                No DMs yet
+              </span>
+            )}
+            {shownDms.map((c) => (
+              <ChannelRow
+                key={c.id}
+                channel={c}
+                active={c.id === activeChannelId && overlay === "none"}
+                onSelect={select}
+              />
+            ))}
           </div>
-          {loaded && dms.length === 0 && (
-            <span className="channel-section" style={{ textTransform: "none" }}>
-              No DMs yet
-            </span>
-          )}
-          {dms.map((c) => (
-            <ChannelRow
-              key={c.id}
-              channel={c}
-              active={c.id === activeChannelId && overlay === "none"}
-              onSelect={select}
-            />
-          ))}
         </div>
         <UserFooter onOpenSettings={openSettings} />
       </nav>
