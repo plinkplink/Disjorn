@@ -295,8 +295,8 @@ export function AppBuildModal({
    * still spinning up, which is the exact thing being prevented.
    *
    * A builder that dies between the send and its first `scoped` sends neither
-   * answer, and until Claudette #2555 that left the panel frozen with Live and
-   * Change-something disabled and no way out but closing the modal. `at` is
+   * answer, and until Claudette #2555 that left the panel frozen with Live
+   * disabled and no way out but closing the modal. `at` is
    * when the send went out, and after PENDING_SILENCE_MS the banner grows a
    * button that clears this by hand. Still no timer that thaws anything: the
    * clock decides when to OFFER, the user decides whether to take it.
@@ -310,7 +310,6 @@ export function AppBuildModal({
       text and the unfreeze button and NOTHING else — `frozen` never reads it,
       so no interval of this component's can change what is under the mouse. */
   const [pendingWaited, setPendingWaited] = useState(0);
-  const [focusNonce, setFocusNonce] = useState(0);
   const [busy, setBusy] = useState<"live" | "open" | "share" | "revert" | null>(
     null,
   );
@@ -937,7 +936,6 @@ export function AppBuildModal({
                       at: Date.now(),
                     });
                   }}
-                  focusNonce={focusNonce}
                 />
               </>
             )}
@@ -1106,23 +1104,6 @@ export function AppBuildModal({
                 }}
               >
                 Share
-              </button>
-              <button
-                className="btn"
-                disabled={frozen || ended || busy !== null}
-                title={
-                  ended
-                    ? "This session ended."
-                    : frozen
-                      ? "Enabled when the builder idles."
-                      : "Put the caret in the message box"
-                }
-                onClick={() => {
-                  setShowPreview(false);
-                  setFocusNonce((n) => n + 1);
-                }}
-              >
-                Change something
               </button>
               {/* Revert only exists once there is a previous live to go back
                   to — the card is the only place that knows (D7). */}

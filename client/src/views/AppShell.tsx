@@ -20,6 +20,7 @@ import {
   planRoomRouteFromHash,
   writeChannelHash,
 } from "../hashRoute";
+import { appRowAction, canKeepBuilding } from "../lib/appRow";
 import { POPUP_BLOCKED_NOTE, openMinted } from "../lib/openMinted";
 import { isSidebarRow, tabTitle } from "../lib/unread";
 import { usePush } from "../push";
@@ -354,8 +355,8 @@ function AppRow({
 }
 
 /**
- * The read-only card for an app you cannot open a session on — someone else's,
- * or one of yours that is past `draft`. Open is rendered disabled rather than
+ * The card for an app whose row does not open a session — someone else's, or
+ * one of yours that is past `draft`. Open is rendered disabled rather than
  * hidden while the app is not live: the app IS reachable eventually, and
  * saying when is more use than pretending the button was never designed.
  *
@@ -372,8 +373,10 @@ function AppCardModal({
   onClose: () => void;
 }) {
   const originBase = useApps((s) => s.originBase);
+  const me = useSession((s) => s.user);
   const [opening, setOpening] = useState(false);
   const [remixing, setRemixing] = useState(false);
+  const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   /** The minted URL when the browser refused the tab — rendered as a link the
       user can click, which is a gesture no popup blocker argues with. */
@@ -428,6 +431,31 @@ function AppCardModal({
         },
       );
   };
+
+  const keepBuilding = () => {
+    if (starting) return;
+    setStarting(true);
+    setError(null);
+    setBlockedUrl(null);
+    useApps
+      .getState()
+      .startSession(app.builder_bot_id, app.id)
+      .then(
+        (session) => {
+          setStarting(false);
+          useApps.getState().requestBuildModal(session.id);
+        },
+        (err: unknown) => {
+          setStarting(false);
+          setError(
+            err instanceof ApiError
+              ? err.detail
+              : "Could not open a build session",
+          );
+        },
+      );
+  };
+  const busy = opening || remixing || starting;
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div
@@ -473,7 +501,7 @@ function AppCardModal({
           {app.status === "live" && (
             <button
               className="btn"
-              disabled={opening || remixing}
+              disabled={busy}
               title="Copy it into an app of your own and build on that"
               onClick={remix}
             >
@@ -482,7 +510,7 @@ function AppCardModal({
           )}
           <button
             className="btn"
-            disabled={opening || app.status !== "live" || originBase === ""}
+            disabled={busy || app.status !== "live" || originBase === ""}
             title={
               originBase === ""
                 ? "Serving is not configured on this house."
@@ -494,6 +522,16 @@ function AppCardModal({
           >
             {opening ? "Opening…" : "Open"}
           </button>
+          {canKeepBuilding(app, me?.id ?? null) && (
+            <button
+              className="btn btn-primary"
+              disabled={busy}
+              title="Open a build session on this app. What people see does not change until you press Live."
+              onClick={keepBuilding}
+            >
+              {starting ? "Opening…" : "Keep building"}
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -840,17 +878,15 @@ export function AppShell() {
   const activeBotDm = active?.dm_bot_id != null;
   const canLeave = (activePrivate && activeMember) || activeBotDm;
 
-  /* Clicking an app row: resume the live session if there is one; start a new
-     one if it is my own draft (the server still rules on quota and locks —
-     this only decides which verb to try); otherwise show the read-only card.
-     A refusal is the server's sentence, said out loud. */
+  /* A refusal is the server's sentence, said out loud. */
   const openApp = (app: App) => {
     setSidebarOpen(false);
-    if (app.open_session !== null) {
-      setBuildSessionId(app.open_session.id);
+    const action = appRowAction(app, me?.id ?? null);
+    if (action.kind === "resume") {
+      setBuildSessionId(action.sessionId);
       return;
     }
-    if (me !== null && app.owner_user_id === me.id && app.status === "draft") {
+    if (action.kind === "start") {
       useApps
         .getState()
         .startSession(app.builder_bot_id, app.id)
