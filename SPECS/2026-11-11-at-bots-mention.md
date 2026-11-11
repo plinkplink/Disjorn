@@ -53,7 +53,7 @@ Governing plan: BUILD-LOOP.md. Style: COMMS.md. Backlog #57.
 - No field listed the bots a message addressed. This build adds one.
 
 **Server** (custodian lane)
-- Migration `023_message_mentions.sql`:
+- Migration `024_message_mentions.sql`:
   `ALTER TABLE messages ADD COLUMN mentioned_bot_ids TEXT NOT NULL DEFAULT '[]'`.
   A JSON array of bot ids. Old rows read `[]` and are not re-read.
 - Stored, not computed per frame. The list is resolved once, from the
@@ -220,7 +220,7 @@ code, and the regexes do not.
 - **Applies**: yes.
 - **Surfaces by lane**:
   - custodian: `server/app/mentions.py`, `server/app/ws.py`,
-    `server/app/routers/messages.py`, `server/app/config.py`, migration 023,
+    `server/app/routers/messages.py`, `server/app/config.py`, migration 024,
     `server/tests/`, `client/`, `sdk/README.md`, and the patch to her own
     adapter above → review owner Claudette
   - builder: `harness/residency/detector.py`,
@@ -245,7 +245,7 @@ One keyboard session.
 
 ## Deploy recipe
 1. Back up the DB (`sqlite3 .backup`).
-2. `systemctl restart disjorn`, which applies 023.
+2. `systemctl restart disjorn`, which applies 024.
 3. Client build.
 4. Restart `gable-summon`.
 5. Apply the patch to claudette.git, run her tests, `claudette-update.sh`.

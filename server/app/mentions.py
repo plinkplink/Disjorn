@@ -30,9 +30,9 @@ async def mentioned_bot_ids(channel_id: int, author_type: str, content: str) -> 
     )
     everyone = author_type == "user" and _at(GROUP, text)
     # These accounts post and never answer; `@bots` listing them would name a call nobody takes.
-    skipped = get_settings().GROUP_MENTION_SKIP_BOT_NAMES
+    skipped = {n.lower() for n in get_settings().GROUP_MENTION_SKIP_BOT_NAMES}
     return [
         b["id"]
         for b in bots
-        if _at(b["name"], text) or (everyone and b["name"] not in skipped)
+        if _at(b["name"], text) or (everyone and b["name"].lower() not in skipped)
     ]

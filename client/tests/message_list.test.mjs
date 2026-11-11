@@ -166,6 +166,11 @@ test('an @bots the server fanned out is drawn as a mention, once, outside code',
   assert.ok(html.includes('<code class="md-inline-code">@bots</code>'), html);
 });
 
+test('a bot whose message names one bot does not get an @bots chip', () => {
+  const html = render([{ ...botMessage(2, { content: '@bots generally' }), mentioned_bot_ids: [1] }]);
+  assert.ok(!html.includes('<span class="md-mention">@bots</span>'), html);
+});
+
 test('an @bots that summoned nobody is plain text', () => {
   for (const mentioned_bot_ids of [undefined, []]) {
     const html = render([{ ...botMessage(1, { content: '@bots wake up' }), mentioned_bot_ids }]);
