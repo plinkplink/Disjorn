@@ -40,6 +40,52 @@ license = "MIT"
 license_in_tarball = "package/LICENSE.md"
 license_shelf_path = "game/LICENSE"
 
+# phaser: pinned 2026-11-11 from the npm registry. 3.90.0 is the last 3.x
+# release. The two .d.ts files are for type-checking only and are never served;
+# phaser.d.ts references matter.d.ts by relative path, so they stay together.
+# phaser/phaser-boot/*.png have no entry: they are not tarball members but the
+# three base64 boot textures inside phaser.min.js, decoded to files, and
+# harness/cc/tests/test_apps_image.py holds them equal to those literals.
+
+[[file]]
+slot = "phaser"
+package = "phaser"
+version = "3.90.0"
+tarball_url = "https://registry.npmjs.org/phaser/-/phaser-3.90.0.tgz"
+tarball_sha256 = "c4e3a8da498ab94aa8859c7a32cb89140d94bfd95d769bee36a98cdef1bea6e6"
+path_in_tarball = "package/dist/phaser.min.js"
+shelf_path = "phaser/phaser.min.js"
+sha256 = "e92ddef111ba42e92d316979c732311757093688ea1810591cb7aa2858eba7a7"
+license = "MIT"
+license_in_tarball = "package/LICENSE.md"
+license_shelf_path = "phaser/LICENSE-phaser"
+
+[[file]]
+slot = "phaser"
+package = "phaser"
+version = "3.90.0"
+tarball_url = "https://registry.npmjs.org/phaser/-/phaser-3.90.0.tgz"
+tarball_sha256 = "c4e3a8da498ab94aa8859c7a32cb89140d94bfd95d769bee36a98cdef1bea6e6"
+path_in_tarball = "package/types/phaser.d.ts"
+shelf_path = "phaser/types/phaser.d.ts"
+sha256 = "8a97fd70c0953b95a039c883413ef1e58e7fa3559b3ece02a36505b6cbe9cead"
+license = "MIT"
+license_in_tarball = "package/LICENSE.md"
+license_shelf_path = "phaser/LICENSE-phaser"
+
+[[file]]
+slot = "phaser"
+package = "phaser"
+version = "3.90.0"
+tarball_url = "https://registry.npmjs.org/phaser/-/phaser-3.90.0.tgz"
+tarball_sha256 = "c4e3a8da498ab94aa8859c7a32cb89140d94bfd95d769bee36a98cdef1bea6e6"
+path_in_tarball = "package/types/matter.d.ts"
+shelf_path = "phaser/types/matter.d.ts"
+sha256 = "49315baaf695c2081834d7faa35f6d18a6bd2908d0ee7b6408db555c4b30b976"
+license = "MIT"
+license_in_tarball = "package/LICENSE.md"
+license_shelf_path = "phaser/LICENSE-phaser"
+
 [[file]]
 slot = "chart"
 package = "chart.js"
