@@ -656,8 +656,12 @@ export function deletePickerItem(
 
 /* ---- unfurl / summarize ---- */
 
-export function fetchUnfurl(url: string): Promise<UnfurlData> {
-  return request<UnfurlData>("GET", `/unfurl?url=${encodeURIComponent(url)}`);
+/** `refresh` asks the server to re-fetch a cached page whose card failed to draw. */
+export function fetchUnfurl(url: string, refresh = false): Promise<UnfurlData> {
+  return request<UnfurlData>(
+    "GET",
+    `/unfurl?url=${encodeURIComponent(url)}${refresh ? "&refresh=true" : ""}`,
+  );
 }
 
 export function summarizeUrl(url: string): Promise<SummarizeResponse> {

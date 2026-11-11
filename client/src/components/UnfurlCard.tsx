@@ -1,11 +1,13 @@
 /* Compact link-unfurl card (Architecture §5.6). Lazily fetches OG metadata
    through the useUnfurl cache; renders nothing when the page yields nothing.
+   An image that fails to load is dropped from the card and reported to the
+   cache, which asks the server for a fresh unfurl.
    The ✨ button opens the Summarize modal (state lifted to ChatView).
    A YouTube link gets a poster that swaps itself for the player on click. */
 
 import { useEffect, useState } from "react";
 
-import { useUnfurl } from "../stores/unfurl";
+import { cardImage, useUnfurl } from "../stores/unfurl";
 import type { UnfurlData, UnfurlEmbed } from "../types";
 
 export interface UnfurlCardProps {
@@ -19,14 +21,24 @@ const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;
 export function UnfurlCard({ url, onSummarize }: UnfurlCardProps) {
   const entry = useUnfurl((s) => s.byUrl[url]);
   const ensure = useUnfurl((s) => s.ensure);
+  const imageFailed = useUnfurl((s) => s.imageFailed);
 
   useEffect(() => {
     ensure(url);
   }, [url, ensure]);
 
-  if (entry === undefined || entry.status !== "done" || entry.data === null) {
-    return null;
-  }
+  const retryAt = entry?.retryAt ?? null;
+  useEffect(() => {
+    if (retryAt === null) return;
+    // The margin keeps a timer that fires a tick early from being a no-op.
+    const timer = setTimeout(
+      () => ensure(url),
+      Math.max(retryAt - Date.now(), 0) + 50,
+    );
+    return () => clearTimeout(timer);
+  }, [retryAt, url, ensure]);
+
+  if (entry === undefined || entry.data === null) return null;
   const { embed } = entry.data;
   if (embed?.provider === "youtube" && VIDEO_ID.test(embed.video_id)) {
     return (
@@ -38,8 +50,9 @@ export function UnfurlCard({ url, onSummarize }: UnfurlCardProps) {
       />
     );
   }
-  const { title, description, image_url } = entry.data;
-  if (title === null && description === null && image_url === null) return null;
+  const { title, description } = entry.data;
+  const image = cardImage(entry, Date.now());
+  if (title === null && description === null && image === null) return null;
 
   return (
     <div className="unfurl-card">
@@ -56,8 +69,14 @@ export function UnfurlCard({ url, onSummarize }: UnfurlCardProps) {
         )}
         {description !== null && <p className="unfurl-desc">{description}</p>}
       </div>
-      {image_url !== null && (
-        <img className="unfurl-thumb" src={image_url} alt="" loading="lazy" />
+      {image !== null && (
+        <img
+          className="unfurl-thumb"
+          src={image}
+          alt=""
+          loading="lazy"
+          onError={() => imageFailed(url, image)}
+        />
       )}
       <SummarizeButton url={url} onSummarize={onSummarize} />
     </div>
@@ -84,6 +103,7 @@ interface YouTubeCardProps extends UnfurlCardProps {
 
 function YouTubeCard({ url, data, embed, onSummarize }: YouTubeCardProps) {
   const [playing, setPlaying] = useState(false);
+  const [deadThumb, setDeadThumb] = useState<string | null>(null);
   const title = data.title ?? "YouTube video";
   const thumb =
     data.image_url ?? `https://i.ytimg.com/vi/${embed.video_id}/hqdefault.jpg`;
@@ -123,7 +143,14 @@ function YouTubeCard({ url, data, embed, onSummarize }: YouTubeCardProps) {
           aria-label={`Play ${title}`}
           onClick={() => setPlaying(true)}
         >
-          <img src={thumb} alt="" loading="lazy" />
+          {thumb !== deadThumb && (
+            <img
+              src={thumb}
+              alt=""
+              loading="lazy"
+              onError={() => setDeadThumb(thumb)}
+            />
+          )}
           <svg className="unfurl-play" viewBox="0 0 68 48" aria-hidden="true">
             <rect width="68" height="48" rx="12" fill="#f00" />
             <path d="M27 14v20l18-10z" fill="#fff" />
