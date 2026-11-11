@@ -183,16 +183,16 @@ export const useChannels = create<ChannelsState>()((set, get) => ({
     const before = get().unreadState[channelId];
     const next = markedRead(before, seq);
     set(withUnread(get(), channelId, next));
+    // The server may store less than it was asked to, or nothing.
+    let stored = before?.read ?? 0;
     try {
-      await apiMarkRead(channelId, next.read);
+      stored = (await apiMarkRead(channelId, next.read)).last_read_seq;
     } catch {
-      const now = readRefused(
-        get().unreadState[channelId],
-        next.read,
-        before?.read ?? 0,
-      );
-      if (now !== undefined) set(withUnread(get(), channelId, now));
+      /* `stored` stands */
     }
+    if (stored >= next.read) return;
+    const now = readRefused(get().unreadState[channelId], next.read, stored);
+    if (now !== undefined) set(withUnread(get(), channelId, now));
   },
 
   onMessageCreate: (message, isRead) => {

@@ -193,6 +193,8 @@ export interface ChannelListItem {
   /** No bot may be set to answer every message here (server setting). */
   mention_only?: boolean;
   unread: number;
+  /** My read cursor as the server had it when it counted `unread`. */
+  last_read_seq?: number;
   last_message: LastMessage | null;
   /* The three fields below arrived with per-channel membership. All optional
      (not merely nullable) so a payload from a server that predates the spec is

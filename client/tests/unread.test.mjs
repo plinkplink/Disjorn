@@ -77,16 +77,20 @@ function row(id, unread, lastSeq, type = 'text') {
       author_type: 'user', author_id: 2, created_at: '2026-10-06T00:00:00Z' } };
 }
 
+/** The row as the server counted it with the reader's cursor at `cursor`. */
+const at = (r, cursor) => ({ ...r, last_read_seq: cursor });
+
 function message(channelId, seq, authorId = 2) {
   return { id: channelId * 1000 + seq, channel_id: channelId, seq, content: 'hi',
     author_type: 'user', author_id: authorId, created_at: '2026-10-06T00:00:00Z' };
 }
 
 /* Each GET /channels waits for the test to answer it; each read is recorded
-   and answered by `readStatus`. */
+   and answered by `readStatus`, stored as `storedAs` says. */
 let lists;
 let reads;
 let readStatus;
+let storedAs;
 
 function answerNextList(rows, which = 0) {
   const [pending] = lists.splice(which, 1);
@@ -108,6 +112,7 @@ beforeEach(() => {
   lists = [];
   reads = [];
   readStatus = 200;
+  storedAs = (seq) => seq;
   FakeSocket.made = [];
   globalThis.fetch = (path, init) => {
     if (init.method === 'GET' && path === '/channels') {
@@ -118,7 +123,7 @@ beforeEach(() => {
       const seq = JSON.parse(init.body).seq;
       reads.push([Number(read[1]), seq]);
       return Promise.resolve({ ok: readStatus === 200, status: readStatus, statusText: '',
-        json: async () => ({ channel_id: Number(read[1]), last_read_seq: seq }) });
+        json: async () => ({ channel_id: Number(read[1]), last_read_seq: storedAs(seq) }) });
     }
     throw new Error(`unexpected ${init.method} ${path}`);
   };
@@ -194,8 +199,31 @@ test('a frame that beat an older list is still counted, in any arrival order', (
 test('a list computed before our read reached the server cannot bring the badge back', () => {
   const s = m.markedRead(m.listed(undefined, row(1, 3, 10)), 10);
   assert.equal(m.unreadCount(s), 0);
-  assert.equal(m.unreadCount(m.listed(s, row(1, 3, 10))), 0);
-  assert.equal(m.unreadCount(m.listed(s, row(1, 2, 12))), 2);
+  assert.equal(m.unreadCount(m.listed(s, at(row(1, 3, 10), 7))), 0);
+  assert.equal(m.unreadCount(m.listed(s, at(row(1, 2, 12), 10))), 2);
+});
+
+test('a list older than our read counts only what arrived above the read', () => {
+  // Read through 10 here; the server counted 8..12 with its cursor still at 7.
+  const read = m.markedRead(m.listed(undefined, at(row(1, 3, 10), 7)), 10);
+  const stale = at(row(1, 5, 12), 7);
+
+  const framesFirst = m.listed(m.created(m.created(read, 11, false), 12, false), stale);
+  assert.equal(m.unreadCount(framesFirst), 2);
+
+  const listFirst = m.listed(read, stale);
+  assert.equal(m.unreadCount(listFirst), 0);
+  assert.equal(m.unreadCount(m.created(m.created(listFirst, 11, false), 12, false)), 2);
+
+  // Once the read has reached the server, its count is the count.
+  assert.equal(m.unreadCount(m.listed(framesFirst, at(row(1, 2, 12), 10))), 2);
+  assert.equal(m.unreadCount(m.listed(framesFirst, at(row(1, 0, 12), 12))), 0);
+});
+
+test('a row without a cursor never poisons the count', () => {
+  const s = m.listed(m.markedRead(m.listed(undefined, row(1, 3, 10)), 10), row(1, 2, 12));
+  assert.equal(m.unreadCount(s), 0);
+  assert.equal(s.read, 10);
 });
 
 test('a read made on another device clears the count at the next list', () => {
@@ -285,6 +313,31 @@ test('a read the server refused comes back with the next list', async () => {
   assert.equal(unreadOf(1), 3);
 });
 
+test('a list that predates the read counts only the message that landed after it', async () => {
+  const st = m.useChannels.getState();
+  await load([at(row(1, 3, 10), 7)]);
+  const done = st.refresh();
+  await st.markRead(1, 10);
+  st.onMessageCreate(message(1, 11), false);
+  answerNextList([at(row(1, 4, 11), 7)]);
+  await done;
+  assert.equal(unreadOf(1), 1);
+  assert.equal(m.tabTitle(m.useChannels.getState().channels), '(1) Disjorn');
+
+  await load([at(row(1, 1, 11), 10)]);
+  assert.equal(unreadOf(1), 1);
+});
+
+test('a read the server stored lower than asked does not outrank the next list', async () => {
+  const st = m.useChannels.getState();
+  await load([row(1, 3, 10)]);
+  storedAs = () => 8;
+  await st.markRead(1, 10);
+  assert.equal(m.useChannels.getState().unreadState[1].read, 8);
+  await load([at(row(1, 1, 10), 8)]);
+  assert.equal(unreadOf(1), 1);
+});
+
 test('a channel that left the list takes its bookkeeping with it', async () => {
   const st = m.useChannels.getState();
   await load([row(1, 0, 10), row(2, 0, 5)]);
@@ -366,7 +419,7 @@ test('a read inside the range the list counted asks the server what is left', as
   await load([row(1, 3, 10)]);
   st.onChannelRead(1, 9);
   assert.equal(lists.length, 1);
-  answerNextList([row(1, 1, 10)]);
+  answerNextList([at(row(1, 1, 10), 9)]);
   await settle();
   assert.equal(unreadOf(1), 1);
 });
