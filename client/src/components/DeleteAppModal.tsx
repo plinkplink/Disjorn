@@ -90,6 +90,11 @@ export function DeleteAppModal({
           Remixes made from it, yours or anyone else&rsquo;s, stay as apps of
           their own.
         </p>
+        <p className="member-modal-note">
+          Nothing in Disjorn brings it back. A copy stays in the house&rsquo;s
+          offsite backup, for up to a year, and only the server&rsquo;s keeper
+          can restore from it.
+        </p>
 
         {error !== null && <p className="form-error">{error}</p>}
         {unfinished && (

@@ -29,8 +29,11 @@ destroys data.
 - **What `plink` gains** (the uid the server and the broker run as): the
   ability to remove any one app's trees by naming its id. Before this the
   worst a serving mode could do was serve an app's own files a deploy early
-  or late. Nothing restores a removed app: `harness/backup` does not cover
-  `/srv/apps*`.
+  or late. Nothing in the product restores a removed app. Since the
+  backup-covers-apps merge the nightly snapshot holds each app's git bundle
+  and web roots, so a deleted app stays in the offsite repository until
+  retention prunes it (7 daily, 4 weekly, 12 monthly), and
+  `harness/backup/README.md` has the by-hand restore.
 - **What it cannot reach**: anything outside `/srv/apps-www/<id>`,
   `/srv/apps-www/.staging/<id>`, `/srv/apps/<id>`, `/srv/apps-git/<id>.git`
   and the turn dirs under `/srv/apps-turns` whose own record names `<id>`.
