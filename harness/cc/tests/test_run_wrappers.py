@@ -115,6 +115,11 @@ def build_seat_ground(tmp_path):
     return {"RESIDENT_BUILD_KERNEL": str(kernel), "RESIDENT_GATEHOUSE": str(gatehouse)}
 
 
+def caller_env() -> dict:
+    return {k: v for k, v in os.environ.items()
+            if not k.startswith(("DISJORN_", "RESIDENT_"))}
+
+
 @pytest.fixture()
 def rig(tmp_path):
     """Scratch mounts + a fake podman on PATH. Returns a run() helper."""
@@ -138,7 +143,7 @@ def rig(tmp_path):
         else:
             env_file.write_text(env_file_text)
             env_file.chmod(0o600)
-        env = dict(os.environ)
+        env = caller_env()
         env.update(
             PATH=f"{bindir}:{env['PATH']}",
             DUMP_DIR=str(dump),
@@ -779,7 +784,7 @@ def reap_rig(tmp_path):
     procs = []
 
     def launch(script: str, extra_env: dict | None = None):
-        env = dict(os.environ)
+        env = caller_env()
         env.update(
             PATH=f"{bindir}:{env['PATH']}",
             DUMP_DIR=str(dump),
@@ -909,7 +914,7 @@ def test_reaper_does_not_mask_the_exit_status(tmp_path, script, code):
         '[ "$_p" = 1 ] && exit 0\n'
         f'exit {code}\n')
     podman.chmod(0o755)
-    env = dict(os.environ)
+    env = caller_env()
     env.update(
         PATH=f"{bindir}:{env['PATH']}",
         RESIDENT_IMAGE="localhost/disjorn-resident:test",
