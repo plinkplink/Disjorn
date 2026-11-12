@@ -363,9 +363,10 @@ outbound request carrying users' audio to a second machine. Advisory.
 One build-hand session; the benchmark was most of it.
 
 ## Confirm record
-- **Confirmed by**: <pending>
-- **#custodian seq**: <pending>
-- **Confirmed at**: <pending>
+- **Confirmed by**: plink
+- **#custodian seq**: 3602
+- **Confirmed at**: 2026-11-11
+- **Review**: PASS by Claudette #3598 at f2d83e9; two of her notes folded at 377a124.
 <!-- No Confirm record → no build. This is the gate. -->
 
 ## Status
