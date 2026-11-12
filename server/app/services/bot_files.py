@@ -175,11 +175,16 @@ def _text_shape(path: Path, cap: int) -> dict[str, Any]:
     return {"kind": "text", "text": text}
 
 
+def _bot_path(thumb: Path) -> Path:
+    """Where a thumbnail's bot variant is kept; no column names it."""
+    if not thumb.name.endswith(THUMB_SUFFIX):
+        raise LookupError(thumb.name)
+    return thumb.with_name(thumb.name.removesuffix(THUMB_SUFFIX) + "_bot.webp")
+
+
 def _bot_variant(att: dict[str, Any], thumb: Path) -> Path:
     """A webp a model can read text in, made beside the thumbnail on the first read and kept."""
-    if not thumb.name.endswith(THUMB_SUFFIX):
-        raise LookupError(att["id"])
-    dest = thumb.with_name(thumb.name.removesuffix(THUMB_SUFFIX) + "_bot.webp")
+    dest = _bot_path(thumb)
     if not dest.is_file():
         tmp = dest.with_name(f".tmp-{os.getpid()}-{threading.get_ident()}-{dest.name}")
         try:
@@ -694,6 +699,10 @@ async def discard_staged(attachment_id: int) -> None:
     await db.execute(
         "DELETE FROM attachments WHERE id = ? AND message_id IS NULL", (attachment_id,)
     )
+    try:
+        _bot_path(_stored(att["thumb_path"], "web")).unlink(missing_ok=True)
+    except (LookupError, OSError):
+        pass
     for rel, folder in (
         (att["file_path"], "originals"), (att["display_path"], "web"), (att["thumb_path"], "web")
     ):

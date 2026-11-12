@@ -806,6 +806,19 @@ async def test_a_hidden_image_makes_no_variant(house):
     assert not bot_variants()
 
 
+async def test_discarding_an_upload_removes_its_bot_variant_too(house):
+    await house.flip("on")
+    _, (att,) = await house.say("shot", ("shot.png", png((900, 600)), "image/png"))
+    await house.read(att)
+    [made] = bot_variants()
+    stem = made.name.removesuffix("_bot.webp")
+
+    await db.execute("UPDATE attachments SET message_id = NULL WHERE id = ?", (att,))
+    await bot_files.discard_staged(att)
+    uploads = get_settings().data_dir / "uploads"
+    assert [p.name for p in uploads.rglob("*") if p.name.startswith(stem)] == []
+
+
 async def test_an_original_that_will_not_decode_falls_back_to_the_thumbnail(house, caplog):
     await house.flip("on")
     _, (att,) = await house.say("shot", ("shot.png", png((900, 600)), "image/png"))
