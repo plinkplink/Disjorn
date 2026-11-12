@@ -36,7 +36,7 @@ ALL_VERBS = [
     "board-list", "board-card", "board-search", "board-flag", "board-comment",
     "summon-hop", "apps-build", "build", "merge",
     "approval-list", "approval-show", "approval-act", "apply-posted-write",
-    "backlog-list", "backlog-file", "read-attachment", "post-file",
+    "backlog-list", "backlog-file", "read-attachment", "read-picker-file", "post-file",
 ]
 
 RECORD_STUB = textwrap.dedent("""\
@@ -1078,6 +1078,11 @@ def harness(tmp_path: Path):
         if path.startswith("/bot/attachments/"):
             wanted = path.rsplit("/", 1)[1].split("?", 1)[0]
             found = planroom_state.get("attachments", {}).get(wanted)
+            if found is None:
+                raise VerbError("exec-failure", "Not found", status=404)
+            return found
+        if path.startswith("/bot/picker/"):
+            found = planroom_state.get("picker", {}).get(path.removeprefix("/bot/picker/"))
             if found is None:
                 raise VerbError("exec-failure", "Not found", status=404)
             return found

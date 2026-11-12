@@ -416,6 +416,7 @@ class Broker(
             "backlog-list": self._verb_backlog_list,
             "backlog-file": self._verb_backlog_file,
             "read-attachment": self._verb_read_attachment,
+            "read-picker-file": self._verb_read_picker_file,
             "post-file": self._verb_post_file,
             # The fails-closed Tier-1 wall: the only verb here that writes
             # outside the resident's own volume, and only on a #custodian record

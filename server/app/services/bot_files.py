@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import stat
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any, Optional
@@ -220,6 +221,18 @@ def _image_shape(att: dict[str, Any], cap: int) -> dict[str, Any]:
         "media_type": VARIANT_MIME,
         "data": base64.b64encode(best.read_bytes()).decode("ascii"),
     }
+
+
+def picker_shape(path: Path, cap: int) -> dict[str, Any]:
+    """A picker file as a bot reads an image: its first frame, no EXIF. Nothing is kept."""
+    with tempfile.TemporaryDirectory() as scratch:
+        made = Path(scratch) / "preview.webp"
+        make_preview(path, made, BOT_MAX)
+        data = made.read_bytes()
+    if len(data) > cap:
+        raise LookupError(path.name)
+    return {"kind": "image", "media_type": VARIANT_MIME,
+            "data": base64.b64encode(data).decode("ascii")}
 
 
 def _pdf_shape(path: Path, cap: int) -> dict[str, Any]:

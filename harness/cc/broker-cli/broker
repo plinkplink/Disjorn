@@ -570,6 +570,21 @@ VERB_SURFACE = {
             },
         },
     },
+    "read-picker-file": {
+        "help": "look at one GIF or image someone posted from the picker",
+        "args": {
+            "path": {
+                "flag": "--path",
+                "type": "string",
+                "required": True,
+                "help": "The path from the message, as /picker/file/<gif|image>/<name>.",
+                "max_len": 300,
+                "pattern": "^/picker/file/(gif|image)/[^/]+$",
+                "no_dotdot": True,
+                "no_nul": True,
+            },
+        },
+    },
     "post-file": {
         "help": "post one file from /files-outbox as an attachment on your own message",
         "args": {

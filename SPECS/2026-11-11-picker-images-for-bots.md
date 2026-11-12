@@ -18,13 +18,11 @@ Governing plan: BUILD-LOOP.md. Style: COMMS.md.
   it calls one tool with the path from the message and gets the picture.
 - A GIF arrives as its first frame. Every picker picture arrives as a WebP of
   at most 1568 px on its long side, with no EXIF.
-- **Open choice, settled by the confirm.** As written, no channel switch
-  applies: the picker is a shelf the whole house shares, and
+- No channel switch applies. The picker is a shelf the whole house shares, and
   `GET /picker/file/...` already answers anyone without a login, so
-  `/files-safe` stays about uploads. Claudette's filing asks for the other
-  answer: the verb also takes the channel the post is in, and the server
-  refuses unless that channel is files-safe, the seat's bot is a member, and a
-  message in it carries that path. A confirm that says "gated" builds that.
+  `/files-safe` stays about uploads. Claudette's filing asked for a files-safe
+  gate; she withdrew it at #custodian 3718 and plink confirmed the spec
+  without one.
 - Nothing changes for people.
 
 ## Architecture notes
@@ -63,9 +61,9 @@ Tier 2: a new bot route and a new broker verb.
 About 400k.
 
 ## Confirm record
-- **Confirmed by**:
-- **#custodian seq**:
-- **Confirmed at**:
+- **Confirmed by**: plink
+- **#custodian seq**: 3719
+- **Confirmed at**: 2026-11-12T04:36:56Z
 
 ## Status
-`draft`
+`built@loop/2026-11-11-picker-images-for-bots`

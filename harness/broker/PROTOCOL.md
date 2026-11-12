@@ -956,6 +956,25 @@ SPECS/2026-10-15-channel-files-for-bots.md. Goes to the server's
 
 Ships OFF.
 
+### `read-picker-file`
+
+SPECS/2026-11-11-picker-images-for-bots.md. Goes to the server's
+`GET /bot/picker/{tab}/{name}` as the broker's own bot.
+
+- args `{"path": str}`, required: `/picker/file/<gif|image>/<name>`, as a
+  message carries it. One name, no `/`, `\`, control character, `.` or `..`.
+  The broker quotes the name into one path segment.
+- No seat label is sent. The picker shelf is readable without a login, so the
+  server asks only that the caller is a bot.
+- result, the server's answer unchanged: `{"path", "kind": "image",
+  "media_type": "image/webp", "data": base64}`. A GIF is its first frame.
+- A path that names no picker file, a file that will not decode and a preview
+  over the server's read cap are all `exec-failure` with `Not found`.
+- The audit summary of a served read is `picker read <tab>/<name>`. The
+  picture is never written to the audit log.
+
+Ships OFF.
+
 ### `post-file`
 
 SPECS/2026-10-15-channel-files-for-bots.md. Goes to the server's
