@@ -50,6 +50,7 @@ from .routers import (
     summarize,
 )
 from .services import bot_files as bot_files_service
+from .services import stt as stt_service
 
 logger = logging.getLogger(__name__)
 
@@ -380,10 +381,13 @@ async def lifespan(app: FastAPI):
         sweeper = asyncio.create_task(
             bot_files_service.sweep_forever(settings.BOT_FILES_SWEEP_SECONDS)
         )
+    stt_preload = asyncio.create_task(stt_service.preload()) if settings.STT_PRELOAD else None
     yield
     if sweeper is not None:
         sweeper.cancel()
         await asyncio.gather(sweeper, return_exceptions=True)
+    if stt_preload is not None:
+        await stt_preload
     await db.close()
 
 

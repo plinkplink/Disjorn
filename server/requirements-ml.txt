@@ -1,4 +1,9 @@
-# Optional heavy deps — install on the GPU box for STT and RAW photo support.
+# Optional heavy deps — install on the box that does STT and RAW photo support.
 # Server degrades gracefully (501 / conversion skip) when these are absent.
+# STT engine onnx_asr: onnx-asr on onnxruntime, with av decoding the upload.
+onnx-asr==0.12.0
+onnxruntime==1.27.0
+av==18.0.0
+# STT engine faster_whisper.
 faster-whisper
 rawpy

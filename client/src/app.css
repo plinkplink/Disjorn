@@ -2635,6 +2635,10 @@
   white-space: nowrap;
 }
 
+.mic-status {
+  color: var(--text-2);
+}
+
 /* ---- topbar search ---- */
 
 .topbar {

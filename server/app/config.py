@@ -30,7 +30,7 @@ class Settings(BaseSettings):
 
     # Pluggable services
     OLLAMA_URL: str = "http://localhost:11434"
-    STT_MODEL: str = "small"
+    STT_MODEL: str = ""
 
     # Media
     MAX_UPLOAD_BYTES: int = 200 * 1024 * 1024
@@ -40,6 +40,17 @@ class Settings(BaseSettings):
     MAX_PICKER_BYTES: int = 8 * 1024 * 1024
     OLLAMA_MODEL: str = "llama3.2"
     STT_ENGINE: str = "faster_whisper"      # key into services.stt.ENGINES
+    STT_MODEL_DIR: str = ""
+    STT_QUANTIZATION: str = ""
+    STT_LANGUAGE: str = "en"
+    STT_PRELOAD: bool = False
+    STT_MAX_BYTES: int = 32 * 1024 * 1024
+    STT_REMOTE_URL: str = ""
+    STT_REMOTE_MODEL: str = "large-v3"
+    STT_REMOTE_TOKEN: str = ""
+    STT_REMOTE_TIMEOUT: float = 20.0
+    STT_REMOTE_CONNECT_TIMEOUT: float = 0.5
+    STT_REMOTE_COOLDOWN: float = 60.0
     SUMMARIZE_ENGINE: str = "ollama"        # key into services.summarize.ENGINES
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_MODEL: str = "claude-haiku-5-5"

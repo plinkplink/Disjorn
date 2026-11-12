@@ -519,34 +519,54 @@ export async function messageBySeq(
 
 /* ---- voice-to-text (WP12) ---- */
 
+/** How long to wait on /stt: a floor that covers a model still loading,
+    plus twice the length of the recording. */
+export function transcribeTimeoutMs(recordedMs: number): number {
+  return 60_000 + 2 * Math.max(0, recordedMs);
+}
+
 /**
  * POST /stt (multipart field `audio`) -> transcribed text.
- * Throws ApiError(501) when no STT engine is installed server-side.
+ * Throws ApiError(501) when no STT engine is installed server-side, and
+ * ApiError(0) when the network fails or `timeoutMs` passes without an answer.
  */
 export async function transcribeAudio(
   blob: Blob,
   filename: string,
+  timeoutMs: number = transcribeTimeoutMs(0),
 ): Promise<{ text: string }> {
   const form = new FormData();
   form.append("audio", blob, filename);
-  let res: Response;
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), timeoutMs);
   try {
-    res = await fetch("/stt", {
-      method: "POST",
-      credentials: "include",
-      body: form,
-    });
-  } catch {
-    throw new ApiError(0, "Network error — transcription failed");
+    let res: Response;
+    try {
+      res = await fetch("/stt", {
+        method: "POST",
+        credentials: "include",
+        body: form,
+        signal: abort.signal,
+      });
+    } catch {
+      throw new ApiError(
+        0,
+        abort.signal.aborted
+          ? "Transcription timed out — the server took too long. Try again, or record a shorter clip."
+          : "Network error — transcription failed",
+      );
+    }
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new ApiError(
+        res.status,
+        detailFromBody(text, res.statusText || "Transcription failed"),
+      );
+    }
+    return (await res.json()) as { text: string };
+  } finally {
+    clearTimeout(timer);
   }
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new ApiError(
-      res.status,
-      detailFromBody(text, res.statusText || "Transcription failed"),
-    );
-  }
-  return (await res.json()) as { text: string };
 }
 
 /* ---- media (WP10) ---- */
