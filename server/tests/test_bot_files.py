@@ -877,3 +877,110 @@ async def test_a_file_that_is_not_a_pdf_is_not_served_as_one(house):
     await house.flip("on")
     _, (att,) = await house.say("fake", ("fake.pdf", b"not a pdf at all", "application/pdf"))
     assert (await house.read(att)).status_code == 404
+
+
+# ------------------------------------------------------------ the picker shelf
+
+def two_frame_gif(size=(600, 400)) -> bytes:
+    frames = [Image.new("RGB", size, colour) for colour in ((250, 0, 0), (0, 0, 250))]
+    buf = io.BytesIO()
+    frames[0].save(buf, format="GIF", save_all=True, append_images=frames[1:], duration=80)
+    return buf.getvalue()
+
+
+async def shelve(house, tab: str, name: str, content: bytes, mime: str) -> str:
+    r = await house.client.post(
+        "/picker/add", files=[("file", (name, content, mime))], data={"tab": tab})
+    assert r.status_code == 200, r.text
+    return r.json()["url"]
+
+
+async def test_a_bot_reads_a_picker_gif_as_its_first_frame(house):
+    url = await shelve(house, "gif", "spin.gif", two_frame_gif(), "image/gif")
+    assert url.startswith("/picker/file/gif/")
+
+    body = (await house.bot.get(url.replace("/picker/file/", "/bot/picker/"))).json()
+
+    assert (body["path"], body["kind"], body["media_type"]) == (url, "image", "image/webp")
+    sent = Image.open(io.BytesIO(base64.b64decode(body["data"])))
+    assert (sent.format, sent.size, getattr(sent, "n_frames", 1)) == ("WEBP", (600, 400), 1)
+    red, _, blue = sent.convert("RGB").getpixel((300, 200))
+    assert red > 200 and blue < 50
+
+
+async def test_a_picker_image_comes_back_no_larger_than_a_bot_reads(house):
+    exif = Image.Exif()
+    exif[0x010F] = "a camera maker"
+    buf = io.BytesIO()
+    Image.new("RGB", (3200, 1600), (10, 90, 160)).save(buf, format="JPEG", exif=exif)
+    url = await shelve(house, "image", "wide.jpg", buf.getvalue(), "image/jpeg")
+
+    body = (await house.bot.get(url.replace("/picker/file/", "/bot/picker/"))).json()
+
+    sent = Image.open(io.BytesIO(base64.b64decode(body["data"])))
+    assert sent.size == (1568, 784) and dict(sent.getexif()) == {}
+
+
+async def test_a_picker_read_needs_no_files_safe_channel_and_no_membership(house):
+    url = await shelve(house, "image", "open.png", png((90, 60)), "image/png")
+    await house.add_bot("stranger", "stranger-key")
+
+    r = await house.bot.get(
+        url.replace("/picker/file/", "/bot/picker/"), headers={"X-Api-Key": "stranger-key"})
+
+    assert r.status_code == 200 and r.json()["kind"] == "image"
+
+
+async def test_a_picker_read_keeps_nothing_and_changes_nothing_on_the_shelf(house):
+    url = await shelve(house, "image", "kept.png", png((90, 60)), "image/png")
+    data_dir = get_settings().data_dir
+    before = sorted(str(p.relative_to(data_dir)) for p in data_dir.rglob("*"))
+
+    assert (await house.bot.get(url.replace("/picker/file/", "/bot/picker/"))).status_code == 200
+
+    assert sorted(str(p.relative_to(data_dir)) for p in data_dir.rglob("*")) == before
+
+
+@pytest.mark.parametrize("path", [
+    "/bot/picker/gif/missing.gif", "/bot/picker/video/open.png", "/bot/picker/image/.hidden",
+    "/bot/picker/image/..%2F..%2Fdisjorn.db", "/bot/picker/image/%2E%2E",
+    "/bot/picker/image/sub%5Copen.png",
+])
+async def test_a_path_that_names_no_picker_file_is_not_found(house, path):
+    await shelve(house, "image", "open.png", png((90, 60)), "image/png")
+    assert (await house.bot.get(path)).status_code == 404
+
+
+async def test_a_picker_file_over_the_read_cap_is_not_found(house, monkeypatch):
+    url = await shelve(house, "image", "noise.png", noisy_png((800, 600)), "image/png")
+    set_env(monkeypatch, "BOT_READ_BYTES", 2000)
+    assert (await house.bot.get(url.replace("/picker/file/", "/bot/picker/"))).status_code == 404
+
+
+async def test_a_person_gets_nothing_from_the_bot_picker_route(house):
+    url = await shelve(house, "image", "open.png", png((90, 60)), "image/png")
+    r = await house.client.get(url.replace("/picker/file/", "/bot/picker/"))
+    assert r.status_code == 404
+
+
+async def test_a_picker_file_that_will_not_decode_is_not_found(house):
+    url = await shelve(house, "image", "open.png", png((90, 60)), "image/png")
+    name = url.rsplit("/", 1)[1]
+    (get_settings().data_dir / "assets" / "picker" / "images" / name).write_bytes(b"not an image")
+    assert (await house.bot.get(url.replace("/picker/file/", "/bot/picker/"))).status_code == 404
+
+
+async def test_a_picker_file_with_too_many_pixels_is_not_decoded(house, monkeypatch):
+    url = await shelve(house, "image", "open.png", png((90, 60)), "image/png")
+    monkeypatch.setattr(bot_files, "PICKER_MAX_PIXELS", 90 * 60 - 1)
+    monkeypatch.setattr(bot_files, "make_preview", lambda *a: pytest.fail("decoded"))
+    assert (await house.bot.get(url.replace("/picker/file/", "/bot/picker/"))).status_code == 404
+
+
+async def test_the_shelf_is_still_open_to_anyone_which_is_why_any_bot_may_read_it(app, house):
+    url = await shelve(house, "image", "open.png", png((90, 60)), "image/png")
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="https://test") as nobody:
+        r = await nobody.get(url)
+    assert r.status_code == 200, (
+        "the picker file route now wants a login: /bot/picker must take the same gate")

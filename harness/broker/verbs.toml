@@ -66,6 +66,7 @@
 "backlog-list" = false
 "backlog-file" = false
 "read-attachment" = false
+"read-picker-file" = false
 "post-file" = false
 
 # NOTE there is no `wake` line in either seat section, and adding one grants
@@ -105,6 +106,7 @@
 "backlog-list" = false
 "backlog-file" = false
 "read-attachment" = false
+"read-picker-file" = false
 "post-file" = false
 
 # THE WAKE CALLER (SPECS/2026-08-25-agentic-residents.md). plink, at the

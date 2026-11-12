@@ -8,6 +8,7 @@ import hashlib
 import json
 import mimetypes
 import os
+import re
 import stat
 from typing import Optional
 
@@ -25,6 +26,7 @@ MAX_BOARD_SEARCH_CHARS = 200
 PLANROOM_HTTP_TIMEOUT = 20
 # A file post carries the whole file and the server stores it before it answers.
 FILE_POST_HTTP_TIMEOUT = 120
+PICKER_PATH_RE = re.compile(r"/picker/file/(?P<tab>gif|image)/(?P<name>[^/\\\x00-\x1f\x7f]+)")
 # The approval object (same spec, item 1). Three verbs over the server's
 # /approval surface, as the broker's own bot identity — the board verbs' idiom,
 # and for the board verbs' reason: one composer, one state of record.
@@ -87,6 +89,8 @@ def _api_label(path: str) -> str:
         return "backlog API"
     if path.startswith("/bot/attachments"):
         return "attachment API"
+    if path.startswith("/bot/picker"):
+        return "picker API"
     return "plan room API"
 
 
@@ -405,6 +409,19 @@ class PlanroomVerbs:
             self.disjorn, "GET",
             f"/bot/attachments/{attachment_id}?on_behalf_of={_urlq(resident)}")
         return result, f"attachment read {attachment_id}"
+
+    def _verb_read_picker_file(self, resident: str, args: dict) -> tuple[dict, str]:
+        """One picker picture in the shape the server gives a bot. The path is
+        the one a message carries; only its two parts reach the server."""
+        _reject_unknown(args, {"path"})
+        path = _check_str(args, "path", required=True, max_len=300)
+        assert path is not None
+        match = PICKER_PATH_RE.fullmatch(path)
+        if match is None or match["name"] in (".", ".."):
+            raise _bad("path must be /picker/file/<gif|image>/<name>, as the message has it")
+        result = self.planroom_api(
+            self.disjorn, "GET", f"/bot/picker/{match['tab']}/{_urlq(match['name'])}")
+        return result, f"picker read {match['tab']}/{match['name']}"
 
     def _verb_post_file(self, resident: str, args: dict) -> tuple[dict, str]:
         """One outbox file, posted by the server as the calling seat's own bot.

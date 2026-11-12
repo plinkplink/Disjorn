@@ -11,9 +11,12 @@ import os
 import re
 import shutil
 import stat
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any, Optional
+
+from PIL import Image
 
 from .. import db, privacy
 from ..config import get_settings
@@ -33,6 +36,7 @@ _UNPOSTABLE_MIMES = frozenset({"text/html", "text/xml", "application/xml", "imag
 PDF_MIME = "application/pdf"
 PDF_MAX_PAGES = 200
 VARIANT_MIME = "image/webp"
+PICKER_MAX_PIXELS = 40_000_000
 THUMB_SUFFIX = "_thumb.webp"
 _ALLOWED_PREFIXES = ("text/", "image/")
 _ALLOWED_MIMES = frozenset({
@@ -220,6 +224,24 @@ def _image_shape(att: dict[str, Any], cap: int) -> dict[str, Any]:
         "media_type": VARIANT_MIME,
         "data": base64.b64encode(best.read_bytes()).decode("ascii"),
     }
+
+
+def picker_shape(path: Path, cap: int) -> dict[str, Any]:
+    """A picker file as a bot reads an image: its first frame, no EXIF. Nothing is kept.
+
+    Adding to the shelf never decoded the pixels, so their count is checked first.
+    """
+    with Image.open(path) as header:
+        if header.width * header.height > PICKER_MAX_PIXELS:
+            raise LookupError(path.name)
+    with tempfile.TemporaryDirectory() as scratch:
+        made = Path(scratch) / "preview.webp"
+        make_preview(path, made, BOT_MAX)
+        data = made.read_bytes()
+    if len(data) > cap:
+        raise LookupError(path.name)
+    return {"kind": "image", "media_type": VARIANT_MIME,
+            "data": base64.b64encode(data).decode("ascii")}
 
 
 def _pdf_shape(path: Path, cap: int) -> dict[str, Any]:

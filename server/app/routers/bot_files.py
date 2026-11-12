@@ -1,10 +1,12 @@
 """GET /bot/attachments/{id}: one uploaded file, in the shape a bot may read.
 POST /bot/attachments: one file a resident seat posts as its own bot.
+GET /bot/picker/{tab}/{name}: one picker picture, as a bot reads an image.
 
 A file is never easier to reach than its message: the reading bot must be a
 member of the file's channel, and then `visible_to_bots` decides the file.
 """
 
+import asyncio
 import base64
 import binascii
 import io
@@ -72,6 +74,30 @@ async def read_attachment(
     if out is None:
         raise HTTPException(status_code=404, detail="Not found")
     return out
+
+
+@router.get("/bot/picker/{tab}/{name}")
+async def read_picker_file(
+    tab: str, name: str, actor: Annotated[Actor, Depends(get_actor)]
+) -> dict[str, Any]:
+    """The picker shelf has no private file, so any bot may read; 404 for every refusal."""
+    out = None
+    try:
+        if actor.type == "bot" and tab in media.PICKER_TABS:
+            path = media._picker_path(tab, name)
+            if path.is_file():
+                out = await asyncio.to_thread(
+                    bot_files.picker_shape, path, get_settings().BOT_READ_BYTES
+                )
+    except Exception:
+        out = None
+    logger.info(
+        "bot picker read: caller=%s:%s file=%r %s",
+        actor.type, actor.id, f"{tab}/{name}", "allowed" if out is not None else "refused",
+    )
+    if out is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    return {"path": f"/picker/file/{tab}/{name}", **out}
 
 
 class FilePost(BaseModel):
