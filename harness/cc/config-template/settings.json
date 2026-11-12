@@ -3,11 +3,15 @@
   "effortLevel": "high",
   "permissions": {
     "defaultMode": "acceptEdits",
-    "additionalDirectories": ["/config", "/opt/house_memory"],
+    "additionalDirectories": ["/config", "/opt/house_memory", "/files", "/files-outbox"],
     "allow": [
       "Read(//home/resident/**)",
       "Edit(//home/resident/**)",
       "Write(//home/resident/**)",
+      "Read(//files/**)",
+      "Read(//files-outbox/**)",
+      "Write(//files-outbox/**)",
+      "Edit(//files-outbox/**)",
       "Glob",
       "Grep",
       "Bash(broker:*)",
