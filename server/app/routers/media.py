@@ -405,7 +405,7 @@ async def get_media(
 async def store_avatar(file: UploadFile, stem: str) -> str:
     """Save an uploaded image as avatars/{stem}.webp; return the DB-relative path.
 
-    THE avatar conversion path (256px WebP via media_convert.make_avatar) —
+    THE avatar conversion path (256px WebP, media_convert.make_preview) —
     exported so bot avatars (routers/bots_admin.py) reuse it instead of growing
     a second one. Raises HTTP 400 on anything Pillow can't decode; the caller
     owns authorization and the DB column update.
@@ -416,7 +416,7 @@ async def store_avatar(file: UploadFile, stem: str) -> str:
     await _save_upload(file, tmp, get_settings().MAX_UPLOAD_BYTES)
     dest = avatars / f"{stem}.webp"
     try:
-        media_convert.make_avatar(tmp, dest, max_dim=256)
+        media_convert.make_preview(tmp, dest, max_dim=256)
     except Exception:
         raise HTTPException(status_code=400, detail="Not a supported image")
     finally:

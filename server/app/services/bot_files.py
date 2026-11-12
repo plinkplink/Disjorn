@@ -11,12 +11,14 @@ import os
 import re
 import shutil
 import stat
+import threading
 from pathlib import Path
 from typing import Any, Optional
 
 from .. import db, privacy
 from ..config import get_settings
 from ..routers.approval import RESIDENT_PRINCIPAL_RE
+from .media_convert import BOT_MAX, make_preview
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,7 @@ _UNPOSTABLE_MIMES = frozenset({"text/html", "text/xml", "application/xml", "imag
 PDF_MIME = "application/pdf"
 PDF_MAX_PAGES = 200
 VARIANT_MIME = "image/webp"
+THUMB_SUFFIX = "_thumb.webp"
 _ALLOWED_PREFIXES = ("text/", "image/")
 _ALLOWED_MIMES = frozenset({
     PDF_MIME,
@@ -172,14 +175,38 @@ def _text_shape(path: Path, cap: int) -> dict[str, Any]:
     return {"kind": "text", "text": text}
 
 
+def _bot_variant(att: dict[str, Any], thumb: Path) -> Path:
+    """A webp a model can read text in, made beside the thumbnail on the first read and kept."""
+    if not thumb.name.endswith(THUMB_SUFFIX):
+        raise LookupError(att["id"])
+    dest = thumb.with_name(thumb.name.removesuffix(THUMB_SUFFIX) + "_bot.webp")
+    if not dest.is_file():
+        tmp = dest.with_name(f".tmp-{os.getpid()}-{threading.get_ident()}-{dest.name}")
+        try:
+            make_preview(_stored(att["file_path"], "originals"), tmp, BOT_MAX)
+            os.replace(tmp, dest)
+        finally:
+            tmp.unlink(missing_ok=True)
+    return dest
+
+
 def _image_shape(att: dict[str, Any], cap: int) -> dict[str, Any]:
-    """The largest stored webp variant under the cap; the original is never a candidate."""
-    fitting = []
-    for rel in (att["display_path"], att["thumb_path"]):
-        if rel:
-            path = _stored(rel, "web")
-            if path.stat().st_size <= cap:
-                fitting.append(path)
+    """The largest webp variant under the cap; the original is never a candidate.
+
+    An upload a browser shows as it is has no display variant, only a thumbnail.
+    """
+    display, thumb = (
+        _stored(rel, "web") if rel else None for rel in (att["display_path"], att["thumb_path"])
+    )
+    fitting = [p for p in (display, thumb) if p and p.stat().st_size <= cap]
+    if thumb and display not in fitting:
+        try:
+            made = _bot_variant(att, thumb)
+            if made.stat().st_size <= cap:
+                fitting.append(made)
+        except Exception as exc:
+            logger.warning("bot file read: no bot variant for attachment %s (%s)",
+                           att["id"], type(exc).__name__)
     if not fitting:
         raise LookupError(att["id"])
     best = max(fitting, key=lambda p: p.stat().st_size)
@@ -228,7 +255,7 @@ async def read(attachment_id: int) -> Optional[dict[str, Any]]:
         cap = get_settings().BOT_READ_BYTES
         mime = _mime(att)
         if mime.startswith("image/"):
-            shape = _image_shape(att, cap)
+            shape = await asyncio.to_thread(_image_shape, att, cap)
         elif mime == PDF_MIME:
             shape = await asyncio.to_thread(
                 _pdf_shape, _stored(att["file_path"], "originals"), cap
