@@ -257,3 +257,35 @@ def test_a_result_that_is_not_an_image_is_printed_as_it_is(
     broker_cli.main(PICKED, environ={"BROKER_IMAGE_DIR": str(tmp_path / "seen")})
     assert json.loads(capsys.readouterr().out)["result"] == result
     assert not (tmp_path / "seen").exists()
+
+
+def test_the_default_folder_is_under_home_where_the_read_tool_may_look(
+    broker_cli, capsys, monkeypatch, tmp_path
+):
+    answers(broker_cli, monkeypatch, {
+        "kind": "image", "media_type": "image/webp", "data": base64.b64encode(WEBP).decode()})
+
+    broker_cli.main(PICKED, environ={"HOME": str(tmp_path)})
+
+    saved = json.loads(capsys.readouterr().out)["result"]["file"]
+    folder = tmp_path / ".cache" / "broker-images"
+    assert os.path.dirname(saved) == str(folder)
+    assert os.stat(folder).st_mode & 0o777 == 0o700
+
+
+def test_a_save_removes_the_saves_of_an_earlier_day_and_nothing_else(
+    broker_cli, capsys, monkeypatch, tmp_path
+):
+    old, fresh, other = (tmp_path / n for n in ("image-old.webp", "image-new.webp", "notes.txt"))
+    for path in (old, fresh, other):
+        path.write_bytes(b"x")
+    long_ago = os.stat(old).st_mtime - broker_cli.IMAGE_KEEP_SECONDS - 60
+    os.utime(old, (long_ago, long_ago))
+    os.utime(other, (long_ago, long_ago))
+    answers(broker_cli, monkeypatch, {
+        "kind": "image", "media_type": "image/webp", "data": base64.b64encode(WEBP).decode()})
+
+    broker_cli.main(PICKED, environ={"BROKER_IMAGE_DIR": str(tmp_path)})
+
+    saved = os.path.basename(json.loads(capsys.readouterr().out)["result"]["file"])
+    assert sorted(os.listdir(tmp_path)) == sorted(["image-new.webp", "notes.txt", saved])
