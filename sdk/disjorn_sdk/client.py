@@ -331,11 +331,11 @@ class DisjornClient:
     ) -> list[dict[str, Any]]:
         """Read the feature-request backlog (WP-L2), oldest first.
 
-        Returns ``[{id, text, author, created_at, status, spec_ref,
-        status_by_type, status_by_id, status_at}, ...]`` — the same items users
-        file with ``/backlog <text>`` in chat. This is the resident's triage
-        read surface: get the table straight from the server instead of
-        scraping the server-rendered ``/backlog`` chat listing.
+        Returns ``[{id, text, author, author_type, author_id, author_seat,
+        created_at, status, spec_ref, status_by_type, status_by_id,
+        status_at}, ...]`` — the items users file with ``/backlog <text>``.
+        ``author_type``/``author_id`` are who filed it, ``author_seat`` the
+        resident seat a relay filed it for; null if unrecorded.
 
         ``status`` is one of
         ``open``/``spec'd``/``built``/``rejected``/``duplicate``.

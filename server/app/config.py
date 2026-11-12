@@ -66,6 +66,7 @@ class Settings(BaseSettings):
     APPROVAL_PRINCIPALS: str = "plink,res-claudette,res-gable"
     APPROVAL_RELAY_BOT_NAMES: list[str] = ["broker"]
     BACKLOG_RELAY_BOT_NAMES: list[str] = ["broker"]
+    PLANROOM_RELAY_BOT_NAMES: list[str] = ["broker"]
     FILES_RELAY_BOT_NAMES: list[str] = ["broker"]
     BOT_DAILY_UPLOAD_BYTES: int = 25 * 1024 * 1024
     BOT_FILES_EXPORT_ROOT: str = "/srv/disjorn-files-ro"

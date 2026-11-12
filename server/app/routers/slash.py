@@ -328,7 +328,8 @@ async def _system_bot_id() -> int:
 async def _items_page(from_id: int = 0, limit: int = BACKLOG_PAGE_MAX) -> list[dict[str, Any]]:
     """Backlog rows with id >= from_id, oldest first, at most `limit` of them."""
     return await db.fetch_all(
-        """SELECT id, text, author, created_at, status, spec_ref,
+        """SELECT id, text, author, author_type, author_id, author_seat,
+                  created_at, status, spec_ref,
                   status_by_type, status_by_id, status_at FROM backlog
            WHERE id >= ? ORDER BY id LIMIT ?""",
         (from_id, limit),
@@ -484,7 +485,7 @@ async def _backlog(ctx: Ctx) -> str:
         return refusal
 
     # The raw args, verbatim: the parser already stripped the separator.
-    item_id = await _insert_item(ctx.args, ctx.poster)
+    item_id = await _insert_item(ctx.args, ctx.poster, ctx.actor)
     return _filed_ack(item_id)
 
 
@@ -496,10 +497,13 @@ def _oversize(text: str) -> Optional[str]:
             "post a one-paragraph summary and link the detail.")
 
 
-async def _insert_item(text: str, author: str) -> int:
+async def _insert_item(
+    text: str, author: str, actor: Actor, seat: Optional[str] = None
+) -> int:
     cur = await db.execute(
-        "INSERT INTO backlog (text, author, created_at) VALUES (?, ?, ?)",
-        (text, author, db.utc_now()),
+        "INSERT INTO backlog (text, author, author_type, author_id, author_seat, "
+        "created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (text, author, actor.type, actor.id, seat, db.utc_now()),
     )
     assert cur.lastrowid is not None
     return cur.lastrowid
@@ -572,7 +576,7 @@ async def file_for_resident(actor: CurrentActor,
     if refusal:
         raise HTTPException(status_code=400, detail=refusal)
     channel_id = await _custodian_id()
-    item_id = await _insert_item(body.text, label)
+    item_id = await _insert_item(body.text, label, actor, seat=label)
     await _post_system_reply(channel_id, _filed_ack(item_id, relayed=True))
     rows = await _items_page(item_id, 1)
     return BacklogItem(**rows[0])

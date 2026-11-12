@@ -716,7 +716,10 @@ a copy of it — but the mirror can lag, so staleness is declared, never denied.
   re-enters. Attribution is the broker's, stamped from the caller's
   SO_PEERCRED-derived resident name, never from `args`.
 - **`board-comment`** — args `{"slug": str, "text": str}`, both required, text
-  1..4000 chars. Same attribution rule.
+  1..4000 chars. Same attribution rule. The server stores the seat in the
+  comment's `author_seat` column, beside the broker's own bot as
+  `author_type`/`author_id`, and only from a bot on `PLANROOM_RELAY_BOT_NAMES`
+  (default `["broker"]`); any other bot's `author` stays a label.
 
 A `slug` is a spec slug (`YYYY-MM-DD-name` — the spec filename without `.md`,
 because a card's identity IS its spec file), or one of the two forms for cards
@@ -918,7 +921,8 @@ SPECS/2026-10-05-backlog-from-resident-seats.md. Both go to the server's
 - **`backlog-file`** — args `{"text": str}`. The server's `POST /backlog`
   takes `on_behalf_of` only from a bot on `BACKLOG_RELAY_BOT_NAMES` (default
   `["broker"]`) and only as a `res-*` label; **the broker stamps it** from the
-  caller's SO_PEERCRED seat name. The row's author is that label, the text cap
+  caller's SO_PEERCRED seat name. The row's author is that label, stored also
+  as `author_seat` beside the broker's bot (`author_type`/`author_id`); the text cap
   is the `/backlog` slash command's, and the server announces the filing in
   #custodian. Result `{"row": {...}}`; a server refusal comes back verbatim.
   **At most 10 filings per seat per UTC day**: the 11th is `over-budget` and

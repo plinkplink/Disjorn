@@ -64,6 +64,8 @@ from .. import db
 from ..config import get_settings
 from ..models import User
 from ..services import backlog as backlog_service
+from ..services.bot_files import MAX_SEAT_LABEL_CHARS
+from .approval import RESIDENT_PRINCIPAL_RE
 from .auth import Actor, get_actor, get_admin_user
 
 logger = logging.getLogger(__name__)
@@ -254,7 +256,7 @@ async def get_card(slug: str, actor: CurrentActor) -> dict:
     board = await _full_board()
     card = next((c for c in board["cards"] if c.get("slug") == slug), None)
     comments = await db.fetch_all(
-        "SELECT id, slug, author_type, author_id, author_label, text, "
+        "SELECT id, slug, author_type, author_id, author_seat, author_label, text, "
         "created_at FROM card_comments WHERE slug = ? ORDER BY id", (slug,))
     if card is None:
         if not comments:
@@ -369,17 +371,27 @@ async def _require_card(slug: str) -> dict:
 
 
 def _actor_label(actor: Actor, supplied: Optional[str]) -> str:
-    """Who a write is attributed to.
+    """The display label of a write.
 
     A human is themselves; `author` is ignored outright, because letting a
     signed-in person label their own comment with someone else's name is a
-    forgery affordance and there is no use for it. A bot may supply a label —
-    the broker stamps the CALLING RESIDENT there from SO_PEERCRED, never from
-    the resident's own arguments — and the bot's identity remains the wall."""
+    forgery affordance. A bot may supply a label, kept beside its own name."""
     if actor.type == "user":
         return (actor.user.display_name or actor.user.username) if actor.user else "user"
     name = (actor.bot.name if actor.bot else "bot")
     return f"{supplied} (via {name})" if supplied else name
+
+
+def _relayed_seat(actor: Actor, supplied: Optional[str]) -> Optional[str]:
+    """The resident seat a relay wrote for: the relay stamps it from peer
+    credentials, so any other bot's `author` is a label and never a seat."""
+    if actor.type != "bot" or actor.bot is None or supplied is None:
+        return None
+    if actor.bot.name not in get_settings().PLANROOM_RELAY_BOT_NAMES:
+        return None
+    if len(supplied) > MAX_SEAT_LABEL_CHARS or not RESIDENT_PRINCIPAL_RE.fullmatch(supplied):
+        return None
+    return supplied
 
 
 def _require_writer(actor: Actor) -> None:
@@ -412,10 +424,11 @@ async def add_comment(slug: str, actor: CurrentActor,
     label = _actor_label(actor, body.author)
     cur = await db.execute(
         "INSERT INTO card_comments (slug, author_type, author_id, "
-        "author_label, text) VALUES (?, ?, ?, ?, ?)",
-        (slug, actor.type, actor.id, label, body.text.strip()))
+        "author_seat, author_label, text) VALUES (?, ?, ?, ?, ?, ?)",
+        (slug, actor.type, actor.id, _relayed_seat(actor, body.author),
+         label, body.text.strip()))
     row = await db.fetch_one(
-        "SELECT id, slug, author_type, author_id, author_label, text, "
+        "SELECT id, slug, author_type, author_id, author_seat, author_label, text, "
         "created_at FROM card_comments WHERE id = ?", (cur.lastrowid,))
     return {"comment": row}
 
