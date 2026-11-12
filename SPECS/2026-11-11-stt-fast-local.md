@@ -370,4 +370,5 @@ One build-hand session; the benchmark was most of it.
 <!-- No Confirm record → no build. This is the gate. -->
 
 ## Status
-`built@loop/2026-11-11-stt-fast-local`
+merged
+<!-- advanced from `built@loop/2026-11-11-stt-fast-local` by `board --mark-merged` on 2026-11-12: build merged as cc65f79. The word `built@loop/2026-11-11-stt-fast-local` on a merged spec made it indistinguishable from a buildable one. -->

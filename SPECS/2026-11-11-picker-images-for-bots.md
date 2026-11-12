@@ -66,4 +66,5 @@ About 400k.
 - **Confirmed at**: 2026-11-12T04:36:56Z
 
 ## Status
-`built@loop/2026-11-11-picker-images-for-bots`
+merged
+<!-- advanced from `built@loop/2026-11-11-picker-images-for-bots` by `board --mark-merged` on 2026-11-12: build merged as 95195ed. The word `built@loop/2026-11-11-picker-images-for-bots` on a merged spec made it indistinguishable from a buildable one. -->
