@@ -968,3 +968,19 @@ async def test_a_picker_file_that_will_not_decode_is_not_found(house):
     name = url.rsplit("/", 1)[1]
     (get_settings().data_dir / "assets" / "picker" / "images" / name).write_bytes(b"not an image")
     assert (await house.bot.get(url.replace("/picker/file/", "/bot/picker/"))).status_code == 404
+
+
+async def test_a_picker_file_with_too_many_pixels_is_not_decoded(house, monkeypatch):
+    url = await shelve(house, "image", "open.png", png((90, 60)), "image/png")
+    monkeypatch.setattr(bot_files, "PICKER_MAX_PIXELS", 90 * 60 - 1)
+    monkeypatch.setattr(bot_files, "make_preview", lambda *a: pytest.fail("decoded"))
+    assert (await house.bot.get(url.replace("/picker/file/", "/bot/picker/"))).status_code == 404
+
+
+async def test_the_shelf_is_still_open_to_anyone_which_is_why_any_bot_may_read_it(app, house):
+    url = await shelve(house, "image", "open.png", png((90, 60)), "image/png")
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="https://test") as nobody:
+        r = await nobody.get(url)
+    assert r.status_code == 200, (
+        "the picker file route now wants a login: /bot/picker must take the same gate")
