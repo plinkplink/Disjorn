@@ -102,7 +102,7 @@ privacy_flags_on_current_message: {}}`.
 | `client.seed_seq(channel_id, seq)` | Pre-register a cursor (see resuming, below). |
 | `await client.run(handler)` | Loop calling `await handler(event)`; a handler exception is logged and the loop continues. |
 | `await client.aclose()` | Graceful shutdown of WS + HTTP. |
-| `client.bot_id` / `client.ws` / `client.last_seen_seq` | Set after ready / live connection / per-channel high-water marks. |
+| `client.bot_id` / `client.ws` / `client.last_seen_seq` | Set after ready / live connection / per-channel high-water marks of events delivered. |
 
 Logging goes to the `disjorn_sdk` logger (stdlib `logging`).
 
@@ -112,8 +112,8 @@ Logging goes to the `disjorn_sdk` logger (stdlib `logging`).
   (`backoff_initial=1.0` doubling to `backoff_max=30.0`, ±25% jitter),
   yielding a fresh `Ready(reconnected=True)` each time. Only `aclose()` or
   `DisjornAuthError` stops it.
-- The client tracks `last_seen_seq` per channel from every persisted event it
-  sees. After a **re**connect, each known channel is REST-backfilled with
+- The client tracks, per channel, the last persisted event it has read. After
+  a **re**connect, each known channel is REST-backfilled with
   `GET /channels/{id}/messages?from_seq=last+1` (paged) and missed messages
   are yielded as **synthetic `MessageCreate(backfilled=True)`** events, in seq
   order per channel, before live frames resume.
@@ -136,6 +136,32 @@ Logging goes to the `disjorn_sdk` logger (stdlib `logging`).
   connect of a fresh client does not backfill — do a boot-time
   `get_messages(from_seq=...)` sweep yourself if you need catch-up before the
   first reconnect.
+
+## Slow consumers
+
+The client reads the socket in its own task, so a handler may take as long as
+a model turn takes without costing the connection. Events that arrive
+meanwhile wait in arrival order and are delivered **live**, one at a time,
+once the handler returns: they are not backfill and are not flagged
+`backfilled`.
+
+- Up to `max_queued_events` wait (constructor option, default 1000). Past
+  that the client stops reading until the consumer catches up. If that lasts
+  longer than the WebSocket keepalive (20 to 40 s) the socket drops and the
+  reconnect backfill covers the gap. A persisted event is never dropped.
+- `TypingStart` and `Presence` do not pile up. While one is waiting, a newer
+  one from the same sender replaces it (per user for presence, per author and
+  channel for typing), and they are dropped when the queue is full.
+- `last_seen_seq` moves when an event is handed to you, not when it is read.
+  A cursor you persist after handling an event never skips one that was still
+  waiting when the process died.
+- A dropped socket does not touch what is waiting: those events stay live,
+  and the backfill after the reconnect starts after the last event read, so
+  nothing arrives twice.
+- `aclose()` stops delivery at once. Events still waiting are not delivered
+  and stay above `last_seen_seq`.
+- The handler must not block the event loop itself (use `asyncio.to_thread`
+  for blocking work): a blocked loop reads nothing and answers no ping.
 
 ## Privacy guarantees (server-enforced)
 
