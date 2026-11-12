@@ -1,6 +1,7 @@
 import { create } from "zustand";
 
 import { leaveChannel as apiLeave } from "../api";
+import { perUserValues } from "../lib/perUserState";
 import type {
   ChannelVisibility,
   MemberAddFrame,
@@ -68,6 +69,7 @@ interface MembershipState {
  * makes the no-modal case not depend on a field that might be absent.
  */
 const selfLeaving = new Set<number>();
+perUserValues("stores/membership", ["selfLeaving"], () => selfLeaving.clear());
 
 /**
  * Drop every trace of a channel and step off it if it was on screen.

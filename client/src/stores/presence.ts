@@ -1,5 +1,6 @@
 import { create } from "zustand";
 
+import { perUserValues } from "../lib/perUserState";
 import type { MemberType, UserStatus } from "../types";
 
 export interface Typist {
@@ -36,6 +37,10 @@ interface PresenceState {
 }
 
 let pruneTimer: ReturnType<typeof setTimeout> | null = null;
+perUserValues("stores/presence", ["pruneTimer"], () => {
+  if (pruneTimer !== null) clearTimeout(pruneTimer);
+  pruneTimer = null;
+});
 
 export const usePresence = create<PresenceState>()((set, get) => {
   const prune = () => {

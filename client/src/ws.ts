@@ -19,6 +19,7 @@
      and reconnect catch-up arrive over HTTP and never pass through here. */
 
 import { soundFor } from "./lib/messageSound";
+import { perUserValues } from "./lib/perUserState";
 import { isReading } from "./lib/unread";
 import { usePush } from "./push";
 import { playSound, useSoundSettings } from "./sounds";
@@ -138,6 +139,11 @@ export class DisjornSocket {
   sendFocus(channelId: number | null): void {
     this.focusedChannelId = channelId;
     this.send({ op: "focus", channel_id: channelId });
+  }
+
+  /** The next account's first ready must not report the last account's channel as focused. */
+  forgetFocus(): void {
+    this.focusedChannelId = null;
   }
 
   /** Whether a message in this channel is in front of the reader right now. */
@@ -418,6 +424,7 @@ export class DisjornSocket {
 
 /** App-wide singleton. Views import this; stores never do (no import cycle). */
 export const socket = new DisjornSocket();
+perUserValues("ws", ["socket"], () => socket.forgetFocus());
 
 setListAppliedHandler(() => {
   socket.readActive();
