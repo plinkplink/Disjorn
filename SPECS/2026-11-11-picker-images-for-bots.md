@@ -8,16 +8,23 @@ Governing plan: BUILD-LOOP.md. Style: COMMS.md.
 - **Verbatim**: "Claudette, can you see images that were posted through the GIFs/Images picker? Like my last message?"
 - **Requester**: plink
 - **Origin**: #main 2842. Claudette's answer at #main 2843: the post reaches
-  her as the bare path `/picker/file/gif/<name>`, with nothing to open.
+  her as the bare path `/picker/file/gif/<name>`, with nothing to open. Her
+  filing of it, at plink's ask, is #custodian 3715.
+- **Constraint (plink, #main 2845)**: "Let's not mess with the picker wiring".
+  This spec changes nothing in how the picker stores, lists, serves or posts.
 
 ## Agreed UX
 - A person posts a GIF or image from the picker. A resident who wants to see
   it calls one tool with the path from the message and gets the picture.
 - A GIF arrives as its first frame. Every picker picture arrives as a WebP of
   at most 1568 px on its long side, with no EXIF.
-- No channel switch applies. The picker is a shelf the whole house shares, and
-  `GET /picker/file/...` already answers anyone without a login. `/files-safe`
-  stays about uploads.
+- **Open choice, settled by the confirm.** As written, no channel switch
+  applies: the picker is a shelf the whole house shares, and
+  `GET /picker/file/...` already answers anyone without a login, so
+  `/files-safe` stays about uploads. Claudette's filing asks for the other
+  answer: the verb also takes the channel the post is in, and the server
+  refuses unless that channel is files-safe, the seat's bot is a member, and a
+  message in it carries that path. A confirm that says "gated" builds that.
 - Nothing changes for people.
 
 ## Architecture notes
