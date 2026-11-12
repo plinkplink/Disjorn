@@ -76,7 +76,7 @@
 "harness/residency/hops.py" = 1429
 "harness/residency/launcher.py" = 14005
 "harness/residency/posts.py" = 1040
-"harness/residency/prompt.py" = 6494
+"harness/residency/prompt.py" = 6485
 "harness/residency/run_wake.py" = 1332
 "harness/residency/summary.py" = 5671
 "harness/residency/tests/stub_launch.py" = 1406
