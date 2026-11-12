@@ -38,7 +38,8 @@ mode, and why it is masked inside the container.
 - `settings.json` — Claude Code settings. Symlinked inside the image as
   `/etc/claude-code/managed-settings.json`, i.e. managed policy the
   resident's own `~/.claude` settings cannot override. Permissions: file
-  tools allowed in `/home/resident`, `broker` + dev tooling allowed in
+  tools allowed in `/home/resident`, read in `/files`, read and write in
+  `/files-outbox`, `broker` + dev tooling allowed in
   Bash; deny sudo/su, network clients (curl/wget/nc/socat/ssh/scp/rsync),
   podman/systemctl, WebFetch/WebSearch, and any write into `/config`.
   Honest note: the Bash deny list is hygiene — the real egress wall is host
