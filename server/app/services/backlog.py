@@ -106,7 +106,8 @@ async def set_status(
             commit=False,
         )
         updated = await db.fetch_one(
-            "SELECT id, text, author, created_at, status, spec_ref, "
+            "SELECT id, text, author, author_type, author_id, author_seat, "
+            "created_at, status, spec_ref, "
             "status_by_type, status_by_id, status_at FROM backlog WHERE id = ?",
             (item_id,),
         )

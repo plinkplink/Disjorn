@@ -89,6 +89,9 @@ class BacklogItem(BaseModel):
     id: int
     text: str
     author: str
+    author_type: Optional[MemberType] = None
+    author_id: Optional[int] = None
+    author_seat: Optional[str] = None
     created_at: str
     status: BacklogStatus = "open"
     spec_ref: Optional[str] = None
