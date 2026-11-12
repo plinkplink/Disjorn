@@ -3,7 +3,7 @@
   "effortLevel": "high",
   "permissions": {
     "defaultMode": "acceptEdits",
-    "additionalDirectories": ["/config", "/opt/house_memory", "/files", "/files-outbox"],
+    "additionalDirectories": ["/config", "/opt/house_memory", "/opt/disjorn", "/files", "/files-outbox"],
     "allow": [
       "Read(//home/resident/**)",
       "Edit(//home/resident/**)",
