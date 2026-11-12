@@ -37,6 +37,14 @@ DisjornClient.events()  ──▶  SummonDetector.detect  ──▶  Trigger(mod
                     reply → channel  +  summary → #custodian
 ```
 
+Summons are served one at a time. One whose message the server stamped no
+later than this adapter's newest post arrived while an earlier one was being
+handled, and its prompt reads the room up to the present: the usual window
+before it, the message itself, then the rows posted after it among the room's
+newest `count`. One header line says it waited and how many rows follow, and
+the framing line names its `[#seq]`. Any other summon's prompt ends at its own
+message.
+
 ## Modules
 
 | File | Role |

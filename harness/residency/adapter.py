@@ -92,6 +92,7 @@ class SummonAdapter:
         )
         self.cursor = cursor or CursorStore(config.cursor.state_path)
         self._restart_note = ""
+        self._last_post_at = ""  # the server's created_at on this adapter's newest post
         self.hops = hops or HopArbiter(config.hops)
         self.posts = posts or PostLedger(config.posts.state_path)
         self._sends_trace = _accepts(getattr(client, "send", None), "trace")
@@ -466,6 +467,9 @@ class SummonAdapter:
         if floor:
             backfill = [m for m in backfill
                         if not self._own_row_at_or_below(m, floor)]
+        later, cut = None, False
+        if self._waited(event):
+            later, cut = await self._posted_since(channel_id, trigger_seq, floor)
         try:
             posts = self.posts.recent(5)
         except Exception:  # noqa: BLE001 — a ledger is a convenience
@@ -475,8 +479,27 @@ class SummonAdapter:
         return assemble_prompt(
             backfill, event.message or {}, summoner=trigger.summoner,
             where=where, how=trigger.describe(), context=event.context,
-            posts=posts, restart=note,
+            posts=posts, restart=note, later=later, later_cut=cut,
         )
+
+    def _waited(self, event: MessageCreate) -> bool:
+        posted_at = (event.message or {}).get("created_at")
+        return (isinstance(posted_at, str) and isinstance(event.seq, int)
+                and "" < posted_at <= self._last_post_at)  # seqs order one room only
+
+    async def _posted_since(self, channel_id: int, seq: int, floor: int
+                            ) -> tuple[Optional[list[dict]], bool]:
+        try:
+            newest = await self.client.get_messages(
+                channel_id, limit=self.config.backfill.count_for(channel_id))
+        except Exception:  # noqa: BLE001 — the prompt then stops at the trigger
+            logger.warning("fetch up to now failed for channel %s", channel_id,
+                           exc_info=True)
+            return None, False
+        seqs = [m.get("seq") or 0 for m in newest]
+        later = [m for m in reversed(newest) if (m.get("seq") or 0) > seq
+                 and not self._own_row_at_or_below(m, floor)]
+        return later, bool(seqs) and min(seqs) > seq
 
     def _own_row_at_or_below(self, msg: dict, floor: int) -> bool:
         name = str((msg.get("author") or {}).get("name") or "")
@@ -508,7 +531,7 @@ class SummonAdapter:
         if trace is not None and self._sends_trace:
             extra["trace"] = trace
         try:
-            return await self.client.send(channel_id, content, reply_to=reply_to,
+            sent = await self.client.send(channel_id, content, reply_to=reply_to,
                                           **extra)
         except Exception as exc:  # noqa: BLE001 — a failed post never crashes the daemon
             if "trace" in extra and _status(exc) == 422:
@@ -518,6 +541,10 @@ class SummonAdapter:
                                              attribution=attribution)
             logger.warning("send to channel %s failed", channel_id, exc_info=True)
             return None
+        posted_at = sent.get("created_at") if isinstance(sent, dict) else None
+        if isinstance(posted_at, str):
+            self._last_post_at = max(self._last_post_at, posted_at)
+        return sent
 
 
 def _accepts(send, name: str) -> bool:

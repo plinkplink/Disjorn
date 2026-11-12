@@ -59,6 +59,8 @@ digest_pattern = "^\\[custodian daily "
 
 [backfill]
 count = 30                        # default recent messages pulled into the session prompt
+# A summon that waited behind another also gets the rows posted after it, up
+# to the present: at most this many more, the newest kept.
 # Per-channel depth overrides. Design threads in #custodian run long, so 30
 # (a #main number) is too shallow there — give it a deeper window:
 [backfill.per_channel]
