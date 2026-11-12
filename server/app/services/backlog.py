@@ -1,31 +1,6 @@
-"""The backlog row's status, and the ONE function that changes it.
+"""The one write path for backlog status, and its human-only gate.
 
-SPECS/2026-08-23-plan-room-phase2-slice-a.md (confirmed by plink, #custodian
-seq 1625).
-
-Two callers, one write path:
-
-  * ``/backlog reject|duplicate|spec'd|built <id>`` in chat (routers/slash.py)
-  * the triage buttons on a Backlog card (routers/planroom.py)
-
-They are the same write, reached two ways, and this module is the only place
-that write exists. That is not tidiness — it is where the gate lives. If the
-human check sat in each router instead, there would be two of it, and two of a
-rule is one of them drifting. A caller cannot reach the UPDATE without passing
-the guard, because the guard is inside the function that does the UPDATE.
-
-WHAT THIS IS NOT: a write to derived state. A backlog row IS the artifact — the
-Plan Room's Backlog column is *derived from* `status = 'open'`, broker-side, and
-nothing here touches a card, a column or an index. The row moves; the board
-notices at the next derivation tick and announces it like every other
-transition. That ordering is the feature: the command edits the artifact and the
-machinery says so, rather than the UI asserting a state and hoping the artifact
-catches up.
-
-`spec_ref` stores the spec SLUG, never a path (Claudette #1619). A card's
-identity is already its slug, the path is derivable from it, and a stored path
-is wrong the day `SPECS/` is reorganised. Resolution to a path happens at read
-time, where a stale answer costs a broken link instead of a broken row.
+Writes the row only: the Plan Room derives its board from it. spec_ref holds a slug, never a path.
 """
 
 import re
@@ -33,9 +8,6 @@ from typing import Any, Optional
 
 from .. import db
 
-# verb typed in chat -> status written to the row. Only `reject` differs from
-# its status, because "reject" is what a person does and "rejected" is what the
-# row then is; the other three read the same in both moods.
 STATUS_VERBS: dict[str, str] = {
     "reject": "rejected",
     "duplicate": "duplicate",
@@ -43,26 +15,15 @@ STATUS_VERBS: dict[str, str] = {
     "built": "built",
 }
 
-# The statuses this write path can set. Deliberately NOT the full CHECK set:
-# there is no verb that returns a row to `open`, because plink named four verbs
-# and a fifth with no request behind it is vocabulary nobody asked for.
+# Deliberately narrower than the table's CHECK: no verb sets `open`.
 SETTABLE = frozenset(STATUS_VERBS.values())
 
-# A spec slug — the date-prefixed form, the same shape planroom.SLUG_RE accepts
-# for a spec card and the same shape the branch name and the systemd unit use.
-# Anchored and free of path separators on purpose: the whole point of storing a
-# slug is that it is not a path, so a value that could be mistaken for one must
-# not get in.
+# Anchored, with no path separators: a stored slug must not look like a path.
 SPEC_SLUG_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-[a-z0-9][a-z0-9-]{0,50}$")
 
 
 class BacklogStatusError(Exception):
-    """A status change that was refused, with the sentence to show the caller.
-
-    ``status_code`` is the HTTP code the Plan Room endpoint answers with; the
-    chat path ignores it and posts ``str(exc)`` as the reply. One refusal, two
-    renderings — the same reason either way.
-    """
+    """A refused status change; the message goes to the caller."""
 
     def __init__(self, message: str, status_code: int = 400) -> None:
         super().__init__(message)
@@ -70,14 +31,10 @@ class BacklogStatusError(Exception):
 
 
 def _check_human(actor_type: str) -> None:
-    """Bots are refused here, server-side, and that is the whole gate.
+    """Bots are refused server-side; a greyed button is only UX.
 
-    Same shape as the authenticated-human guard on a build: filing a request is
-    something anything in the house may do, but *ruling on* one is a human act.
-    A resident that could reject its own backlog items would be marking its own
-    homework, and the record would stop meaning anything.
-
-    A greyed button is UX. This is the enforcement.
+    Filing a request is open to anything in the house. Ruling on one is a human act:
+    a resident that could reject its own items would make the record meaningless.
     """
     if actor_type != "user":
         raise BacklogStatusError(
@@ -88,12 +45,7 @@ def _check_human(actor_type: str) -> None:
 
 
 def _check_spec_ref(status: str, spec_ref: Optional[str]) -> Optional[str]:
-    """`spec'd` implies a pointer, and the pointer is a slug.
-
-    Shipping the verb without the field would leave a status with no referent —
-    a row that claims a spec exists and cannot say which one (Claudette #1615).
-    So the two move together or neither does.
-    """
+    """`spec'd` requires a slug, or the status names a spec it cannot identify."""
     ref = (spec_ref or "").strip()
     if status != "spec'd":
         if ref:
@@ -128,22 +80,9 @@ async def set_status(
     actor_id: int,
     spec_ref: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Change one backlog row's status. Returns the row as it now stands.
+    """Change one row's status and return the row. Any status may replace any other.
 
-    Raises :class:`BacklogStatusError` for every refusal — the caller renders it
-    (a chat reply, or an HTTP error with ``exc.status_code``).
-
-    Any of the four statuses may replace any other, including one already set.
-    That is deliberate and it is the case that motivated `duplicate` existing at
-    all: row 3 was marked `rejected` for want of a better word, and a triage
-    table you cannot correct is one that accumulates wrong answers. There is no
-    transition matrix here because there is no transition that would be a lie —
-    the row records what somebody last decided, with their name on it.
-
-    The read and the write share one transaction, so the "no such item" answer
-    cannot be raced by a concurrent write, and the status, the spec_ref and the
-    attribution land in a single statement — a row is never briefly `spec'd`
-    with nobody's name on it or no spec to point at.
+    The read and the write share one transaction.
     """
     _check_human(actor_type)
     if status not in SETTABLE:
@@ -160,10 +99,7 @@ async def set_status(
                 status_code=404,
             )
         await db.execute(
-            # COALESCE, not a plain assignment: a `built` or `rejected` write
-            # leaves an existing spec_ref alone. The spec a row was drafted into
-            # is still the spec it was drafted into after somebody rejects it,
-            # and blanking that would destroy the only pointer back.
+            # COALESCE: built/rejected must not blank an existing spec_ref, the only pointer back.
             "UPDATE backlog SET status = ?, spec_ref = COALESCE(?, spec_ref), "
             "status_by_type = ?, status_by_id = ?, status_at = ? WHERE id = ?",
             (status, ref, actor_type, actor_id, db.utc_now(), item_id),

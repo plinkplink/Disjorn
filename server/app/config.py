@@ -1,8 +1,4 @@
-"""Application configuration via pydantic-settings.
-
-All values overridable via environment variables or a `.env` file in the
-working directory. Defaults are sane for local dev.
-"""
+"""Settings from the environment or a `.env` in the working directory."""
 
 import re
 import tomllib
@@ -21,22 +17,13 @@ class Settings(BaseSettings):
     DATA_DIR: str = "data"
 
     # Security
-    SECRET_KEY: str = "dev-secret-change-me"  # HMAC signing (media URLs etc.)
-    # The session cookie carries the __Host- prefix, which a browser honours
-    # only on a Secure cookie, so False drops every login silently. main.py
-    # refuses to boot on it.
+    SECRET_KEY: str = "dev-secret-change-me"  # signs media URLs; dev default only
+    # False drops every login: the __Host- cookie needs Secure. main.py refuses to boot on it.
     COOKIE_SECURE: bool = False
-
-    # Origins allowed to make a cookie-authenticated write or open a
-    # cookie-authenticated /ws handshake (app/origin_wall.py). Exact string
-    # match, never a suffix test: the apps port :8443 is a different origin and
-    # must stay out of this list. Dev origins go in the list, never into the
-    # code. Empty is a house-wide write lockout, so main.py refuses to boot on
-    # it. Set from the environment as a JSON array:
-    #   HOUSE_ORIGINS=["https://debian.tailca81ba.ts.net"]
+    # Exact-match origins for cookie writes and /ws. Empty locks out all writes.
     HOUSE_ORIGINS: list[str] = []
 
-    # Web Push (VAPID) — generated via `cli.py gen-vapid` (WP2)
+    # VAPID keys: `cli.py gen-vapid`
     VAPID_PUBLIC_KEY: str = ""
     VAPID_PRIVATE_KEY: str = ""
     VAPID_CLAIMS_EMAIL: str = "mailto:admin@example.com"
@@ -45,30 +32,23 @@ class Settings(BaseSettings):
     OLLAMA_URL: str = "http://localhost:11434"
     STT_MODEL: str = "small"
 
-    # Media (WP6)
-    MAX_UPLOAD_BYTES: int = 200 * 1024 * 1024  # generous — trusted users
-    MEDIA_URL_TTL: int = 3600  # seconds a signed media URL stays valid
+    # Media
+    MAX_UPLOAD_BYTES: int = 200 * 1024 * 1024
+    MEDIA_URL_TTL: int = 3600  # seconds
     BOT_READ_BYTES: int = 1024 * 1024
-    # Picker assets are served raw and a whole tab loads at once, so this cap is
-    # much tighter than MAX_UPLOAD_BYTES: one fat GIF degrades the grid.
+    # Keep well under MAX_UPLOAD_BYTES: picker assets load together.
     MAX_PICKER_BYTES: int = 8 * 1024 * 1024
-    # Pluggable services (WP8)
     OLLAMA_MODEL: str = "llama3.2"
     STT_ENGINE: str = "faster_whisper"      # key into services.stt.ENGINES
     SUMMARIZE_ENGINE: str = "ollama"        # key into services.summarize.ENGINES
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_MODEL: str = "claude-haiku-5-5"
-    SUMMARIZE_CACHE_TTL: int = 7 * 24 * 3600  # seconds a stored summary answers repeat clicks
-    SUMMARIZE_RATE_LIMIT: int = 20          # uncached summaries per user per window; 0 lifts the cap
+    SUMMARIZE_CACHE_TTL: int = 7 * 24 * 3600  # seconds
+    SUMMARIZE_RATE_LIMIT: int = 20          # uncached summaries per user per window; 0 disables
     SUMMARIZE_RATE_WINDOW: int = 3600       # seconds
-    FETCH_CONTACT: str = ""                 # URL or role address sent in the page fetchers' User-Agent
+    FETCH_CONTACT: str = ""                 # URL or role address sent in page fetchers' User-Agent
 
-    # Plan Room (SPECS/2026-08-20-plan-room.md). The derived card index, written
-    # BROKER-SIDE by harness/planroom/planroom.py and opened READ-ONLY here.
-    # Derivation needs gatehouse access (`sudo git --git-dir`) and brokerd
-    # imports; this process has neither and must not grow them (seq 1428 P2).
-    # Empty means the tab reports itself unavailable, which is the honest
-    # answer — an absent index and an empty board must not read alike.
+    # Broker writes it; read-only here, no gatehouse access. Empty: tab unavailable.
     PLANROOM_INDEX: str = ""
 
     APPROVAL_ENABLED: bool = False
@@ -84,77 +64,32 @@ class Settings(BaseSettings):
 
     CUSTODIAN_CHANNEL_ID: int = 4
 
-    # APPS tab (SPECS/2026-08-30-apps-tab-v1.md, stage 1).
-    #
-    # These four live HERE rather than in broker.toml's `[apps]` table because
-    # this process never reads broker.toml and must not learn how (the
-    # PLANROOM_INDEX precedent above). The split is by ENFORCER, not by topic:
-    # what the SERVER enforces — the daily session cap, the lock lifetime, who
-    # may build, who may publish a stage — is server config; what the BROKER
-    # enforces — the per-build token ceiling, the serving origin base, the
-    # apps-builder spawn — stays in broker.toml for a later stage.
+    # Apps settings: this process never reads broker.toml.
 
-    # Build sessions per user per UTC day (RULED seq 2176: 3). The visible
-    # unit; there is deliberately no daily token cap.
+    # Per user per UTC day. No token cap is deliberate.
     APPS_DAILY_SESSION_CAP: int = 3
 
-    # Seconds a build session's lock survives without a heartbeat (RULED at
-    # Round 12: 15 minutes). The open modal heartbeats; a lock whose
-    # locked_until has passed is clear, and no sweeper is involved.
+    # Seconds. No sweeper: a lock past its expiry is clear.
     APPS_SESSION_LOCK_TTL: int = 900
 
-    # The resident seats offered as builders in the chooser, in the order they
-    # should be shown. JSON array of objects:
-    #   APPS_BUILDERS=[{"bot_id": 2, "model_source": "/etc/gable/seat.toml",
-    #                   "model_key": "container.model"}]
-    # `model_source` is a path READ AT REQUEST TIME to print the model the seat
-    # actually runs (see read_model_pin). For a .toml source, `model_key` is the
-    # dotted path of the key holding the pin (default: top-level `model`); an
-    # env-style source ignores it. Empty is allowed and is not a boot
-    # failure — the tab renders an empty state that says so, which is the
-    # honest answer for a house that has not configured a build seat yet.
+    # Builder seats in display order: JSON objects with bot_id, model_source, model_key.
     APPS_BUILDERS: list[dict[str, Any]] = []
 
-    # Bot names allowed to POST a build-stage event (plus admin users). The
-    # stage stream is an attestation about what a build actually did, so its
-    # publisher list is config a person edits.
+    # Bots, plus admins, that may post build-stage events.
     APPS_STAGE_PUBLISHER_BOT_NAMES: list[str] = ["broker"]
 
-    # APPS serving gate (SPECS/2026-09-09-apps-serving-gate.md, stage 3).
-    #
-    # These four are read by BOTH processes — the house mints grants with them,
-    # the gate verifies with them — which is the whole reason they are here and
-    # not in broker.toml: the gate is a second ASGI app in this package and
-    # reads this same server/.env.
-    #
-    # NONE of them is boot-critical for the house. A house with no gate
-    # configured still runs the APPS tab: builds work, the modal works, and the
-    # four endpoints that need an origin to point at (open / live / share /
-    # remix) answer 503 with a sentence saying so. An assertion at boot here
-    # would mean a house that cannot start because a feature nobody has turned
-    # on yet is not turned on.
+    # Gate settings. Not needed to boot; origin endpoints answer 503 without them.
 
-    # The HMAC secret shared with the gate. ≥32 bytes to mint; shorter (or
-    # empty) reads as "not configured". Generate with:
-    #   python3 -c "import secrets; print(secrets.token_urlsafe(48))"
+    # Shared with the gate; at least 32 bytes.
     APPS_GATE_SECRET: str = ""
 
-    # Scheme + host + port of the apps origin, no trailing slash, e.g.
-    # https://debian.tailca81ba.ts.net:10000 (D1: port 10000, Funnel →
-    # 127.0.0.1:8402). It is a DIFFERENT ORIGIN from the house on purpose and
-    # must never appear in HOUSE_ORIGINS.
+    # Scheme, host and port, no trailing slash. Never add it to HOUSE_ORIGINS.
     APPS_ORIGIN_BASE: str = ""
 
-    # Where published app trees live: `<root>/<app-id>/live` and
-    # `…/preview`, with `…/live.prev` once a live deploy has been replaced.
-    # The house only ever READS this path (does `live.prev` exist?); the
-    # writing is the launch helper's, as the apps seat.
+    # Published app trees, read-only here.
     APPS_WWW_ROOT: str = "/srv/apps-www"
 
-    # The fixed argv prefix for the host helper's publish / revert / remix
-    # modes (D6). A LIST, never a string: it is spawned directly, never through
-    # a shell, and the app id is appended as its own argv element so nothing a
-    # caller sends can become a word of the command.
+    # Argv prefix, spawned directly and never through a shell.
     APPS_LAUNCH_HELPER: list[str] = [
         "sudo", "-n", "/usr/local/lib/disjorn/disjorn-apps-launch",
     ]
@@ -163,7 +98,6 @@ class Settings(BaseSettings):
 
     PLATFORM_BUILD_BOT: str = "BuildGable"
 
-    # Rooms no bot may answer every message in, by id or text-channel name.
     MENTION_ONLY_CHANNEL_IDS: list[int] = []
     MENTION_ONLY_CHANNEL_NAMES: list[str] = ["custodian"]
 
@@ -186,36 +120,17 @@ class Settings(BaseSettings):
         return Path(self.DATA_DIR)
 
 
-# ---------------------------------------------------------------------------
-# Model pin: printed from the seat, never written down here
-# ---------------------------------------------------------------------------
+# Model pin
 #
-# Provenance-printing policy (spec "Agreed UX"): a builder card shows the model
-# the seat ACTUALLY RUNS, read from the seat's own config at request time.
-# There is no model string anywhere in this codebase and there must never be
-# one — a hardcoded name is a card that keeps saying the old model for months
-# after the seat was repinned, and nobody can tell it is lying.
-#
-# Unreadable, absent, or silent about its model -> None, and the card says
-# "model not declared by seat". That is a true statement about the seat; a
-# guessed name would not be.
+# Never hardcode a model name: a stale one outlives a repin.
 
-# A .toml source is parsed as TOML and the pin is read at `model_key`, a dotted
-# path (default "model", i.e. top level). Gable's live seat keeps it under
-# [container], so his entry says "container.model". Naming the key in config
-# is the point: the card prints exactly the value a person pointed at, never a
-# `model =` line that happened to match somewhere in the file.
 DEFAULT_MODEL_KEY = "model"
 
-# env-style: CHAT_MODEL=… wins over MODEL=… when a file carries both, because
-# a seat that names both means the specific one.
 _ENV_MODEL_RE = re.compile(
     r"""^\s*(?:export\s+)?(?P<key>CHAT_MODEL|MODEL)\s*=\s*(?P<value>.*?)\s*$"""
 )
 
-# Bounds. A "model source" is a small config file; anything past these is not
-# one, and reading it into a response would make an API shape out of whatever
-# is on disk at that path.
+# Model sources are small config files; larger ones are rejected.
 MODEL_PIN_MAX_BYTES = 256 * 1024
 MODEL_PIN_MAX_CHARS = 200
 
@@ -230,17 +145,7 @@ def _clean_env_value(raw: str) -> str:
 
 
 def read_model_pin(source: str | Path | None, model_key: str | None = None) -> str | None:
-    """The model a builder seat declares, or None if it declares none.
-
-    `source` is a path from APPS_BUILDERS[*]["model_source"]. A `.toml` suffix
-    is parsed as TOML and the string at `model_key` (dotted path, default
-    top-level `model`) is the pin; anything else is read as an env-style file
-    (`CHAT_MODEL=` / `MODEL=`). Every failure mode — no path, no file, no
-    permission, unparsable TOML, no such key, a non-string value, a value
-    longer than a model name could plausibly be — answers None rather than
-    raising or guessing, because the builder chooser must still render when a
-    seat's config is missing.
-    """
+    """The model a builder seat declares; None on any failure, so the chooser still renders."""
     if not source:
         return None
     path = Path(source)
@@ -285,5 +190,5 @@ def get_settings() -> Settings:
 
 
 def reset_settings_cache() -> None:
-    """Clear the cached Settings — used by tests after mutating env vars."""
+    """Clear the cached Settings, for tests that change env vars."""
     get_settings.cache_clear()
