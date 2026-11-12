@@ -19,10 +19,13 @@ Architecture.md §8. Highlights the SDK builds on:
 from __future__ import annotations
 
 import asyncio
+import collections
+import contextlib
 import json
 import logging
 import mimetypes
 import random
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Optional, Sequence, Union
 
@@ -90,6 +93,71 @@ class DisjornError(Exception):
     """Base class for SDK errors."""
 
 
+@dataclass(slots=True)
+class _Tombstone:
+    channel_id: int
+    seq: int
+
+
+@dataclass(slots=True)
+class _End:
+    error: Optional[Exception] = None
+
+
+def _coalesce_key(event: Any) -> Optional[tuple]:
+    if isinstance(event, TypingStart):
+        return ("typing", event.channel_id, event.author_type, event.author_id)
+    if isinstance(event, Presence):
+        return ("presence", event.user_id)
+    return None
+
+
+class _Inbox:
+    """Typing and presence keep the newest per sender and never wait for room."""
+
+    def __init__(self, limit: int) -> None:
+        self._limit = limit
+        self._slots: collections.deque[list[Any]] = collections.deque()
+        self._waiting: dict[tuple, list[Any]] = {}
+        self._filled = asyncio.Event()
+        self._drained = asyncio.Event()
+
+    async def put(self, item: Any) -> None:
+        key = _coalesce_key(item)
+        if key is None:
+            if len(self._slots) >= self._limit:
+                logger.warning("%d events wait for the consumer; reading stops "
+                               "until it takes one", self._limit)
+            while len(self._slots) >= self._limit:
+                self._drained.clear()
+                await self._drained.wait()
+            slot = [item]
+        elif key in self._waiting:
+            self._waiting[key][0] = item
+            return
+        elif len(self._slots) >= self._limit:
+            return
+        else:
+            slot = self._waiting[key] = [item]
+        self._append(slot)
+
+    def end(self, error: Optional[Exception]) -> None:
+        self._append([_End(error)])
+
+    def _append(self, slot: list[Any]) -> None:
+        self._slots.append(slot)
+        self._filled.set()
+
+    async def get(self) -> Any:
+        while not self._slots:
+            self._filled.clear()
+            await self._filled.wait()
+        item = self._slots.popleft()[0]
+        self._waiting.pop(_coalesce_key(item), None)
+        self._drained.set()
+        return item
+
+
 class DisjornAuthError(DisjornError):
     """The server rejected the API key (WS close 4401 / REST 401).
 
@@ -114,9 +182,9 @@ class DisjornClient:
         ws: the live WebSocket connection (None while disconnected). Exposed
             mainly so tests/operators can force a reconnect via
             ``await client.ws.close()``.
-        last_seen_seq: per-channel high-water mark of persisted events seen.
-            Persist and re-seed it (:meth:`seed_seq`) to resume across process
-            restarts without losing messages.
+        last_seen_seq: per-channel high-water mark of persisted events
+            delivered. Persist and re-seed it (:meth:`seed_seq`) to resume
+            across process restarts without losing messages.
     """
 
     def __init__(
@@ -127,12 +195,16 @@ class DisjornClient:
         backoff_initial: float = 1.0,
         backoff_max: float = 30.0,
         http_timeout: float = 30.0,
+        max_queued_events: int = 1000,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.bot_id: Optional[int] = None
         self.ws: Optional[ClientConnection] = None
         self.last_seen_seq: dict[int, int] = {}
+        self._read_seq: dict[int, int] = {}
+        self._max_queued = max(1, max_queued_events)
+        self._reader: Optional[asyncio.Task[None]] = None
         self._backoff_initial = backoff_initial
         self._backoff_max = backoff_max
         self._closed = False
@@ -405,7 +477,8 @@ class DisjornClient:
         cover the gap. (The first connect of a fresh client does not backfill —
         call :meth:`get_messages` yourself for boot-time catch-up, or seed and
         rely on the stream after the first reconnect.)"""
-        self.last_seen_seq[channel_id] = max(self.last_seen_seq.get(channel_id, 0), seq)
+        self._advance(self.last_seen_seq, channel_id, seq)
+        self._advance(self._read_seq, channel_id, seq)
 
     async def aclose(self) -> None:
         """Graceful shutdown: stops the events loop and closes HTTP + WS."""
@@ -416,6 +489,10 @@ class DisjornClient:
                 await ws.close()
             except Exception:  # noqa: BLE001 — already dying
                 logger.debug("ws close during aclose failed", exc_info=True)
+        reader, self._reader = self._reader, None
+        if reader is not None:
+            reader.cancel()
+            await asyncio.gather(reader, return_exceptions=True)
         await self._http.aclose()
 
     # ---------------------------------------------------------- event loop
@@ -423,15 +500,44 @@ class DisjornClient:
     async def events(self) -> AsyncIterator[Event]:
         """Connect, authenticate, and yield typed events forever.
 
-        Auto-reconnects with exponential backoff (``backoff_initial`` doubling
-        to ``backoff_max``, ±25% jitter). Each successful (re)connect yields
-        :class:`Ready`; after a *re*connect, every channel with a known cursor
-        is REST-backfilled from ``last_seen_seq + 1`` and missed messages are
-        yielded as synthetic ``MessageCreate(backfilled=True)`` events, in seq
-        order per channel, before live frames resume. Live ``message_create``
-        frames at-or-below the cursor (already covered by backfill) are
-        deduplicated away. Exits when :meth:`aclose` is called; raises
-        :class:`DisjornAuthError` on a rejected API key."""
+        A background task reads the socket while the consumer is busy, up to
+        ``max_queued_events`` queued. Reconnects with exponential backoff
+        (``backoff_initial`` doubling to ``backoff_max``, ±25% jitter), yielding
+        :class:`Ready` each time; after a *re*connect each known channel is
+        REST-backfilled from the last event read, as
+        ``MessageCreate(backfilled=True)`` in seq order, before live frames
+        resume; a live duplicate is dropped. Exits when :meth:`aclose` is
+        called; raises :class:`DisjornAuthError` on a rejected API key."""
+        self._read_seq = dict(self.last_seen_seq)
+        inbox = _Inbox(self._max_queued)
+        reader = self._reader = asyncio.create_task(self._read_into(inbox))
+        try:
+            while True:
+                item = await inbox.get()
+                if self._closed:
+                    return
+                if isinstance(item, _End):
+                    if item.error is not None:
+                        raise item.error
+                    return
+                if hasattr(item, "seq"):
+                    self._advance(self.last_seen_seq, item.channel_id, item.seq)
+                if not isinstance(item, _Tombstone):
+                    yield item
+        finally:
+            reader.cancel()
+            await asyncio.gather(reader, return_exceptions=True)
+
+    async def _read_into(self, inbox: _Inbox) -> None:
+        error: Optional[Exception] = None
+        try:
+            await self._read_loop(inbox)
+        except Exception as exc:  # noqa: BLE001 — raised again in the consumer
+            error = exc
+        finally:
+            inbox.end(error)
+
+    async def _read_loop(self, inbox: _Inbox) -> None:
         backoff = self._backoff_initial
         connected_before = False
         while not self._closed:
@@ -458,23 +564,22 @@ class DisjornClient:
                     "%s as bot %s", "reconnected" if connected_before else "connected",
                     self.bot_id,
                 )
-                yield Ready(bot_id=self.bot_id, reconnected=connected_before)
-                if connected_before and self.last_seen_seq:
-                    async for event in self._backfill():
-                        yield event
+                await inbox.put(Ready(bot_id=self.bot_id, reconnected=connected_before))
+                if connected_before and self._read_seq:
+                    await self._backfill(inbox)
                 connected_before = True
                 while True:
                     frame = json.loads(await ws.recv())
                     event = self._parse_frame(frame)
                     if event is not None:
-                        yield event
+                        await inbox.put(event)
             except websockets.ConnectionClosed as exc:
                 code = exc.rcvd.code if exc.rcvd is not None else None
                 if code == _AUTH_CLOSE_CODE:
                     raise DisjornAuthError("server rejected API key (close 4401)") from exc
                 if not self._closed:
                     logger.warning("WS connection lost (%s); reconnecting", code)
-            except (DisjornAuthError, asyncio.CancelledError, GeneratorExit):
+            except (DisjornAuthError, asyncio.CancelledError):
                 raise
             except Exception:  # noqa: BLE001 — transient; log and reconnect
                 if self._closed:
@@ -496,11 +601,12 @@ class DisjornClient:
     ) -> None:
         """Convenience runner: ``await handler(event)`` per event, with error
         isolation — a handler exception is logged and the loop continues."""
-        async for event in self.events():
-            try:
-                await handler(event)
-            except Exception:  # noqa: BLE001 — one bad event never kills the bot
-                logger.exception("handler failed on %s", type(event).__name__)
+        async with contextlib.aclosing(self.events()) as events:
+            async for event in events:
+                try:
+                    await handler(event)
+                except Exception:  # noqa: BLE001 — one bad event never kills the bot
+                    logger.exception("handler failed on %s", type(event).__name__)
 
     # ------------------------------------------------------------ internals
 
@@ -517,10 +623,10 @@ class DisjornClient:
         logger.debug("reconnect in %.1fs", delay)
         await asyncio.sleep(delay)
 
-    async def _backfill(self) -> AsyncIterator[MessageCreate]:
-        """Yield missed messages for every known channel, current-state."""
-        for channel_id in sorted(self.last_seen_seq):
-            from_seq = self.last_seen_seq[channel_id] + 1
+    async def _backfill(self, inbox: _Inbox) -> None:
+        """Queue missed messages for every known channel, current-state."""
+        for channel_id in sorted(self._read_seq):
+            from_seq = self._read_seq[channel_id] + 1
             while True:
                 try:
                     page = await self.get_messages(
@@ -534,16 +640,15 @@ class DisjornClient:
                     break
                 for item in page:
                     seq = item["seq"]
-                    self.last_seen_seq[channel_id] = max(
-                        self.last_seen_seq[channel_id], seq
-                    )
+                    self._advance(self._read_seq, channel_id, seq)
                     from_seq = seq + 1
                     if item.get("deleted"):
-                        continue  # tombstone: the message is gone; skip
+                        await inbox.put(_Tombstone(channel_id, seq))
+                        continue
                     logger.debug("backfill: channel %s seq %s", channel_id, seq)
-                    yield MessageCreate(
+                    await inbox.put(MessageCreate(
                         channel_id=channel_id, seq=seq, message=item, backfilled=True
-                    )
+                    ))
                 if len(page) < _BACKFILL_PAGE:
                     break
 
@@ -554,9 +659,9 @@ class DisjornClient:
         ftype = frame.get("type")
         if ftype == "message_create":
             channel_id, seq = frame["channel_id"], frame["seq"]
-            if seq is not None and seq <= self.last_seen_seq.get(channel_id, 0):
+            if seq is not None and seq <= self._read_seq.get(channel_id, 0):
                 return None  # already delivered by a backfill pass
-            self._advance(channel_id, seq)
+            self._advance(self._read_seq, channel_id, seq)
             return MessageCreate(
                 channel_id=channel_id,
                 seq=seq,
@@ -565,11 +670,11 @@ class DisjornClient:
             )
         if ftype == "message_edit":
             channel_id, seq = frame["channel_id"], frame["seq"]
-            self._advance(channel_id, seq)
+            self._advance(self._read_seq, channel_id, seq)
             return MessageEdit(channel_id=channel_id, seq=seq, message=frame["message"])
         if ftype == "message_delete":
             channel_id, seq = frame["channel_id"], frame["seq"]
-            self._advance(channel_id, seq)
+            self._advance(self._read_seq, channel_id, seq)
             return MessageDelete(channel_id=channel_id, id=frame["id"], seq=seq)
         if ftype == "typing_start":
             return TypingStart(
@@ -599,11 +704,10 @@ class DisjornClient:
         logger.debug("ignoring unknown frame type %r", ftype)
         return None
 
-    def _advance(self, channel_id: int, seq: Optional[int]) -> None:
+    @staticmethod
+    def _advance(cursor: dict[int, int], channel_id: int, seq: Optional[int]) -> None:
         if seq is not None:
-            self.last_seen_seq[channel_id] = max(
-                self.last_seen_seq.get(channel_id, 0), seq
-            )
+            cursor[channel_id] = max(cursor.get(channel_id, 0), seq)
 
     def _raise_for_status(self, resp: httpx.Response) -> None:
         if resp.status_code == 401:

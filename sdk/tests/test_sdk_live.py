@@ -14,21 +14,28 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import gc
 import json
+import logging
 import sqlite3
+from functools import partial
+from types import SimpleNamespace
 from typing import Any, AsyncIterator, Callable
 
 import httpx
 import pytest
 import websockets
 
+from disjorn_sdk import client as sdk_client
 from disjorn_sdk import (
     ChannelCreate,
+    DisjornAuthError,
     DisjornClient,
     Event,
     MessageCreate,
     MessageDelete,
     MessageEdit,
+    Presence,
     Ready,
 )
 
@@ -522,3 +529,333 @@ async def test_typing_op_accepted_and_broadcast(server, alice, main_id, bot_stre
         assert frame["author_id"] == bot.bot_id
     finally:
         await ws.close()
+
+
+# ---------------------------------------------------------------------------
+# A slow consumer
+# ---------------------------------------------------------------------------
+
+FAST_PING = 0.2
+
+
+@pytest.fixture
+def fast_keepalive(monkeypatch):
+    """The SDK's own sockets ping every 0.2 s and give a pong 0.2 s: the
+    library's 20 s / 20 s keepalive, scaled so a lost pong costs under a second."""
+    monkeypatch.setattr(sdk_client, "websockets", SimpleNamespace(
+        connect=partial(websockets.connect, ping_interval=FAST_PING,
+                        ping_timeout=FAST_PING),
+        ConnectionClosed=websockets.ConnectionClosed,
+    ))
+
+
+async def _until(cond: Callable[[], bool], timeout: float = EVENT_TIMEOUT) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not cond():
+        assert loop.time() < deadline, "timed out waiting for a condition"
+        await asyncio.sleep(0.01)
+
+
+def _has_read(bot: DisjornClient, channel_id: int, message: dict) -> Callable[[], bool]:
+    """The reader has this message off the socket, delivered or not."""
+    return lambda: bot._read_seq.get(channel_id, 0) >= message["seq"]
+
+
+async def _flip_presence(ws, times: int, last: str = "online") -> None:
+    """`times` presence frames from this user, each one seen back before the next."""
+    for i in range(times):
+        status = last if i == times - 1 else ("idle", "dnd")[i % 2]
+        await ws.send(json.dumps({"op": "status", "status": status}))
+        while True:
+            frame = json.loads(await asyncio.wait_for(ws.recv(), EVENT_TIMEOUT))
+            if frame.get("type") == "presence" and frame["status"] == status:
+                break
+
+
+async def _creates_until(agen: AsyncIterator[Event], last: dict) -> list[Event]:
+    """Every Ready and MessageCreate up to and including the message `last`."""
+    out: list[Event] = []
+    while True:
+        event = await _next_matching(
+            agen, lambda e: isinstance(e, (Ready, MessageCreate)))
+        out.append(event)
+        if isinstance(event, MessageCreate) and event.seq == last["seq"]:
+            return out
+
+
+@pytest.mark.parametrize("enqueue_only", [False, True],
+                         ids=["turn-in-handler", "handler-only-enqueues"])
+async def test_a_turn_longer_than_the_keepalive_keeps_its_socket(
+    server, alice, main_id, bot, fast_keepalive, enqueue_only
+):
+    """Over 16 frames arrive during one turn, a message among them: it is
+    delivered live after the turn, on the same connection."""
+    readies: list[Ready] = []
+    creates: list[MessageCreate] = []
+    in_turn, done = asyncio.Event(), asyncio.Event()
+
+    async def turn(event: Event) -> None:
+        if isinstance(event, Ready):
+            readies.append(event)
+        if not isinstance(event, MessageCreate):
+            return
+        creates.append(event)
+        if event.message["content"] == "turn-a":
+            in_turn.set()
+            await asyncio.sleep(6 * FAST_PING)
+        if event.message["content"] == "after-b":
+            done.set()
+
+    inbox: asyncio.Queue = asyncio.Queue()
+
+    async def enqueue(event: Event) -> None:
+        inbox.put_nowait(event)
+
+    async def serve() -> None:
+        while True:
+            await turn(await inbox.get())
+
+    tasks = [asyncio.create_task(bot.run(enqueue if enqueue_only else turn))]
+    if enqueue_only:
+        tasks.append(asyncio.create_task(serve()))
+    ws = await _user_ws(server, alice)
+    try:
+        await _post(alice, main_id, "turn-a")
+        await asyncio.wait_for(in_turn.wait(), EVENT_TIMEOUT)
+        await _flip_presence(ws, 20)
+        summon = await _post(alice, main_id, "summon-b")
+        await _flip_presence(ws, 4)
+        await _post(alice, main_id, "after-b")
+        await asyncio.wait_for(done.wait(), EVENT_TIMEOUT)
+    finally:
+        await ws.close()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    assert [r.reconnected for r in readies] == [False]
+    assert [e.message["content"] for e in creates] == ["turn-a", "summon-b", "after-b"]
+    b = creates[1]
+    assert b.seq == summon["seq"] and b.backfilled is False
+
+
+async def test_presence_waiting_for_a_busy_consumer_keeps_only_the_newest(
+    server, alice, main_id, bot_stream
+):
+    bot, agen = bot_stream
+    me = (await alice.get("/me")).json()["id"]
+    ws = await _user_ws(server, alice)
+    try:
+        await _flip_presence(ws, 9, last="dnd")
+        marker = await _post(alice, main_id, "after the flips")
+        await _until(_has_read(bot, main_id, marker))
+
+        seen: list[str] = []
+        while True:
+            event = await asyncio.wait_for(anext(agen), EVENT_TIMEOUT)
+            if isinstance(event, Presence) and event.user_id == me:
+                seen.append(event.status)
+            if isinstance(event, MessageCreate) and event.seq == marker["seq"]:
+                break
+        assert seen == ["dnd"]
+    finally:
+        await _flip_presence(ws, 1)
+        await ws.close()
+
+
+async def test_a_full_queue_stops_the_reader_and_loses_nothing(
+    server, alice, main_id, caplog
+):
+    bot = DisjornClient(server.base_url, api_key=server.api_key,
+                        backoff_initial=0.2, max_queued_events=3)
+    agen = bot.events()
+    try:
+        await _next_matching(agen, lambda e: isinstance(e, Ready))
+        posted = [await _post(alice, main_id, f"full-{i}") for i in range(7)]
+        # Three wait and the reader holds a fourth; it reads no further.
+        await _until(_has_read(bot, main_id, posted[2]))
+        await asyncio.sleep(0.3)
+        assert bot._read_seq[main_id] <= posted[3]["seq"]
+        assert main_id not in bot.last_seen_seq
+        assert any("reading stops" in r.getMessage() for r in caplog.records)
+
+        got = [e for e in await _creates_until(agen, posted[-1])
+               if isinstance(e, MessageCreate)]
+        assert [e.seq for e in got] == [m["seq"] for m in posted]
+        assert not any(e.backfilled for e in got)
+    finally:
+        await bot.aclose()
+        await agen.aclose()
+
+
+async def test_a_queue_full_past_the_keepalive_resyncs_by_backfill(
+    server, alice, main_id, fast_keepalive
+):
+    """The bound's fallback is the old behaviour: the socket drops and the
+    backfill returns the rest, each message once and in order."""
+    bot = DisjornClient(server.base_url, api_key=server.api_key,
+                        backoff_initial=0.2, max_queued_events=3)
+    agen = bot.events()
+    try:
+        await _next_matching(agen, lambda e: isinstance(e, Ready))
+        posted = [await _post(alice, main_id, f"flood-{i}") for i in range(30)]
+        await asyncio.sleep(6 * FAST_PING)
+
+        got = await _creates_until(agen, posted[-1])
+        creates = [e for e in got if isinstance(e, MessageCreate)]
+        assert [e.seq for e in creates] == [m["seq"] for m in posted]
+        assert any(isinstance(e, Ready) and e.reconnected for e in got)
+        assert creates[0].backfilled is False and creates[-1].backfilled is True
+    finally:
+        await bot.aclose()
+        await agen.aclose()
+
+
+async def test_the_cursor_moves_on_delivery_so_a_crash_skips_nothing(
+    server, alice, main_id, bot_stream
+):
+    bot, agen = bot_stream
+    m1 = await _post(alice, main_id, "crash-m1")
+    await _next_matching(agen, _is_create("crash-m1"))
+    m2 = await _post(alice, main_id, "crash-m2")
+    m3 = await _post(alice, main_id, "crash-m3")
+    await _until(_has_read(bot, main_id, m3))
+
+    # Read but never handed over: the cursor a bot would persist stays at m1.
+    assert bot.last_seen_seq == {main_id: m1["seq"]}
+    saved = dict(bot.last_seen_seq)
+    await bot.aclose()
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(anext(agen), EVENT_TIMEOUT)
+    assert bot.last_seen_seq == saved
+
+    restarted = DisjornClient(server.base_url, api_key=server.api_key,
+                              backoff_initial=0.2)
+    for channel_id, seq in saved.items():
+        restarted.seed_seq(channel_id, seq)
+    stream = restarted.events()
+    try:
+        await _next_matching(stream, lambda e: isinstance(e, Ready))
+        await restarted.ws.close()
+        ready = await _next_matching(stream, lambda e: isinstance(e, Ready), timeout=20)
+        assert ready.reconnected is True
+        ev2 = await _next_matching(stream, lambda e: isinstance(e, MessageCreate))
+        ev3 = await _next_matching(stream, lambda e: isinstance(e, MessageCreate))
+        assert (ev2.seq, ev3.seq) == (m2["seq"], m3["seq"])
+        assert ev2.backfilled and ev3.backfilled
+        assert restarted.last_seen_seq[main_id] == m3["seq"]
+    finally:
+        await restarted.aclose()
+        await stream.aclose()
+
+
+async def test_a_drop_with_events_waiting_keeps_them_live_and_backfills_only_the_gap(
+    server, alice, main_id
+):
+    bot = DisjornClient(server.base_url, api_key=server.api_key, backoff_initial=0.5)
+    agen = bot.events()
+    try:
+        await _next_matching(agen, lambda e: isinstance(e, Ready))
+        m0 = await _post(alice, main_id, "drop-m0")
+        await _next_matching(agen, _is_create("drop-m0"))
+
+        m1 = await _post(alice, main_id, "drop-m1")
+        m2 = await _post(alice, main_id, "drop-m2")
+        await _until(_has_read(bot, main_id, m2))
+        await bot.ws.close()
+        m3 = await _post(alice, main_id, "drop-m3")
+        m4 = await _post(alice, main_id, "drop-m4")
+        await _until(lambda: bot.ws is not None and _has_read(bot, main_id, m4)(),
+                     timeout=20)
+        m5 = await _post(alice, main_id, "drop-m5")
+        assert bot.last_seen_seq[main_id] == m0["seq"]
+
+        got = await _creates_until(agen, m5)
+        assert [(e.seq, e.backfilled) if isinstance(e, MessageCreate) else "reconnected"
+                for e in got] == [
+            (m1["seq"], False),
+            (m2["seq"], False),
+            "reconnected",
+            (m3["seq"], True),
+            (m4["seq"], True),
+            (m5["seq"], False),
+        ]
+        assert bot.last_seen_seq[main_id] == m5["seq"]
+    finally:
+        await bot.aclose()
+        await agen.aclose()
+
+
+async def test_aclose_ends_a_waiting_consumer_and_its_reader(server, bot_stream):
+    bot, agen = bot_stream
+    waiting = asyncio.create_task(anext(agen))
+    await asyncio.sleep(0.05)
+    reader = bot._reader
+    assert reader is not None and not reader.done()
+
+    await bot.aclose()
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(waiting, EVENT_TIMEOUT)
+    assert reader.done() and bot.ws is None
+
+
+async def test_aclose_ends_a_reader_that_is_waiting_for_room(server, alice, main_id):
+    bot = DisjornClient(server.base_url, api_key=server.api_key, max_queued_events=1)
+    agen = bot.events()
+    try:
+        await _next_matching(agen, lambda e: isinstance(e, Ready))
+        posted = [await _post(alice, main_id, f"room-{i}") for i in range(3)]
+        await _until(_has_read(bot, main_id, posted[1]))
+        reader = bot._reader
+        assert not reader.done()
+    finally:
+        await bot.aclose()
+    assert reader.done()
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(anext(agen), EVENT_TIMEOUT)
+
+
+async def test_a_rejected_key_raises_in_the_consumer(server):
+    bot = DisjornClient(server.base_url, api_key="not-a-key", backoff_initial=0.2)
+    try:
+        with pytest.raises(DisjornAuthError):
+            await asyncio.wait_for(bot.run(lambda event: asyncio.sleep(0)), EVENT_TIMEOUT)
+        assert bot._reader.done()
+    finally:
+        await bot.aclose()
+
+
+@pytest.mark.parametrize("consumer", ["run", "events"])
+def test_a_consumer_cancelled_mid_turn_leaves_no_task_behind(server, caplog, consumer):
+    """Nobody calls aclose(): the shape of a daemon stopped mid-turn."""
+    leftovers: list[asyncio.Task] = []
+
+    async def main() -> None:
+        bot = DisjornClient(server.base_url, api_key=server.api_key)
+        in_turn = asyncio.Event()
+
+        async def handler(event: Event) -> None:
+            in_turn.set()
+            await asyncio.sleep(3600)
+
+        async def iterate() -> None:
+            async for event in bot.events():
+                await handler(event)
+
+        task = asyncio.create_task(bot.run(handler) if consumer == "run" else iterate())
+        await asyncio.wait_for(in_turn.wait(), EVENT_TIMEOUT)
+        reader = bot._reader
+        assert reader is not None and not reader.done()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        if consumer == "run":
+            assert reader.done() and bot.ws is None
+        leftovers.append(reader)
+        await bot._http.aclose()
+
+    with caplog.at_level(logging.WARNING, logger="asyncio"):
+        asyncio.run(main())
+        gc.collect()
+    assert leftovers[0].done()
+    assert [r.getMessage() for r in caplog.records if r.name == "asyncio"] == []
