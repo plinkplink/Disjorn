@@ -183,3 +183,77 @@ def test_a_stamped_arg_has_no_flag(broker_cli, capsys, flag):
         broker_cli.main(POST_FILE + [flag, "claude-x"], environ={})
     assert exc.value.code == 2
     capsys.readouterr()
+
+
+# ── an image result goes to a file, never to the terminal ────────────────
+
+import base64
+import os
+
+WEBP = b"RIFF\x12\x00\x00\x00WEBPVP8 " + bytes(10)
+PICKED = ["read-picker-file", "--path", "/picker/file/gif/spin.gif"]
+
+
+def answers(broker_cli, monkeypatch, result):
+    monkeypatch.setattr(broker_cli, "call_broker", lambda sock, req: {
+        "ok": True, "verb": req["verb"], "result": json.loads(json.dumps(result))})
+
+
+def test_an_image_result_is_saved_and_its_base64_is_not_printed(
+    broker_cli, capsys, monkeypatch, tmp_path
+):
+    data = base64.b64encode(WEBP).decode()
+    answers(broker_cli, monkeypatch, {
+        "path": "/picker/file/gif/spin.gif", "kind": "image",
+        "media_type": "image/webp", "data": data})
+
+    code = broker_cli.main(PICKED, environ={"BROKER_IMAGE_DIR": str(tmp_path / "seen")})
+    printed = capsys.readouterr().out
+    result = json.loads(printed)["result"]
+
+    assert code == 0 and data not in printed and "data" not in result
+    assert result["file"].startswith(str(tmp_path / "seen") + "/image-")
+    assert result["file"].endswith(".webp") and result["file_bytes"] == len(WEBP)
+    assert open(result["file"], "rb").read() == WEBP
+    assert os.stat(result["file"]).st_mode & 0o077 == 0
+    assert (result["path"], result["kind"]) == ("/picker/file/gif/spin.gif", "image")
+
+
+def test_two_reads_of_one_picture_do_not_share_a_file(
+    broker_cli, capsys, monkeypatch, tmp_path
+):
+    answers(broker_cli, monkeypatch, {
+        "kind": "image", "media_type": "image/webp", "data": base64.b64encode(WEBP).decode()})
+    files = []
+    for _ in range(2):
+        broker_cli.main(PICKED, environ={"BROKER_IMAGE_DIR": str(tmp_path)})
+        files.append(json.loads(capsys.readouterr().out)["result"]["file"])
+    assert files[0] != files[1]
+
+
+@pytest.mark.parametrize("data, folder", [("not base64 !!", "ok"), ("QUJD", "\x00bad")])
+def test_an_image_that_cannot_be_saved_still_prints_no_base64(
+    broker_cli, capsys, monkeypatch, tmp_path, data, folder
+):
+    answers(broker_cli, monkeypatch, {"kind": "image", "media_type": "image/webp", "data": data})
+
+    code = broker_cli.main(PICKED, environ={"BROKER_IMAGE_DIR": str(tmp_path / folder)})
+    printed = capsys.readouterr().out
+    result = json.loads(printed)["result"]
+
+    assert code == 0 and data not in printed
+    assert "file" not in result and f"{len(data)} base64 characters" in result["not_saved"]
+
+
+@pytest.mark.parametrize("result", [
+    {"kind": "text", "text": "plain notes", "data": "QUJD"},
+    {"kind": "image", "data": 7},
+    ["kind", "image"],
+])
+def test_a_result_that_is_not_an_image_is_printed_as_it_is(
+    broker_cli, capsys, monkeypatch, tmp_path, result
+):
+    answers(broker_cli, monkeypatch, result)
+    broker_cli.main(PICKED, environ={"BROKER_IMAGE_DIR": str(tmp_path / "seen")})
+    assert json.loads(capsys.readouterr().out)["result"] == result
+    assert not (tmp_path / "seen").exists()

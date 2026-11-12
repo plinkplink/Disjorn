@@ -46,17 +46,21 @@ Exit codes:
     20  refused locally: BROKER_DISABLE is set
 
 Output: the broker's full JSON response object on stdout (success or
-error); local refusals print a JSON object of the same shape.
+error); local refusals print a JSON object of the same shape. An image
+result is the one exception: its bytes go to a file and the object names
+the file ("file", "file_bytes") in place of the base64 ("data").
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import re
 import socket
 import sys
+import tempfile
 
 DEFAULT_SOCKET = "/run/broker.sock"
 MAX_REQUEST_BYTES = 64 * 1024  # PROTOCOL.md cap
@@ -764,6 +768,33 @@ def _emit(obj: dict) -> None:
     print(json.dumps(obj, indent=2, ensure_ascii=False))
 
 
+def _save_image(response: dict, environ: dict) -> None:
+    """Write an image result to a file and print its path, never its base64.
+
+    Printed, the base64 is only context spent; the Read tool opens the file.
+    """
+    result = response.get("result")
+    if not (response.get("ok") is True and isinstance(result, dict)
+            and result.get("kind") == "image" and isinstance(result.get("data"), str)):
+        return
+    data = result.pop("data")
+    try:
+        raw = base64.b64decode(data, validate=True)
+        folder = environ.get("BROKER_IMAGE_DIR") or os.path.join(
+            tempfile.gettempdir(), "broker-images")
+        os.makedirs(folder, mode=0o700, exist_ok=True)
+        suffix = ".webp" if result.get("media_type") == "image/webp" else ".img"
+        fd, path = tempfile.mkstemp(prefix="image-", suffix=suffix, dir=folder)
+        with os.fdopen(fd, "wb") as out:
+            out.write(raw)
+    except (ValueError, OSError) as exc:
+        result["not_saved"] = (f"{type(exc).__name__}: {len(data)} base64 characters "
+                               "were received and are not shown")
+        return
+    result["file"] = path
+    result["file_bytes"] = len(raw)
+
+
 def main(argv: list[str] | None = None, environ: dict = os.environ) -> int:
     if environ.get("BROKER_DISABLE"):
         _emit({"ok": False, "error": {
@@ -795,6 +826,7 @@ def main(argv: list[str] | None = None, environ: dict = os.environ) -> int:
             "message": f"{type(exc).__name__}: {exc} (socket: {socket_path})"}})
         return EXIT_TRANSPORT
 
+    _save_image(response, environ)
     _emit(response)
     if response.get("ok") is True:
         return EXIT_OK
