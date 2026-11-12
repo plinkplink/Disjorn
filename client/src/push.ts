@@ -23,11 +23,14 @@
    pushManager.subscribe(userVisibleOnly) -> POST /push/subscribe.
    The prompt goes first because iOS only allows it inside the tap's user
    activation, which a slow first request can outlast.
-   disable() = DELETE /push/subscribe -> subscription.unsubscribe(). */
+   disable() = DELETE /push/subscribe -> subscription.unsubscribe().
+   release() = the same two steps at logout. It leaves the device's wish for
+   push in place, so the next account's sync() subscribes it again as its own. */
 
 import { create } from "zustand";
 
 import { ApiError, getVapidPublicKey, pushSubscribe, pushUnsubscribe } from "./api";
+import { releaseDevice } from "./lib/pushRelease";
 
 export type PushStatus =
   | "checking"
@@ -58,6 +61,9 @@ function supported(): boolean {
 
 /** How long to wait for the worker to activate before calling push dead here. */
 const SW_READY_TIMEOUT_MS = 10_000;
+
+/** A logout waits this long for the device to be released, then goes ahead. */
+const RELEASE_TIMEOUT_MS = 5_000;
 
 /** Remembers "the reader turned push on in this browser" across loads. */
 const WANTED_KEY = "disjorn.push.wanted";
@@ -135,6 +141,9 @@ interface PushState {
   sync: () => Promise<void>;
   enable: () => Promise<void>;
   disable: () => Promise<void>;
+  /** Logout, before the session ends: this device stops receiving the
+      account's pushes and drops the ones already shown. Never rejects. */
+  release: () => Promise<void>;
 }
 
 export const usePush = create<PushState>()((set, get) => ({
@@ -272,5 +281,26 @@ export const usePush = create<PushState>()((set, get) => ({
     } finally {
       set({ busy: false });
     }
+  },
+
+  release: async () => {
+    const work = (async () => {
+      if (!supported()) return;
+      const reg = await navigator.serviceWorker.getRegistration();
+      if (reg === undefined) return;
+      const sub = await reg.pushManager.getSubscription();
+      if (await releaseDevice(sub, pushUnsubscribe)) {
+        set({ status: "disabled", detail: null, subscribed: false });
+      }
+      for (const shown of await reg.getNotifications()) shown.close();
+    })().catch(() => undefined);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      work,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, RELEASE_TIMEOUT_MS);
+      }),
+    ]);
+    clearTimeout(timer);
   },
 }));
