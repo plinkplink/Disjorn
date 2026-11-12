@@ -218,4 +218,5 @@ One build hand, one session.
 - **Review**: PASS by Gable #3496 at 4fbf278; his tsconfig note verified on the pinned binary and folded at ed45283.
 
 ## Status
-`built@loop/2026-11-11-apps-shelf-phaser-typescript`
+merged
+<!-- advanced from `built@loop/2026-11-11-apps-shelf-phaser-typescript` by `board --mark-merged` on 2026-11-12: build merged as b51f831. The word `built@loop/2026-11-11-apps-shelf-phaser-typescript` on a merged spec made it indistinguishable from a buildable one. -->

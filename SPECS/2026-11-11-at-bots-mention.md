@@ -264,5 +264,6 @@ One keyboard session.
 <!-- No Confirm record → no build. This is the gate. -->
 
 ## Status
-`built@loop/2026-11-11-at-bots-mention`
+merged
+<!-- advanced from `built@loop/2026-11-11-at-bots-mention` by `board --mark-merged` on 2026-11-12: build merged as 887e79e. The word `built@loop/2026-11-11-at-bots-mention` on a merged spec made it indistinguishable from a buildable one. -->
 <!-- One of: draft / confirmed / building / built@<branch> / merged / failed. -->

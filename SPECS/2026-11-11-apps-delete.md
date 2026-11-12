@@ -501,5 +501,6 @@ alias is installed.
 <!-- No Confirm record → no build. This is the gate. -->
 
 ## Status
-`built@loop/2026-11-11-apps-delete`
+merged
+<!-- advanced from `built@loop/2026-11-11-apps-delete` by `board --mark-merged` on 2026-11-12: build merged as 87f1840. The word `built@loop/2026-11-11-apps-delete` on a merged spec made it indistinguishable from a buildable one. -->
 <!-- One of: draft / confirmed / building / built@<branch> / merged / failed. -->

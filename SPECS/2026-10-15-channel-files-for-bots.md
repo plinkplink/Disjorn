@@ -130,4 +130,5 @@ Tier 2 — touches the privacy wall (`privacy.py` callers), a migration, broker 
 - Deploy: migration 026 at server restart; broker restart; `harness/residency` and `run-resident.sh` synced to their deployed copies; the resident image rebuilt, because the broker CLI's generated table changed.
 
 ## Status
-`built@loop/2026-10-15-channel-files-for-bots-b (slice B)`
+merged
+<!-- advanced from `built@loop/2026-10-15-channel-files-for-bots-b (slice b)` by `board --mark-merged` on 2026-11-12: build merged as 1935aac. The word `built@loop/2026-10-15-channel-files-for-bots-b (slice b)` on a merged spec made it indistinguishable from a buildable one. -->
