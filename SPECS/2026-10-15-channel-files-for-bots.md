@@ -29,6 +29,7 @@ Two tiers, one server-side wall. The server decides what a bot may see; no seat 
 - **Read shapes, sized for a context window, not for a browser.** `BOT_READ_BYTES` (config, default 1 MiB) caps what one read returns:
   - text/code: raw text, truncated at the cap with a trailing `[truncated: N of M bytes]` marker.
   - images: the existing `_thumb.webp`/`_display.webp` variants (`media_convert.py`, 400/2048 px); the server picks the largest variant under the cap, base64 in the tool result. Never the original.
+    - Amended 2026-11-11 (Claudette, #custodian 3703): an upload a browser shows as it is has no display variant, so the only candidate was the 400 px thumbnail. When the display variant is missing or over the cap, the server makes a third variant on the first read (`_bot.webp`, 1568 px, no EXIF) and keeps it beside the others.
   - PDF: **server-side text extraction** (new dependency `pypdf`, pinned in `server/requirements.txt`), returned as text under the same cap with a page marker per page. No PDF bytes ever go to a bot. A PDF with no extractable text returns `[no text layer: N pages]`, not an image.
 - The message-read path lists attachments (id, mime, size) **per attachment**, each one passed through `visible_to_bots`; a message with one secret and one plain attachment shows only the plain one. When a channel is not `files_safe` the `attachments` field is omitted, not empty, so the adapter cannot tell "hidden" from "none".
 

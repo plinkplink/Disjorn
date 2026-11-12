@@ -22,8 +22,8 @@ Public API:
         their metadata on disk and are only reachable via the signed `orig`
         variant.
 
-    make_avatar(src_path, dest_path, max_dim=256) -> (width, height)
-        Small square-ish WebP for avatars; same loaders, EXIF stripped.
+    make_preview(src_path, dest_path, max_dim) -> (width, height)
+        One WebP for an avatar or a bot read; same loaders, EXIF stripped.
 
     UnsupportedFormat — raised when a format is recognized but the codec is
         unavailable (e.g. RAW without rawpy). The upload route maps this to
@@ -38,6 +38,7 @@ from PIL import ExifTags, Image, ImageOps, UnidentifiedImageError
 
 DISPLAY_MAX = 2048
 THUMB_MAX = 400
+BOT_MAX = 1568
 WEBP_QUALITY = 85
 
 # Formats browsers render natively — candidates for the "serve original" shortcut.
@@ -172,8 +173,8 @@ def convert_for_web(src_path: str | Path, dest_dir: str | Path) -> ConvertResult
     )
 
 
-def make_avatar(src_path: str | Path, dest_path: str | Path, max_dim: int = 256) -> tuple[int, int]:
-    """Convert any supported image to a small avatar WebP (EXIF stripped).
+def make_preview(src_path: str | Path, dest_path: str | Path, max_dim: int) -> tuple[int, int]:
+    """Convert any supported image to one WebP (EXIF stripped).
 
     Returns the saved (width, height). Raises UnsupportedFormat /
     UnidentifiedImageError / OSError for undecodable input.

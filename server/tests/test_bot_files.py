@@ -717,8 +717,12 @@ async def test_an_image_comes_back_as_its_largest_variant_under_the_cap(house, m
     assert (body["kind"], body["media_type"]) == ("image", "image/webp")
     assert base64.b64decode(body["data"]) == display
 
+    assert not bot_variants()
+
     set_env(monkeypatch, "BOT_READ_BYTES", len(display) - 1)
-    assert base64.b64decode((await house.read(att)).json()["data"]) == thumb
+    sent = base64.b64decode((await house.read(att)).json()["data"])
+    assert len(thumb) < len(sent) < len(display)
+    assert Image.open(io.BytesIO(sent)).size == (1568, 784)
     set_env(monkeypatch, "BOT_READ_BYTES", len(thumb) - 1)
     assert (await house.read(att)).status_code == 404
 
@@ -738,6 +742,95 @@ async def test_an_image_never_comes_back_as_its_original(house):
     assert (await house.read(att)).status_code == 404
     await db.execute("UPDATE attachments SET thumb_path = NULL WHERE id = ?", (att,))
     assert (await house.read(att)).status_code == 404
+
+
+def bot_variants() -> list:
+    return sorted((get_settings().data_dir / "uploads" / "web").glob("*_bot.webp"))
+
+
+async def sent_image(house, att) -> Image.Image:
+    return Image.open(io.BytesIO(base64.b64decode((await house.read(att)).json()["data"])))
+
+
+async def test_an_upload_the_browser_shows_as_it_is_comes_back_big_enough_to_read(house):
+    await house.flip("on")
+    _, (att,) = await house.say("shot", ("shot.png", noisy_png((1900, 950)), "image/png"))
+    assert (await row(att))["display_path"] is None
+
+    sent = await sent_image(house, att)
+    assert (sent.format, sent.size) == ("WEBP", (1568, 784))
+
+    [made] = bot_variants()
+    stamp = made.stat().st_mtime_ns
+    assert (await sent_image(house, att)).size == (1568, 784)
+    assert made.stat().st_mtime_ns == stamp
+    assert [p.name for p in made.parent.iterdir() if p.name.startswith(".tmp-")] == []
+
+
+async def test_a_small_image_is_not_made_larger(house):
+    await house.flip("on")
+    _, (att,) = await house.say("small", ("small.png", png((300, 200)), "image/png"))
+    assert (await sent_image(house, att)).size == (300, 200)
+
+
+async def test_the_bot_variant_carries_no_exif(house):
+    await house.flip("on")
+    exif = Image.Exif()
+    exif[0x010F] = "a camera maker"
+    buf = io.BytesIO()
+    Image.new("RGB", (800, 600), (10, 90, 160)).save(buf, format="JPEG", exif=exif)
+    _, (att,) = await house.say("photo", ("photo.jpg", buf.getvalue(), "image/jpeg"))
+    assert (await row(att))["display_path"] is None
+
+    sent = await sent_image(house, att)
+    assert sent.size == (800, 600)
+    assert dict(sent.getexif()) == {}
+
+
+async def test_an_animation_comes_back_as_its_first_frame(house):
+    await house.flip("on")
+    frames = [Image.new("RGB", (600, 400), colour) for colour in ((250, 0, 0), (0, 0, 250))]
+    buf = io.BytesIO()
+    frames[0].save(buf, format="GIF", save_all=True, append_images=frames[1:], duration=80)
+    _, (att,) = await house.say("gif", ("spin.gif", buf.getvalue(), "image/gif"))
+
+    sent = await sent_image(house, att)
+    assert (sent.size, getattr(sent, "n_frames", 1)) == ((600, 400), 1)
+    red, green, blue = sent.convert("RGB").getpixel((300, 200))
+    assert red > 200 and blue < 50
+
+
+async def test_a_hidden_image_makes_no_variant(house):
+    _, (att,) = await house.say("closed", ("shot.png", png((900, 600)), "image/png"))
+    assert (await house.read(att)).status_code == 404
+    assert not bot_variants()
+
+
+async def test_discarding_an_upload_removes_its_bot_variant_too(house):
+    await house.flip("on")
+    _, (att,) = await house.say("shot", ("shot.png", png((900, 600)), "image/png"))
+    await house.read(att)
+    [made] = bot_variants()
+    stem = made.name.removesuffix("_bot.webp")
+
+    await db.execute("UPDATE attachments SET message_id = NULL WHERE id = ?", (att,))
+    await bot_files.discard_staged(att)
+    uploads = get_settings().data_dir / "uploads"
+    assert [p.name for p in uploads.rglob("*") if p.name.startswith(stem)] == []
+
+
+async def test_an_original_that_will_not_decode_falls_back_to_the_thumbnail(house, caplog):
+    await house.flip("on")
+    _, (att,) = await house.say("shot", ("shot.png", png((900, 600)), "image/png"))
+    stored = await row(att)
+    data_dir = get_settings().data_dir
+    (data_dir / stored["file_path"]).write_bytes(b"not an image any more")
+
+    body = (await house.read(att)).json()
+    assert base64.b64decode(body["data"]) == (data_dir / stored["thumb_path"]).read_bytes()
+    assert not bot_variants()
+    assert f"no bot variant for attachment {att} " in caplog.text
+    assert "shot.png" not in caplog.text
 
 
 async def test_a_pdf_comes_back_as_its_text_page_by_page(house, monkeypatch):
