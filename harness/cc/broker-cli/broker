@@ -52,7 +52,8 @@ the file ("file", "file_bytes") in place of the base64 ("data"). The
 folder is $BROKER_IMAGE_DIR, or ~/.cache/broker-images. Give it a folder of
 its own: each save deletes the `image-*` files there that are over a day old.
 A program that reads this output and wants the base64 itself (Claudette's
-adapter) sets BROKER_IMAGE_INLINE=1, and then nothing is saved.
+adapter) sets BROKER_IMAGE_INLINE=1, and then nothing is saved. Any
+non-empty value turns it on, `0` included, as with BROKER_DISABLE.
 """
 
 from __future__ import annotations
