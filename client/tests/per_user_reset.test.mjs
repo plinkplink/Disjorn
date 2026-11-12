@@ -1,10 +1,10 @@
-// The per-user stores and what empties them, bundled for node:
+// The per-user stores and module-level values and what empties them, bundled for node:
 //
 //     node --test client/tests/per_user_reset.test.mjs
 
 import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -23,6 +23,8 @@ function nodeModules() {
 
 const ENTRY = `
 export { PER_USER_STORES } from "../src/stores/perUser";
+export { forgetPerUserValues, perUserValueNames } from "../src/lib/perUserState";
+export { socket } from "../src/ws";
 export { useSession } from "../src/stores/session";
 import { useApprovals } from "../src/stores/approvals";
 import { useApps } from "../src/stores/apps";
@@ -39,11 +41,27 @@ export const stores = { approvals: useApprovals, apps: useApps,
   unfurl: useUnfurl };
 `;
 
+class FakeSocket {
+  static OPEN = 1;
+  static made = [];
+  constructor() {
+    this.readyState = FakeSocket.OPEN;
+    this.sent = [];
+    FakeSocket.made.push(this);
+  }
+  send(frame) { this.sent.push(JSON.parse(frame)); }
+  close() {}
+}
+
 let m;
 let scratch;
 
 before(async () => {
-  globalThis.location = { protocol: 'https:', host: 'test', hash: '' };
+  globalThis.WebSocket = FakeSocket;
+  globalThis.location = { protocol: 'https:', host: 'test', hash: '', pathname: '/', search: '' };
+  globalThis.history = { replaceState: (_state, _title, url) => {
+    location.hash = url.includes('#') ? url.slice(url.indexOf('#')) : '';
+  } };
   globalThis.document = { hasFocus: () => false };
   const nm = nodeModules();
   const bin = join(nm, '@esbuild', `${process.platform}-${process.arch}`, 'bin', 'esbuild');
@@ -86,6 +104,8 @@ const answer = (status, body) => ({ ok: status < 300, status, statusText: '',
 
 beforeEach(() => {
   held = [];
+  FakeSocket.made = [];
+  location.hash = '';
   routes = {
     'POST /auth/login': ALICE,
     'POST /auth/logout': { ok: true },
@@ -194,4 +214,138 @@ test("the last account's late 401 does not sign the next account out", async () 
   held[0](answer(401, { detail: 'Not authenticated' }));
   await refused;
   assert.equal(m.useSession.getState().user.id, BOB.id);
+});
+
+async function signIn(who) {
+  routes['POST /auth/login'] = who;
+  assert.equal(await m.useSession.getState().login(who.username, 'pw'), true);
+}
+
+async function handOver() {
+  await m.useSession.getState().logout();
+  await signIn(BOB);
+}
+
+/* Module-level declarations that can hold a value between calls: every `let`,
+   every collection or instance created empty, every store outside stores/. */
+const HOLDERS = [
+  /^(?:export )?let (\w+)/,
+  /^(?:export )?const (\w+)[^=]*= (?:\{\}|\[\]|new \w+(?:<[^>]*>)?\(\))/,
+];
+const STORE = /^(?:export )?const (\w+) = create</;
+
+/* Held for the device or the server, wiring set once at load, a counter that
+   only has to be unique, or an empty constant: not one account's. */
+const NOT_PER_USER = [
+  'api:account', 'api:onRotationRequired', 'api:onUnauthenticated',
+  'components/ChibiPicker:botsOnce', 'components/Composer:uploadCounter',
+  'components/Markdown:NO_CHIBIS', 'components/MessageList:EMPTY_GAPS',
+  'components/MessageList:EMPTY_LIST', 'components/MessageList:EMPTY_NAMES',
+  'install:deferredPrompt', 'install:useInstall', 'lib/perUserState:registered',
+  'push:usePush', 'push:vapidKey', 'pwa:listeners', 'pwa:updateWaiting',
+  'sidebar:useSidebarSections', 'sounds:ctx', 'sounds:lastPlayedAt',
+  'sounds:useSoundSettings', 'stores/apps:syntheticStageId',
+  'stores/channels:onListApplied',
+];
+
+test('every module-level value is forgotten with the account or listed as not one account\'s', () => {
+  const src = join(CLIENT, 'src');
+  const found = [];
+  for (const file of readdirSync(src, { recursive: true }).filter((f) => /\.tsx?$/.test(f))) {
+    const module = file.replace(/\.tsx?$/, '');
+    for (const line of readFileSync(join(src, file), 'utf8').split('\n')) {
+      const hit = HOLDERS.map((re) => re.exec(line)).find(Boolean)
+        ?? (module.startsWith('stores/') ? null : STORE.exec(line));
+      if (hit) found.push(`${module}:${hit[1]}`);
+    }
+  }
+  assert.deepEqual(found.sort(), [...m.perUserValueNames(), ...NOT_PER_USER].sort());
+});
+
+test('the next account climbs its own first-load ladder', async () => {
+  await signIn(ALICE);
+  routes['GET /channels'] = 'held';
+  const channels = m.stores.channels;
+  const alices = channels.getState().ensureLoaded();
+  await handOver();
+  const bobs = channels.getState().ensureLoaded();
+  assert.equal(held.length, 2);
+
+  held[0](answer(503, { detail: 'down' }));
+  await alices;
+  assert.equal(channels.getState().loadFailed, false);
+  held[1](answer(200, [ROW]));
+  await bobs;
+  assert.equal(channels.getState().loaded, true);
+  assert.equal(held.length, 2);
+});
+
+test('forgetting alone outdates a channel list already asked for', async () => {
+  await signIn(ALICE);
+  routes['GET /channels'] = 'held';
+  const list = m.stores.channels.getState().refresh();
+  m.forgetPerUserValues();
+  held[0](answer(200, [ROW]));
+  await list;
+  assert.deepEqual(m.stores.channels.getState().channels, []);
+});
+
+test('a roster fetch left in flight does not block the next account\'s', async () => {
+  await signIn(ALICE);
+  routes['GET /channels/1/members'] = 'held';
+  const alices = m.stores.members.getState().refresh(1);
+  await handOver();
+  const bobs = m.stores.members.getState().refresh(1);
+  assert.equal(held.length, 2);
+  for (const give of held) give(answer(200, [{ type: 'user', id: 3, name: 'Carol' }]));
+  await Promise.all([alices, bobs]);
+});
+
+test('a channel the last account left or deleted is no longer this tab\'s own doing', async () => {
+  await signIn(ALICE);
+  routes['POST /channels/4/leave'] = { ok: true, left: true };
+  routes['DELETE /channels/9'] = { ok: true };
+  await m.stores.membership.getState().leave(4);
+  await m.stores.channelDelete.getState().remove(9);
+  await handOver();
+
+  const channel = { name: 'plans', visibility: 'private' };
+  m.stores.membership.getState().onMemberRemove({ channel_id: 4, member_type: 'user',
+    member_id: BOB.id, by_user_id: null, channel });
+  assert.equal(m.stores.membership.getState().notice.kind, 'removed');
+  m.stores.channels.getState().setActive(9);
+  m.stores.channelDelete.getState().onChannelDelete({ channel_id: 9, by_user_id: null, channel });
+  assert.equal(m.stores.channelDelete.getState().notice.channelId, 9);
+});
+
+test('the socket does not report the last account\'s channel as the next account\'s focus', async () => {
+  const ready = (ws) => ws.onmessage({ data: JSON.stringify({ type: 'ready' }) });
+  await signIn(ALICE);
+  m.socket.connect();
+  ready(FakeSocket.made[0]);
+  m.socket.sendFocus(7);
+  assert.deepEqual(FakeSocket.made[0].sent, [{ op: 'focus', channel_id: 7 }]);
+
+  await m.useSession.getState().logout();
+  m.socket.disconnect();
+  await signIn(BOB);
+  m.socket.connect();
+  ready(FakeSocket.made[1]);
+  assert.deepEqual(FakeSocket.made[1].sent, []);
+  m.socket.disconnect();
+});
+
+test('an account that leaves takes its route; a link opened signed out keeps its own', async () => {
+  await signIn(ALICE);
+  location.hash = '#/channels/7';
+  await m.useSession.getState().logout();
+  assert.equal(location.hash, '');
+
+  location.hash = '#/channels/3';
+  await signIn(BOB);
+  assert.equal(location.hash, '#/channels/3');
+
+  globalThis.fetch = async () => answer(401, { detail: 'Not authenticated' });
+  await assert.rejects(m.stores.channels.getState().refresh());
+  assert.equal(location.hash, '');
 });

@@ -1,6 +1,7 @@
 import { create } from "zustand";
 
 import { listMembers } from "../api";
+import { perUserValues } from "../lib/perUserState";
 import type { ChannelMemberOut, MemberType, ReplyMode } from "../types";
 
 /* Per-channel member roster — WP10 uses it to resolve typing-indicator names
@@ -30,6 +31,7 @@ interface MembersState {
 }
 
 const inFlight = new Set<number>();
+perUserValues("stores/members", ["inFlight"], () => inFlight.clear());
 
 export const useMembers = create<MembersState>()((set, get) => ({
   byChannel: {},

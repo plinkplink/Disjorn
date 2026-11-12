@@ -27,4 +27,4 @@ def test_a_change_of_account_empties_every_per_user_store(tmp_path):
     r = subprocess.run(["node", "--test", str(NODE_TEST)], capture_output=True,
                        text=True, timeout=180, env=env)
     assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]
-    assert "# pass 6" in r.stdout
+    assert "# pass 13" in r.stdout

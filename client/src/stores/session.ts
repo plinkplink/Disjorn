@@ -10,6 +10,7 @@ import {
   setUnauthenticatedHandler,
   updateMe,
 } from "../api";
+import { usePush } from "../push";
 import type { PasswordResetNotice, SettableStatus, User } from "../types";
 
 /** Backoff between boot probes when the server cannot be reached at all. */
@@ -176,6 +177,8 @@ export const useSession = create<SessionState>()((set, get) => ({
   },
 
   logout: async () => {
+    // First: only a live session can tell the server to forget this device.
+    await usePush.getState().release();
     try {
       await apiLogout();
     } catch {

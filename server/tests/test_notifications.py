@@ -184,6 +184,51 @@ async def test_subscribe_upsert_and_unsubscribe_scoping(client):
     assert [row["endpoint"] for row in rows] == [e1]
 
 
+async def test_an_endpoint_serves_only_the_account_that_registered_it_last(client, sent):
+    alice = await make_user("alice")
+    bob = await make_user("bob")
+    await make_user("carol")
+    ta, tb, tc = [await login(client, name) for name in ("alice", "bob", "carol")]
+    phone = "https://p.example/shared-phone"
+    for token in (ta, tb):
+        r = await client.post(
+            "/push/subscribe", json={"endpoint": phone, "keys": KEYS}, headers=cookie(token)
+        )
+        assert r.status_code == 200
+    rows = await db.fetch_all("SELECT user_id FROM push_subscriptions")
+    assert [row["user_id"] for row in rows] == [bob]
+
+    await post_msg(client, tc, await make_dm(client, tc, alice), "for alice only")
+    assert sent == []
+    await post_msg(client, tc, await make_dm(client, tc, bob), "for bob")
+    assert [(c["user_id"], c["endpoint"]) for c in sent] == [(bob, phone)]
+
+
+async def test_an_endpoint_deleted_before_logout_gets_nothing_after_it(client, sent):
+    alice = await make_user("alice")
+    await make_user("carol")
+    ta, tc = await login(client, "alice"), await login(client, "carol")
+    phone = "https://p.example/alice-phone"
+    r = await client.post(
+        "/push/subscribe", json={"endpoint": phone, "keys": KEYS}, headers=cookie(ta)
+    )
+    assert r.status_code == 200
+    dm = await make_dm(client, tc, alice)
+    await post_msg(client, tc, dm, "while signed in")
+    assert [c["endpoint"] for c in sent] == [phone]
+
+    r = await client.request(
+        "DELETE", "/push/subscribe", json={"endpoint": phone}, headers=cookie(ta)
+    )
+    assert r.json() == {"ok": True, "removed": True}
+    assert (await client.post("/auth/logout", headers=cookie(ta))).status_code == 200
+    client.cookies.clear()
+    sent.clear()
+    await post_msg(client, tc, dm, "after the logout")
+    assert sent == []
+    assert await db.fetch_all("SELECT id FROM push_subscriptions") == []
+
+
 # ---------------------------------------------------------------------------
 # Notify prefs
 # ---------------------------------------------------------------------------

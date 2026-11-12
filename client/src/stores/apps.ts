@@ -40,6 +40,7 @@ import {
   shareApp,
   startAppSession,
 } from "../api";
+import { perUserValues } from "../lib/perUserState";
 import { useSession } from "./session";
 import type {
   App,
@@ -62,6 +63,12 @@ import type {
    id so React keys stay stable and a later GET, whose events carry real
    positive ids, can never collide with one. */
 let syntheticStageId = -1;
+
+/** Sessions being fetched after a frame arrived for one we had never
+    loaded; one fetch each, however many frames land while it is in
+    flight. */
+const adopting = new Set<number>();
+perUserValues("stores/apps", ["adopting"], () => adopting.clear());
 
 function stageEventFromFrame(frame: AppStageFrame): StageEvent {
   return {
@@ -369,11 +376,6 @@ export const useApps = create<AppsState>()((set, get) => {
       deletedAppIds: known.includes(appId) ? known : [...known, appId],
     });
   };
-
-  /** Sessions being fetched after a frame arrived for one we had never
-      loaded; one fetch each, however many frames land while it is in
-      flight. */
-  const adopting = new Set<number>();
 
   /**
    * Take in a session whose first stage frame beat its row here.

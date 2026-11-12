@@ -1,10 +1,13 @@
 /* The stores that hold one account's data, and the one place they are emptied.
    A change of signed-in account resets them all before the next account's
-   first request, so nothing the previous account loaded is drawn for it. */
+   first request, so nothing the previous account loaded is drawn for it.
+   Module-level values registered in lib/perUserState are forgotten with them. */
 
 import type { StoreApi } from "zustand";
 
 import { abandonPendingRequests } from "../api";
+import { writeChannelHash } from "../hashRoute";
+import { forgetPerUserValues } from "../lib/perUserState";
 import { useApprovals } from "./approvals";
 import { useApps } from "./apps";
 import { useChannelDelete } from "./channelDelete";
@@ -47,8 +50,12 @@ export function resetPerUserStores(): void {
   // First, so an answer already on its way cannot refill a store just emptied.
   abandonPendingRequests();
   for (const store of Object.values(PER_USER_STORES)) store.reset();
+  forgetPerUserValues();
 }
 
 useSession.subscribe((state, prev) => {
-  if (state.user?.id !== prev.user?.id) resetPerUserStores();
+  if (state.user?.id === prev.user?.id) return;
+  resetPerUserStores();
+  // Only a departure clears the route: a link opened signed out waits for its login.
+  if (prev.user !== null) writeChannelHash(null);
 });

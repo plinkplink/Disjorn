@@ -1,6 +1,7 @@
 import { create } from "zustand";
 
 import { deleteChannel as apiDelete } from "../api";
+import { perUserValues } from "../lib/perUserState";
 import type { ChannelDeleteFrame } from "../types";
 import { useChannels } from "./channels";
 import { forgetChannel } from "./membership";
@@ -50,6 +51,7 @@ interface ChannelDeleteState {
  * ever goes missing.
  */
 const selfDeleting = new Set<number>();
+perUserValues("stores/channelDelete", ["selfDeleting"], () => selfDeleting.clear());
 
 export const useChannelDelete = create<ChannelDeleteState>()((set) => ({
   notice: null,

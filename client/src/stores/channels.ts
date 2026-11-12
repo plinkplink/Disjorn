@@ -7,6 +7,7 @@ import {
   openBotDm as apiOpenBotDm,
   openDm as apiOpenDm,
 } from "../api";
+import { perUserValues } from "../lib/perUserState";
 import {
   created,
   deleted,
@@ -27,8 +28,27 @@ function retryable(err: unknown): boolean {
 }
 
 let firstLoad: Promise<void> | null = null;
+/** Counts account changes: a first-load ladder climbed for the last account stops. */
+let generation = 0;
 let listsRequested = 0;
 let listApplied = 0;
+
+perUserValues(
+  "stores/channels",
+  ["firstLoad", "generation", "listsRequested", "listApplied"],
+  () => {
+    firstLoad = null;
+    generation += 1;
+    // Every list already asked for is now older than the newest one applied.
+    listApplied = ++listsRequested;
+  },
+);
+
+/** Runs after each channel list is applied. The socket registers here, since no store imports it. */
+let onListApplied: () => void = () => {};
+export function setListAppliedHandler(fn: () => void): void {
+  onListApplied = fn;
+}
 
 function sortChannels(channels: ChannelListItem[]): ChannelListItem[] {
   // main_feed pinned first; text channels alphabetically; DMs by most recent
@@ -130,18 +150,25 @@ export const useChannels = create<ChannelsState>()((set, get) => ({
       unread: unreadCount(unreadState[row.id]),
     }));
     set({ channels, unreadState, loaded: true, loadFailed: false });
+    onListApplied();
   },
 
   ensureLoaded: () => {
     if (get().loaded) return Promise.resolve();
     if (firstLoad !== null) return firstLoad;
     set({ loadFailed: false });
-    firstLoad = (async () => {
-      for (let attempt = 0; !get().loaded; attempt++) {
+    const startedIn = generation;
+    const ladder = (async () => {
+      for (
+        let attempt = 0;
+        startedIn === generation && !get().loaded;
+        attempt++
+      ) {
         try {
           await get().refresh();
           return;
         } catch (err) {
+          if (startedIn !== generation) return;
           if (!retryable(err) || attempt >= LOAD_RETRY_DELAYS_MS.length) {
             set({ loadFailed: true });
             return;
@@ -152,9 +179,10 @@ export const useChannels = create<ChannelsState>()((set, get) => ({
         }
       }
     })().finally(() => {
-      firstLoad = null;
+      if (firstLoad === ladder) firstLoad = null;
     });
-    return firstLoad;
+    firstLoad = ladder;
+    return ladder;
   },
 
   setActive: (channelId) => set({ activeChannelId: channelId }),

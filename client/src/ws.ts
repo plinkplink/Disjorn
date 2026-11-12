@@ -19,13 +19,14 @@
      and reconnect catch-up arrive over HTTP and never pass through here. */
 
 import { soundFor } from "./lib/messageSound";
+import { perUserValues } from "./lib/perUserState";
 import { isReading } from "./lib/unread";
 import { usePush } from "./push";
 import { playSound, useSoundSettings } from "./sounds";
 import { useApprovals } from "./stores/approvals";
 import { useApps } from "./stores/apps";
 import { useChannelDelete } from "./stores/channelDelete";
-import { useChannels } from "./stores/channels";
+import { setListAppliedHandler, useChannels } from "./stores/channels";
 import { useMembers } from "./stores/members";
 import { useMembership } from "./stores/membership";
 import { useMessages } from "./stores/messages";
@@ -140,6 +141,11 @@ export class DisjornSocket {
     this.send({ op: "focus", channel_id: channelId });
   }
 
+  /** The next account's first ready must not report the last account's channel as focused. */
+  forgetFocus(): void {
+    this.focusedChannelId = null;
+  }
+
   /** Whether a message in this channel is in front of the reader right now. */
   isReading(channelId: number): boolean {
     const channels = useChannels.getState();
@@ -155,7 +161,8 @@ export class DisjornSocket {
   /**
    * Mark the active channel read if the reader is looking at its newest
    * message. Called when that may have just become true: the window refocused,
-   * a view covering the channel closed, the list reached its bottom.
+   * a view covering the channel closed, the list reached its bottom, a channel
+   * list raised the count of a channel already on screen.
    */
   readActive(): boolean {
     const st = useChannels.getState();
@@ -417,3 +424,8 @@ export class DisjornSocket {
 
 /** App-wide singleton. Views import this; stores never do (no import cycle). */
 export const socket = new DisjornSocket();
+perUserValues("ws", ["socket"], () => socket.forgetFocus());
+
+setListAppliedHandler(() => {
+  socket.readActive();
+});
