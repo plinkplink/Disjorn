@@ -289,3 +289,16 @@ def test_a_save_removes_the_saves_of_an_earlier_day_and_nothing_else(
 
     saved = os.path.basename(json.loads(capsys.readouterr().out)["result"]["file"])
     assert sorted(os.listdir(tmp_path)) == sorted(["image-new.webp", "notes.txt", saved])
+
+
+def test_a_program_that_asks_for_the_base64_gets_it_and_no_file_is_made(
+    broker_cli, capsys, monkeypatch, tmp_path
+):
+    result = {"kind": "image", "media_type": "image/webp",
+              "data": base64.b64encode(WEBP).decode()}
+    answers(broker_cli, monkeypatch, result)
+
+    broker_cli.main(PICKED, environ={"BROKER_IMAGE_INLINE": "1", "HOME": str(tmp_path)})
+
+    assert json.loads(capsys.readouterr().out)["result"] == result
+    assert os.listdir(tmp_path) == []

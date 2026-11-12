@@ -51,6 +51,9 @@ result is the one exception: its bytes go to a file and the object names
 the file ("file", "file_bytes") in place of the base64 ("data"). The
 folder is $BROKER_IMAGE_DIR, or ~/.cache/broker-images. Give it a folder of
 its own: each save deletes the `image-*` files there that are over a day old.
+A program that reads this output and wants the base64 itself (Claudette's
+adapter) sets BROKER_IMAGE_INLINE=1, and then nothing is saved. Any
+non-empty value turns it on, `0` included, as with BROKER_DISABLE.
 """
 
 from __future__ import annotations
@@ -790,7 +793,8 @@ def _save_image(response: dict, environ: dict) -> None:
     Printed, the base64 is only context spent; the Read tool opens the file.
     """
     result = response.get("result")
-    if not (response.get("ok") is True and isinstance(result, dict)
+    if environ.get("BROKER_IMAGE_INLINE") or not (
+            response.get("ok") is True and isinstance(result, dict)
             and result.get("kind") == "image" and isinstance(result.get("data"), str)):
         return
     data = result.pop("data")
