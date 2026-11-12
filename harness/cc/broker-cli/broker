@@ -48,7 +48,9 @@ Exit codes:
 Output: the broker's full JSON response object on stdout (success or
 error); local refusals print a JSON object of the same shape. An image
 result is the one exception: its bytes go to a file and the object names
-the file ("file", "file_bytes") in place of the base64 ("data").
+the file ("file", "file_bytes") in place of the base64 ("data"). The
+folder is $BROKER_IMAGE_DIR, or ~/.cache/broker-images. Give it a folder of
+its own: each save deletes the `image-*` files there that are over a day old.
 """
 
 from __future__ import annotations
