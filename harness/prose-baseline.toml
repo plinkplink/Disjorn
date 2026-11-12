@@ -87,7 +87,8 @@
 "server/app/gate.py" = 9627
 "server/app/main.py" = 6402
 "server/app/origin_wall.py" = 1497
-"server/app/privacy.py" = 826
+"server/app/apps_grant.py" = 1492
+"server/app/privacy.py" = 880
 "server/app/routers/apps.py" = 14338
 "server/app/routers/auth.py" = 7549
 "server/app/routers/bots_admin.py" = 3013

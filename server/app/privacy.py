@@ -3,6 +3,7 @@
 Every bot-facing path decides visibility here. `secret` and `off_the_record`
 messages never reach a bot in any form: no content, tombstone or context.
 Detection runs before insert and fan-out, so the flag exists first.
+Flags only. Channel membership is the caller's check.
 """
 
 import re

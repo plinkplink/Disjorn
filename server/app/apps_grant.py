@@ -28,7 +28,8 @@ DEFAULT_TTL_SEC = 12 * 60 * 60
 # Same floor as gate.GateSettings and the house; each checks it.
 MIN_SECRET_BYTES = 32
 
-# NUL-terminated so no tag is a prefix of another.
+# One key signs two kinds of thing. Without the tag, a payload's signature
+# could equal some user's opaque id. NUL-terminated so no tag prefixes another.
 DOMAIN_GRANT = b"grant\0"
 DOMAIN_OPAQUE = b"opaque\0"
 
@@ -36,7 +37,8 @@ OPAQUE_ID_CHARS = 16
 
 
 class GrantError(Exception):
-    """Failed verification. `reason` is for logs only: every failure gets the same 403."""
+    """Failed verification. `reason` is for logs only: every failure gets the same 403,
+    since telling a caller why is telling them how to shape the next one."""
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
