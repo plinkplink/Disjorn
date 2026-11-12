@@ -30,6 +30,12 @@ let firstLoad: Promise<void> | null = null;
 let listsRequested = 0;
 let listApplied = 0;
 
+/** Runs after each channel list is applied. The socket registers here, since no store imports it. */
+let onListApplied: () => void = () => {};
+export function setListAppliedHandler(fn: () => void): void {
+  onListApplied = fn;
+}
+
 function sortChannels(channels: ChannelListItem[]): ChannelListItem[] {
   // main_feed pinned first; text channels alphabetically; DMs by most recent
   // activity (server order mirrors this — re-sorting locally keeps live
@@ -130,6 +136,7 @@ export const useChannels = create<ChannelsState>()((set, get) => ({
       unread: unreadCount(unreadState[row.id]),
     }));
     set({ channels, unreadState, loaded: true, loadFailed: false });
+    onListApplied();
   },
 
   ensureLoaded: () => {

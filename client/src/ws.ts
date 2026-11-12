@@ -25,7 +25,7 @@ import { playSound, useSoundSettings } from "./sounds";
 import { useApprovals } from "./stores/approvals";
 import { useApps } from "./stores/apps";
 import { useChannelDelete } from "./stores/channelDelete";
-import { useChannels } from "./stores/channels";
+import { setListAppliedHandler, useChannels } from "./stores/channels";
 import { useMembers } from "./stores/members";
 import { useMembership } from "./stores/membership";
 import { useMessages } from "./stores/messages";
@@ -155,7 +155,8 @@ export class DisjornSocket {
   /**
    * Mark the active channel read if the reader is looking at its newest
    * message. Called when that may have just become true: the window refocused,
-   * a view covering the channel closed, the list reached its bottom.
+   * a view covering the channel closed, the list reached its bottom, a channel
+   * list raised the count of a channel already on screen.
    */
   readActive(): boolean {
     const st = useChannels.getState();
@@ -417,3 +418,7 @@ export class DisjornSocket {
 
 /** App-wide singleton. Views import this; stores never do (no import cycle). */
 export const socket = new DisjornSocket();
+
+setListAppliedHandler(() => {
+  socket.readActive();
+});

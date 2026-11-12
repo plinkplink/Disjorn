@@ -27,7 +27,7 @@ export * from "../src/lib/unread";
 export { useApps } from "../src/stores/apps";
 export { useChannels } from "../src/stores/channels";
 export { useSession } from "../src/stores/session";
-export { DisjornSocket } from "../src/ws";
+export { DisjornSocket, socket } from "../src/ws";
 `;
 
 class FakeSocket {
@@ -108,7 +108,7 @@ async function load(rows) {
 
 const unreadOf = (id) => m.useChannels.getState().channels.find((c) => c.id === id).unread;
 
-beforeEach(() => {
+function fresh() {
   focused = false;
   lists = [];
   reads = [];
@@ -132,7 +132,11 @@ beforeEach(() => {
   m.useChannels.setState({ channels: [], unreadState: {}, activeChannelId: null,
     atBottom: {}, loaded: false });
   m.useApps.setState({ openBuildSessionId: null });
-});
+  m.socket.disconnect();
+  m.socket.sendFocus(null);
+}
+
+beforeEach(fresh);
 
 test('the title is the sum of the rows the sidebar draws, and nothing else', () => {
   const rows = [row(1, 2, 9, 'main_feed'), row(2, 1, 4), row(3, 0, 7, 'dm_1to1'),
@@ -484,4 +488,89 @@ test('a message is read on arrival only in front of the reader, and later once i
     assert.equal(socket.readActive(), false);
   }
   socket.disconnect();
+});
+
+/* A phone comes back on a dead socket: the focus handler looks while the count
+   is still the stale 0, and only the list that follows carries the message
+   that arrived meanwhile. `cover` hides the channel from the reader first. */
+async function resume(cover = () => {}) {
+  await load([at(row(1, 0, 10), 10), row(2, 0, 4)]);
+  const st = m.useChannels.getState();
+  st.setActive(1);
+  focused = true;
+  m.socket.connect();
+  FakeSocket.made[0].onmessage({ data: JSON.stringify({ type: 'ready' }) });
+  m.socket.sendFocus(1);
+  st.setAtBottom(1, true);
+  cover(st);
+  assert.equal(m.socket.readActive(), false);
+  assert.deepEqual(reads, []);
+  await load([at(row(1, 1, 11), 10), row(2, 0, 4)]);
+  await settle();
+}
+
+test('a list that brings unread for the channel in front of the reader reads it', async () => {
+  await resume();
+  assert.deepEqual(reads, [[1, 11]]);
+  assert.equal(unreadOf(1), 0);
+  assert.equal(title(), 'Disjorn');
+
+  await load([at(row(1, 0, 11), 11), row(2, 0, 4)]);
+  await settle();
+  assert.deepEqual(reads, [[1, 11]]);
+  assert.equal(title(), 'Disjorn');
+});
+
+test('a list that brings unread for a channel the reader cannot see leaves it unread', async () => {
+  const covers = {
+    'scrolled up': (st) => st.setAtBottom(1, false),
+    'under Settings or the Plan Room': () => m.socket.sendFocus(null),
+    'under the build modal': () => m.useApps.setState({ openBuildSessionId: 5 }),
+    'window not focused': () => { focused = false; },
+    'another channel open': (st) => {
+      st.setActive(2);
+      m.socket.sendFocus(2);
+      st.setAtBottom(2, true);
+    },
+  };
+  for (const [name, cover] of Object.entries(covers)) {
+    fresh();
+    await resume(cover);
+    assert.deepEqual(reads, [], name);
+    assert.equal(unreadOf(1), 1, name);
+    assert.equal(title(), '(1) Disjorn', name);
+  }
+});
+
+test('the list a reconnect fetches reads the open channel too', async (t) => {
+  await resume((st) => st.setAtBottom(1, false));
+  m.useChannels.getState().setAtBottom(1, true);
+  const channelLists = globalThis.fetch;
+  globalThis.fetch = (path, init) => (path === '/channels' || init.method !== 'GET'
+    ? channelLists(path, init)
+    : Promise.resolve({ ok: true, status: 200, statusText: '',
+      json: async () => ({ apps: [], quota: null, proposals: [], truncated: false }) }));
+
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  FakeSocket.made[0].onclose({ code: 1006 });
+  t.mock.timers.tick(2_000);
+  FakeSocket.made[1].onmessage({ data: JSON.stringify({ type: 'ready' }) });
+  await settle();
+  answerNextList([at(row(1, 1, 11), 10), row(2, 0, 4)]);
+  await settle();
+  assert.deepEqual(reads, [[1, 11]]);
+  assert.equal(title(), 'Disjorn');
+});
+
+test('the list a partial read on another device asks for reads the open channel too', async () => {
+  await resume((st) => st.setAtBottom(1, false));
+  const st = m.useChannels.getState();
+  await load([at(row(1, 3, 13), 10), row(2, 0, 4)]);
+  st.setAtBottom(1, true);
+  st.onChannelRead(1, 12);
+  answerNextList([at(row(1, 1, 13), 12), row(2, 0, 4)]);
+  await settle();
+  await settle();
+  assert.deepEqual(reads, [[1, 13]]);
+  assert.equal(title(), 'Disjorn');
 });
